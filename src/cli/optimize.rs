@@ -239,6 +239,17 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         );
     }
 
+    // Check `--smooth-scale`'s pins against the grid they will be applied to,
+    // before any strategy is parsed or backtested: a pin that names no axis is
+    // a typo the sweep would otherwise honour silently. The kernel repeats the
+    // error for library callers; only here can the inert-pin warnings be
+    // printed. stderr and ungated by `--quiet`, like `overlap` / `cadence`.
+    if let Some(cfg) = &opts.smoothing {
+        for warning in cfg.scales.validate_against(&subgrids)? {
+            eprintln!("{} {warning}", style::yellow("warning:"));
+        }
+    }
+
     // Imports splice once, up front: the resulting base value is what every
     // grid point's `!param` substitution runs over, so a shared fragment costs
     // one read no matter how large the sweep.

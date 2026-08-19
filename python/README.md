@@ -1151,7 +1151,10 @@ sweep.best             # -> highest-ranked row (None when best_by is unset)
 
 `grid` is a list of dicts (one per subgrid; stacked subgrids union), where
 values that are lists become sweep axes and `"start..end[:step]"` strings
-expand to numeric ranges. Pass `windowed=N` to reduce each grid point across
+expand to numeric ranges. An axis list must not repeat a value — the Cartesian
+product would just repeat the point, at the cost of a second backtest and a
+duplicate row — and `20` and `20.0` count as one value, since they substitute
+identically. Pass `windowed=N` to reduce each grid point across
 non-overlapping N-bar windows (`row.metrics_windowed` carries the per-window
 docs), or `walkforward=(is, oos)` / `walkforward=(is, oos, embargo)` for
 walk-forward validation:
@@ -1195,7 +1198,10 @@ one typical step of *that* axis and an evenly spaced axis behaves exactly as
 "one declared position along". Each axis picks linear or log spacing by
 whichever makes its own gaps more uniform; `smooth_scale=` pins it
 (`"index"`, `"PERIOD:log"`, `"linear,PERIOD:log"`), with `"index"` restoring
-the pre-0.65 measure between declared positions. Non-numeric axes and
+the pre-0.65 measure between declared positions. A `NAME:SCALE` pin whose
+`NAME` no subgrid sweeps is a `ValueError` — an unmatched pin is never looked
+up, so it would otherwise leave the axis on the automatic choice in silence.
+Non-numeric axes and
 single-value axes partition rather than smooth, each subgrid is its own
 lattice, and boundary points renormalize over the neighbours they have —
 `smooth_min_support=` discards a row whose realized support falls below a

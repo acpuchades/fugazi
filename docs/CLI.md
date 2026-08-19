@@ -440,7 +440,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
-| `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. A `NAME` that no subgrid sweeps is an error — an unmatched pin is never looked up, so it would silently leave the axis on the automatic choice. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
@@ -468,6 +468,17 @@ The range step is optional (`3..7` → step `1`). Ranges are inclusive on both
 ends. A range whose step doesn't align with the endpoint stops at the last
 value that still fits (`3..10:2` → `3, 5, 7, 9`). Every axis' cartesian
 product is one grid point.
+
+**A list may not repeat a value** — on any axis, numeric or categorical.
+`FAST=[4,5,5,6]` and `SL_MODE=["none","none","atr"]` are refused rather than
+deduped: the product just repeats the point, costing a second backtest and
+emitting a duplicate CSV row, and under `--smooth` the repeat sits at distance
+`0` from itself, so the point counts as its own full-weight neighbour and
+inflates the `support` that `--smooth-min-support` exists to test. Deduping
+silently would leave the CSV a row shorter than the grid spec implies with
+nothing saying why. `20` and `20.0` are one value — they substitute
+identically into the strategy — and the error names both spellings. Ranges
+can't produce an exact duplicate, so this only ever fires on a written list.
 
 Axes are emitted as CSV columns **sorted by axis name** (stable regardless
 of `--params` flag order), followed by the requested metric columns.
@@ -588,6 +599,8 @@ strictly positive — an axis containing `0` or a negative stays linear.
 | `--smooth-scale=PERIOD:log,ATR_MULT:linear` | those two pinned, the rest automatic |
 | `--smooth-scale=linear,PERIOD:log` | linear by default, `PERIOD` on log |
 | `--smooth-scale=index` | the pre-0.65 measure: distance between *declared positions*, so the neighbourhood depends on how the list was typed |
+| `--smooth-scale=TYPO:log` | an error: a `NAME` no subgrid sweeps would never be looked up, so the pin would be silently ignored. The refusal names every unmatched key and lists the axes that *are* swept. A name that is an axis in one stacked subgrid and a scalar in another is fine — matching somewhere is enough |
+| `--smooth-scale=SL_MODE:log` | on a categorical or single-value axis: accepted, with a warning that it is inert. The name exists, so it isn't a typo, but such an axis partitions the grid rather than smoothing along it |
 
 A `log` pin on an axis containing a non-positive value is an error, not a silent
 fallback. Whatever is chosen, the console `smooth` line names it per axis:

@@ -454,6 +454,47 @@ def test_optimize_smooth_scale_pins_the_distance_scale():
         ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale="quadratic", **kwargs)
 
 
+def test_optimize_smooth_scale_pin_for_an_unknown_axis_is_refused():
+    """A pin naming no swept axis is never looked up, so it would silently
+    leave the axis on the automatic choice. `best_by` and `metric_names` both
+    refuse an unresolvable name; this one used not to."""
+    kwargs = dict(
+        cash=1000.0,
+        grid=[{"FAST": [3, 5, 7], "SLOW": 15}],
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+    # A typo, and a name that is a scalar rather than an axis.
+    for pin in ("FASTT:linear", "SLOW:log"):
+        with pytest.raises(ValueError, match=pin.split(":")[0]):
+            ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale=pin, **kwargs)
+    # The correctly spelled pin is unaffected.
+    ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale="FAST:linear", **kwargs)
+
+
+def test_optimize_repeated_axis_value_is_refused():
+    """Two equal values sit at distance 0, so the point becomes a full-weight
+    neighbour of itself — and the duplicate costs a second backtest and row."""
+    common = dict(
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+    )
+    def swept(fast):
+        return ta.optimize(
+            _trend_yaml(), _trend_snaps(), grid=[{"FAST": fast, "SLOW": 15}], **common
+        )
+
+    with pytest.raises(ValueError, match="FAST"):
+        swept([3, 5, 5, 7])
+    # `3` and `3.0` substitute identically, so they are one point.
+    with pytest.raises(ValueError, match="3.0"):
+        swept([3, 3.0, 7])
+    # The same grid without the repeat is untouched.
+    assert len(swept([3, 5, 7]).rows) == 3
+
+
 def test_optimize_support_ignores_a_single_value_axis():
     """A numeric axis with one value is not a swept dimension, so it must not
     divide every point's support by the kernel's axis weight."""

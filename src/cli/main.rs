@@ -517,6 +517,10 @@ struct OptimizeArgs {
     /// `--grid X=A,Y=1..10 --grid X=B,Z=10..100:10`, useful when a parameter
     /// only makes sense conditionally on another. Each subgrid layers over
     /// `--params`; total grid = sum of subgrid point counts.
+    ///
+    /// A list may not repeat a value — the product would just repeat the
+    /// point, costing a second backtest and a duplicate CSV row. `20` and
+    /// `20.0` count as one value.
     #[arg(short = 'g', long = "grid", value_name = "SPEC", required = true)]
     grid: Vec<params::ParamSpec>,
 
@@ -680,7 +684,14 @@ struct OptimizeArgs {
     /// `10→20`) is measured in log space. An evenly spaced axis is a fixed
     /// point of that test. `log` needs every value on the axis strictly
     /// positive. The resolved scale is echoed on the `smooth` line.
-    /// Requires `--smooth`.
+    ///
+    /// A `NAME` that no `--grid` subgrid sweeps is an error, not a shrug: an
+    /// unmatched pin is never looked up, so it would leave the axis on the
+    /// automatic choice in silence. The refusal names every unmatched key and
+    /// lists the axes that are available. Matching *one* stacked subgrid is
+    /// enough. Pinning a categorical or one-value axis is accepted with a
+    /// warning that it is inert — such an axis partitions the grid rather than
+    /// smoothing along it. Requires `--smooth`.
     #[arg(long = "smooth-scale", value_name = "SPEC", requires = "smooth")]
     smooth_scale: Option<optimize::SmoothScales>,
 

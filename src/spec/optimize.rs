@@ -122,6 +122,13 @@ where
     // `run` has already validated the subgrid list; `optimize` still asserts
     // the invariants it relies on (non-empty list, non-empty combos in each).
     assert!(!subgrids.is_empty(), "optimize: called with zero subgrids");
+    // A `--smooth-scale` pin naming no axis would be silently never looked up.
+    // The CLI checks this earlier so it can also print the inert-pin warnings;
+    // here the warnings have nowhere to go, but the error still catches the
+    // library and Python callers.
+    if let Some(cfg) = smooth {
+        cfg.scales.validate_against(&subgrids)?;
+    }
 
     let union_columns = compute_union_columns(&subgrids);
     let subgrid_summaries = subgrids
@@ -660,6 +667,7 @@ pub fn split_axes(params: &HashMap<String, Value>) -> Result<Partition> {
                 if items.is_empty() {
                     bail!("--params axis `{k}` has an empty list");
                 }
+                reject_repeated_values(k, items)?;
                 axes.push((k.clone(), items.clone()));
             }
             Value::String(s) => match try_parse_range(s) {
@@ -675,6 +683,62 @@ pub fn split_axes(params: &HashMap<String, Value>) -> Result<Partition> {
     }
     axes.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((fixed, axes))
+}
+
+/// Canonical identity of one axis value — two values sharing a key name the
+/// same grid point.
+///
+/// Numbers fold through `f64` so `20` and `20.0` collide: they substitute
+/// identically into the strategy and produce identical backtests, so treating
+/// them as two axis positions would be the duplicate bug wearing a different
+/// spelling. Above 2⁵³ an `f64` can no longer tell two integers apart, so a
+/// number that large keeps its own spelling rather than risk a false
+/// collision. Everything else compares as JSON, which is already exact — and
+/// the `#` prefix keeps a number away from the string that spells it.
+fn axis_value_key(v: &Value) -> String {
+    match v {
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.abs() <= 9_007_199_254_740_992.0 => format!("#{f:?}"),
+            _ => format!("#{n}"),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// Error if a hand-written axis list names the same point twice.
+///
+/// There is no reading under which a repeated grid value is meaningful — the
+/// Cartesian product just repeats the point, so the duplicate costs a second
+/// backtest and emits a second identical CSV row. Under `--smooth` it is worse
+/// than wasteful: two equal values sit at distance 0 in value space, so the
+/// point becomes a full-weight neighbour of itself and inflates its own
+/// `support`, which is exactly what `--smooth-min-support` exists to measure.
+///
+/// Refusing beats silently deduping: a dedupe would leave the `-o` CSV a row
+/// shorter than the grid spec implies with nothing saying why. Applies to
+/// every axis, numeric or not — `SL_MODE=[none,none,atr]` is the same typo
+/// with the same wasted evaluations. Ranges can't produce exact duplicates, so
+/// only a list ever reaches here.
+fn reject_repeated_values(name: &str, items: &[Value]) -> Result<()> {
+    let mut seen: HashMap<String, &Value> = HashMap::with_capacity(items.len());
+    for item in items {
+        let Some(first) = seen.insert(axis_value_key(item), item) else {
+            continue;
+        };
+        // Name both spellings when they differ — `20` and `20.0` are one point,
+        // and an error quoting only one of them reads like a false positive.
+        return Err(if first == item {
+            anyhow!(
+                "--params axis `{name}` repeats the value `{item}` — grid values must be distinct"
+            )
+        } else {
+            anyhow!(
+                "--params axis `{name}` repeats one value under two spellings, `{first}` and \
+                 `{item}` — grid values must be distinct"
+            )
+        });
+    }
+    Ok(())
 }
 
 /// `start..end[:step]` → the inclusive integer or float sequence. `None` for a
@@ -1079,6 +1143,79 @@ impl SmoothScales {
     /// about a flag the user never passed.
     pub fn is_auto(&self) -> bool {
         self.default.is_none() && self.per_axis.is_empty()
+    }
+
+    /// Check every `NAME:SCALE` pin against the grid it will be applied to.
+    ///
+    /// A pin whose `NAME` matches no axis is silently never looked up, so the
+    /// user asks for `linear` and gets whatever the heuristic picked. That is
+    /// out of step with the flags either side of it — `-m` and `--best-by`
+    /// both refuse a name that resolves to nothing — and with `--smooth-scale`
+    /// itself, which already refuses a `log` pin on an axis holding a
+    /// non-positive value. So an unmatched name is an error.
+    ///
+    /// Three cases, and they are not the same:
+    ///
+    /// 1. **Matches no axis in any subgrid** → `Err`, naming every unmatched
+    ///    key at once and listing the axes that *are* available: with stacked
+    ///    subgrids the user often has more axes in play than they are holding
+    ///    in their head.
+    /// 2. **Matches an axis in at least one subgrid** → accepted. Stacked
+    ///    subgrids legitimately have a name that is an axis in one and a
+    ///    scalar in another (the same asymmetry [`compute_union_columns`]
+    ///    reasons about), so the test is "matches somewhere", never "matches
+    ///    everywhere".
+    /// 3. **Matches only axes that are categorical or degenerate**
+    ///    (`axis_is_numeric` false) → accepted, and returned as a warning
+    ///    string. The name exists, so it isn't a typo, but such an axis
+    ///    partitions the lattice rather than smoothing along it and no scale
+    ///    is ever resolved for it. An error would punish a
+    ///    correct-but-pointless spelling; silence would leave a real
+    ///    misunderstanding uncorrected.
+    ///
+    /// The bare grid-wide `default` needs no validation — it names no axis.
+    /// Note this reads `per_axis` directly rather than going through
+    /// [`pinned`](Self::pinned), which folds `default` in as a fallback and so
+    /// would report every axis as matched.
+    ///
+    /// Returns the (name-sorted) inert-pin warnings; the caller decides how to
+    /// surface them, since this layer does no printing.
+    pub fn validate_against(&self, subgrids: &[Subgrid]) -> Result<Vec<String>> {
+        let mut unmatched: Vec<&str> = Vec::new();
+        let mut inert: Vec<String> = Vec::new();
+        for name in self.per_axis.keys() {
+            let mut matches =
+                subgrids.iter().flat_map(|sg| &sg.axes).filter(|a| a.0 == *name).peekable();
+            if matches.peek().is_none() {
+                unmatched.push(name);
+            } else if !matches.any(axis_is_numeric) {
+                inert.push(format!(
+                    "--smooth-scale pins axis `{name}`, but it is categorical or has a single \
+                     value — such an axis partitions the grid rather than smoothing along it, \
+                     so the pin has no effect"
+                ));
+            }
+        }
+        if !unmatched.is_empty() {
+            unmatched.sort_unstable();
+            let mut available: Vec<&str> =
+                subgrids.iter().flat_map(|sg| &sg.axes).map(|a| a.0.as_str()).collect();
+            available.sort_unstable();
+            available.dedup();
+            let available = if available.is_empty() {
+                "the grid sweeps no axes".to_string()
+            } else {
+                format!("swept axes are: {}", available.join(", "))
+            };
+            bail!(
+                "--smooth-scale pins {} that {} no swept axis: {} — {available}",
+                if unmatched.len() == 1 { "a name" } else { "names" },
+                if unmatched.len() == 1 { "matches" } else { "match" },
+                unmatched.join(", "),
+            );
+        }
+        inert.sort();
+        Ok(inert)
     }
 }
 
@@ -2059,6 +2196,11 @@ where
     R: Fn(&HashMap<String, Value>) -> Result<crate::RunReport<Symbol>> + Sync,
 {
     assert!(!subgrids.is_empty(), "walkforward: called with zero subgrids");
+    // Same precondition [`optimize`] applies, and for the same reason — checked
+    // before the pre-scan so a typo'd pin costs no backtests.
+    if let Some(cfg) = smooth {
+        cfg.scales.validate_against(&subgrids)?;
+    }
 
     // Grid enumeration — same shape as [`optimize`] so subgrids stack the same
     // way and the union-column projection is compatible with the per-fold row.
@@ -3052,6 +3194,94 @@ mod tests {
         assert!(SmoothScales::from_str("linear,index").is_err());
         assert!(SmoothScales::from_str(":log").is_err());
         assert!(SmoothScales::from_str("").is_err());
+    }
+
+    /// One edit should fix every typo, so the refusal names them all rather
+    /// than stopping at whichever the `HashMap` happened to hand over first.
+    #[test]
+    fn smooth_scales_validate_against_reports_every_unmatched_name() {
+        // `Subgrid` isn't `Clone`, so each case builds its own.
+        let sg = || subgrid(&[("SLOW", Value::from(20))], &[("FAST", nums(&[2, 4, 8]))]);
+        let scales = SmoothScales::default()
+            .with_axis("FASTT", AxisScale::Linear)
+            .with_axis("SLOWW", AxisScale::Log);
+        let err = scales.validate_against(&[sg()]).unwrap_err().to_string();
+        assert!(err.contains("FASTT") && err.contains("SLOWW"), "{err}");
+        // And it says what *is* available, since a stacked grid often has more
+        // axes in play than the user is holding in their head.
+        assert!(err.contains("FAST,") || err.contains("axes are: FAST"), "{err}");
+
+        // A scalar is not an axis: pinning `SLOW` is the same silent no-op.
+        let scales = SmoothScales::default().with_axis("SLOW", AxisScale::Log);
+        assert!(scales.validate_against(&[sg()]).is_err());
+
+        // The correctly spelled pin validates clean, and reports no warning.
+        let scales = SmoothScales::default().with_axis("FAST", AxisScale::Linear);
+        assert_eq!(scales.validate_against(&[sg()]).unwrap(), Vec::<String>::new());
+
+        // Matching *somewhere* is enough — `SLOW` is a scalar in the first
+        // subgrid and an axis in the second, which is a legitimate stack.
+        let other = subgrid(&[("FAST", Value::from(3))], &[("SLOW", nums(&[6, 8, 10]))]);
+        let scales = SmoothScales::default().with_axis("SLOW", AxisScale::Index);
+        assert_eq!(scales.validate_against(&[sg(), other]).unwrap(), Vec::<String>::new());
+    }
+
+    /// The bare grid-wide form names no axis, so there is nothing to match it
+    /// against — including on a grid with no numeric axis at all.
+    #[test]
+    fn a_bare_grid_wide_scale_needs_no_axis_name() {
+        let categorical = || subgrid(&[], &[("MODE", strs(&["a", "b"]))]);
+        for scale in [AxisScale::Linear, AxisScale::Log, AxisScale::Index] {
+            assert_eq!(
+                SmoothScales::all(scale).validate_against(&[categorical()]).unwrap(),
+                Vec::<String>::new()
+            );
+        }
+        // `pinned()` folds the default in as a fallback, so validating through
+        // it would report every axis as matched. This must read `per_axis`.
+        let mixed = SmoothScales::all(AxisScale::Linear).with_axis("NOPE", AxisScale::Log);
+        assert!(mixed.validate_against(&[categorical()]).is_err());
+    }
+
+    /// The name exists, so it isn't a typo — but a categorical or degenerate
+    /// axis partitions the lattice rather than smoothing along it, and no scale
+    /// is ever resolved for it. Warn; erroring would punish a correct spelling.
+    #[test]
+    fn a_pin_on_a_categorical_axis_is_inert_not_an_error() {
+        let sg = || subgrid(&[], &[("MODE", strs(&["a", "b"])), ("SOLO", nums(&[9]))]);
+        for name in ["MODE", "SOLO"] {
+            let scales = SmoothScales::default().with_axis(name, AxisScale::Log);
+            let warnings = scales.validate_against(&[sg()]).expect("inert, not invalid");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains(name) && warnings[0].contains("no effect"), "{warnings:?}");
+        }
+        // Numeric in one subgrid is enough to make the pin live, so no warning.
+        let swept = subgrid(&[], &[("SOLO", nums(&[9, 10, 11]))]);
+        let scales = SmoothScales::default().with_axis("SOLO", AxisScale::Log);
+        assert_eq!(scales.validate_against(&[sg(), swept]).unwrap(), Vec::<String>::new());
+    }
+
+    /// A repeated value double-counts itself as its own distance-0 neighbour,
+    /// inflating `support` past the floor `--smooth-min-support` sets.
+    #[test]
+    fn split_axes_refuses_a_repeated_value() {
+        let axis = |values: Value| {
+            let mut table = HashMap::new();
+            table.insert("FAST".to_string(), values);
+            split_axes(&table)
+        };
+        assert!(axis(serde_json::json!([4, 5, 6])).is_ok());
+        let err = axis(serde_json::json!([4, 5, 5, 6])).unwrap_err().to_string();
+        assert!(err.contains("FAST") && err.contains('5'), "{err}");
+        // Categorical repeats waste exactly the same evaluations.
+        assert!(axis(serde_json::json!(["none", "none", "atr"])).is_err());
+        // `20` and `20.0` substitute identically, so they are one point — and
+        // the refusal quotes both spellings, or it reads as a false positive.
+        let err = axis(serde_json::json!([20, 20.0])).unwrap_err().to_string();
+        assert!(err.contains("`20`") && err.contains("`20.0`"), "{err}");
+        // Distinct values that merely *look* close stay distinct.
+        assert!(axis(serde_json::json!([20, 20.5, 21])).is_ok());
+        assert!(axis(serde_json::json!(["20", 20])).is_ok(), "a string is not the number");
     }
 
     /// The grid's shape is the result; its maximum is not.

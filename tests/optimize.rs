@@ -687,6 +687,127 @@ fn a_one_value_axis_does_not_dilute_support() {
     assert_eq!(kept, 3, "the three interior FAST points clear full support");
 }
 
+/// A `--smooth-scale` pin is looked up by axis name, so a name that matches
+/// nothing is never consulted: the user asks for `linear` and silently gets
+/// whatever the heuristic picked. `--best-by` and `-m` both refuse an
+/// unresolvable name; this one used not to.
+#[test]
+fn a_smooth_scale_pin_for_an_unknown_axis_is_refused() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_pin_unknown_strategy.yml", SWEEPABLE);
+    let pinned = |scale: &str| {
+        Cmd::new("optimize")
+            .arg(&format!("@{}", path.display()))
+            .series(&at("examples/candles.csv"))
+            .args(&["--grid", "FAST=[2,4,8,16],SLOW=20,SYM=BTC"])
+            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+            .args(&[&format!("--smooth-scale={scale}"), "--output", "/dev/null"])
+    };
+
+    let out = pinned("FASTT:linear").fails();
+    assert!(out.stderr.contains("FASTT"), "the refusal should name the typo, got: {}", out.stderr);
+    assert!(
+        out.stderr.contains("FAST,") || out.stderr.contains("axes are: FAST"),
+        "the refusal should list the axes that are available, got: {}",
+        out.stderr
+    );
+
+    // The guard against over-rejecting: the correctly spelled pin still works,
+    // and still takes effect.
+    let out = pinned("FAST:linear").ok();
+    assert!(
+        out.stdout.contains("scale FAST linear"),
+        "a valid pin must still be honoured:\n{}",
+        out.stdout
+    );
+}
+
+/// `SLOW=20` and `SYM=BTC` are scalars, not axes — a pin naming one is the same
+/// silent no-op as a typo, and reads as one to the user.
+#[test]
+fn a_smooth_scale_pin_naming_a_scalar_is_refused() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_pin_scalar_strategy.yml", SWEEPABLE);
+    for name in ["SYM", "SLOW"] {
+        let out = Cmd::new("optimize")
+            .arg(&format!("@{}", path.display()))
+            .series(&at("examples/candles.csv"))
+            .args(&["--grid", "FAST=[2,4,8,16],SLOW=20,SYM=BTC"])
+            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+            .args(&[&format!("--smooth-scale={name}:log"), "--output", "/dev/null"])
+            .fails();
+        assert!(
+            out.stderr.contains(name),
+            "pinning the scalar `{name}` should be refused by name, got: {}",
+            out.stderr
+        );
+    }
+}
+
+/// Stacked subgrids legitimately have a name that is an axis in one and a
+/// scalar in another, so the test is "matches somewhere", never "matches
+/// everywhere" — the same asymmetry `compute_union_columns` reasons about.
+#[test]
+fn a_smooth_scale_pin_is_accepted_when_any_subgrid_sweeps_it() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_pin_stacked_strategy.yml", SWEEPABLE);
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        // `SLOW` sweeps in the second subgrid and is pinned flat in the first.
+        .args(&["--grid", "FAST=[2,4,8,16],SLOW=9"])
+        .args(&["--grid", "FAST=3,SLOW=[6,8,10]"])
+        .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+        .args(&["--smooth-scale=SLOW:index", "--output", "/dev/null"])
+        .ok();
+    assert!(
+        out.stdout.contains("scale FAST log, SLOW index"),
+        "a pin swept by one subgrid should be honoured there:\n{}",
+        out.stdout
+    );
+}
+
+/// Two equal values sit at distance 0 in value space, so each becomes a
+/// full-weight neighbour of the other and the point double-counts itself —
+/// which inflates `support` and lets a duplicate defeat the
+/// `--smooth-min-support` floor that exists to reject edge points.
+#[test]
+fn a_repeated_axis_value_is_refused() {
+    let (path, _) = scratch_file("fugazi_opt_dup_axis_strategy.yml", SWEEPABLE);
+    let swept = |grid: &str| {
+        Cmd::new("optimize")
+            .arg(&format!("@{}", path.display()))
+            .series(&at("examples/candles.csv"))
+            .args(&["--grid", grid])
+            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+            .args(&["--output", "/dev/null"])
+    };
+
+    let out = swept("FAST=[4,5,5,6],SLOW=[9]").fails();
+    assert!(
+        out.stderr.contains("FAST") && out.stderr.contains('5'),
+        "the refusal should name the axis and the repeated value, got: {}",
+        out.stderr
+    );
+
+    // The same grid without the typo is untouched.
+    swept("FAST=[4,5,6],SLOW=[9]").ok();
+
+    // Categorical too: a repeat there wastes exactly the same evaluations.
+    let out = swept(r#"FAST=[2,3],MODE=["a","a","b"]"#).fails();
+    assert!(
+        out.stderr.contains("MODE"),
+        "a repeated categorical value should be refused, got: {}",
+        out.stderr
+    );
+
+    // `20` and `20.0` substitute identically into the strategy, so they name
+    // one point under two spellings — and the error says both.
+    let out = swept("FAST=[20,20.0],SLOW=[9]").fails();
+    assert!(
+        out.stderr.contains("20") && out.stderr.contains("20.0"),
+        "the refusal should quote both spellings that collided, got: {}",
+        out.stderr
+    );
+}
+
 #[test]
 fn smooth_without_best_by_is_refused() {
     // There is no ranking key to average over the neighbourhood. Clap enforces
