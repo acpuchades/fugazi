@@ -785,7 +785,9 @@ plotting. CLI emits data files only: `fills.csv`, `trades.csv`, `returns.csv`,
   (non-numeric ones partition), renormalizes at edges and reports the realized
   `support`. Direction-agnostic: it averages the already-directed `ranking_value`,
   so `-k` composes for free. Runs between the row rejoin and the sort, while
-  `rows[i] ↔ plan[i]` still holds. Adds `<best-by>_smoothed`/`_support` columns.
+  `rows[i] ↔ plan[i]` still holds. Adds `smooth.value`/`smooth.support` — their
+  own scope, because a flag-gated column should not share a prefix with an
+  always-emitted one like `selection.deflated_sharpe`.
 - **`selection.deflated_sharpe` on `optimize`** — per-row DSR against the grid-wide
   null (`N` = trials, `Var[SR]` = sample variance of the grid's annualized Sharpes).
   Omitted if <2 rows have defined Sharpe or trial variance is zero.

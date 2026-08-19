@@ -517,8 +517,8 @@ and which the sort already knows to read largest-first or smallest-first — so
 averaging that key over a neighbourhood is the identical operation for a
 maximize and a minimize metric. A low-drawdown plateau outranks a low-drawdown
 spike for exactly the same reason a high-Sharpe plateau outranks a high-Sharpe
-spike, and the emitted `_smoothed` column stays in the metric's native
-orientation so it reads directly against the raw column beside it.
+spike, and the emitted `smooth.value` column stays in the metric's native
+orientation so it reads directly against the raw metric column.
 
 #### Neighbourhood smoothing
 
@@ -569,7 +569,7 @@ values, one per lattice.
 **Edges renormalize, and say so.** A boundary point has fewer neighbours; its
 average is divided by the weight it actually found rather than padded or
 reflected. Since grid maxima *like* to sit on edges, the realized weight is
-reported per row as `<metric>_support` — `1.0` for a fully interior point, `4/9`
+reported per row as `smooth.support` — `1.0` for a fully interior point, `4/9`
 for the corner of a 2-D `box:1` grid. `--smooth-min-support FRAC` refuses
 anything thinner: the row's smoothed value is dropped and sorts last, exactly
 like a missing metric, while its support is still written. Caveat: an axis
@@ -587,9 +587,19 @@ cross-window mean against it, and `--smooth` averages *that* shifted key over
 the neighbourhood. So the ranking is `avg(mean − K·std)`, not `avg(mean) −
 K·avg(std)`.
 
-**Reading the result.** Two CSV columns are appended — `<metric>_smoothed` and
-`<metric>_support` — and the console `best` block prints the winner's smoothed
-value, its support, and the line that matters:
+**Reading the result.** Two CSV columns are appended, under their own
+`smooth.` scope: `smooth.value` (the neighbourhood average the rows are ranked
+by, in the `--best-by` metric's native orientation) and `smooth.support`. The
+scope is the flag's, deliberately — a column that exists only when `--smooth` is
+passed shouldn't share a prefix with one that is always emitted, so the header
+alone tells you which invocation produced the file. It also avoids a trap under
+`-w`, where a `<metric>_smoothed` suffix would sit in a `<metric>_mean` /
+`<metric>_std` triple looking like a third aggregation of the metric — it is
+not, it is the neighbourhood average of `mean − K·std`. Which metric was
+smoothed is fixed per run by `--best-by` and echoed in the inputs block.
+
+The console `best` block prints the winner's smoothed value, its support, and
+the line that matters:
 
 ```
 best
@@ -728,9 +738,11 @@ part of that maximum that was noise. Smoothing the per-fold keys swaps in a
 different rule — "pick the centre of the best in-sample neighbourhood" — and the
 composite then estimates *that*. Comparing the two composite metrics documents,
 with and without `--smooth`, is a direct read on how much of the strategy's
-apparent edge was the selection rule chasing noise. Each fold row gains
-`<metric>_is_smoothed` and `<metric>_is_support` columns, so the choice is
-auditable against the raw `_is` column beside it.
+apparent edge was the selection rule chasing noise. Each fold row gains the same
+`smooth.value` and `smooth.support` columns, so the choice is auditable against
+the `--best-by` metric's raw `_is` column beside it. (No `_is` marker on them:
+selection only ever happens in-sample, so there is no OOS counterpart to
+distinguish them from.)
 
 **Outputs.** Given `-o out/wf.csv`, three sibling files are written:
 
@@ -1826,13 +1838,16 @@ One row per grid point:
   `<name>_mean` and `<name>_std`, its cross-window mean and population
   standard deviation over the windows where it is defined.
 
-- **Smoothing columns**, under [`--smooth`](#neighbourhood-smoothing) only:
-  `<best-by>_smoothed` and `<best-by>_support`, appended last. The first is the
-  kernel-weighted neighbourhood average the rows are ranked by, in the metric's
-  native orientation; the second is the fraction of a fully interior
-  neighbourhood that average rests on. A value dropped by
-  `--smooth-min-support` leaves an empty `_smoothed` cell and a populated
-  `_support` one.
+- **`selection.deflated_sharpe`**, when the grid has enough Sharpe spread to
+  define it.
+- **`smooth.value` / `smooth.support`**, under
+  [`--smooth`](#neighbourhood-smoothing) only. The first is the `--best-by`
+  metric's kernel-weighted neighbourhood average — the key the rows are ranked
+  by, in the metric's native orientation; the second is the fraction of a fully
+  interior neighbourhood that average rests on. A value dropped by
+  `--smooth-min-support` leaves an empty `smooth.value` cell and a populated
+  `smooth.support` one. They carry their own scope because they appear only when
+  the flag does.
 
 Missing metric values (`sharpe` on a run with zero variance,
 `profit_factor` on a run with no losing trade, …) render as **empty
