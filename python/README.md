@@ -1189,13 +1189,18 @@ result.composite_metrics                # composite metrics doc
 `smooth=` mirrors the CLI's `--smooth`: rank `best_by` by a kernel-weighted
 average over each grid point's *parameter neighbourhood* rather than by the
 point estimate, so a broad plateau outranks a lone spike. `"box:R"`,
-`"triangle:R"` or `"gaussian:S"`, with radii in lattice steps (adjacent
-declared positions on an axis, not parameter units). Non-numeric axes
-partition rather than smooth, each subgrid is its own lattice, and boundary
-points renormalize over the neighbours they have — `smooth_min_support=`
-discards a row whose realized support falls below a fraction of a fully
-interior point's. It composes with `risk_aversion=` (which is folded into the
-key first) and applies per fold under `walkforward=`.
+`"triangle:R"` or `"gaussian:S"`, with radii in **grid steps**: distance along
+an axis is the parameter gap divided by that axis' own median gap, so `1` means
+one typical step of *that* axis and an evenly spaced axis behaves exactly as
+"one declared position along". Each axis picks linear or log spacing by
+whichever makes its own gaps more uniform; `smooth_scale=` pins it
+(`"index"`, `"PERIOD:log"`, `"linear,PERIOD:log"`), with `"index"` restoring
+the pre-0.65 measure between declared positions. Non-numeric axes and
+single-value axes partition rather than smooth, each subgrid is its own
+lattice, and boundary points renormalize over the neighbours they have —
+`smooth_min_support=` discards a row whose realized support falls below a
+fraction of a fully interior point's. It composes with `risk_aversion=` (which
+is folded into the key first) and applies per fold under `walkforward=`.
 
 ```python
 smooth_yaml = """

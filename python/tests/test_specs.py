@@ -375,6 +375,8 @@ def test_optimize_smooth_ranks_by_the_neighbourhood_average():
     )
     assert len(sweep.rows) == 9
     supports = [row.support for row in sweep.rows]
+    # Both axes are evenly spaced, so 1.0 is the ceiling here; on an irregular
+    # axis a denser-than-median stretch reads above it, deliberately.
     assert all(s is not None and 0.0 < s <= 1.0 + 1e-12 for s in supports)
     # A 3x3 box:1 lattice has exactly one fully interior cell.
     assert sum(abs(s - 1.0) < 1e-9 for s in supports) == 1
@@ -418,6 +420,57 @@ def test_optimize_smooth_min_support_drops_thin_neighbourhoods():
     assert len(kept) == 1, "only the interior cell of a 3x3 clears full support"
     # Support is still reported for the rows it rejected.
     assert all(row.support is not None for row in sweep.rows)
+
+
+def test_optimize_smooth_scale_pins_the_distance_scale():
+    """`smooth_scale=` reaches the kernel, and `"index"` restores the old measure."""
+    kwargs = dict(
+        cash=1000.0,
+        # Irregular on purpose: index space and value space disagree here, and
+        # the same seven values typed in a different order must not.
+        grid=[{"FAST": [3, 9, 4, 8, 5, 7, 6], "SLOW": [10, 15, 20]}],
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+
+    def by_params(sweep):
+        return {
+            (row.values["FAST"], row.values["SLOW"]): (row.smoothed, row.support)
+            for row in sweep.rows
+        }
+
+    scrambled = ta.optimize(_trend_yaml(), _trend_snaps(), **kwargs)
+    kwargs["grid"] = [{"FAST": [3, 4, 5, 6, 7, 8, 9], "SLOW": [10, 15, 20]}]
+    sorted_ = ta.optimize(_trend_yaml(), _trend_snaps(), **kwargs)
+    assert by_params(scrambled) == by_params(sorted_)
+
+    # `index` is the documented way back to the order-dependent measure.
+    kwargs["grid"] = [{"FAST": [3, 9, 4, 8, 5, 7, 6], "SLOW": [10, 15, 20]}]
+    indexed = ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale="index", **kwargs)
+    assert by_params(indexed) != by_params(sorted_)
+
+    with pytest.raises(ValueError, match="linear"):
+        ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale="quadratic", **kwargs)
+
+
+def test_optimize_support_ignores_a_single_value_axis():
+    """A numeric axis with one value is not a swept dimension, so it must not
+    divide every point's support by the kernel's axis weight."""
+    common = dict(
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+    listed = ta.optimize(
+        _trend_yaml(), _trend_snaps(), grid=[{"FAST": [3, 5, 7, 9, 11], "SLOW": [15]}], **common
+    )
+    scalar = ta.optimize(
+        _trend_yaml(), _trend_snaps(), grid=[{"FAST": [3, 5, 7, 9, 11]}], params={"SLOW": 15}, **common
+    )
+    assert [r.support for r in listed.rows] == [r.support for r in scalar.rows]
+    assert max(r.support for r in listed.rows) == pytest.approx(1.0)
 
 
 def test_optimize_smooth_rejects_an_unknown_kernel():

@@ -791,11 +791,29 @@ plotting. CLI emits data files only: `fills.csv`, `trades.csv`, `returns.csv`,
   space counterpart to `-k`'s time-space penalty. `spec::optimize::smooth_keys` is
   the one neighbour walk, shared by the grid sweep and the per-fold walk-forward
   selection; it reads each subgrid's `combos` as a mixed-radix lattice (last axis
-  fastest, `Subgrid::{axis_lens, strides, digits}`), smooths only numeric axes
-  (non-numeric ones partition), renormalizes at edges and reports the realized
-  `support`. Direction-agnostic: it averages the already-directed `ranking_value`,
-  so `-k` composes for free. Runs between the row rejoin and the sort, while
+  fastest, `Subgrid::{axis_lens, strides, digits}`), smooths only numeric axes of
+  length ≥ 2 (categorical *and* one-value axes partition, and neither counts
+  toward `support`), renormalizes at edges and reports the realized `support`.
+  Direction-agnostic: it averages the already-directed `ranking_value`, so `-k`
+  composes for free. Runs between the row rejoin and the sort, while
   `rows[i] ↔ plan[i]` still holds. Adds `<best-by>_smoothed`/`_support` columns.
+  **Distance is in value space, normalized per axis** (`axis_geometry`): the
+  parameter gap over that axis' median gap, on a `linear` / `log` / `index`
+  `AxisScale` chosen per axis (log when it makes the axis' gaps clearly more
+  uniform and every value is positive) and overridable via `--smooth-scale` /
+  `SmoothScales`. Because the kernels are separable the axes never need a common
+  scale — only one internal to each, which the axis' own spacing supplies. A
+  *regular* axis takes an exact integer-rank fast path (no float division at
+  all), so an ascending `start..end:step` range or evenly spaced list reproduces
+  the pre-0.65 index-space numbers bit for bit; only irregular lists move.
+  Neighbourhoods are always summed in **ascending parameter order**, never
+  declared order — that is what makes the result independent of how the list was
+  typed, exactly rather than to the last ULP, and it is why a *descending*
+  regular declaration no longer matches pre-0.65's last bit. `support`'s
+  denominator stays kernel-only (`Π_j Σ_{d=−R..R} w(d)`), unclamped, so `1.0` is
+  grid-independent and reachable and a denser-than-median pocket reads above it.
+  `plateau_size` connects `±1` in *sorted* position, not within the bandwidth —
+  the console prints it as a cell count.
 - **`selection.deflated_sharpe` on `optimize`** — per-row DSR against the grid-wide
   null (`N` = trials, `Var[SR]` = sample variance of the grid's annualized Sharpes).
   Omitted if <2 rows have defined Sharpe or trial variance is zero.

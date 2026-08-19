@@ -240,8 +240,9 @@ where
     // then combo order — which is exactly the layout `smooth_keys` needs to
     // read a subgrid's lattice out of a contiguous slice. So smoothing has to
     // happen *here*, between the rejoin and the sort that destroys it.
-    let smoothing = smooth.copied();
+    let smoothing = smooth.cloned();
     let mut plateau: Option<usize> = None;
+    let mut smooth_scales: Option<Vec<(String, AxisScale)>> = None;
     if let Some((_, ref path, direction)) = best_by {
         let keys: Vec<Option<Real>> = rows
             .iter()
@@ -253,9 +254,16 @@ where
             // gets smoothed is the risk-adjusted key, not the raw mean.
             Some(cfg) => {
                 let smoothed = smooth_keys(&subgrids, &keys, cfg)?;
+                smooth_scales = Some(resolved_axis_scales(&subgrids, cfg)?);
                 // Measure the plateau here, while the vector is still in
                 // lattice order — the sort below is what destroys that.
-                plateau = Some(plateau_size(&subgrids, &smoothed, direction, PLATEAU_TOLERANCE));
+                plateau = Some(plateau_size(
+                    &subgrids,
+                    &smoothed,
+                    direction,
+                    PLATEAU_TOLERANCE,
+                    &cfg.scales,
+                ));
                 let smooth_keys_vec: Vec<Option<Real>> = smoothed.iter().map(|s| s.value).collect();
                 for (row, key) in rows.iter_mut().zip(smoothed) {
                     row.smoothed = Some(key);
@@ -279,6 +287,7 @@ where
         windowed: windowed.is_some(),
         deflated_sharpe_context,
         smoothing,
+        smooth_scales,
         plateau,
     })
 }
@@ -594,6 +603,11 @@ pub struct Sweep {
     /// `None` when smoothing didn't run. The CSV writer keys the two extra
     /// columns off this; the console block echoes the kernel.
     pub smoothing: Option<Smoothing>,
+    /// Under `--smooth`, the [`AxisScale`] each smoothed axis resolved to —
+    /// name-sorted and deduped across subgrids, so the console can say which
+    /// scale it measured on rather than leaving it implicit. `None` when
+    /// smoothing didn't run. See [`resolved_axis_scales`].
+    pub smooth_scales: Option<Vec<(String, AxisScale)>>,
     /// Under `--smooth`, the size of the largest connected region of grid
     /// points within [`PLATEAU_TOLERANCE`] of the best smoothed value —
     /// measured in lattice space, before `rows` was sorted. The grid's shape is
@@ -969,13 +983,166 @@ pub fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Rea
 // Neighbourhood smoothing
 // ---------------------------------------------------------------------------
 
-/// How neighbourhood weight falls off with lattice distance.
+/// Which scale an axis' distances are measured on, once resolved.
 ///
-/// Distance is measured in **declared-position units along an axis**, never in
-/// parameter units — see [`smooth_keys`] for why that is the only scale-free
-/// choice. All three kernels are *separable*: the weight of an offset vector is
-/// the product of its per-axis weights, which makes [`SmoothKernel::Box`]'s
-/// tensor product exactly the Chebyshev ball of radius `R`.
+/// [`smooth_keys`] measures neighbour distance in **parameter units, divided by
+/// the axis' own characteristic spacing** — so a radius of `1` means "one
+/// typical grid step on this axis" whatever the axis means. The transform
+/// applied before that division is this enum.
+///
+/// Chosen per axis by [`SmoothScales`]: automatically by default, or pinned by
+/// `--smooth-scale`. The choice only ever *matters* on an irregularly spaced
+/// axis — on a regular one every scale collapses to the same integer stencil.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AxisScale {
+    /// Distance is `|vᵢ − vⱼ| / step`, `step` being the median gap between
+    /// successive values. The default for an additive grid.
+    Linear,
+    /// Distance is `|ln vᵢ − ln vⱼ| / step` in log space. Picked automatically
+    /// for a grid the user laid out multiplicatively (`[10,20,50,100,200]`),
+    /// where `100→200` really is about as near as `10→20`. Only admissible when
+    /// every value on the axis is strictly positive.
+    Log,
+    /// Distance is `|i − j|` between **declared positions** — the pre-0.65
+    /// behaviour, and what `--smooth-scale=index` restores. Depends on how the
+    /// list was typed, which is why it is no longer the default.
+    Index,
+}
+
+impl std::fmt::Display for AxisScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AxisScale::Linear => "linear",
+            AxisScale::Log => "log",
+            AxisScale::Index => "index",
+        })
+    }
+}
+
+impl std::str::FromStr for AxisScale {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim() {
+            "linear" => Ok(AxisScale::Linear),
+            "log" => Ok(AxisScale::Log),
+            "index" => Ok(AxisScale::Index),
+            other => Err(format!(
+                "unknown smoothing scale `{other}` — expected `linear`, `log` or `index`"
+            )),
+        }
+    }
+}
+
+/// `--smooth-scale`: which [`AxisScale`] each axis is measured on.
+///
+/// Grammar is a `,`-separated list of terms, each either a bare scale name (the
+/// grid-wide default, at most one) or `NAME:SCALE` (that one axis). So
+/// `--smooth-scale=index` restores the pre-0.65 index-space behaviour
+/// wholesale, `--smooth-scale=PERIOD:log` overrides one axis and leaves the
+/// rest automatic, and the two compose: `--smooth-scale=linear,PERIOD:log`.
+///
+/// The default — no term for an axis and no bare default — is **automatic**:
+/// `choose_axis_scale` picks whichever transform makes that axis' spacings
+/// most nearly uniform. A regular axis is a fixed point of that test, so the
+/// heuristic only ever fires on an irregular one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SmoothScales {
+    default: Option<AxisScale>,
+    per_axis: HashMap<String, AxisScale>,
+}
+
+impl SmoothScales {
+    /// No pins at all — every axis picks its own scale.
+    pub fn auto() -> Self {
+        Self::default()
+    }
+
+    /// Pin every axis to one scale.
+    pub fn all(scale: AxisScale) -> Self {
+        SmoothScales { default: Some(scale), per_axis: HashMap::new() }
+    }
+
+    /// Pin one axis by name, leaving the rest as they were.
+    pub fn with_axis(mut self, name: impl Into<String>, scale: AxisScale) -> Self {
+        self.per_axis.insert(name.into(), scale);
+        self
+    }
+
+    /// The scale pinned for `name`, or `None` when it is left automatic.
+    /// A per-axis term wins over the bare default.
+    pub fn pinned(&self, name: &str) -> Option<AxisScale> {
+        self.per_axis.get(name).copied().or(self.default)
+    }
+
+    /// True when nothing at all was pinned — the console echo stays quiet
+    /// about a flag the user never passed.
+    pub fn is_auto(&self) -> bool {
+        self.default.is_none() && self.per_axis.is_empty()
+    }
+}
+
+impl std::str::FromStr for SmoothScales {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let mut out = SmoothScales::default();
+        for term in s.split(',') {
+            let term = term.trim();
+            if term.is_empty() {
+                continue;
+            }
+            match term.rsplit_once(':') {
+                Some((name, scale)) => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return Err(format!("`{term}` names no axis — write `NAME:SCALE`"));
+                    }
+                    out.per_axis.insert(name.to_string(), scale.parse()?);
+                }
+                None => {
+                    let scale: AxisScale = term.parse()?;
+                    if out.default.is_some_and(|d| d != scale) {
+                        return Err(format!(
+                            "conflicting grid-wide scales in `{s}` — pass at most one bare \
+                             scale name, and use `NAME:SCALE` for per-axis overrides"
+                        ));
+                    }
+                    out.default = Some(scale);
+                }
+            }
+        }
+        if out.default.is_none() && out.per_axis.is_empty() {
+            return Err(format!(
+                "`{s}` sets no scale — expected `linear`, `log`, `index`, or `NAME:SCALE` terms"
+            ));
+        }
+        Ok(out)
+    }
+}
+
+impl std::fmt::Display for SmoothScales {
+    /// Round-trips through [`FromStr`](std::str::FromStr): the bare default
+    /// first, then per-axis terms name-sorted.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut terms: Vec<String> = self.default.iter().map(|d| d.to_string()).collect();
+        let mut pins: Vec<(&String, &AxisScale)> = self.per_axis.iter().collect();
+        pins.sort_by(|a, b| a.0.cmp(b.0));
+        terms.extend(pins.into_iter().map(|(n, s)| format!("{n}:{s}")));
+        f.write_str(&terms.join(","))
+    }
+}
+
+/// How neighbourhood weight falls off with distance along an axis.
+///
+/// Distance is in **units of the axis' own characteristic spacing** — see
+/// [`smooth_keys`]. On a regularly spaced axis that is exactly `|i − j|`
+/// between declared positions, which is what `R` and `S` have always meant;
+/// on an irregular one it is the parameter gap divided by the median gap. All
+/// three kernels are *separable*: the weight of an offset vector is the product
+/// of its per-axis weights, which makes [`SmoothKernel::Box`]'s tensor product
+/// exactly the Chebyshev ball of radius `R`. Separability is also why the axes
+/// never need a *common* scale — only a scale internal to each.
 ///
 /// Parsed from the `--smooth` grammar via [`FromStr`](std::str::FromStr): `box:R`, `triangle:R`,
 /// `gaussian:S`. A bare kernel name takes the default parameter (`box` →
@@ -986,13 +1153,20 @@ pub enum SmoothKernel {
     Box { radius: usize },
     /// `Π (1 − |dⱼ|/(R+1))` — linear falloff, zero outside radius `R`.
     Triangle { radius: usize },
-    /// `Π exp(−dⱼ²/2S²)`, truncated at `⌈3S⌉` lattice steps per axis. `S` is a
+    /// `Π exp(−dⱼ²/2S²)`, truncated at `⌈3S⌉` grid steps per axis. `S` is a
     /// bandwidth in **grid steps**, not in the axis' parameter units.
     Gaussian { bandwidth: Real },
 }
 
+/// Slack allowed when testing a real-valued distance against a kernel's reach.
+/// A distance derived from float parameter values (`1.0..4.0:0.5` accumulates)
+/// can land a few ULP outside an exact radius; without this a neighbour that
+/// *is* one step away would silently drop out. Far below any real grid spacing,
+/// so it never admits a genuine non-neighbour.
+const DISTANCE_TOLERANCE: Real = 1e-9;
+
 impl SmoothKernel {
-    /// Per-axis stencil radius: the largest `|d|` that can carry weight.
+    /// Per-axis stencil radius: the largest distance that can carry weight.
     pub fn radius(&self) -> usize {
         match self {
             SmoothKernel::Box { radius } | SmoothKernel::Triangle { radius } => *radius,
@@ -1002,35 +1176,39 @@ impl SmoothKernel {
         }
     }
 
-    /// The one-dimensional weight at lattice offset `d`. Zero outside
-    /// [`radius`](Self::radius); exactly `1.0` at `d = 0` for every kernel.
-    pub fn weight_1d(&self, d: i64) -> Real {
-        let a = d.unsigned_abs() as Real;
+    /// The one-dimensional weight at real-valued distance `d`, in units of the
+    /// axis' characteristic spacing. Zero beyond [`radius`](Self::radius);
+    /// exactly `1.0` at `d = 0` for every kernel.
+    ///
+    /// Bit-identical to the old integer form when `d` is a whole number, which
+    /// is what keeps a regularly spaced grid byte-identical to pre-0.65 output.
+    pub fn weight_at(&self, d: Real) -> Real {
+        let a = d.abs();
+        let reach = self.radius() as Real + DISTANCE_TOLERANCE;
         match self {
-            SmoothKernel::Box { radius } => {
-                if d.unsigned_abs() as usize <= *radius { 1.0 } else { 0.0 }
+            SmoothKernel::Box { .. } => {
+                if a <= reach { 1.0 } else { 0.0 }
             }
             SmoothKernel::Triangle { radius } => {
-                if d.unsigned_abs() as usize <= *radius {
-                    1.0 - a / (*radius as Real + 1.0)
-                } else {
-                    0.0
-                }
+                if a <= reach { 1.0 - a / (*radius as Real + 1.0) } else { 0.0 }
             }
             SmoothKernel::Gaussian { bandwidth } => {
-                if d.unsigned_abs() as usize <= self.radius() {
-                    (-(a * a) / (2.0 * bandwidth * bandwidth)).exp()
-                } else {
-                    0.0
-                }
+                if a <= reach { (-(a * a) / (2.0 * bandwidth * bandwidth)).exp() } else { 0.0 }
             }
         }
     }
 
-    /// `Σ_{d=−R..R} w(d)` — the weight one axis contributes to a *fully
-    /// interior* point. Deliberately boundary-ignoring: it is the denominator
-    /// [`SmoothedKey::support`] is expressed against, so an interior point
-    /// scores exactly `1.0`.
+    /// [`weight_at`](Self::weight_at) at an integer lattice offset — the form
+    /// the boundary-ignoring reference weight is summed over.
+    pub fn weight_1d(&self, d: i64) -> Real {
+        self.weight_at(d.unsigned_abs() as Real)
+    }
+
+    /// `Σ_{d=−R..R} w(d)` — the weight one axis contributes to a point sitting
+    /// in the interior of a *regular* axis of that axis' own spacing.
+    /// Deliberately boundary- and density-ignoring: it is the denominator
+    /// [`SmoothedKey::support`] is expressed against, so an interior point on a
+    /// regular grid scores exactly `1.0`.
     fn ideal_axis_weight(&self) -> Real {
         let r = self.radius() as i64;
         (-r..=r).map(|d| self.weight_1d(d)).sum()
@@ -1050,7 +1228,7 @@ impl std::str::FromStr for SmoothKernel {
                 None => Ok(default),
                 Some(a) => a
                     .parse::<usize>()
-                    .map_err(|_| format!("`{name}` takes a whole-number radius in lattice steps, got `{a}`")),
+                    .map_err(|_| format!("`{name}` takes a whole-number radius in grid steps, got `{a}`")),
             }
         };
         match name {
@@ -1061,7 +1239,7 @@ impl std::str::FromStr for SmoothKernel {
                     None => 1.0,
                     Some(a) => a
                         .parse::<Real>()
-                        .map_err(|_| format!("`gaussian` takes a bandwidth in lattice steps, got `{a}`"))?,
+                        .map_err(|_| format!("`gaussian` takes a bandwidth in grid steps, got `{a}`"))?,
                 };
                 if !(bandwidth > 0.0 && bandwidth.is_finite()) {
                     return Err(format!("`gaussian` bandwidth must be > 0 (got {bandwidth})"));
@@ -1070,7 +1248,7 @@ impl std::str::FromStr for SmoothKernel {
             }
             other => Err(format!(
                 "unknown smoothing kernel `{other}` — expected `box:R`, `triangle:R` or `gaussian:S` \
-                 (R a radius in lattice steps, S a bandwidth in lattice steps)"
+                 (R a radius in grid steps, S a bandwidth in grid steps)"
             )),
         }
     }
@@ -1086,25 +1264,35 @@ impl std::fmt::Display for SmoothKernel {
     }
 }
 
-/// A configured `--smooth` pass: the kernel plus the `--smooth-min-support`
-/// floor below which a row's smoothed value is discarded.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A configured `--smooth` pass: the kernel, the `--smooth-min-support` floor
+/// below which a row's smoothed value is discarded, and the `--smooth-scale`
+/// pins.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Smoothing {
     pub kernel: SmoothKernel,
     /// Minimum realized [`support`](SmoothedKey::support), in `0..=1`. `0.0`
     /// (the default) keeps every row.
     pub min_support: Real,
+    /// Per-axis distance scales. [`SmoothScales::auto`] by default.
+    pub scales: SmoothScales,
 }
 
 impl Smoothing {
     /// Validated constructor. `min_support` outside `0..=1` is refused — above
     /// `1` would discard every row including the fully interior ones, which is
-    /// never what a caller means.
+    /// never what a caller means. Scales default to automatic; add pins with
+    /// [`with_scales`](Self::with_scales).
     pub fn new(kernel: SmoothKernel, min_support: Real) -> Result<Self> {
         if !(0.0..=1.0).contains(&min_support) {
             bail!("--smooth-min-support must be in 0..=1 (got {min_support})");
         }
-        Ok(Smoothing { kernel, min_support })
+        Ok(Smoothing { kernel, min_support, scales: SmoothScales::auto() })
+    }
+
+    /// Pin the per-axis distance scales (`--smooth-scale`).
+    pub fn with_scales(mut self, scales: SmoothScales) -> Self {
+        self.scales = scales;
+        self
     }
 }
 
@@ -1119,18 +1307,219 @@ pub struct SmoothedKey {
     /// configured floor — either way it sorts last, exactly like a `None`
     /// metric.
     pub value: Option<Real>,
-    /// The weight actually available, as a fraction of the weight a fully
-    /// interior point with no `None` neighbours would have. `1.0` = fully
-    /// supported. Always reported, even when `value` was discarded — that is
-    /// the diagnostic.
+    /// The weight actually found, as a fraction of the weight a point in the
+    /// interior of a *regular* axis of this axis' own median spacing would
+    /// find — `Π_j Σ_{d=−R..R} w(d)` over the smoothed axes. `1.0` = as much
+    /// evidence as a regular grid of that spacing would give. Always reported,
+    /// even when `value` was discarded — that is the diagnostic.
+    ///
+    /// **Not clamped.** A stretch of an irregular axis denser than its own
+    /// median packs more neighbours inside the kernel's reach and reads above
+    /// `1.0`; that is the measured quantity, and squeezing it into `0..=1`
+    /// would report "exactly fully supported" for two different situations.
+    /// [`Smoothing::min_support`] is a floor, so nothing downstream cares.
+    ///
+    /// See [`smooth_keys`] for why the denominator stays kernel-only rather
+    /// than following the local grid density.
     pub support: Real,
 }
 
-/// True iff every value on this axis is a JSON number. Only a numeric axis is
-/// smoothed: `SL_MODE=[none,atr,chandelier]` has no ordering, so lattice
-/// distance along it is meaningless.
+/// True iff this axis takes part in smoothing: every value is a JSON number
+/// *and* there are at least two of them.
+///
+/// Both exclusions partition the lattice rather than smoothing across it, for
+/// the same reason. `SL_MODE=[none,atr,chandelier]` has no ordering, so
+/// distance along it is meaningless. A **degenerate** axis — `SLOW=[20]`, or a
+/// name one stacked subgrid pins while the others sweep it — is not a swept
+/// dimension at all: it carries no neighbourhood information in either
+/// direction, so it neither widens a neighbourhood nor belongs in the support
+/// denominator. (An axis of length *two* is different in kind: it is genuinely
+/// swept, it just has no interior point — see [`smooth_keys`]'s error.)
 fn axis_is_numeric(axis: &Axis) -> bool {
-    !axis.1.is_empty() && axis.1.iter().all(Value::is_number)
+    axis.1.len() > 1 && axis.1.iter().all(Value::is_number)
+}
+
+/// Relative slack for "these gaps are all the same". Wide enough to absorb the
+/// drift `start..end:step` accumulates over a long float range, far tighter
+/// than any spacing a user would call irregular.
+const REGULAR_SPACING_TOLERANCE: Real = 1e-9;
+
+/// How much flatter log-spacing has to look before [`choose_axis_scale`] picks
+/// it. A clear margin, not a hair: ties and near-ties stay linear, which is the
+/// scale a reader assumes when they don't think about it.
+const LOG_SCALE_MARGIN: Real = 0.5;
+
+/// Coefficient of variation of a sample — `σ/|μ|`, the scale-free measure of
+/// "how unequal are these gaps". `None` when the mean is zero (no scale to be
+/// free of) or there are fewer than two samples.
+fn coefficient_of_variation(xs: &[Real]) -> Option<Real> {
+    if xs.len() < 2 {
+        return None;
+    }
+    let n = xs.len() as Real;
+    let mean = xs.iter().sum::<Real>() / n;
+    if mean == 0.0 || !mean.is_finite() {
+        return None;
+    }
+    let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<Real>() / n;
+    Some(var.sqrt() / mean.abs())
+}
+
+/// Successive gaps of an already-sorted value list.
+fn successive_gaps(sorted: &[Real]) -> Vec<Real> {
+    sorted.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// Pick [`AxisScale::Linear`] or [`AxisScale::Log`] for an axis, by testing
+/// which transform makes its spacings most nearly uniform.
+///
+/// A user who writes `PERIOD=[10,20,50,100,200]` chose a roughly geometric grid
+/// deliberately, and in strategy terms `100→200` is about as near as `10→20`;
+/// plain linear distance would call the first pair 10× farther apart. So
+/// compare the coefficient of variation of the successive gaps of `v` against
+/// those of `ln v`, and take log when it wins by [`LOG_SCALE_MARGIN`].
+///
+/// **A regular axis is a fixed point of the test** (its linear CV is already
+/// zero, which nothing can beat), so this only ever fires on an irregular one.
+/// **Log is only admissible when every value is strictly positive** — an axis
+/// containing `0` or a negative falls back to linear rather than being
+/// silently log-transformed.
+fn choose_axis_scale(sorted: &[Real]) -> AxisScale {
+    let linear = successive_gaps(sorted);
+    let Some(cv_linear) = coefficient_of_variation(&linear) else {
+        return AxisScale::Linear;
+    };
+    if !sorted.iter().all(|v| *v > 0.0) {
+        return AxisScale::Linear;
+    }
+    let logs: Vec<Real> = sorted.iter().map(|v| v.ln()).collect();
+    let Some(cv_log) = coefficient_of_variation(&successive_gaps(&logs)) else {
+        return AxisScale::Linear;
+    };
+    if cv_log <= LOG_SCALE_MARGIN * cv_linear { AxisScale::Log } else { AxisScale::Linear }
+}
+
+/// One smoothed axis, reduced to what the walk needs: the resolved scale and,
+/// per declared position, its in-reach neighbours with their 1-D weights.
+///
+/// The neighbour lists are the whole cost guarantee. They are built once per
+/// axis by a sliding window over the *sorted* values — never a search — so the
+/// per-point stencil is just the Cartesian product of `neighbours[digit_j]`
+/// and the walk stays `O(N · |neighbourhood|)`.
+struct AxisGeometry {
+    scale: AxisScale,
+    /// `neighbours[p]` = `(declared position, weight)` for every position
+    /// within the kernel's reach of declared position `p`, **in accumulation
+    /// order**. See [`axis_geometry`] for why that order is what it is.
+    neighbours: Vec<Vec<(usize, Real)>>,
+}
+
+/// Resolve one axis' scale and build its neighbour lists.
+///
+/// 1. **Scale.** A `--smooth-scale` pin wins; otherwise [`choose_axis_scale`].
+///    An explicit `log` on an axis with a non-positive value is an error, not a
+///    silent fallback — the user asked for something that has no meaning.
+/// 2. **Coordinates.** The transformed values divided by the axis' **median**
+///    successive gap. Median, not minimum: `1.0..4.0:0.5` accumulates float
+///    error, and a min-gap denominator would turn one `0.4999999` into a
+///    phantom scale for the whole axis.
+/// 3. **Regular fast path.** When every successive gap is equal within
+///    [`REGULAR_SPACING_TOLERANCE`] the coordinates are replaced by exact
+///    integer ranks, so `|vᵢ − vⱼ| / step` is computed as `|i − j|` with no
+///    float division at all. This is what makes a regular grid *byte*-identical
+///    to pre-0.65 output rather than identical to 1e-12 — and it covers every
+///    `start..end:step` range and every evenly spaced list.
+///
+/// **Accumulation order.** Neighbours are listed in ascending coordinate order,
+/// always — never in declared order. f64 addition is not associative, so the
+/// summation sequence is part of the result, and making it a function of the
+/// axis' *values* is what lets two declarations of the same value set agree bit
+/// for bit rather than merely to the last ULP. There is no exception for a
+/// descending declaration: "how you typed the list cannot matter" is the rule
+/// the whole scale change exists to establish, and a rule with a carve-out is
+/// not one.
+fn axis_geometry(
+    axis: &Axis,
+    kernel: &SmoothKernel,
+    pinned: Option<AxisScale>,
+) -> Result<AxisGeometry> {
+    let raw: Vec<Real> = axis
+        .1
+        .iter()
+        .map(|v| v.as_f64().expect("axis_is_numeric guarantees every value is a JSON number"))
+        .collect();
+    let len = raw.len();
+
+    // The axis' values in ascending order — the only thing the scale heuristic
+    // may look at, since declaration order is exactly what must not matter.
+    let mut sorted: Vec<Real> = raw.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let scale = match pinned {
+        Some(AxisScale::Log) if !raw.iter().all(|v| *v > 0.0) => bail!(
+            "--smooth-scale pins axis `{}` to `log`, but it contains a non-positive value — \
+             log distance is undefined there; use `linear` or `index`",
+            axis.0
+        ),
+        Some(s) => s,
+        None => choose_axis_scale(&sorted),
+    };
+
+    // Transformed coordinates in *declared* position order. `Index` is the
+    // pre-0.65 spelling: the declared position itself, already regular.
+    let transformed: Vec<Real> = match scale {
+        AxisScale::Index => (0..len).map(|p| p as Real).collect(),
+        AxisScale::Linear => raw.clone(),
+        AxisScale::Log => raw.iter().map(|v| v.ln()).collect(),
+    };
+    let mut sorted_t: Vec<usize> = (0..len).collect();
+    sorted_t.sort_by(|&a, &b| {
+        transformed[a].partial_cmp(&transformed[b]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let sorted_vals: Vec<Real> = sorted_t.iter().map(|&p| transformed[p]).collect();
+
+    let gaps = successive_gaps(&sorted_vals);
+    let mut sorted_gaps = gaps.clone();
+    sorted_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = crate::indicators::stats::quantile_of_sorted(&sorted_gaps, 0.5);
+    // An axis of one gap (or none) is trivially regular; so is one whose gaps
+    // are all equal, and so is the degenerate all-same-value axis (median 0),
+    // which has no spacing to normalize by and falls back to rank distance.
+    let regular = median <= 0.0
+        || gaps.iter().all(|g| (g - median).abs() <= REGULAR_SPACING_TOLERANCE * median.abs());
+
+    // Coordinates the kernel actually sees. Regular → exact integer ranks.
+    let mut coord = vec![0.0; len];
+    for (rank, &p) in sorted_t.iter().enumerate() {
+        coord[p] = if regular { rank as Real } else { transformed[p] / median };
+    }
+
+    // Sliding window over the sorted order: both bounds advance monotonically,
+    // so building every neighbour list costs one pass plus the neighbours
+    // themselves — never a per-point search.
+    let reach = kernel.radius() as Real + DISTANCE_TOLERANCE;
+    let mut neighbours = vec![Vec::new(); len];
+    let (mut lo, mut hi) = (0usize, 0usize);
+    for (k, &p) in sorted_t.iter().enumerate() {
+        let c = coord[p];
+        while lo < k && (coord[sorted_t[lo]] - c).abs() > reach {
+            lo += 1;
+        }
+        hi = hi.max(k);
+        while hi + 1 < len && (coord[sorted_t[hi + 1]] - c).abs() <= reach {
+            hi += 1;
+        }
+        let list = &mut neighbours[p];
+        list.reserve(hi + 1 - lo);
+        for &q in &sorted_t[lo..=hi] {
+            let w = kernel.weight_at(coord[q] - c);
+            if w != 0.0 {
+                list.push((q, w));
+            }
+        }
+    }
+
+    Ok(AxisGeometry { scale, neighbours })
 }
 
 /// Kernel-weighted neighbourhood average of a grid's ranking keys.
@@ -1140,17 +1529,27 @@ fn axis_is_numeric(axis: &Axis) -> bool {
 /// sorting, and the order [`walkforward`]'s per-fold key vector is in. The
 /// return value is parallel to `keys`.
 ///
-/// **Index space, not value space.** Distance along an axis is `|i − j|` in
-/// declared-position units. This is the only scale-free choice: a grid mixing
-/// `PERIOD=[10,20,50]` with `ATR_MULT=1.0..4.0:0.5` has no common metric in
-/// value space, and an irregular list like `[10,20,50,200]` should weight each
-/// declared neighbour equally. The tradeoff is real and deliberate — an
-/// irregularly-spaced axis smooths over unequal parameter distances by
-/// construction, and a `gaussian:1.5` bandwidth means 1.5 *grid steps*, not 1.5
-/// units of the parameter.
+/// **Value space, per-axis normalized.** Distance along an axis is
+/// `|t(vᵢ) − t(vⱼ)| / step`, where `t` is the axis' [`AxisScale`] transform and
+/// `step` is the median gap between its successive values. A radius of `1`
+/// therefore means "one typical grid step on this axis" — the thing index space
+/// was reaching for, and got right only when the grid was regular. Because the
+/// kernels are **separable** (weight is `Π_j w(dⱼ)`, a product of per-axis
+/// weights) the axes never need a metric in common: each needs only a scale
+/// internal to itself, and its own spacing is one. On a regularly spaced axis
+/// `|vᵢ − vⱼ| / step` *is* `|i − j|`, so every `start..end:step` range and every
+/// evenly spaced list behaves exactly as it did before 0.65; the two only
+/// diverge on an irregular hand-written list, which is the case index space got
+/// wrong. `--smooth-scale=index` restores the old measure wholesale.
 ///
-/// **Non-numeric axes partition, they do not smooth.** An axis whose values
-/// aren't all numbers has its offset pinned to zero, so each combination of its
+/// **Order-independence falls out.** Value distance cannot depend on
+/// declaration order, so `FAST=[3,9,4,8,5,7,6]` and `FAST=[3,4,5,6,7,8,9]`
+/// smooth identically — there is no monotonicity rule for the user to remember
+/// and no error to hit.
+///
+/// **Non-numeric and degenerate axes partition, they do not smooth.** See
+/// `axis_is_numeric`: an axis whose values aren't all numbers, or that has
+/// only one value, has its offset pinned to zero, so each combination of its
 /// levels forms an independent lattice for free.
 ///
 /// **Each subgrid is its own lattice.** `--grid` is repeatable and the point
@@ -1169,13 +1568,32 @@ fn axis_is_numeric(axis: &Axis) -> bool {
 /// `None` contributes no weight and reduces support without dragging the mean
 /// toward zero.
 ///
+/// **What `support` is measured against.** The denominator stays
+/// `Π_j Σ_{d=−R..R} w(d)` — the weight a point in the interior of a *regular*
+/// axis of that axis' own median spacing would find. It is a property of the
+/// kernel alone, so `1.0` keeps meaning one fixed, reachable thing and
+/// `--smooth-min-support 1.0` keeps meaning "fully supported". Two alternatives
+/// were weighed and rejected: normalizing by the *best weight any position on
+/// the axis achieves* makes `1.0` reachable on any grid, but it also erases the
+/// "an axis shorter than the kernel's diameter has no interior point" error by
+/// redefining its 2-point axis as fully supported; and comparing against the
+/// continuous kernel mass under the local density turns `support` into a
+/// density estimate whose `1.0` is not attainable in general, which makes
+/// `--smooth-min-support 1.0` unusable as an input. The cost of the choice we
+/// kept is that on an irregular axis `support` conflates "near an edge" with
+/// "in a thin part of the grid" — both are genuinely less-supported estimates,
+/// but they warrant different reactions, so the docs say so. A *denser*-than-
+/// median pocket finds more weight than the reference and reads above `1.0`,
+/// unclamped: it is the ratio that was measured, and `min_support` is a floor.
+///
 /// **Direction-agnostic.** Smoothing is the same averaging operation for
 /// [`Direction::Descending`] and [`Direction::Ascending`]: [`ranking_value`]
 /// has already folded `-k/--risk-aversion` in the correct direction, and
 /// [`sort_by_keys`] owns the comparison. Do not special-case direction here.
 ///
-/// Cost is `O(N · |stencil|)` — the stencil is built once per subgrid and the
-/// walk is index arithmetic, never a search.
+/// Cost is `O(N · |neighbourhood|)` — the per-axis neighbour lists are built
+/// once per subgrid by a sliding window over the sorted values, and the walk is
+/// index arithmetic over their Cartesian product, never a search.
 pub fn smooth_keys(
     subgrids: &[Subgrid],
     keys: &[Option<Real>],
@@ -1198,55 +1616,74 @@ pub fn smooth_keys(
         let n = sg.points();
         let lens = sg.axis_lens();
         let strides = sg.strides();
-        // Numeric axes are the ones that smooth; every other axis keeps its
-        // offset at zero and therefore partitions the lattice.
-        let numeric: Vec<usize> = (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        // Numeric, non-degenerate axes are the ones that smooth; every other
+        // axis keeps its offset at zero and therefore partitions the lattice.
+        let numeric: Vec<usize> =
+            (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        let geoms: Vec<AxisGeometry> = numeric
+            .iter()
+            .map(|&j| axis_geometry(&sg.axes[j], kernel, smoothing.scales.pinned(&sg.axes[j].0)))
+            .collect::<Result<_>>()?;
 
-        // The stencil: every offset vector over the numeric axes that carries
-        // weight, built once. Per-axis offsets are clipped to `len - 1` (a
-        // larger offset can never land inside the lattice), which keeps a wide
-        // `gaussian:S` from generating a stencil the grid could never use.
-        // `ideal` is deliberately *not* clipped — it is the boundary-ignoring
-        // reference an interior point is measured against.
+        // The reference weight an interior point on a regular grid finds —
+        // deliberately independent of this grid's density and edges, since it
+        // is what `support` is a fraction of.
         let ideal: Real = kernel.ideal_axis_weight().powi(numeric.len() as i32);
-        let mut stencil: Vec<(Vec<i64>, Real)> = vec![(vec![0; numeric.len()], 1.0)];
-        for (slot, &j) in numeric.iter().enumerate() {
-            let reach = kernel.radius().min(lens[j].saturating_sub(1)) as i64;
-            let mut next = Vec::with_capacity(stencil.len() * (2 * reach as usize + 1));
-            for (deltas, w) in &stencil {
-                for d in -reach..=reach {
-                    let wd = kernel.weight_1d(d);
-                    if wd == 0.0 {
-                        continue;
-                    }
-                    let mut deltas = deltas.clone();
-                    deltas[slot] = d;
-                    next.push((deltas, w * wd));
-                }
-            }
-            stencil = next;
-        }
 
         let slice = &keys[base..base + n];
         let mut digits = vec![0usize; sg.axes.len()];
+        // Scratch for the Cartesian walk over the per-axis neighbour lists:
+        // this point's list per smoothed axis, plus one cursor into each.
+        let mut lists: Vec<&[(usize, Real)]> = Vec::with_capacity(numeric.len());
+        let mut cursor = vec![0usize; numeric.len()];
         for (ci, own) in slice.iter().enumerate() {
             for (j, digit) in digits.iter_mut().enumerate() {
                 *digit = (ci / strides[j]) % lens[j];
             }
             let mut numerator = 0.0;
             let mut weight = 0.0;
-            'stencil: for (deltas, w) in &stencil {
-                let mut nci = ci as i64;
-                for (slot, &j) in numeric.iter().enumerate() {
-                    let target = digits[j] as i64 + deltas[slot];
-                    if target < 0 || target >= lens[j] as i64 {
-                        continue 'stencil;
-                    }
-                    nci += deltas[slot] * strides[j] as i64;
+            if numeric.is_empty() {
+                // No smoothed axis at all: the point is its own neighbourhood.
+                if let Some(v) = *own {
+                    numerator = v;
+                    weight = 1.0;
                 }
-                if let Some(v) = slice[nci as usize] {
-                    numerator += w * v;
-                    weight += w;
+            } else {
+                lists.clear();
+                lists.extend(
+                    geoms.iter().enumerate().map(|(slot, g)| g.neighbours[digits[numeric[slot]]].as_slice()),
+                );
+                cursor.iter_mut().for_each(|c| *c = 0);
+                'walk: loop {
+                    // Fold the per-axis weights in axis order starting from
+                    // 1.0 — the same association pre-0.65 built its stencil
+                    // weights with, so a regular grid reproduces them bit for
+                    // bit.
+                    let mut w = 1.0;
+                    let mut nci = ci;
+                    for (slot, &j) in numeric.iter().enumerate() {
+                        let (q, wq) = lists[slot][cursor[slot]];
+                        w *= wq;
+                        nci = nci + q * strides[j] - digits[j] * strides[j];
+                    }
+                    if let Some(v) = slice[nci] {
+                        numerator += w * v;
+                        weight += w;
+                    }
+                    // Odometer over the neighbour lists, last axis fastest —
+                    // the lexicographic order the old stencil enumerated in.
+                    let mut slot = numeric.len();
+                    loop {
+                        if slot == 0 {
+                            break 'walk;
+                        }
+                        slot -= 1;
+                        cursor[slot] += 1;
+                        if cursor[slot] < lists[slot].len() {
+                            break;
+                        }
+                        cursor[slot] = 0;
+                    }
                 }
             }
             // A row whose own raw key is `None` is `None` regardless of how
@@ -1276,11 +1713,40 @@ pub fn smooth_keys(
         bail!(
             "--smooth-min-support {} discarded every grid point (best realized support was {best:.3}). \
              Lower it, shrink the kernel radius, or widen the grid — an axis shorter than the \
-             kernel's diameter leaves no fully interior point.",
+             kernel's diameter leaves no fully interior point, and a sparse stretch of an \
+             irregular axis reaches less than a regular one of the same median spacing.",
             smoothing.min_support
         );
     }
 
+    Ok(out)
+}
+
+/// The [`AxisScale`] each smoothed axis resolved to, name-sorted and deduped
+/// across subgrids — what the console echoes so the chosen scale is never
+/// implicit. A name that resolves differently in two subgrids (different value
+/// sets under the same name) appears once per distinct scale.
+///
+/// Errors exactly where [`smooth_keys`] would, so the CLI can call it first and
+/// report a bad `--smooth-scale` pin before the sweep runs.
+pub fn resolved_axis_scales(
+    subgrids: &[Subgrid],
+    smoothing: &Smoothing,
+) -> Result<Vec<(String, AxisScale)>> {
+    let mut out: Vec<(String, AxisScale)> = Vec::new();
+    for sg in subgrids {
+        for axis in &sg.axes {
+            if !axis_is_numeric(axis) {
+                continue;
+            }
+            let geom = axis_geometry(axis, &smoothing.kernel, smoothing.scales.pinned(&axis.0))?;
+            let entry = (axis.0.clone(), geom.scale);
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    out.sort();
     Ok(out)
 }
 
@@ -1292,8 +1758,20 @@ pub const PLATEAU_TOLERANCE: Real = 0.05;
 /// Size of the largest connected region of grid points whose smoothed value is
 /// within `tol` (a fraction, e.g. `0.05`) of the best smoothed value.
 ///
-/// Connectivity is `±1` along exactly one numeric axis, so non-numeric axes and
-/// separate subgrids bound a region exactly as they bound the smoothing itself.
+/// Connectivity is the **next value up or down** a smoothed axis — `±1` in
+/// sorted position, not within the kernel's bandwidth. The console prints this
+/// as "N of M cells", so it has to stay a count of *adjacent cells*; measuring
+/// it in bandwidth instead would make a sparse stretch of an irregular axis
+/// report fewer cells for the same parameter width, which is not what the
+/// sentence claims. On a regular axis the two coincide anyway, and sorted
+/// position equals declared position. Non-numeric and degenerate axes, and
+/// separate subgrids, bound a region exactly as they bound the smoothing
+/// itself.
+///
+/// `scales` only matters for `--smooth-scale=index`, where "the next value up"
+/// means the next *declared* position; every other scale is monotone in the
+/// value, so they all order an axis the same way.
+///
 /// The band is measured against the *directed* key, so it means "no worse than"
 /// under either [`Direction`]. Scaled by `|best|`, which is the caveat: a best
 /// value near zero gives a near-zero band.
@@ -1305,6 +1783,7 @@ pub fn plateau_size(
     smoothed: &[SmoothedKey],
     direction: Direction,
     tol: Real,
+    scales: &SmoothScales,
 ) -> usize {
     let best = smoothed
         .iter()
@@ -1330,7 +1809,29 @@ pub fn plateau_size(
         let n = sg.points();
         let lens = sg.axis_lens();
         let strides = sg.strides();
-        let numeric: Vec<usize> = (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        let numeric: Vec<usize> =
+            (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        // Per smoothed axis: declared positions in ascending value order, and
+        // each declared position's rank in that order.
+        let steps: Vec<(Vec<usize>, Vec<usize>)> = numeric
+            .iter()
+            .map(|&j| {
+                let axis = &sg.axes[j];
+                let mut order: Vec<usize> = (0..axis.1.len()).collect();
+                if scales.pinned(&axis.0) != Some(AxisScale::Index) {
+                    let vals: Vec<Real> =
+                        axis.1.iter().map(|v| v.as_f64().unwrap_or(Real::NAN)).collect();
+                    order.sort_by(|&a, &b| {
+                        vals[a].partial_cmp(&vals[b]).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                let mut rank = vec![0usize; order.len()];
+                for (r, &p) in order.iter().enumerate() {
+                    rank[p] = r;
+                }
+                (order, rank)
+            })
+            .collect();
 
         let mut seen = vec![false; n];
         let mut digits = vec![0usize; sg.axes.len()];
@@ -1338,7 +1839,7 @@ pub fn plateau_size(
             if seen[start] || !in_band(smoothed[base + start].value) {
                 continue;
             }
-            // Flood fill from `start` over the ±1 numeric-axis neighbourhood.
+            // Flood fill from `start` over the ±1 sorted-position neighbourhood.
             let mut region = 0usize;
             let mut stack = vec![start];
             seen[start] = true;
@@ -1347,13 +1848,15 @@ pub fn plateau_size(
                 for (j, digit) in digits.iter_mut().enumerate() {
                     *digit = (ci / strides[j]) % lens[j];
                 }
-                for &j in &numeric {
+                for (slot, &j) in numeric.iter().enumerate() {
+                    let (order, rank) = &steps[slot];
                     for step in [-1i64, 1] {
-                        let target = digits[j] as i64 + step;
+                        let target = rank[digits[j]] as i64 + step;
                         if target < 0 || target >= lens[j] as i64 {
                             continue;
                         }
-                        let nci = (ci as i64 + step * strides[j] as i64) as usize;
+                        let q = order[target as usize];
+                        let nci = ci + q * strides[j] - digits[j] * strides[j];
                         if !seen[nci] && in_band(smoothed[base + nci].value) {
                             seen[nci] = true;
                             stack.push(nci);
@@ -2216,6 +2719,341 @@ mod tests {
         assert!(err.contains("1 ranking keys for 3 grid points"), "{err}");
     }
 
+    fn floats(v: &[Real]) -> Vec<Value> {
+        v.iter().map(|x| Value::from(*x)).collect()
+    }
+
+    /// Match two smoothed grids by the axis value each point carries, not by
+    /// enumeration position — the whole point being that the two declarations
+    /// enumerate the same points in different orders.
+    fn by_value(axis: &[Value], smoothed: &[SmoothedKey]) -> Vec<(String, SmoothedKey)> {
+        let mut pairs: Vec<(String, SmoothedKey)> = axis
+            .iter()
+            .zip(smoothed)
+            .map(|(v, s)| (format_value(v), *s))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
+    /// The reproduction that motivated measuring distance in value space:
+    /// seven values, seven identical keys, only the typing order differs. In
+    /// index space the winner flipped from `FAST=3` to `FAST=8` and the raw
+    /// argmax fell from smoothed rank 1 to rank 6 — silently.
+    ///
+    /// Asserted as *exact* equality, not a tolerance: neighbours are summed in
+    /// ascending value order regardless of declaration, so the two grids
+    /// accumulate the same terms in the same sequence.
+    #[test]
+    fn declaration_order_does_not_affect_smoothing() {
+        let sorted = nums(&[3, 4, 5, 6, 7, 8, 9]);
+        let scrambled = nums(&[3, 9, 4, 8, 5, 7, 6]);
+        let reversed = nums(&[9, 8, 7, 6, 5, 4, 3]);
+        // One key per *value*, so both declarations describe the same surface.
+        let key_of = |v: &Value| Some(v.as_f64().unwrap() * v.as_f64().unwrap());
+        let keys_sorted: Vec<Option<Real>> = sorted.iter().map(key_of).collect();
+        let keys_scrambled: Vec<Option<Real>> = scrambled.iter().map(key_of).collect();
+        let keys_reversed: Vec<Option<Real>> = reversed.iter().map(key_of).collect();
+
+        for kernel in [
+            SmoothKernel::Box { radius: 1 },
+            SmoothKernel::Box { radius: 2 },
+            SmoothKernel::Triangle { radius: 2 },
+            SmoothKernel::Gaussian { bandwidth: 1.5 },
+        ] {
+            let cfg = Smoothing::new(kernel, 0.0).unwrap();
+            let a = smooth_keys(&[subgrid(&[], &[("FAST", sorted.clone())])], &keys_sorted, &cfg)
+                .unwrap();
+            let b = smooth_keys(
+                &[subgrid(&[], &[("FAST", scrambled.clone())])],
+                &keys_scrambled,
+                &cfg,
+            )
+            .unwrap();
+            let c =
+                smooth_keys(&[subgrid(&[], &[("FAST", reversed.clone())])], &keys_reversed, &cfg)
+                    .unwrap();
+            assert_eq!(
+                by_value(&sorted, &a),
+                by_value(&scrambled, &b),
+                "{kernel} smoothed differently once the list was reordered"
+            );
+            assert_eq!(
+                by_value(&sorted, &a),
+                by_value(&reversed, &c),
+                "{kernel} smoothed differently once the list was reversed"
+            );
+        }
+
+        // `--smooth-scale=index` is the documented way back to the old,
+        // order-dependent measure — so it had better still be order-dependent.
+        let cfg = Smoothing::new(SmoothKernel::Box { radius: 1 }, 0.0)
+            .unwrap()
+            .with_scales(SmoothScales::all(AxisScale::Index));
+        let a =
+            smooth_keys(&[subgrid(&[], &[("FAST", sorted.clone())])], &keys_sorted, &cfg).unwrap();
+        let b = smooth_keys(&[subgrid(&[], &[("FAST", scrambled.clone())])], &keys_scrambled, &cfg)
+            .unwrap();
+        assert_ne!(by_value(&sorted, &a), by_value(&scrambled, &b));
+    }
+
+    /// The load-bearing compatibility guarantee: on a regularly spaced axis
+    /// `|vᵢ − vⱼ| / step` *is* `|i − j|`, so value space and the old index
+    /// space must agree **exactly** — not to 1e-12. `axis_geometry`'s regular
+    /// fast path is what makes that true: it substitutes integer ranks for the
+    /// division, so no float error is introduced to begin with.
+    ///
+    /// Covers a range axis, an evenly spaced list, and a float axis where the
+    /// accumulation in `try_parse_range` would otherwise bite.
+    ///
+    /// Only *ascending* declarations, deliberately. `index` measures between
+    /// declared positions and so orders a descending list back to front; value
+    /// space always walks ascending. The two therefore sum the same terms in
+    /// opposite sequences, and f64 addition is not associative. That is not a
+    /// defect to paper over — declaration order not mattering is the property
+    /// this change exists to establish, and `declaration_order_does_not_affect_smoothing`
+    /// is where a descending list is pinned.
+    #[test]
+    fn a_regular_axis_is_byte_identical_to_index_space() {
+        let axes: Vec<Vec<Value>> = vec![
+            nums(&[3, 4, 5, 6, 7, 8, 9]),                       // 3..9:1
+            nums(&[10, 20, 30, 40, 50]),                        // evenly spaced list
+            floats(&[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]),       // 1.0..4.0:0.5
+            floats(&[0.1, 0.2, 0.30000000000000004, 0.4, 0.5]), // 0.1..0.5:0.1, drift and all
+        ];
+        let kernels = [
+            SmoothKernel::Box { radius: 1 },
+            SmoothKernel::Box { radius: 2 },
+            SmoothKernel::Triangle { radius: 1 },
+            SmoothKernel::Triangle { radius: 3 },
+            SmoothKernel::Gaussian { bandwidth: 1.0 },
+            SmoothKernel::Gaussian { bandwidth: 1.5 },
+        ];
+        for values in &axes {
+            let keys: Vec<Option<Real>> =
+                (0..values.len()).map(|i| Some(1.0 / (i as Real + 3.0))).collect();
+            for kernel in kernels {
+                let auto = Smoothing::new(kernel, 0.0).unwrap();
+                let index = auto.clone().with_scales(SmoothScales::all(AxisScale::Index));
+                let sg = || vec![subgrid(&[], &[("P", values.clone())])];
+                assert_eq!(
+                    smooth_keys(&sg(), &keys, &auto).unwrap(),
+                    smooth_keys(&sg(), &keys, &index).unwrap(),
+                    "{kernel} over {values:?} drifted off index space"
+                );
+            }
+        }
+
+        // Two regular axes at once — the separable product is where a
+        // per-axis normalization would show up if it were inexact.
+        let sg = || {
+            vec![subgrid(
+                &[],
+                &[("A", floats(&[1.0, 1.5, 2.0, 2.5])), ("B", nums(&[10, 20, 30, 40, 50]))],
+            )]
+        };
+        let keys: Vec<Option<Real>> = (0..20).map(|i| Some((i as Real).sin())).collect();
+        let auto = Smoothing::new(SmoothKernel::Triangle { radius: 2 }, 0.0).unwrap();
+        let index = auto.clone().with_scales(SmoothScales::all(AxisScale::Index));
+        assert_eq!(
+            smooth_keys(&sg(), &keys, &auto).unwrap(),
+            smooth_keys(&sg(), &keys, &index).unwrap()
+        );
+    }
+
+    /// The whole point of the change: on `[10,20,50,200]` the `50→200` jump is
+    /// eight times the `10→20` one in parameter terms, and index space called
+    /// them equally close.
+    #[test]
+    fn an_irregular_axis_weights_by_parameter_distance() {
+        let values = nums(&[10, 20, 50, 200]);
+        let axis = || vec![subgrid(&[], &[("PERIOD", values.clone())])];
+        // Two one-point spikes, read from the *near* side each time: how much
+        // of 10 reaches 20, and how much of 200 reaches 50.
+        let from_10 = vec![Some(1.0), Some(0.0), Some(0.0), Some(0.0)];
+        let from_200 = vec![Some(0.0), Some(0.0), Some(0.0), Some(1.0)];
+        let cfg = box1(0.0);
+
+        let near = smooth_keys(&axis(), &from_10, &cfg).unwrap()[1].value.unwrap();
+        let far = smooth_keys(&axis(), &from_200, &cfg).unwrap()[2].value.unwrap();
+        assert!(near > far, "10 should reach 20 ({near}) harder than 200 reaches 50 ({far})");
+        assert!((far - 0.0).abs() < 1e-12, "200 is more than one typical step from 50");
+
+        // Index space is exactly the claim being refuted: there the two pairs
+        // are one declared step apart each, and the bleed is identical.
+        let idx = cfg.clone().with_scales(SmoothScales::all(AxisScale::Index));
+        let near = smooth_keys(&axis(), &from_10, &idx).unwrap()[1].value.unwrap();
+        let far = smooth_keys(&axis(), &from_200, &idx).unwrap()[2].value.unwrap();
+        assert!((near - far).abs() < 1e-12, "index space: {near} vs {far}");
+        assert!((near - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    /// A user who writes `[10,20,50,100,200]` chose a geometric grid, and
+    /// `100→200` is about as near as `10→20` in strategy terms. The heuristic
+    /// has to notice that, leave additive grids alone, and never log-transform
+    /// an axis that reaches zero.
+    #[test]
+    fn a_geometric_axis_is_detected_as_log() {
+        let scale_of = |values: Vec<Value>| {
+            let sg = subgrid(&[], &[("P", values)]);
+            let cfg = Smoothing::new(SmoothKernel::Box { radius: 1 }, 0.0).unwrap();
+            resolved_axis_scales(&[sg], &cfg).unwrap()[0].1
+        };
+        assert_eq!(scale_of(nums(&[10, 20, 50, 100, 200])), AxisScale::Log);
+        assert_eq!(scale_of(nums(&[1, 2, 4, 8, 16, 32])), AxisScale::Log);
+        // Regular grids are a fixed point of the test — nothing beats a zero CV.
+        assert_eq!(scale_of(nums(&[10, 20, 30, 40])), AxisScale::Linear);
+        assert_eq!(scale_of(floats(&[1.0, 1.5, 2.0, 2.5])), AxisScale::Linear);
+        // Irregular but not geometric — log makes the gaps *less* uniform.
+        assert_eq!(scale_of(nums(&[10, 20, 30, 45])), AxisScale::Linear);
+        // Log is only admissible where every value is strictly positive.
+        assert_eq!(scale_of(floats(&[0.0, 1.0, 2.0, 8.0])), AxisScale::Linear);
+        assert_eq!(scale_of(floats(&[-4.0, -2.0, -1.0, -0.5])), AxisScale::Linear);
+
+        // On an exactly geometric axis log recovers *uniform* spacing, so the
+        // surface is the one an evenly spaced axis of the same length gives —
+        // bit for bit, via the regular fast path.
+        let keys = vec![Some(1.0), Some(2.0), Some(4.0), Some(8.0), Some(16.0)];
+        let cfg = box1(0.0);
+        let geometric = smooth_keys(&[subgrid(&[], &[("P", nums(&[10, 20, 40, 80, 160]))])], &keys, &cfg).unwrap();
+        let regular = smooth_keys(&[subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5]))])], &keys, &cfg).unwrap();
+        assert_eq!(geometric, regular);
+        assert!((geometric[2].value.unwrap() - (2.0 + 4.0 + 8.0) / 3.0).abs() < 1e-12);
+
+        // A merely *roughly* geometric axis still gets far closer to uniform
+        // than linear would: every point keeps at least an edge's worth of
+        // neighbourhood, where linear distance would strand 200 alone.
+        let rough = nums(&[10, 20, 50, 100, 200]);
+        let out = smooth_keys(&[subgrid(&[], &[("P", rough.clone())])], &keys, &cfg).unwrap();
+        assert!(
+            out.iter().all(|s| s.support >= 2.0 / 3.0 - 1e-12),
+            "log spacing should leave every point a neighbour: {out:?}"
+        );
+        let linear = cfg.clone().with_scales(SmoothScales::all(AxisScale::Linear));
+        let out = smooth_keys(&[subgrid(&[], &[("P", rough)])], &keys, &linear).unwrap();
+        assert!((out[4].support - 1.0 / 3.0).abs() < 1e-12, "linear strands 200: {:?}", out[4]);
+
+        // And an explicit `log` pin on an axis that reaches zero is an error,
+        // not a silent fallback — the user asked for something undefined.
+        let pinned = Smoothing::new(SmoothKernel::Box { radius: 1 }, 0.0)
+            .unwrap()
+            .with_scales(SmoothScales::default().with_axis("P", AxisScale::Log));
+        let sg = subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0]))]);
+        let err = smooth_keys(&[sg], &[Some(1.0); 3], &pinned).unwrap_err().to_string();
+        assert!(err.contains("non-positive"), "{err}");
+    }
+
+    /// A one-value numeric axis is not a swept dimension: it carries no
+    /// neighbourhood information in either direction, exactly like a
+    /// categorical one. Multiplying its `Σ w(d)` into the support denominator
+    /// divided every point's support by 3 under `box:1`, so the same sweep
+    /// scored 1.000 written `SLOW=20` and 0.333 written `SLOW=[20]`.
+    #[test]
+    fn a_pinned_axis_does_not_dilute_support() {
+        let keys: Vec<Option<Real>> = (0..7).map(|i| Some(i as Real)).collect();
+        let cfg = box1(0.0);
+        let scalar = subgrid(&[("SLOW", Value::from(20))], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9]))]);
+        let listed = subgrid(&[], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("SLOW", nums(&[20]))]);
+        let a = smooth_keys(&[scalar], &keys, &cfg).unwrap();
+        let b = smooth_keys(&[listed], &keys, &cfg).unwrap();
+        assert_eq!(a, b, "the two spellings of a pinned axis must smooth identically");
+        // Smoothed *values* never moved — only the denominator did.
+        assert!((a[3].value.unwrap() - 3.0).abs() < 1e-12);
+        assert!((a[3].support - 1.0).abs() < 1e-12, "an interior point reaches 1.0");
+        assert!((a[0].support - 2.0 / 3.0).abs() < 1e-12, "the edge is still an edge");
+        // Same for the degenerate axis a categorical one shadows.
+        let mixed = subgrid(
+            &[],
+            &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("MODE", strs(&["atr"]))],
+        );
+        assert_eq!(smooth_keys(&[mixed], &keys, &cfg).unwrap(), a);
+    }
+
+    /// The user-visible half of the same bug: `--smooth-min-support 1.0` over
+    /// `FAST=3..9:1 × SLOW=[20]` hard-errored with "best realized support was
+    /// 0.333" on a grid where every interior `FAST` point had a complete
+    /// neighbourhood.
+    #[test]
+    fn min_support_ignores_pinned_axes() {
+        let keys: Vec<Option<Real>> = (0..7).map(|i| Some(i as Real)).collect();
+        let sg = subgrid(&[], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("SLOW", nums(&[20]))]);
+        let out = smooth_keys(&[sg], &keys, &box1(1.0)).unwrap();
+        let kept: Vec<usize> =
+            out.iter().enumerate().filter(|(_, s)| s.value.is_some()).map(|(i, _)| i).collect();
+        assert_eq!(kept, vec![1, 2, 3, 4, 5], "only the two FAST edges fall short");
+    }
+
+    /// `support` stays a fraction of `Π_j Σ_{d=−R..R} w(d)` — the weight a point
+    /// in the interior of a *regular* axis of this axis' own median spacing
+    /// would find. That reference is a property of the kernel alone, which is
+    /// what keeps `1.0` reachable and `--smooth-min-support 1.0` meaningful.
+    ///
+    /// The two rejected alternatives are why this test pins both ends:
+    /// normalizing by the best weight *any* position achieves would report
+    /// `1.0` in the sparse stretch below (there is no better position to lose
+    /// to), and comparing against the continuous kernel mass would put `1.0`
+    /// out of reach everywhere. So: a sparse stretch scores below `1.0`, and a
+    /// denser-than-median pocket is clamped at `1.0` rather than overshooting.
+    #[test]
+    fn support_is_measured_against_the_kernel_not_the_local_density() {
+        // Median gap 1.0. Positions 0..3 are regular; 4 sits 4 units out.
+        let values = floats(&[0.0, 1.0, 2.0, 3.0, 7.0]);
+        let sg = subgrid(&[], &[("P", values)]);
+        let keys = vec![Some(1.0); 5];
+        let out = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+        assert!((out[2].support - 1.0).abs() < 1e-12, "a regular interior point is fully supported");
+        // The far point has no neighbour within one median gap: itself only.
+        assert!((out[4].support - 1.0 / 3.0).abs() < 1e-12, "{:?}", out[4]);
+        // Its inward neighbour is an interior *position* but sits on the edge
+        // of the sparse stretch, so it too falls short — the honest reading.
+        assert!(out[3].support < 1.0, "{:?}", out[3]);
+
+        // A pocket denser than the median finds *more* weight than the reference,
+        // and that is reported rather than squeezed into `0..=1`: position 3
+        // sees four points where a regular axis of the same median spacing
+        // would hand it three. Clamping would report "exactly fully supported"
+        // for two different situations.
+        let dense = subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0, 3.0, 3.1, 3.2]))]);
+        let out = smooth_keys(&[dense], &[Some(1.0); 6], &box1(0.0)).unwrap();
+        assert!((out[3].support - 4.0 / 3.0).abs() < 1e-12, "{:?}", out[3]);
+        // `min_support` is a floor, so an over-supported point clears it either
+        // way — nothing downstream depended on the clamp.
+        let floored = smooth_keys(
+            &[subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0, 3.0, 3.1, 3.2]))])],
+            &[Some(1.0); 6],
+            &box1(1.0),
+        )
+        .unwrap();
+        assert!(floored[3].value.is_some(), "{:?}", floored[3]);
+    }
+
+    #[test]
+    fn smooth_scales_parses_every_documented_form() {
+        use std::str::FromStr;
+        assert_eq!(SmoothScales::from_str("index").unwrap(), SmoothScales::all(AxisScale::Index));
+        assert_eq!(
+            SmoothScales::from_str("PERIOD:log,ATR_MULT:linear").unwrap(),
+            SmoothScales::default()
+                .with_axis("PERIOD", AxisScale::Log)
+                .with_axis("ATR_MULT", AxisScale::Linear)
+        );
+        // A bare default and per-axis pins compose; the pin wins.
+        let mixed = SmoothScales::from_str("linear,PERIOD:log").unwrap();
+        assert_eq!(mixed.pinned("PERIOD"), Some(AxisScale::Log));
+        assert_eq!(mixed.pinned("FAST"), Some(AxisScale::Linear));
+        assert!(SmoothScales::auto().is_auto());
+        assert_eq!(SmoothScales::auto().pinned("FAST"), None);
+        // Round-trips through Display, so the echo is re-parseable.
+        for spelling in ["index", "linear,PERIOD:log", "ATR_MULT:linear,PERIOD:log"] {
+            assert_eq!(SmoothScales::from_str(spelling).unwrap().to_string(), spelling);
+        }
+        assert!(SmoothScales::from_str("quadratic").is_err());
+        assert!(SmoothScales::from_str("P:quadratic").is_err());
+        assert!(SmoothScales::from_str("linear,index").is_err());
+        assert!(SmoothScales::from_str(":log").is_err());
+        assert!(SmoothScales::from_str("").is_err());
+    }
+
     /// The grid's shape is the result; its maximum is not.
     #[test]
     fn plateau_size_measures_the_largest_connected_region() {
@@ -2226,7 +3064,33 @@ mod tests {
             .iter()
             .map(|v| SmoothedKey { value: Some(*v), support: 1.0 })
             .collect();
-        assert_eq!(plateau_size(&[sg], &smoothed, Direction::Descending, 0.05), 3);
+        assert_eq!(
+            plateau_size(&[sg], &smoothed, Direction::Descending, 0.05, &SmoothScales::auto()),
+            3
+        );
+    }
+
+    /// Adjacency is `±1` in *sorted* position, so the console's "N of M cells"
+    /// stays a count of adjacent cells however the list was typed — and a
+    /// sparse stretch of an irregular axis is still one step, not zero.
+    #[test]
+    fn plateau_adjacency_follows_value_order_not_declaration_order() {
+        let smoothed = |vs: &[Real]| -> Vec<SmoothedKey> {
+            vs.iter().map(|v| SmoothedKey { value: Some(*v), support: 1.0 }).collect()
+        };
+        // Declared scrambled: values 1,5,2,4,3. The plateau is at values 3,4,5.
+        let sg = subgrid(&[], &[("P", nums(&[1, 5, 2, 4, 3]))]);
+        let keys = smoothed(&[1.0, 5.0, 1.0, 5.0, 5.0]);
+        assert_eq!(
+            plateau_size(&[sg], &keys, Direction::Descending, 0.05, &SmoothScales::auto()),
+            3,
+            "values 3, 4 and 5 are consecutive however they were typed"
+        );
+        // `--smooth-scale=index` reads adjacency off declared positions again,
+        // where the same three cells are not connected.
+        let sg = subgrid(&[], &[("P", nums(&[1, 5, 2, 4, 3]))]);
+        let index = SmoothScales::all(AxisScale::Index);
+        assert_eq!(plateau_size(&[sg], &keys, Direction::Descending, 0.05, &index), 2);
     }
 
     #[test]

@@ -1139,8 +1139,12 @@ impl PySweepRow {
         self.smoothed
     }
 
-    /// The neighbourhood weight actually found, as a fraction of a fully
-    /// interior point's. `None` when smoothing didn't run.
+    /// The neighbourhood weight actually found, as a fraction of the weight a
+    /// point in the interior of a *regular* axis of the same median spacing
+    /// would find. `1.0` = as much evidence as a regular grid of that spacing;
+    /// not clamped, so a denser-than-median stretch of an irregular axis reads
+    /// above it. A numeric axis with only one value doesn't count against it —
+    /// it isn't a swept dimension. `None` when smoothing didn't run.
     #[getter]
     pub(crate) fn support(&self) -> Option<Real> {
         self.support
@@ -1288,6 +1292,7 @@ pub(crate) fn build_subgrids(
     risk_aversion = 0.0,
     smooth = None,
     smooth_min_support = 0.0,
+    smooth_scale = None,
     jobs = None,
     bars_per_year = 252.0,
     risk_free_rate = 0.0,
@@ -1311,6 +1316,7 @@ pub(crate) fn optimize(
     risk_aversion: Real,
     smooth: Option<&str>,
     smooth_min_support: Real,
+    smooth_scale: Option<&str>,
     jobs: Option<usize>,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -1328,13 +1334,30 @@ pub(crate) fn optimize(
     // `smooth=` mirrors the CLI's `--smooth` grammar: "box:1", "triangle:2",
     // "gaussian:1.5". Presence is what turns smoothing on; `smooth_min_support`
     // only tunes it, exactly as `--smooth-min-support` does.
+    // `smooth_scale=` mirrors `--smooth-scale`: "index", "PERIOD:log",
+    // "linear,PERIOD:log". `None` leaves every axis on the automatic choice.
+    let scales = smooth_scale
+        .map(|spec| {
+            spec.parse::<spec_optimize::SmoothScales>()
+                .map_err(|e| PyValueError::new_err(format!("`smooth_scale`: {e}")))
+        })
+        .transpose()?;
+    if scales.is_some() && smooth.is_none() {
+        return Err(PyValueError::new_err(
+            "`smooth_scale=` needs `smooth=` — there is no neighbourhood to measure without a kernel",
+        ));
+    }
     let smoothing = smooth
         .map(|spec| {
             let kernel: spec_optimize::SmoothKernel = spec
                 .parse()
                 .map_err(|e| PyValueError::new_err(format!("`smooth`: {e}")))?;
-            spec_optimize::Smoothing::new(kernel, smooth_min_support)
-                .map_err(|e| PyValueError::new_err(format!("`smooth_min_support`: {e}")))
+            let sm = spec_optimize::Smoothing::new(kernel, smooth_min_support)
+                .map_err(|e| PyValueError::new_err(format!("`smooth_min_support`: {e}")))?;
+            Ok::<_, PyErr>(match scales.clone() {
+                Some(scales) => sm.with_scales(scales),
+                None => sm,
+            })
         })
         .transpose()?;
     let snaps = snapshots_from_sequence(snapshots)?;

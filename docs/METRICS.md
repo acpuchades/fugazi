@@ -21,7 +21,8 @@ what it means, and calls out the caveats that shape how it should be read.
   pair aggregated across the row's own non-overlapping windows. Under
   `--smooth`, two further columns are appended — `<best-by>_smoothed` and
   `<best-by>_support`, the parameter-neighbourhood average the rows are ranked
-  by and the weight behind it. `selection.deflated_sharpe` is computed from the
+  by and the weight behind it as a fraction of a fully interior point's (`0`–`1`;
+  see [CLI](CLI.md#neighbourhood-smoothing)). `selection.deflated_sharpe` is computed from the
   **raw** per-row Sharpes and is unaffected by smoothing: `--smooth` changes
   which row sorts first, not what any row is worth.
 

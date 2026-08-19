@@ -644,12 +644,16 @@ struct OptimizeArgs {
     /// `KERNEL` is `box:R` (uniform over Chebyshev radius `R`), `triangle:R`,
     /// or `gaussian:S` (bandwidth `S`, truncated at `3S`). Bare `--smooth`
     /// means `box:1` — the Moore neighbourhood, self plus every adjacent
-    /// point. Radii and bandwidths are in **lattice steps**, not parameter
-    /// units: distance is measured between declared positions on an axis, so
-    /// `PERIOD=[10,20,50]` and `ATR_MULT=1.0..4.0:0.5` are commensurable.
-    /// A non-numeric axis (`SL_MODE=[none,atr]`) has no ordering, so it
-    /// partitions the grid instead of smoothing across it, and each `--grid`
-    /// subgrid is its own lattice.
+    /// point. Radii and bandwidths are in **grid steps**: distance along an
+    /// axis is the parameter gap divided by that axis' own median gap, so `1`
+    /// means one typical step of *that* axis. The kernels are separable, so no
+    /// two axes ever need a common scale. On an evenly spaced axis this is
+    /// exactly "one declared position along"; only an irregular list like
+    /// `PERIOD=[10,20,50,200]` differs, and it differs in the direction you
+    /// want. A non-numeric axis (`SL_MODE=[none,atr]`) has no ordering and a
+    /// one-value axis (`SLOW=[20]`) no extent, so both partition the grid
+    /// instead of smoothing across it, and each `--grid` subgrid is its own
+    /// lattice.
     ///
     /// Pass a value with `=`: `--smooth=triangle:2`.
     #[arg(
@@ -661,6 +665,24 @@ struct OptimizeArgs {
         requires = "best_by"
     )]
     smooth: Option<optimize::SmoothKernel>,
+
+    /// Pin which scale `--smooth` measures an axis' distances on, when the
+    /// automatic choice guesses wrong.
+    ///
+    /// `,`-separated terms: a bare `linear`, `log` or `index` sets the
+    /// grid-wide default, and `NAME:SCALE` pins one axis. `--smooth-scale=index`
+    /// restores the pre-0.65 measure (distance between *declared positions*,
+    /// so the neighbourhood depends on how the list was typed).
+    ///
+    /// By default each axis picks whichever of `linear` / `log` makes its own
+    /// spacings most nearly uniform, so a deliberately geometric grid
+    /// (`PERIOD=[10,20,50,100,200]`, where `100→200` is about as near as
+    /// `10→20`) is measured in log space. An evenly spaced axis is a fixed
+    /// point of that test. `log` needs every value on the axis strictly
+    /// positive. The resolved scale is echoed on the `smooth` line.
+    /// Requires `--smooth`.
+    #[arg(long = "smooth-scale", value_name = "SPEC", requires = "smooth")]
+    smooth_scale: Option<optimize::SmoothScales>,
 
     /// Drop a row's smoothed value when the neighbourhood weight it actually
     /// found is below this fraction of the weight a fully interior point would
@@ -1171,7 +1193,13 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     // already refused the flag without `--best-by`.
     let smoothing = args
         .smooth
-        .map(|kernel| optimize::Smoothing::new(kernel, args.smooth_min_support.unwrap_or(0.0)))
+        .map(|kernel| {
+            let sm = optimize::Smoothing::new(kernel, args.smooth_min_support.unwrap_or(0.0))?;
+            Ok::<_, anyhow::Error>(match args.smooth_scale.clone() {
+                Some(scales) => sm.with_scales(scales),
+                None => sm,
+            })
+        })
         .transpose()?;
     let grid_tables: Vec<HashMap<String, serde_json::Value>> = args
         .grid

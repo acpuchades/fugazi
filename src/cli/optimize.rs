@@ -36,7 +36,8 @@ use fugazi::spec::pairs::PairsStrategySpec;
 // from `main.rs`) and other library-side items keep resolving through this
 // module.
 pub use fugazi::spec::optimize::{
-    ColumnPos, Direction, Evaluation, Row, SmoothKernel, Smoothing, Subgrid, Sweep,
+    AxisScale, ColumnPos, Direction, Evaluation, Row, SmoothKernel, SmoothScales, Smoothing,
+    Subgrid, Sweep,
     build_any_spec, build_spec, build_typed, cartesian, combine_params, format_number,
     format_value, lookup, lookup_windowed,
     PLATEAU_TOLERANCE, mean_std_of, optimize, probe_params, rank_positions, ranking_value,
@@ -520,6 +521,7 @@ fn run_single(
             &sweep.subgrid_summaries,
             &sweep.rows,
             period.as_deref(),
+            sweep.smooth_scales.as_deref(),
         );
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
@@ -773,6 +775,7 @@ fn run_multi_symbol(
             &sweep.subgrid_summaries,
             &sweep.rows,
             period.as_deref(),
+            sweep.smooth_scales.as_deref(),
         );
         if sweep.best_by.is_some() {
             print_best_block(&sweep, opts.risk_aversion);
@@ -1074,12 +1077,14 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
 // Console output
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn print_inputs_block(
     opts: &OptimizeOptions,
     windowed_bars: Option<NonZeroUsize>,
     subgrid_summaries: &[(String, usize)],
     rows: &[Row],
     period: Option<&str>,
+    smooth_scales: Option<&[(String, AxisScale)]>,
 ) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
@@ -1141,6 +1146,14 @@ fn print_inputs_block(
             let mut msg = format!("{} over the parameter neighbourhood", sm.kernel);
             if sm.min_support > 0.0 {
                 msg.push_str(&format!(" (min support {})", sm.min_support));
+            }
+            // Which scale each axis' distances were measured on. Never left
+            // implicit: it is the thing that decides what "one step" means, and
+            // on an irregular axis the automatic choice is a judgment call.
+            if let Some(scales) = smooth_scales.filter(|s| !s.is_empty()) {
+                let per_axis: Vec<String> =
+                    scales.iter().map(|(name, scale)| format!("{name} {scale}")).collect();
+                msg.push_str(&format!(" · scale {}", per_axis.join(", ")));
             }
             style::field("smooth", &msg);
         }
@@ -1237,7 +1250,7 @@ fn print_smoothing_lines(
     path: &str,
     direction: Direction,
     k: Real,
-    smoothing: Smoothing,
+    smoothing: &Smoothing,
 ) {
     let rows = &sweep.rows;
     let winner = match rows.first().and_then(|r| r.smoothed) {
@@ -1314,7 +1327,7 @@ fn print_best_block(sweep: &Sweep, k: Real) {
         }
         // Friendly label for the console; the CSV column keeps the dotted path.
         style::field(&friendly_metric_label(path), &value);
-        if let Some(smoothing) = sweep.smoothing {
+        if let Some(smoothing) = &sweep.smoothing {
             print_smoothing_lines(sweep, path, *direction, k, smoothing);
         }
     }

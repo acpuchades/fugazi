@@ -439,7 +439,8 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
-| `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *lattice steps*, not parameter units. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
@@ -546,18 +547,62 @@ property you actually wanted when you swept.
 Kernels are separable across axes, which is why `box`'s product form is exactly
 the Chebyshev ball.
 
-**Distance is measured in index space, not value space.** Neighbours are
-adjacent *declared positions* on an axis, so a radius of 1 means "one grid step"
-regardless of what the parameter means. This is the only scale-free choice: a
-grid mixing `PERIOD=[10,20,50]` with `ATR_MULT=1.0..4.0:0.5` has no common
-metric in value space. The tradeoff is real and deliberate — an irregularly
-spaced axis like `[10,20,50,200]` smooths over unequal parameter distances by
-construction, weighting the `50→200` jump exactly as much as `10→20`. If that
-matters for your axis, declare it evenly spaced.
+**Distance is measured in parameter units, normalized per axis.** Along each
+axis the distance between two points is the parameter gap divided by that axis'
+own *median* gap, so a radius of `1` means "one typical step on this axis"
+whatever the axis means. The kernels are separable — the weight of an offset is
+`Π_j w(dⱼ)`, a product of per-axis weights — so no two axes ever need a metric
+in common; each only needs a scale internal to itself, and its own spacing is
+one. A grid mixing `PERIOD=[10,20,50]` with `ATR_MULT=1.0..4.0:0.5` is fine.
 
-**Non-numeric axes partition, they do not smooth.** `SL_MODE=["none","atr"]`
-has no ordering, so lattice distance along it is meaningless. Each combination
-of its levels becomes an independent lattice; nothing bleeds across.
+On an **evenly spaced** axis `|vᵢ − vⱼ| / step` *is* `|i − j|`, so every
+`start..end:step` range and every evenly spaced list behaves exactly as "one
+declared position along" — and computes it that way internally, in integer
+arithmetic. The two only diverge on an irregular hand-written list like
+`[10,20,50,200]`, where `50→200` is genuinely eight times the `10→20` gap and
+is now weighted accordingly.
+
+A corollary worth stating: **the neighbourhood does not depend on how you typed
+the list.** `FAST=[3,9,4,8,5,7,6]`, `FAST=[3,4,5,6,7,8,9]` and
+`FAST=[9,8,7,6,5,4,3]` all produce identical smoothed values, to the bit — the
+kernel sums each neighbourhood in ascending parameter order whatever the
+declaration, so there is nothing to remember and no rule with an exception in
+it. (`--smooth-scale=index` is the one measure that does depend on declaration
+order; that is what it is for.)
+
+**Linear or log, per axis.** A user who writes `PERIOD=[10,20,50,100,200]` chose
+a roughly geometric grid deliberately, and in strategy terms `100→200` is about
+as near as `10→20`; plain linear distance calls the first pair 10× farther
+apart. So each axis picks whichever of linear or log makes its *own* gaps most
+nearly uniform (comparing the coefficient of variation of the successive gaps of
+`v` against those of `ln v`) and takes log only when it wins by a clear margin.
+An evenly spaced axis is a fixed point of that test, so this only ever fires on
+an irregular one, and log is only admissible when every value on the axis is
+strictly positive — an axis containing `0` or a negative stays linear.
+
+`--smooth-scale` overrides it when the guess is wrong:
+
+| Spelling | Effect |
+| --- | --- |
+| `--smooth-scale=log` | every axis on log |
+| `--smooth-scale=PERIOD:log,ATR_MULT:linear` | those two pinned, the rest automatic |
+| `--smooth-scale=linear,PERIOD:log` | linear by default, `PERIOD` on log |
+| `--smooth-scale=index` | the pre-0.65 measure: distance between *declared positions*, so the neighbourhood depends on how the list was typed |
+
+A `log` pin on an axis containing a non-positive value is an error, not a silent
+fallback. Whatever is chosen, the console `smooth` line names it per axis:
+
+```
+  smooth   box:1 over the parameter neighbourhood · scale FAST log, SLOW linear
+```
+
+**Non-numeric and single-value axes partition, they do not smooth.**
+`SL_MODE=["none","atr"]` has no ordering, so distance along it is meaningless.
+`SLOW=[20]` is not a swept dimension at all — it carries no neighbourhood
+information in either direction, and it does not count against `support`
+either (the same sweep scores the same written `SLOW=20` or `SLOW=[20]`). Each
+combination of such levels becomes an independent lattice; nothing bleeds
+across.
 
 **Each `--grid` subgrid is its own lattice.** Stacked subgrids are a disjoint
 union, and neighbours are computed inside a subgrid before the sparse
@@ -569,13 +614,35 @@ values, one per lattice.
 **Edges renormalize, and say so.** A boundary point has fewer neighbours; its
 average is divided by the weight it actually found rather than padded or
 reflected. Since grid maxima *like* to sit on edges, the realized weight is
-reported per row as `<metric>_support` — `1.0` for a fully interior point, `4/9`
-for the corner of a 2-D `box:1` grid. `--smooth-min-support FRAC` refuses
-anything thinner: the row's smoothed value is dropped and sorts last, exactly
-like a missing metric, while its support is still written. Caveat: an axis
-shorter than the kernel's diameter has *no* interior point, so nothing on it
-ever reaches support `1.0` — `--smooth-min-support 1.0` on such a grid is an
-error rather than an empty result.
+reported per row as `<metric>_support`.
+
+The denominator it is a fraction of is `Π_j Σ_{d=−R..R} w(d)` — the weight a
+point in the interior of a **regular** axis of that axis' own median spacing
+would find. That reference depends on the kernel alone, never on the grid, which
+is what keeps `1.0` one fixed, reachable, grid-independent thing. So on a 2-D `box:1` grid the
+interior is `1.0`, an edge cell `6/9`, and a corner `4/9`: the corner sees four
+of the nine weight units the kernel would hand a fully surrounded point.
+
+Two consequences of measuring against the kernel rather than the local grid:
+
+- On an **irregular** axis, a point in a sparse stretch cannot reach `1.0` even
+  though it sits nowhere near an edge — its neighbours are simply further away
+  than one typical step. That is honest (a sparse region *is* less supported),
+  but it means `support` conflates "near an edge" with "in a thin part of the
+  grid", and those warrant different reactions: widen the range for the first,
+  fill in values for the second. The `_smoothed` column plus the axis cells tell
+  you which one you are looking at.
+- A **denser**-than-median pocket finds more weight than the reference, and
+  reads above `1.0`. That is the measured ratio, reported rather than squeezed
+  into `0`–`1`: clamping would print "exactly fully supported" for two
+  different situations. `--smooth-min-support` is a floor, so it is unaffected.
+
+`--smooth-min-support FRAC` refuses anything thinner: the row's smoothed value is
+dropped and sorts last, exactly like a missing metric, while its support is
+still written. Caveat: an axis shorter than the kernel's diameter has *no*
+interior point, so nothing on it ever reaches support `1.0` —
+`--smooth-min-support 1.0` on such a grid is an error rather than an empty
+result, and the error names the best support actually realized.
 
 A neighbour whose metric is undefined (didn't trade, zero variance) contributes
 no weight and lowers support, but does not drag the average toward zero. A row

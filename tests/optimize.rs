@@ -426,7 +426,9 @@ fn smooth_appends_two_columns_without_reordering_the_others() {
         "the inputs block should echo the default kernel:\n{}",
         out.stdout
     );
-    // Support is a fraction of a fully-interior neighbourhood: 0 < s <= 1.
+    // Support is a fraction of a fully-interior neighbourhood. The ceiling of
+    // 1.0 holds because both axes here are evenly spaced — on an irregular axis
+    // a denser-than-median stretch reads above it, deliberately.
     let sup = column(header, "returns.total_pct_support");
     let supports: Vec<f64> = lines[1..]
         .iter()
@@ -556,6 +558,133 @@ fn min_support_empties_the_smoothed_cell_but_keeps_the_support_cell() {
         lines[1..].iter().all(|l| !cells(l)[csup].is_empty()),
         "support must be reported even for the rows it rejected — that is the diagnostic"
     );
+}
+
+#[test]
+fn smooth_scale_pins_the_distance_scale_and_index_restores_the_old_measure() {
+    // Seven values, one surface, two typings. In value space the neighbourhood
+    // cannot depend on declaration order; `--smooth-scale=index` is the
+    // documented way back to the measure that did.
+    let smoothed_by_fast = |name: &str, axis: &str, extra: &[&str]| {
+        let mut args = vec!["--grid", axis, "-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"];
+        args.extend_from_slice(extra);
+        let (out, csv) = sweep(name, &args);
+        let lines = read_csv(&csv);
+        let header = &lines[0];
+        let (cf, csm) = (column(header, "FAST"), column(header, "returns.total_pct_smoothed"));
+        let mut got: Vec<(String, String)> = lines[1..]
+            .iter()
+            .map(|l| (cells(l)[cf].to_string(), cells(l)[csm].to_string()))
+            .collect();
+        got.sort();
+        (out.stdout, got)
+    };
+
+    let scrambled = "FAST=[3,9,4,8,5,7,6],SLOW=[9]";
+    let sorted = "FAST=[3,4,5,6,7,8,9],SLOW=[9]";
+    let (stdout, a) = smoothed_by_fast("fugazi_opt_smooth_scale_scrambled", scrambled, &[]);
+    let (_, b) = smoothed_by_fast("fugazi_opt_smooth_scale_sorted", sorted, &[]);
+    assert_eq!(a, b, "declaration order changed the smoothed column");
+    // The resolved scale is echoed, never left implicit.
+    assert!(
+        stdout.contains("scale FAST linear"),
+        "the inputs block should name the scale each axis resolved to:\n{stdout}"
+    );
+
+    // Bare `index` restores it wholesale — and with it the order dependence.
+    let (stdout, a) = smoothed_by_fast(
+        "fugazi_opt_smooth_scale_index",
+        scrambled,
+        &["--smooth-scale=index"],
+    );
+    assert!(stdout.contains("scale FAST index"), "{stdout}");
+    assert_ne!(a, b, "`--smooth-scale=index` did not restore the index-space measure");
+
+    // Per-axis pins compose with a bare default, and a geometric axis is
+    // detected as log without being asked.
+    let (stdout, _) = smoothed_by_fast(
+        "fugazi_opt_smooth_scale_per_axis",
+        "FAST=[2,4,8,16],SLOW=[6,9]",
+        &["--smooth-scale=SLOW:index"],
+    );
+    assert!(
+        stdout.contains("scale FAST log, SLOW index"),
+        "per-axis pins and the automatic choice should both show:\n{stdout}"
+    );
+}
+
+#[test]
+fn smooth_scale_rejects_an_unknown_scale_and_needs_smooth() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_badscale_strategy.yml", SWEEPABLE);
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3],SLOW=[9]"])
+        .args(&["--best-by", "total_pct", "--smooth=box:1", "--smooth-scale=quadratic"])
+        .args(&["--output", "/dev/null"])
+        .fails();
+    assert!(
+        out.stderr.contains("linear") && out.stderr.contains("index"),
+        "the refusal should name the accepted scales, got: {}",
+        out.stderr
+    );
+
+    // Like `--smooth-min-support`, it tunes a pass that has to be turned on.
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3],SLOW=[9]"])
+        .args(&["--best-by", "total_pct", "--smooth-scale=index"])
+        .args(&["--output", "/dev/null"])
+        .fails();
+    assert!(out.stderr.contains("--smooth"), "{}", out.stderr);
+}
+
+/// A numeric axis with one value is not a swept dimension — it carries no
+/// neighbourhood information in either direction. Multiplying its share into
+/// the support denominator made the same sweep score 1.000 written `SLOW=9`
+/// and 0.333 written `SLOW=[9]`, and turned `--smooth-min-support 0.5` into a
+/// hard error on a grid where every point had a complete `FAST` neighbourhood.
+#[test]
+fn a_one_value_axis_does_not_dilute_support() {
+    let supports = |name: &str, grid: &str, params: &[&str]| {
+        let mut args =
+            vec!["--grid", grid, "-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"];
+        args.extend_from_slice(params);
+        let (_, csv) = sweep(name, &args);
+        let lines = read_csv(&csv);
+        let header = &lines[0];
+        let (cf, cs) = (column(header, "FAST"), column(header, "returns.total_pct_support"));
+        let mut got: Vec<(String, String)> = lines[1..]
+            .iter()
+            .map(|l| (cells(l)[cf].to_string(), cells(l)[cs].to_string()))
+            .collect();
+        got.sort();
+        got
+    };
+    let listed = supports("fugazi_opt_smooth_pin_listed", "FAST=[2,3,4,5,6],SLOW=[9]", &[]);
+    let scalar = supports("fugazi_opt_smooth_pin_scalar", "FAST=[2,3,4,5,6],SLOW=9", &[]);
+    assert_eq!(listed, scalar, "the two spellings of a pinned axis must score the same");
+    assert!(
+        listed.iter().any(|(_, s)| (s.parse::<f64>().unwrap() - 1.0).abs() < 1e-12),
+        "interior points should reach full support: {listed:?}"
+    );
+
+    // The user-visible half: a floor that used to reject the whole grid.
+    let (path, _) = scratch_file("fugazi_opt_smooth_pin_minsup_strategy.yml", SWEEPABLE);
+    let out_csv = common::cli::unique_path("fugazi_opt_smooth_pin_minsup").with_extension("csv");
+    Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3,4,5,6],SLOW=[9]"])
+        .args(&["-m", "total_pct", "--best-by", "total_pct"])
+        .args(&["--smooth=box:1", "--smooth-min-support", "1.0"])
+        .args(&["--output", &out_csv.to_string_lossy()])
+        .ok();
+    let lines = read_csv(&out_csv.to_string_lossy());
+    let csm = column(&lines[0], "returns.total_pct_smoothed");
+    let kept = lines[1..].iter().filter(|l| !cells(l)[csm].is_empty()).count();
+    assert_eq!(kept, 3, "the three interior FAST points clear full support");
 }
 
 #[test]
