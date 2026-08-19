@@ -145,12 +145,46 @@ So a ruined run reports, by construction:
 simulation that kept trading through zero reported further losses as **positive
 returns**. That is not a display quirk — it gives whole regions of a parameter
 grid a genuinely positive Sharpe, and `optimize --best-by sharpe` finds them,
-because that is what an argmax does. Bounding the curve at the simulation makes
-every layer above it correct without a filter of its own: `--best-by` ranks a
-ruined cell below a solvent one on its own arithmetic, `--smooth`'s
-neighbourhood average is no longer averaging fiction, the walk-forward composite
-scales fold winners by real equity, and the Monte Carlo bootstrap resamples
-returns that are bounded below by `-1`.
+because that is what an argmax does. Bounding the curve at the simulation is
+what makes the table above true at all: `--smooth`'s neighbourhood average is no
+longer averaging fiction, the walk-forward composite scales fold winners by real
+equity, and the Monte Carlo bootstrap resamples returns bounded below by `-1`.
+
+### A bar-return ratio cannot see ruin
+
+Bounding the curve fixes the metrics **anchored to terminal wealth** — the five
+rows above, plus `calmar` (`-1` exactly), `recovery_factor` (`-1`),
+`ulcer_performance_index` (negative) and `worst_bar` (`-1`). It does nothing for
+the rest, and the rest is most of them.
+
+Sharpe is a mean over a standard deviation of *per-bar* returns. Truncating at
+ruin contributes **one** `-100%` bar out of however many the run had. Over 1 858
+daily bars that barely moves the ratio: a strategy that compounds for years and
+then dies keeps a positive Sharpe, a positive Sortino and a positive Omega, and
+if the pre-ruin stretch was calm it also posts the grid's lowest `var_95` and
+its shortest `drawdown.avg_duration_bars`. Of the 39 metrics `--best-by` will
+rank, an adversarial pair of curves beats a solvent profitable run on 17, and
+only the nine named above are safe by *construction*.
+
+**No metric is nulled for this.** A pre-ruin Sharpe is a true description of the
+strategy while it was alive, `run.ruin_bar` sits beside it saying that is all it
+is, and nulling it would throw away the only evidence of what the parameter set
+was doing before it died. Every value stays in `metrics.yml` and in the
+`optimize` CSV exactly as it was.
+
+**What a ruined run loses is its candidacy.** `optimize` treats a ruined row as
+having no ranking value at all, so it can never win `--best-by`, whatever the
+metric; under `--smooth` it contributes no weight to its neighbours and lowers
+their `_support`; and a walk-forward fold will not select a cell that was wiped
+out inside the in-sample slice it was selected on. The rule is one predicate
+applied where a metrics document becomes a *ranking key*, so it covers every
+metric — including ones added later — rather than the ones someone remembered to
+list.
+
+**Reading a sweep by hand?** `calmar`, `ulcer_performance_index` and `cagr_pct`
+are the ruin-safe choices: each is anchored to terminal wealth, so a ruined run
+scores `-1`, negative and `-100` respectively and cannot outrank a solvent
+profitable one on raw value. `sharpe` is not one of them.
 
 **Reading it.** Ruin is *reported*, never inferred. `fugazi run` prints a banner
 naming the bar; `run.ruin_bar` is a metrics field and an `optimize --metrics`

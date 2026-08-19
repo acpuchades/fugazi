@@ -503,6 +503,28 @@ pub enum Evaluation {
     Windowed(Vec<metrics::WindowMetrics>),
 }
 
+impl Evaluation {
+    /// The bar this grid point's account was **ruined** on — the first bar
+    /// close at which equity reached zero — or `None` for a row that stayed
+    /// solvent over the whole evaluated span.
+    ///
+    /// Under `-w` a row is ruined if *any* window is: `report_slice` clamps
+    /// [`ruin_bar`](metrics::RunSection::ruin_bar) into the window it lands in
+    /// and reports `Some(0)` for every window after it, so the first window
+    /// carrying one is the window ruin happened in and `start_bar + b` is the
+    /// absolute bar. "Any window" is the right quantifier because the account
+    /// only dies once: a row whose folds 3..N are flat zeros is not a row that
+    /// was solvent for folds 1..2, it is a dead one.
+    pub fn ruin_bar(&self) -> Option<usize> {
+        match self {
+            Evaluation::Whole(m) => m.run.ruin_bar,
+            Evaluation::Windowed(ws) => ws
+                .iter()
+                .find_map(|w| w.metrics.run.ruin_bar.map(|b| w.start_bar + b)),
+        }
+    }
+}
+
 /// One folded subgrid: its scalar map (baseline layered under this subgrid's
 /// `--grid` scalars, minus any name carved out as an axis) plus its axes
 /// (name-sorted) and cartesian combos over those axes. A `--grid` flag with
@@ -1025,12 +1047,61 @@ pub fn mean_std_of<I: Iterator<Item = Option<Real>>>(values: I) -> Option<(Real,
     metrics::mean_std(values.flatten())
 }
 
+/// Look a metric up **for the purpose of selecting on it**: the plain
+/// [`lookup`], except that a ruined run has no ranking value at all.
+///
+/// This is the one place the rule lives, and the rule is:
+///
+/// > **No metric that [`direction_for`] will rank may prefer a ruined run to a
+/// > solvent profitable one.**
+///
+/// `1a253e8` made ruin a terminal run outcome, which fixed the metrics that
+/// are *anchored to terminal wealth* — `cagr_pct` reads exactly `-100`,
+/// `calmar` and `recovery_factor` exactly `-1`, `max_pct` exactly `100`. It
+/// did nothing for the rest, and the rest is most of them: a bar-return ratio
+/// cannot see ruin, because truncating at zero contributes **one** `-100%` bar
+/// out of however many the run had. A strategy that compounds for years and
+/// then dies keeps a positive Sharpe. Of the 39 paths [`direction_for`] ranks,
+/// an adversarial pair of curves beats a solvent profitable run on 17
+/// (`sharpe`, `sortino`, `omega`, `mean_bar`, `win_rate_pct`, the VaR family,
+/// three quarters of the `drawdown.*` block, …), and only nine —
+/// `final_equity`, `total`, `total_pct`, `cagr_pct`, `worst_bar`, `calmar`,
+/// `ulcer_performance_index`, `drawdown.max`, `drawdown.max_pct` — are safe by
+/// *construction* rather than by the fixture happening not to reach them.
+///
+/// So the guard is not on the metrics. It is here, because "a ruined run is
+/// not a candidate" is one predicate that covers all 39 **and every metric
+/// added later**, where a per-metric `None` would cover the ones someone
+/// remembered. `None` needs nothing of the layers above: [`sort_by_keys`]
+/// already sorts it last, [`argbest`] already skips it, [`smooth_keys`]
+/// already treats it as missing evidence rather than as a plateau (so a ruined
+/// neighbour contributes no weight and lowers `_support`), and the CSV column
+/// keeps the number it always had.
+///
+/// The number is *kept* on purpose. A pre-ruin Sharpe is a true description of
+/// the strategy while it was alive, `run.ruin_bar` sits beside it saying so,
+/// and nulling it would throw away the only evidence of what the parameter set
+/// was doing before it died. See the module docs of `tests/ruin.rs` and
+/// `TODO.md` for the two alternatives this was chosen over.
+pub fn ranking_lookup(m: &metrics::Metrics, path: &str) -> Option<Real> {
+    if m.run.ruin_bar.is_some() {
+        return None;
+    }
+    lookup(m, path)
+}
+
 /// The single value a row is *ranked* by for a metric path: the whole-run
 /// value, or the cross-window mean shifted **against** the row by `k`
 /// standard deviations — `mean − k·std` for a higher-is-better (descending)
 /// metric, `mean + k·std` for a lower-is-better (ascending) one, so a large
 /// spread is always penalized, never rewarded.
+///
+/// `None` for a row that was ruined, whatever the metric says — see
+/// [`ranking_lookup`], whose rule this applies to a whole [`Evaluation`].
 pub fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -> Option<Real> {
+    if eval.ruin_bar().is_some() {
+        return None;
+    }
     match eval {
         Evaluation::Whole(m) => lookup(m, path),
         Evaluation::Windowed(ws) => {
@@ -2328,11 +2399,17 @@ where
         // same layout `smooth_keys` reads its lattices out of. Keys stay in the
         // metric's *native* orientation (`compare_keys` owns direction), so a
         // smoothed `drawdown.max_pct` reads as a drawdown, not as its negation.
+        //
+        // `ranking_lookup`, not `lookup`: a cell that was wiped out *inside
+        // this fold's in-sample slice* is not a candidate to trade the fold's
+        // out-of-sample slice with, whatever its pre-ruin ratio says. Same rule
+        // as the plain sweep's, applied to a bare `Metrics` — the fold selects
+        // on the IS document, not on an `Evaluation`.
         let mut winner_smoothed: Option<SmoothedKey> = None;
         let winner_idx: usize = match &best_by {
             Some((_, path, direction)) => {
                 let keys: Vec<Option<Real>> =
-                    per_row.iter().map(|(is_m, _)| lookup(is_m, path)).collect();
+                    per_row.iter().map(|(is_m, _)| ranking_lookup(is_m, path)).collect();
                 let ranked: Vec<Option<Real>> = match smooth {
                     // This is the selection rule whose out-of-sample behaviour
                     // the composite measures — so smoothing it changes what the

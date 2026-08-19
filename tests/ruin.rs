@@ -555,3 +555,681 @@ fn run_reports_ruin_rather_than_leaving_it_to_be_inferred() {
         "ruin must be a field, not an inference:\n{metrics}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ranking: a dead account is not a candidate
+// ---------------------------------------------------------------------------
+//
+// `1a253e8` claimed a ruined row "sorts last under any `--best-by` on its own
+// arithmetic". That holds for the metrics *anchored to terminal wealth* —
+// `cagr_pct` is exactly `-100`, `calmar` and `recovery_factor` exactly `-1`,
+// `max_pct` exactly `100`. It does not hold for a bar-return ratio, and
+// `sharpe` is one: truncating at ruin contributes **one** `-100%` bar out of
+// however many the run had, so a strategy that compounds for years and then
+// dies keeps a positive Sharpe, and `--best-by sharpe` finds it.
+//
+// The fix is one predicate — `optimize::ranking_lookup` — at the one place a
+// `Metrics` becomes a *ranking key*. The metric keeps its value everywhere
+// else; what a ruined run loses is not its Sharpe, it is its candidacy.
+//
+// Two alternatives were considered and rejected; `TODO.md` records why, and
+// `ruin_is_unrankable_but_its_numbers_are_still_reported` pins the choice.
+
+use fugazi::spec::optimize::{
+    Direction, Evaluation, argbest, direction_for, lookup, ranking_lookup, ranking_value,
+};
+use fugazi::wallet::{OrderId, OrderKind};
+use fugazi::{Fill, Order, RunReport};
+
+/// A `Fill` of `units` of `X` at `price` on `bar`.
+fn blotter_fill(bar: usize, side: Side, units: Real, price: Real) -> Fill<Symbol> {
+    Fill {
+        bar,
+        order: Order::new(
+            fugazi::types::symbol("X"),
+            side,
+            units,
+            price,
+            OrderKind::Market,
+            OrderId(bar as u64),
+        ),
+    }
+}
+
+/// One closed long: in at `a` on `bar`, out at `b` on the next.
+fn round_trip(bar: usize, a: Real, b: Real) -> Vec<Fill<Symbol>> {
+    vec![
+        blotter_fill(bar, Side::Buy, 1.0, a),
+        blotter_fill(bar + 1, Side::Sell, 1.0, b),
+    ]
+}
+
+/// How long the synthetic curves below run. Long enough that one `-100%` bar
+/// is a rounding error in the return moments — which is the whole defect: at
+/// 1 858 bars (the length of the daily series that surfaced this) ruin moves
+/// Sharpe by less than the difference between two neighbouring grid cells.
+const RANKING_BARS: usize = 1858;
+
+/// The curve a wiped-out grid cell actually draws: smooth compounding, shallow
+/// drawdowns, mostly-winning trades — and then nothing, because there is no
+/// money left. Ruined on `at`, pinned at zero from there on exactly as
+/// `backtest::run` pins it.
+fn pretty_then_dead(at: usize) -> metrics::Metrics {
+    let mut equity = Vec::with_capacity(RANKING_BARS);
+    let mut e = 10_000.0;
+    for i in 0..at {
+        e *= if i % 11 == 0 { 0.999 } else { 1.006 };
+        equity.push(e);
+    }
+    equity.extend(std::iter::repeat_n(0.0, RANKING_BARS - at));
+
+    let mut fills = Vec::new();
+    for i in 0..(at / 4).max(1) {
+        let bar = i * 4;
+        if i % 9 == 0 {
+            fills.extend(round_trip(bar, 100.0, 99.0));
+        } else {
+            fills.extend(round_trip(bar, 100.0, 103.0));
+        }
+    }
+    // The wipeout is a realized trade: `run` liquidates the book at ruin.
+    fills.extend(round_trip(at.saturating_sub(2), 100.0, 0.0001));
+
+    reduce_curve(equity, fills, Some(at))
+}
+
+/// A modest, solvent, genuinely profitable cell — noisier than the doomed one
+/// on purpose, so on every bar-return statistic it is the *less* attractive of
+/// the two and only its survival distinguishes it.
+fn modest_and_alive() -> metrics::Metrics {
+    let mut equity = Vec::with_capacity(RANKING_BARS);
+    let mut e = 10_000.0;
+    for i in 0..RANKING_BARS {
+        e *= 1.0 + 0.0012 + 0.02 * (i as Real * 1.7).sin();
+        equity.push(e);
+    }
+    let mut fills = Vec::new();
+    for i in 0..40 {
+        let bar = i * 4;
+        if i % 2 == 0 {
+            fills.extend(round_trip(bar, 100.0, 108.0));
+        } else {
+            fills.extend(round_trip(bar, 100.0, 94.0));
+        }
+    }
+    reduce_curve(equity, fills, None)
+}
+
+fn reduce_curve(
+    equity_curve: Vec<Real>,
+    fills: Vec<Fill<Symbol>>,
+    ruin_bar: Option<usize>,
+) -> metrics::Metrics {
+    let report = RunReport {
+        equity_curve,
+        fills,
+        rejections: Vec::new(),
+        initial_equity: 10_000.0,
+        ruin_bar,
+    };
+    metrics::from_report(&report, 252.0, 0.0, None)
+}
+
+fn whole(m: metrics::Metrics) -> Evaluation {
+    Evaluation::Whole(Box::new(m))
+}
+
+/// **The invariant.** Asserted over the whole of [`direction_for`]'s table, not
+/// a sample, so a metric added later is covered the day it is added.
+///
+/// Before the guard, 17 of the 39 rankable paths preferred one of these dead
+/// accounts to the live one — `sharpe`, `sortino` and `omega` among them, plus
+/// `mean_bar`, `win_rate_pct`, the VaR pair and most of the `drawdown.*` block.
+/// The other 22 were safe only in the sense that *this* pair of curves does not
+/// reach them: `best_bar`, `largest_win` and `payoff_ratio` are one lucky
+/// pre-ruin trade away, and `stddev_bar` and `ulcer_index` are bounded only by
+/// `1/sqrt(bars)`. Enumerating the safe ones was never going to be the fix.
+#[test]
+fn no_rankable_metric_prefers_a_ruined_run_to_a_solvent_profitable_one() {
+    let solvent = modest_and_alive();
+    assert!(
+        solvent.run.ruin_bar.is_none() && solvent.returns.total_pct > 0.0,
+        "the control must be solvent and profitable, or the test proves nothing"
+    );
+
+    // Ruin early, in the middle, and on the last bar: the damage one `-100%`
+    // bar does to a moment shrinks as it moves later, so the final-bar case is
+    // where a pre-ruin ratio is at its most flattering.
+    let ruined: Vec<(usize, metrics::Metrics)> = [3, 20, 200, RANKING_BARS / 2, RANKING_BARS - 1]
+        .into_iter()
+        .map(|at| (at, pretty_then_dead(at)))
+        .collect();
+    for (at, m) in &ruined {
+        assert_eq!(m.run.ruin_bar, Some(*at));
+    }
+
+    let mut checked = 0;
+    for (path, _) in metrics::flatten(&solvent) {
+        let Some(direction) = direction_for(path) else { continue };
+        checked += 1;
+
+        let solvent_key = ranking_value(&whole(solvent.clone()), path, direction, 0.0);
+        for (at, m) in &ruined {
+            let ruined_key = ranking_value(&whole(m.clone()), path, direction, 0.0);
+            assert_eq!(
+                ruined_key, None,
+                "`{path}` is rankable, so a run ruined at bar {at} must have no ranking \
+                 value under it — it had {ruined_key:?}"
+            );
+            // And the ordering that follows from it, through the same
+            // comparator `--best-by` sorts with.
+            let keys = [ruined_key, solvent_key];
+            assert_eq!(
+                argbest(&keys, direction),
+                Some(1),
+                "`{path}` ranked a run ruined at bar {at} above a solvent profitable one"
+            );
+        }
+    }
+    assert_eq!(
+        checked,
+        39,
+        "the direction table changed size — re-read the rule in `ranking_lookup` and \
+         check the new entries against it rather than adjusting this number"
+    );
+}
+
+/// **The design decision, pinned.**
+///
+/// Three ways to stop a dead account winning a sweep were on the table:
+///
+/// 1. `None` from the metric itself — "a run that ceased to exist has no
+///    Sharpe". Rejected: the rule it needs does not exist. To satisfy the
+///    invariant it has to null ~30 of the 39, including `stddev_bar`,
+///    `var_95`, `drawdown.max_duration_bars` and `largest_loss`, ten of which
+///    are non-`Option` fields today — so it is a schema change to `metrics.yml`
+///    that leaves a ruined run's document nearly empty, *and* it still covers
+///    only the metrics someone remembered to list.
+/// 2. Unrankable, but still reported — this. One predicate, total coverage,
+///    every number kept.
+/// 3. A parallel `pre_ruin.` namespace. Rejected: (1)'s blast radius plus a
+///    second catalogue to keep in step — `direction_for` entries, `flatten`,
+///    CSV columns, Python — to say what `run.ruin_bar` beside the plain value
+///    already says.
+///
+/// So: the value survives, the candidacy does not. Change this test only
+/// together with the decision it records.
+#[test]
+fn ruin_is_unrankable_but_its_numbers_are_still_reported() {
+    let m = pretty_then_dead(RANKING_BARS - 1);
+
+    let sharpe = lookup(&m, "risk_adjusted.sharpe").expect("a pre-ruin Sharpe exists");
+    assert!(
+        sharpe > 0.0,
+        "the fixture must reproduce the defect — a *positive* Sharpe on a wiped-out \
+         account — or it pins nothing: got {sharpe}"
+    );
+    assert_eq!(m.risk_adjusted.sharpe, Some(sharpe), "the document keeps the number");
+    assert_eq!(m.run.ruin_bar, Some(RANKING_BARS - 1), "and says it is a dead account");
+    assert_eq!(m.returns.cagr_pct, Some(-100.0), "the terminal-wealth metrics still read ruin");
+
+    // Same document, asked as a ranking key rather than as a description.
+    assert_eq!(ranking_lookup(&m, "risk_adjusted.sharpe"), None);
+    assert_eq!(
+        ranking_value(&whole(m), "risk_adjusted.sharpe", Direction::Descending, 0.0),
+        None
+    );
+}
+
+/// The edge case where truncation removes almost nothing and the pre-ruin ratio
+/// is at its most nearly legitimate: the account died on the **final** bar, so
+/// the run is 1 857 bars of real trading and one bar of insolvency.
+///
+/// It is still not a candidate. "Nearly the whole run was real" is a matter of
+/// degree, and a degree is a threshold; ruin is not.
+#[test]
+fn a_run_ruined_on_the_final_bar_is_still_unrankable() {
+    let last = pretty_then_dead(RANKING_BARS - 1);
+    let early = pretty_then_dead(3);
+
+    let key = |m: &metrics::Metrics| ranking_lookup(m, "risk_adjusted.sharpe");
+    assert_eq!(key(&last), None);
+    assert_eq!(key(&early), None);
+
+    // The two dead accounts differ enormously as *descriptions* — which is the
+    // reason the numbers are kept — and not at all as candidates.
+    let (a, b) = (
+        lookup(&last, "risk_adjusted.sharpe").unwrap(),
+        lookup(&early, "risk_adjusted.sharpe").unwrap(),
+    );
+    assert!(
+        a > b + 1.0,
+        "a final-bar ruin should describe far better than a bar-3 one: {a} vs {b}"
+    );
+}
+
+/// Under `-w` a row is ruined if **any** window is. `report_slice` clamps ruin
+/// into the window it lands in and reports `Some(0)` for every window after it,
+/// so a row whose later folds are flat zeros is not a row that was solvent for
+/// its early ones — the account only dies once.
+#[test]
+fn a_windowed_row_is_unrankable_if_any_window_was_ruined() {
+    let solvent = modest_and_alive();
+    let dead = pretty_then_dead(RANKING_BARS / 2);
+    let window = |start_bar, end_bar, m: &metrics::Metrics| metrics::WindowMetrics {
+        start_bar,
+        end_bar,
+        metrics: m.clone(),
+    };
+
+    let all_alive = Evaluation::Windowed(vec![
+        window(0, 99, &solvent),
+        window(100, 199, &solvent),
+        window(200, 299, &solvent),
+    ]);
+    assert_eq!(all_alive.ruin_bar(), None);
+    assert!(
+        ranking_value(&all_alive, "risk_adjusted.sharpe", Direction::Descending, 0.0).is_some(),
+        "a row that never died must stay rankable under -w"
+    );
+
+    // Ruin in the middle fold. The two solvent folds around it must not average
+    // it back into contention.
+    let died_midway = Evaluation::Windowed(vec![
+        window(0, 99, &solvent),
+        window(100, 199, &dead),
+        window(200, 299, &solvent),
+    ]);
+    assert_eq!(
+        died_midway.ruin_bar(),
+        Some(100 + RANKING_BARS / 2),
+        "the absolute bar, not the window-relative one"
+    );
+    assert_eq!(
+        ranking_value(&died_midway, "risk_adjusted.sharpe", Direction::Descending, 0.0),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The CLI: `optimize` neither picks a dead account nor hides one
+// ---------------------------------------------------------------------------
+
+/// A trend-following short whose only knob is the moving average it reads.
+///
+/// The knob matters because it decides *whether the cell is in the market when
+/// the roof falls in*, independently of how well it traded before then — which
+/// is the shape of the real failure. A fast cell trades the trend beautifully
+/// and is still short at the spike; a slow one is flat and survives having
+/// traded much worse.
+const RUIN_SWEEPABLE_MA: &str = "\
+symbol: X
+sizing: !value 1.0
+short:
+  enter: !lt
+    lhs: !close
+    rhs: !sma { source: close, period: !param PERIOD }
+  exit: !gt
+    lhs: !close
+    rhs: !sma { source: close, period: !param PERIOD }
+";
+
+/// 1 858 daily bars in which the Sharpe-optimal cell is a wiped-out account.
+///
+/// The reproduction that motivated this needed fugazi-labs and
+/// fugazi-datasets; a regression test may not, so the path is built here:
+///
+/// - 1 700 bars of a drifting-down series with **AR(1)** shocks. The
+///   autocorrelation is the point: it makes the series trend, so a trend
+///   follower actually works on it and the fast cells earn a real Sharpe rather
+///   than a whipsawed one.
+/// - a 60-bar rally, then a 16-bar slide. Close ends below every moving average
+///   up to 60 — those cells have just gone short — and still above the 100- and
+///   200-bar ones, which are flat.
+/// - one bar at 4×, which is ruin for anyone short.
+///
+/// The result: `PERIOD=3` posts the highest Sharpe in the grid (**+2.76**) with
+/// `cagr_pct = -100`, and `PERIOD=100` is the best cell that still has an
+/// account. Before the ranking guard, `--best-by sharpe` returned the former.
+/// Bars between the end of the noise stretch and the 4× spike: the 60-bar rally
+/// plus the 16-bar slide. So a series built from `n` noise bars is ruined on bar
+/// `n + APPROACH`.
+const APPROACH: usize = 76;
+
+/// The grid sweep's series: 1 700 noise bars, so ruin lands at bar 1 776 of
+/// 1 858 — late, where a bar-return ratio is at its most flattering.
+const SWEEP_NOISE: usize = 1700;
+const RUIN_BAR: usize = SWEEP_NOISE + APPROACH;
+
+/// The walk-forward series: the same shape with ruin 220 bars earlier, so an
+/// in-sample window long enough to dilute one `-100%` bar can still straddle
+/// it. Both are 1 858 bars.
+const WF_NOISE: usize = 1480;
+const WF_RUIN_BAR: usize = WF_NOISE + APPROACH;
+
+fn ma_sweep_csv() -> String {
+    ma_series(SWEEP_NOISE)
+}
+
+fn ma_series(noise_bars: usize) -> String {
+    let mut closes: Vec<Real> = Vec::with_capacity(1858);
+    let mut px: Real = 100.0;
+    // Deterministic pseudo-noise — an LCG, so the fixture is a constant.
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut noise = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as Real / (1u64 << 31) as Real) * 2.0 - 1.0
+    };
+    let mut shock: Real = 0.0;
+    for _ in 0..noise_bars {
+        shock = 0.85 * shock + 0.020 * noise();
+        px *= 1.0 - 0.0015 + shock;
+        closes.push(px);
+    }
+    for _ in 0..60 {
+        px *= 1.014;
+        closes.push(px);
+    }
+    for _ in 0..16 {
+        px *= 0.980;
+        closes.push(px);
+    }
+    px *= 4.0;
+    closes.push(px);
+    for _ in 0..(1858 - noise_bars - APPROACH - 1) {
+        px *= 0.999;
+        closes.push(px);
+    }
+    assert_eq!(closes.len(), 1858, "the fixture is 1 858 bars whatever the ruin bar");
+
+    let mut out = String::from("time,symbol,open,high,low,close,volume\n");
+    for (i, px) in closes.iter().enumerate() {
+        let t = 1_600_000_000_000i64 + i as i64 * 86_400_000;
+        out.push_str(&format!("{t},X,{px},{px},{px},{px},1000\n"));
+    }
+    out
+}
+
+/// Run the fixture sweep and hand back `(console, csv_header, csv_rows)`.
+fn ma_sweep(extra: &[&str], tag: &str) -> (String, String, Vec<String>) {
+    let (spec, _) = scratch_file(&format!("ruin_ma_{tag}_strategy.yml"), RUIN_SWEEPABLE_MA);
+    let (series, _) = scratch_file(&format!("ruin_ma_{tag}_series.csv"), &ma_sweep_csv());
+    let out = unique_path(&format!("ruin_ma_{tag}")).with_extension("csv");
+    let out_str = out.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&out);
+
+    let outcome = Cmd::new("optimize")
+        .arg(&format!("@{}", spec.display()))
+        .series(&format!("@{}", series.display()))
+        .args(&["--crypto", "-f", "1d"])
+        .args(&["--grid", "PERIOD=[3,5,10,20,40,60,100,200]"])
+        .args(&["--metrics", "sharpe,cagr_pct,max_pct,run.ruin_bar"])
+        .args(extra)
+        .args(&["--output", &out_str])
+        .ok();
+
+    let text = std::fs::read_to_string(&out).expect("optimize wrote no CSV");
+    let mut lines = text.lines();
+    let header = lines.next().expect("header").to_string();
+    let rows: Vec<String> = lines.map(str::to_string).collect();
+    (format!("{}{}", outcome.stdout, outcome.stderr), header, rows)
+}
+
+fn is_ruined(header: &str, row: &str) -> bool {
+    !column(header, row, "run.ruin_bar").is_empty()
+}
+
+fn sharpe_of(header: &str, row: &str) -> Real {
+    column(header, row, "risk_adjusted.sharpe").parse().expect("a Sharpe cell")
+}
+
+/// The reproduction, end to end: the grid's Sharpe-*optimal* cell is a wiped-out
+/// account, and `--best-by sharpe` does not return it.
+///
+/// This is the assertion `1a253e8` believed it had already made. It did not:
+/// the cell it checked was ruined *and* Sharpe-worst, because the leverage grid
+/// it used trades every cell identically and Sharpe is leverage-invariant, so a
+/// wipeout could only ever push a cell down. Here the cells trade differently,
+/// which is the only way the defect shows.
+#[test]
+fn the_sharpe_optimal_cell_can_be_a_dead_account_and_still_not_win() {
+    let (_console, header, rows) = ma_sweep(&["--best-by", "sharpe"], "best");
+
+    let ruined: Vec<&String> = rows.iter().filter(|r| is_ruined(&header, r)).collect();
+    let solvent: Vec<&String> = rows.iter().filter(|r| !is_ruined(&header, r)).collect();
+    assert!(!ruined.is_empty() && !solvent.is_empty(), "need both kinds:\n{rows:#?}");
+    for row in &ruined {
+        assert_eq!(
+            column(&header, row, "run.ruin_bar"),
+            RUIN_BAR.to_string(),
+            "every doomed cell dies on the spike, at the bar `RUIN_BAR` names:\n{row}"
+        );
+    }
+
+    // The defect, still present in the numbers: the best Sharpe in this grid
+    // belongs to an account that reached zero. If this ever stops holding the
+    // fixture has drifted and the test below proves nothing.
+    let best_sharpe = rows
+        .iter()
+        .max_by(|a, b| sharpe_of(&header, a).total_cmp(&sharpe_of(&header, b)))
+        .expect("a non-empty grid");
+    assert!(
+        is_ruined(&header, best_sharpe),
+        "the fixture must keep a *ruined* cell as the Sharpe argmax:\n{header}\n{best_sharpe}"
+    );
+    assert!(
+        sharpe_of(&header, best_sharpe) > 0.0,
+        "and that Sharpe must be positive, or ruin is not what is being hidden"
+    );
+
+    // And the fix: the row `--best-by` sorted to the top is a live account.
+    let winner = &rows[0];
+    assert!(
+        !is_ruined(&header, winner),
+        "--best-by sharpe picked a wiped-out cell:\n{header}\n{winner}"
+    );
+    assert!(
+        sharpe_of(&header, winner) < sharpe_of(&header, best_sharpe),
+        "the winner should be beaten on raw Sharpe by the dead cell it out-ranked — \
+         otherwise the guard was never exercised"
+    );
+    // Every ruined cell sorts below every solvent one, not just the first.
+    let last_solvent = rows.iter().rposition(|r| !is_ruined(&header, r)).unwrap();
+    let first_ruined = rows.iter().position(|r| is_ruined(&header, r)).unwrap();
+    assert!(
+        last_solvent < first_ruined,
+        "ruined cells must sort as a block below the solvent ones:\n{rows:#?}"
+    );
+}
+
+/// The value is kept. `--best-by` stops selecting on it; nothing stops
+/// reporting it. See `ruin_is_unrankable_but_its_numbers_are_still_reported`
+/// for why that is the choice.
+#[test]
+fn a_ruined_cell_keeps_its_metrics_in_the_csv() {
+    let (_console, header, rows) = ma_sweep(&["--best-by", "sharpe"], "csv");
+    let ruined: Vec<&String> = rows.iter().filter(|r| is_ruined(&header, r)).collect();
+    assert!(!ruined.is_empty());
+    for row in ruined {
+        let sharpe = column(&header, row, "risk_adjusted.sharpe");
+        assert!(
+            sharpe.parse::<Real>().is_ok(),
+            "a ruined cell keeps its pre-ruin Sharpe rather than blanking it:\n{row}"
+        );
+        assert_eq!(
+            column(&header, row, "returns.cagr_pct"),
+            "-100",
+            "and its terminal-wealth metrics still read ruin:\n{row}"
+        );
+    }
+}
+
+/// Defect B: the console said `+356.06% ann` for a zeroed account and nothing
+/// else. `run` gained a ruin banner in `1a253e8`; `optimize` reports N cells and
+/// shows one, so it needs both — a count for the rows in the CSV, and a line on
+/// the winner when the winner itself is dead.
+#[test]
+fn optimize_names_ruin_for_a_ruined_row_and_for_a_ruined_winner() {
+    // A ruined *non-winner*: the sweep is correctly ranked and still has to say
+    // that seven of its eight rows are dead accounts.
+    let (console, header, rows) = ma_sweep(&["--best-by", "sharpe"], "warn");
+    let n_ruined = rows.iter().filter(|r| is_ruined(&header, r)).count();
+    assert!(n_ruined > 0 && n_ruined < rows.len());
+    assert!(
+        console.contains(&format!("{n_ruined} of {} grid points ended in ruin", rows.len())),
+        "a correctly-ranked sweep must still name its dead rows:\n{console}"
+    );
+    assert!(
+        !console.contains("ruined at bar"),
+        "…but must not claim the *winner* is one when it is not:\n{console}"
+    );
+
+    // A ruined winner: rank by a metric every cell here is degenerate under, so
+    // no cell is rankable and the block falls back to the first row — which is
+    // ruined. The headline figures above it describe a run that ended at zero.
+    let (spec, _) = scratch_file("ruin_ma_win_strategy.yml", RUIN_SWEEPABLE_MA);
+    let (series, _) = scratch_file("ruin_ma_win_series.csv", &ma_sweep_csv());
+    let out = unique_path("ruin_ma_win").with_extension("csv");
+    let out_str = out.to_string_lossy().into_owned();
+    let outcome = Cmd::new("optimize")
+        .arg(&format!("@{}", spec.display()))
+        .series(&format!("@{}", series.display()))
+        .args(&["--crypto", "-f", "1d"])
+        // Only cells that die, so every candidate is unrankable and the winner
+        // is necessarily a dead one.
+        .args(&["--grid", "PERIOD=[3,5,10]"])
+        .args(&["--metrics", "sharpe,cagr_pct,run.ruin_bar"])
+        .args(&["--best-by", "sharpe"])
+        .args(&["--output", &out_str])
+        .ok();
+    let console = format!("{}{}", outcome.stdout, outcome.stderr);
+    assert!(
+        console.contains("ruined at bar"),
+        "the best block must qualify the headline it prints for a dead winner:\n{console}"
+    );
+    assert!(
+        console.contains("Every cell in this grid ended in ruin"),
+        "and say that there was no solvent cell to pick:\n{console}"
+    );
+}
+
+/// `--smooth` needs no change of its own: a ruined cell has no ranking key, and
+/// a missing key already contributes no weight to its neighbours' averages and
+/// lowers their `_support`. That is the honest reading — the neighbourhood
+/// average rests on fewer cells — and it is what the flag's support column is
+/// for. Treating ruin as "very bad" instead would mean inventing a magnitude.
+#[test]
+fn smoothing_gives_a_ruined_cell_no_weight_and_says_so_in_support() {
+    let (spec, _) = scratch_file("ruin_ma_smooth_strategy.yml", RUIN_SWEEPABLE_MA);
+    let (series, _) = scratch_file("ruin_ma_smooth_series.csv", &ma_sweep_csv());
+    let out = unique_path("ruin_ma_smooth").with_extension("csv");
+    let out_str = out.to_string_lossy().into_owned();
+    Cmd::new("optimize")
+        .arg(&format!("@{}", spec.display()))
+        .series(&format!("@{}", series.display()))
+        .args(&["--crypto", "-f", "1d"])
+        .args(&["--grid", "PERIOD=[3,5,10,20,40,60,100,200]"])
+        .args(&["--metrics", "sharpe,run.ruin_bar"])
+        .args(&["--best-by", "sharpe", "--smooth=box:1"])
+        .args(&["--output", &out_str])
+        .ok();
+
+    let text = std::fs::read_to_string(&out).expect("optimize wrote no CSV");
+    let mut lines = text.lines();
+    let header = lines.next().expect("header").to_string();
+    let rows: Vec<String> = lines.map(str::to_string).collect();
+    let support = |row: &str| -> Real {
+        column(&header, row, "risk_adjusted.sharpe_support").parse().expect("a support cell")
+    };
+
+    for row in &rows {
+        if !is_ruined(&header, row) {
+            continue;
+        }
+        assert_eq!(
+            column(&header, row, "risk_adjusted.sharpe_smoothed"),
+            "",
+            "a ruined cell contributes no ranking key, so it has no smoothed value \
+             of its own either:\n{row}"
+        );
+    }
+    // A cell whose neighbourhood contains a dead one must say its average rests
+    // on less: full support on this stencil is 1.0.
+    assert!(
+        rows.iter().any(|r| !is_ruined(&header, r) && support(r) < 1.0),
+        "a solvent cell next to a ruined one should carry reduced support:\n{text}"
+    );
+}
+
+/// Walk-forward selects a winner **per fold**, from that fold's in-sample
+/// slice, through its own call site — so it needs the same rule, and a fold is
+/// where getting it wrong is most expensive: the cell picked in-sample is the
+/// cell whose out-of-sample slice becomes the composite. Pick a dead one and
+/// the composite is stitched from a flat-zero curve.
+///
+/// Both halves are asserted here.
+///
+/// - A fold whose in-sample slice **contains** the ruin bar must not crown the
+///   cell that died in it. Without the guard this fold picks `PERIOD=3` on an
+///   in-sample Sharpe of `+1.84` with `run.ruin_bar_is` set — the account was
+///   already at zero for the last 300 bars of the window it was selected on.
+/// - A fold whose winner was solvent when it was picked and blew up **out of**
+///   sample has to say so, because `sharpe_oos` reads like an ordinary bad fold
+///   and `_wfe` like an ordinary bad ratio.
+///
+/// The in-sample half needs a window long enough to dilute one `-100%` bar,
+/// which is why this runs against [`WF_NOISE`]'s earlier ruin rather than the
+/// grid sweep's: over a 500-bar slice the wipeout sinks the cell on its own
+/// arithmetic and the guard is never reached.
+#[test]
+fn a_fold_neither_picks_a_cell_that_died_in_sample_nor_hides_one_that_died_out() {
+    let (spec, _) = scratch_file("ruin_ma_wf_strategy.yml", RUIN_SWEEPABLE_MA);
+    let (series, _) = scratch_file("ruin_ma_wf_series.csv", &ma_series(WF_NOISE));
+    let out = unique_path("ruin_ma_wf").with_extension("csv");
+    let out_str = out.to_string_lossy().into_owned();
+    let outcome = Cmd::new("optimize")
+        .arg(&format!("@{}", spec.display()))
+        .series(&format!("@{}", series.display()))
+        .args(&["--crypto", "-f", "1d"])
+        .args(&["--grid", "PERIOD=[3,5,10,20,40,60,100,200]"])
+        .args(&["--metrics", "sharpe,run.ruin_bar"])
+        .args(&["--best-by", "sharpe"])
+        // Long in-sample windows, so one wiped-out bar in 1 300 is exactly as
+        // invisible to Sharpe as it is over a whole run.
+        .args(&["--walkforward", "1300,100"])
+        .args(&["--output", &out_str])
+        .ok();
+
+    let text = std::fs::read_to_string(&out).expect("optimize wrote no walk-forward CSV");
+    let mut lines = text.lines();
+    let header = lines.next().expect("header").to_string();
+    let rows: Vec<String> = lines.map(str::to_string).collect();
+
+    // No fold may have selected a cell that was already dead in the slice it
+    // was selected on.
+    for row in &rows {
+        assert_eq!(
+            column(&header, row, "run.ruin_bar_is"),
+            "",
+            "a fold selected a cell that was wiped out inside its own in-sample \
+             slice:\n{header}\n{row}"
+        );
+    }
+    // And the fixture must actually have offered one, or the loop above is
+    // vacuous: some fold's in-sample window has to contain the ruin bar.
+    let straddles = rows.iter().any(|r| {
+        let start: usize = column(&header, r, "is_start").parse().unwrap_or(0);
+        let end: usize = column(&header, r, "is_end").parse().unwrap_or(0);
+        (start..end).contains(&WF_RUIN_BAR)
+    });
+    assert!(straddles, "no fold's in-sample slice covers bar {WF_RUIN_BAR}:\n{text}");
+
+    // The other half: a fold whose winner died out of sample says so.
+    let died_oos = rows.iter().any(|r| !column(&header, r, "run.ruin_bar_oos").is_empty());
+    assert!(died_oos, "the fixture should ruin some fold's winner out of sample:\n{text}");
+    let console = format!("{}{}", outcome.stdout, outcome.stderr);
+    assert!(
+        console.contains("ruined oos@"),
+        "the folds table must name a winner that blew up out of sample:\n{console}"
+    );
+}

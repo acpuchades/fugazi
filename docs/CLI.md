@@ -527,6 +527,14 @@ Metrics that don't appear in the direction table (`returns.skewness`,
 inputs, …) can still be requested with `-m` — they just can't be passed
 to `--best-by` because there's no unambiguous "better".
 
+**A ruined row is never a candidate under any of them.** Twenty of the metrics
+above will happily rank a wiped-out account over a solvent profitable one on
+raw value — every bar-return ratio, because one `-100%` bar in a few thousand
+barely moves an average — so ruin is excluded where a row becomes a ranking
+key rather than metric by metric. The values stay in the CSV; the candidacy
+does not. See [Overfitting](#overfitting-and-the-trainvalidate-workflow) and
+[Ruin](METRICS.md#ruin).
+
 Under [`-w/--windowed`](#windowed-metrics), `--best-by` ranks by the metric's
 **cross-window mean**, and `-k/--risk-aversion <K>` shifts that mean
 *against* each grid point by `K` standard deviations before sorting —
@@ -750,13 +758,49 @@ losses as *positive* returns — and an argmax over Sharpe finds that region
 reliably. `backtest::run` therefore treats reaching zero equity as terminal: it
 records the bar, liquidates, stops trading, and pins the curve at zero (see
 [Ruin](METRICS.md#ruin)). A ruined cell consequently reports `-100%` return and
-a 100% drawdown and sorts below any solvent one under `--best-by` on its own
-arithmetic — there is no `--exclude-ruined` flag to remember, and none is
-needed. Ask for `run.ruin_bar` in `-m`/`--metrics` if you want to see which
-cells died and when.
+a 100% drawdown.
 
-Note that `--smooth` cannot substitute for this: where a whole *region* of the
-grid is ruined-but-positive-Sharpe, the neighbourhood average endorses it.
+**That fixes the metrics anchored to terminal wealth, and no others.** A
+bar-return ratio cannot see ruin: truncating at zero contributes one `-100%` bar
+out of however many the run had, which over a few thousand bars barely moves the
+average. A strategy that compounds for years and then dies keeps a positive
+Sharpe — and Sharpe is the metric people reach for. So `optimize` treats a
+ruined row as having **no ranking value at all**: it can never win `--best-by`
+whatever the metric, it contributes no weight to its neighbours under
+`--smooth` (and lowers their `_support`), and a walk-forward fold will not
+select a cell that was wiped out inside its own in-sample slice. There is still
+no `--exclude-ruined` flag to remember, and none is needed.
+
+The number itself is kept — a pre-ruin Sharpe describes what the parameter set
+was doing while it was alive, and `run.ruin_bar` sits beside it saying that is
+all it is. So a ruined row's `-m` cells read exactly as before; what changed is
+that nothing selects on them. Ask for `run.ruin_bar` in `-m`/`--metrics` to see
+which cells died, and when.
+
+The console says it too, in two places — a count for the rows that went into the
+CSV, and a line on the winner when the winner itself is dead (which can only
+happen when *nothing* in the grid survived):
+
+```
+best
+  params   PERIOD=3
+  sharpe   2.5525
+  cagr_pct -100.0000
+  return   +123.89% ann · vol 48.54%
+  ruin     ruined at bar 1776 of 1858 — every figure above describes the run before that point
+           this cell is not rankable, so it is shown here only because no solvent cell out-ranked it
+warning: 3 of 3 grid points ended in ruin — …
+```
+
+`+123.89% ann` on a zeroed account is exactly the headline the `ruin` line
+exists to qualify. Under `--walkforward` the fold table carries the same marker
+per fold — `ruined is@N` / `ruined oos@N` — which is where it matters most: a
+fold winner that was solvent when it was selected and blew up out of sample
+otherwise reads as an ordinary bad fold.
+
+Note that `--smooth` cannot substitute for any of this: where a whole *region*
+of the grid is ruined-but-positive-Sharpe, the neighbourhood average endorses
+it.
 
 The recommended workflow is therefore an **explicit train / validate
 split**, with `get` and `file:` doing the plumbing:

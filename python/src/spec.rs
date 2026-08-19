@@ -1127,6 +1127,8 @@ pub(crate) struct PySweepRow {
     // support behind it. `None` when smoothing didn't run.
     pub(crate) smoothed: Option<Real>,
     pub(crate) support: Option<Real>,
+    // The bar this row's account was ruined on, if it was.
+    pub(crate) ruin_bar: Option<usize>,
 }
 
 #[pymethods]
@@ -1137,6 +1139,27 @@ impl PySweepRow {
     #[getter]
     pub(crate) fn smoothed(&self) -> Option<Real> {
         self.smoothed
+    }
+
+    /// The bar this row's account was **ruined** on — the first bar close at
+    /// which equity reached zero — or `None` for a row that stayed solvent.
+    ///
+    /// A ruined row is **not a candidate**: `best_by` never returns one, and
+    /// under `smooth=` it contributes no weight to its neighbours and lowers
+    /// their `support`. Its metrics are still here, because a pre-ruin Sharpe
+    /// is a true description of the strategy while it was alive — this is the
+    /// property that says it is only that. See `fugazi optimize`'s ruin
+    /// warning, which reports the same thing on the console.
+    #[getter]
+    pub(crate) fn ruin_bar(&self) -> Option<usize> {
+        self.ruin_bar
+    }
+
+    /// Whether this row's account was wiped out. Sugar for
+    /// `row.ruin_bar is not None`.
+    #[getter]
+    pub(crate) fn ruined(&self) -> bool {
+        self.ruin_bar.is_some()
     }
 
     /// The neighbourhood weight actually found, as a fraction of the weight a
@@ -1490,6 +1513,7 @@ pub(crate) fn optimize(
                 windowed_metrics,
                 smoothed: row.smoothed.and_then(|s| s.value),
                 support: row.smoothed.map(|s| s.support),
+                ruin_bar: row.eval.ruin_bar(),
             },
         )?;
         row_objs.push(py_row);

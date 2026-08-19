@@ -540,6 +540,7 @@ fn run_single(
             print_best_block(&sweep, opts.risk_aversion);
         }
         warn_if_nothing_traded(&sweep.rows);
+        warn_if_ruined(&sweep.rows, sweep.best_by.is_some());
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -792,6 +793,7 @@ fn run_multi_symbol(
             print_best_block(&sweep, opts.risk_aversion);
         }
         warn_if_nothing_traded(&sweep.rows);
+        warn_if_ruined(&sweep.rows, sweep.best_by.is_some());
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -1208,6 +1210,45 @@ fn warn_if_nothing_traded(rows: &[Row]) {
     );
 }
 
+/// The grid-wide "some of these cells are dead accounts" banner.
+///
+/// `run` gained a ruin banner in `1a253e8`; `optimize` did not, and it needs
+/// one *more*, because a sweep reports N cells and shows the user one. A ruined
+/// cell is no longer a candidate to win (see
+/// [`ranking_lookup`](fugazi::spec::optimize::ranking_lookup)), but it is still
+/// a row in the CSV with a headline `sharpe` on it, and unless `run.ruin_bar`
+/// was among the `-m` columns nothing on that line says the account was zeroed.
+///
+/// stderr and ungated by `--quiet`, matching `warn_if_nothing_traded` /
+/// `overlap` / `cadence`: a finding about the result, not part of the summary.
+fn warn_if_ruined(rows: &[Row], ranked: bool) {
+    let ruined = rows.iter().filter(|r| r.eval.ruin_bar().is_some()).count();
+    if ruined == 0 {
+        return;
+    }
+    let n = rows.len();
+    let tail = if ruined == n {
+        " Every cell in this grid ended in ruin — there is no solvent point to \
+         pick, and the row shown as `best` is only the first one enumerated."
+            .to_string()
+    } else if ranked {
+        String::new()
+    } else {
+        " Pass --best-by to rank the sweep; without it the rows are in \
+         enumeration order and a ruined cell can be the first one."
+            .to_string()
+    };
+    eprintln!(
+        "{} {ruined} of {n} grid {} ended in ruin — the account reached zero \
+         and stopped trading. Their bar-return metrics (sharpe, mean_bar, \
+         win_rate_pct, …) describe only the part of the run that happened \
+         before that, so they are excluded from --best-by ranking; read \
+         run.ruin_bar to tell them apart.{tail}",
+        style::yellow("warning:"),
+        if ruined == 1 { "point" } else { "points" },
+    );
+}
+
 fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");
@@ -1385,6 +1426,27 @@ fn print_best_block(sweep: &Sweep, k: Real) {
         }
     };
     style::field("return", &headline);
+
+    // Last, directly under the headline it contradicts. `+356.06% ann` on a
+    // zeroed account is the exact line this exists to qualify: every number
+    // above describes the run up to `bar`, and there was no money after it.
+    if let Some(bar) = best.eval.ruin_bar() {
+        let bars = match &best.eval {
+            Evaluation::Whole(m) => m.run.bars,
+            Evaluation::Windowed(ws) => ws.last().map_or(0, |w| w.end_bar + 1),
+        };
+        style::field(
+            "ruin",
+            &format!(
+                "ruined at bar {bar} of {bars} — every figure above describes \
+                 the run before that point",
+            ),
+        );
+        style::field_continuation(
+            "this cell is not rankable, so it is shown here only because no \
+             solvent cell out-ranked it",
+        );
+    }
 }
 
 /// One metric value for the best block: `1.2345` for a whole-run evaluation,
@@ -1687,6 +1749,34 @@ fn print_walkforward_inputs(
     ));
 }
 
+/// `  ruined is@N` / `  ruined oos@N` for a fold whose winner was wiped out on
+/// one side of the split, else the empty string.
+///
+/// The fold table's `_is` / `_oos` / `_wfe` columns are bar-return metrics as
+/// often as not, and those cannot see ruin — an efficiency of 0.9 between two
+/// dead accounts reads as a well-behaved fold. Ruin in the *in-sample* slice
+/// can no longer make a cell win (`ranking_lookup`), so what shows up here is
+/// the case that survives selection: the fold's winner was solvent when it was
+/// picked and blew up out of sample. That is the single most important thing a
+/// walk-forward can tell you, and it had no line.
+///
+/// Bars are absolute, matching the `[is_start..is_end)` labels on the same row;
+/// `report_slice` reports each slice's ruin bar relative to the slice.
+fn fold_ruin_marker(row: &crate::spec::optimize::WalkForwardRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = row.is_metrics.run.ruin_bar {
+        parts.push(format!("is@{}", row.is_start + b));
+    }
+    if let Some(b) = row.oos_metrics.run.ruin_bar {
+        parts.push(format!("oos@{}", row.oos_start + b));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  {} {}", style::yellow("ruined"), parts.join(" "))
+    }
+}
+
 fn print_walkforward_summary(
     rows: &[crate::spec::optimize::WalkForwardRow],
     metric_columns: &[(String, String)],
@@ -1711,7 +1801,7 @@ fn print_walkforward_summary(
             style::field(
                 &format!("#{}", row.fold),
                 &format!(
-                    "[{}..{})/[{}..{})  {label}_is={} _oos={} _wfe={}  params: {params_label}",
+                    "[{}..{})/[{}..{})  {label}_is={} _oos={} _wfe={}  params: {params_label}{}",
                     row.is_start,
                     row.is_end,
                     row.oos_start,
@@ -1719,6 +1809,7 @@ fn print_walkforward_summary(
                     is_v.map(format_number).unwrap_or_else(|| "—".into()),
                     oos_v.map(format_number).unwrap_or_else(|| "—".into()),
                     wfe.map(format_number).unwrap_or_else(|| "—".into()),
+                    fold_ruin_marker(row),
                 ),
             );
         }
@@ -1736,8 +1827,12 @@ fn print_walkforward_summary(
             style::field(
                 &format!("#{}", row.fold),
                 &format!(
-                    "[{}..{})/[{}..{})  is={is_str} oos={oos_str}",
-                    row.is_start, row.is_end, row.oos_start, row.oos_end
+                    "[{}..{})/[{}..{})  is={is_str} oos={oos_str}{}",
+                    row.is_start,
+                    row.is_end,
+                    row.oos_start,
+                    row.oos_end,
+                    fold_ruin_marker(row),
                 ),
             );
         }

@@ -1373,3 +1373,99 @@ def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
     without_b = spec.run(ta.PaperWallet(10_000.0), snaps(False))
     assert len(with_b.fills) > 0
     assert len(without_b.fills) == 0
+
+
+# ---------------------------------------------------------------------------
+# optimize: a ruined row is reported but never selected
+# ---------------------------------------------------------------------------
+
+
+def _doomed_yaml():
+    """A short held from the first bar and never covered, at a sweepable size."""
+    return """
+    symbol: BTC
+    sizing: !param LEVERAGE
+    short:
+      enter: !lt
+        lhs: !value 0
+        rhs: !value 1
+      exit: !never
+    """
+
+
+def _rally_snaps():
+    """A rally steep enough to bury a leveraged short, with a long tail after it.
+
+    The tail is the point: ruin pins the equity curve at zero, so the dead
+    cell's return series is one `-100%` bar followed by hundreds of exact zeros,
+    and a *tail* statistic reads that as the calmest account in the grid. On a
+    40-bar path the wipeout would still be inside the bottom 5% and the metric
+    would report it; a real run has no such luck.
+    """
+    px, prices = 100.0, []
+    for i in range(4):
+        px *= 1.01 if i % 2 else 0.99
+        prices.append(px)
+    for _ in range(2):
+        px *= 1.25
+        prices.append(px)
+    for i in range(400):
+        px *= 1.01 if i % 2 else 0.99
+        prices.append(px)
+    return _snaps_single("BTC", prices)
+
+
+def test_optimize_reports_ruin_but_never_selects_it():
+    """A wiped-out cell keeps its metrics and loses its candidacy.
+
+    `best_by` is `returns.var_95` on purpose: it is *lower-is-better* and a
+    ruined run's tail is mostly the flat zeros the driver pins after ruin, so on
+    raw arithmetic the dead cell wins it. That is the whole class of defect —
+    only the metrics anchored to terminal wealth (`cagr_pct`, `calmar`) read
+    ruin, and every bar-return statistic is blind to it. The guard is on the
+    ranking, not on the metric, so the number below is still there to read.
+    """
+    sweep = ta.optimize(
+        _doomed_yaml(),
+        _rally_snaps(),
+        cash=1000.0,
+        grid=[{"LEVERAGE": [0.2, 3.0]}],
+        metric_names=["returns.var_95", "returns.cagr_pct", "run.ruin_bar"],
+        best_by="returns.var_95",
+    )
+    by_leverage = {row.values["LEVERAGE"]: row for row in sweep.rows}
+    dead, alive = by_leverage[3.0], by_leverage[0.2]
+
+    assert dead.ruined and dead.ruin_bar is not None, "the 3x short must be wiped out"
+    assert not alive.ruined and alive.ruin_bar is None
+    assert dead.ruin_bar == dead.metrics["run.ruin_bar"], "the property and the column agree"
+
+    # The number survives — both cells report a var_95, and the dead one's is
+    # the better of the two on raw arithmetic.
+    assert dead.metrics["returns.var_95"] is not None
+    assert dead.metrics["returns.var_95"] <= alive.metrics["returns.var_95"]
+    assert dead.metrics["returns.cagr_pct"] == pytest.approx(-100.0)
+
+    # The candidacy does not.
+    assert sweep.best is not None
+    assert not sweep.best.ruined
+    assert sweep.best.values["LEVERAGE"] == 0.2
+    assert sweep.rows[0].values["LEVERAGE"] == 0.2, "ruined rows sort last"
+
+
+def test_optimize_smooth_gives_a_ruined_cell_no_weight():
+    """A ruined cell has no ranking key, so it neither smooths nor contributes."""
+    sweep = ta.optimize(
+        _doomed_yaml(),
+        _rally_snaps(),
+        cash=1000.0,
+        grid=[{"LEVERAGE": [0.2, 0.4, 3.0]}],
+        metric_names=["returns.var_95"],
+        best_by="returns.var_95",
+        smooth="box:1",
+    )
+    by_leverage = {row.values["LEVERAGE"]: row for row in sweep.rows}
+    assert by_leverage[3.0].ruined
+    assert by_leverage[3.0].smoothed is None, "no ranking key, so nothing to smooth"
+    # Its solvent neighbour's average rests on one cell fewer.
+    assert by_leverage[0.4].support < 1.0

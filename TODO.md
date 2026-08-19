@@ -57,6 +57,39 @@ hand, ship the helper with the end-of-period convention and document the other.
 
 ## Optimize
 
+### Ruin is excluded from *ranking*, not from the metrics
+
+A wiped-out grid cell keeps every number it had — `sharpe`, `mean_bar`,
+`win_rate_pct`, all of them — and loses only its candidacy: `ranking_lookup`
+returns `None` for a ruined row, so `--best-by` can never return one, `--smooth`
+gives it no weight, and a walk-forward fold will not select a cell that died
+inside its own in-sample slice. Two alternatives were considered when the
+bar-return blind spot was found (0.65.0) and rejected.
+
+**`None` from the metric itself** — "a run that ceased to exist has no Sharpe" —
+loses because the rule it needs does not exist. The set of statistics a wipeout
+invalidates is not "the ratios": an adversarial pair of curves beats a solvent
+profitable run on 17 of the 39 rankable paths outright, and of the remaining 22
+only nine are safe by *construction* (the terminal-wealth ones, `drawdown.max*`
+and `worst_bar`). `best_bar`, `largest_win` and `payoff_ratio` are one lucky
+pre-ruin trade away; `stddev_bar` and `ulcer_index` are bounded only by
+`1/sqrt(bars)`. Satisfying the invariant that way means nulling ~30 of 39,
+including ten fields that are non-`Option` today — a schema change to
+`metrics.yml` that leaves a ruined run's document nearly empty, throws away the
+only evidence of what the parameter set was doing before it died, *and* still
+covers only the metrics someone remembered to list. One predicate at the
+ranking boundary covers all 39 and every metric added later.
+
+**A parallel `pre_ruin.` namespace**, with the plain name `None`, loses for the
+same reason plus a second catalogue to keep in step — `direction_for` entries,
+`metrics::flatten`, CSV columns, Python — to say what `run.ruin_bar` beside the
+plain value already says.
+
+What would change it: a metric whose *pre-ruin* value is not merely unrankable
+but actively misleading as a description — one where reading it at all invites
+the wrong conclusion regardless of the ruin flag next to it. None in the current
+catalogue is; `tests/ruin.rs` pins the choice.
+
 ### The rest of the plateau summary: "fraction of the grid above baseline"
 
 `--smooth`'s console block reports the largest connected plateau within 5% of
