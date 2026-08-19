@@ -87,6 +87,186 @@ fn lanes_sum_sq(xs: &[Real], mean: Real) -> Real {
     (acc[0] + acc[1]) + (acc[2] + acc[3])
 }
 
+/// A fixed-capacity ring buffer — the generic form of the storage
+/// [`WindowStats`] and [`WindowExtreme`] hand-roll.
+///
+/// Those two came first and each carries a hand-written ring tuned to its own
+/// access pattern ([`WindowStats`] needs the *whole* buffer as one contiguous
+/// run when full, [`WindowExtreme`] pushes and pops at both ends to stay
+/// monotonic), so neither is expressed in terms of this. Everything else that
+/// wants "the last `capacity` samples, oldest evicted" should be.
+///
+/// The point is the same one trick #3 in `docs/PERFORMANCE.md` records: the
+/// capacity is fixed at construction and never changes, so a [`VecDeque`]'s
+/// growth checks and wrap-around bookkeeping are paid on every sample for a
+/// flexibility none of these windows use. Measured on the shipped indicators,
+/// callgrind instructions per sample net of a control
+/// (`cargo bench --bench window_ring -- <workload>`; see `docs/PERFORMANCE.md`
+/// Phase 13):
+///
+/// | indicator | `VecDeque` | `Ring` | |
+/// |---|---:|---:|---:|
+/// | `Diff` / `Lag` / `Ratio` | 49.63 | **7.62** | −84.6% |
+/// | [`Wma`](super::Wma) | 65.62 | **26.64** | −59.4% |
+/// | [`Hma`](super::Hma) (three at once) | 200.58 | **121.62** | −39.4% |
+/// | [`Correlation`](super::Correlation) | 407.18 | **303.83** | −25.4% |
+/// | [`Vwap`](super::Vwap) | 144.63 | **129.64** | −10.4% |
+///
+/// Wall-clock put `Vwap` and `Correlation` ~10% *slower* on the same change.
+/// That reading was code layout, not work — the control drifted 13% between the
+/// two runs, which is the condition trap 6 in `docs/PERFORMANCE.md` says to
+/// resolve with callgrind rather than by re-running.
+///
+/// **Serialization is the caller's job, and it is load-bearing.** A `Ring` has
+/// no `Serialize`/`Deserialize` impl on purpose: the wire format every existing
+/// run-state file carries is a bare array in logical (oldest-first) order, which
+/// does not record the capacity, so a `Ring` cannot restore itself from one.
+/// Each owner therefore hand-writes the pair — reading its own `period` field to
+/// size the ring, then replaying the array through [`push`](Self::push) — which
+/// is exactly what [`WindowStats`] already does and why *its* format survived
+/// the same change. See [`from_logical`](Self::from_logical).
+#[derive(Debug, Clone)]
+pub(crate) struct Ring<T> {
+    /// `capacity` slots. Only the `len` entries starting at `head` (wrapping)
+    /// are live; the rest are stale.
+    buf: Box<[T]>,
+    head: usize,
+    len: usize,
+}
+
+impl<T: Copy + Default> Ring<T> {
+    /// # Panics
+    /// Panics if `capacity` is zero.
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "ring capacity must be greater than zero");
+        Self {
+            buf: vec![T::default(); capacity].into_boxed_slice(),
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Rebuild from a logical (oldest-first) run of samples at a known
+    /// capacity — the deserialization half, factored out because every owner's
+    /// hand-written `Deserialize` needs exactly this.
+    ///
+    /// Extra samples beyond `capacity` are dropped from the *front*, keeping the
+    /// newest: the blob is caller-supplied, and a window longer than its period
+    /// is corrupt rather than fatal.
+    pub fn from_logical(capacity: usize, items: impl IntoIterator<Item = T>) -> Self {
+        let mut out = Self::new(capacity);
+        for x in items {
+            out.push(x);
+        }
+        out
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len == self.buf.len()
+    }
+
+    /// Push a sample. Once full this evicts the oldest and returns it, which is
+    /// the `pop_front`-then-`push_back` pair every caller used to write as two
+    /// deque operations.
+    pub fn push(&mut self, x: T) -> Option<T> {
+        let cap = self.buf.len();
+        if self.len == cap {
+            // Full: overwrite the oldest slot and advance. One store, one
+            // branch, no bounds juggling.
+            let old = self.buf[self.head];
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == cap {
+                self.head = 0;
+            }
+            Some(old)
+        } else {
+            let at = self.head + self.len;
+            let at = if at >= cap { at - cap } else { at };
+            self.buf[at] = x;
+            self.len += 1;
+            None
+        }
+    }
+
+    /// The live samples as up to two contiguous slices, oldest first.
+    pub fn slices(&self) -> (&[T], &[T]) {
+        if self.len == 0 {
+            return (&[], &[]);
+        }
+        let end = self.head + self.len;
+        if end <= self.buf.len() {
+            (&self.buf[self.head..end], &[])
+        } else {
+            (&self.buf[self.head..], &self.buf[..end - self.buf.len()])
+        }
+    }
+
+    /// The live samples, oldest first — the logical order the wire format uses.
+    pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        let (a, b) = self.slices();
+        a.iter().copied().chain(b.iter().copied())
+    }
+
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+}
+
+/// A [`Ring`] serializes as a bare array in logical (oldest-first) order — the
+/// shape a `VecDeque` field produced, so every run-state file written before the
+/// conversion still loads.
+impl<T: Copy + Default + Serialize> Serialize for Ring<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.len))?;
+        let (a, b) = self.slices();
+        for x in a.iter().chain(b) {
+            seq.serialize_element(x)?;
+        }
+        seq.end()
+    }
+}
+
+/// Restore a fixed-capacity window from the bare array [`Ring`]'s `Serialize`
+/// emits, **taking the capacity from the value being restored into** rather than
+/// from the blob.
+///
+/// This is why a [`Ring`] has no `Deserialize` impl and cannot have a useful
+/// one: the wire format does not record the capacity, and a window saved
+/// mid-warm-up is shorter than its period, so `Deserialize` alone would restore
+/// it at the wrong size. It does not need to — the run-state contract in
+/// `fugazi-derive` is that *the structure is always rebuilt from the spec first
+/// and only the values are replayed in*, so the destination's capacity is
+/// already correct by construction. `#[state(window)]` is the field annotation
+/// that routes through this.
+pub(crate) trait LoadWindow: Sized {
+    fn load_window(&self, v: &serde_json::Value) -> Result<Self, String>;
+}
+
+impl<T: Copy + Default + serde::de::DeserializeOwned> LoadWindow for Ring<T> {
+    fn load_window(&self, v: &serde_json::Value) -> Result<Self, String> {
+        let items: Vec<T> = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        if items.len() > self.capacity() {
+            return Err(format!(
+                "window holds {} samples, more than its capacity of {}",
+                items.len(),
+                self.capacity()
+            ));
+        }
+        Ok(Ring::from_logical(self.capacity(), items))
+    }
+}
+
 /// A fixed-capacity ring buffer of the last `period` samples.
 ///
 /// A `VecDeque` would do the same job, and did. The window's capacity is known
@@ -412,12 +592,56 @@ pub(crate) const MOMENT_EPS: Real = 1e-12;
 /// way). Backs [`Correlation`](super::Correlation); the shared covariance
 /// machinery also makes rolling beta a one-line composition (`corr · σ_y / σ_x`)
 /// without a second core.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **The serialized shape is unchanged** — see the `Serialize`/`Deserialize`
+/// impls below, which emit the same `{period, window, sum_x, sum_y}` object with
+/// the window in logical (oldest-first) order that the `VecDeque` derive
+/// produced. Run-state files written by earlier versions still load.
+#[derive(Debug, Clone)]
 pub(crate) struct WindowCovariance {
     period: usize,
-    window: VecDeque<(Real, Real)>,
+    window: Ring<(Real, Real)>,
     sum_x: Real,
     sum_y: Real,
+}
+
+/// The on-the-wire shape of a [`WindowCovariance`], identical to what the old
+/// `VecDeque`-backed derive produced.
+#[derive(Serialize, Deserialize)]
+struct WindowCovarianceRepr {
+    period: usize,
+    window: Vec<(Real, Real)>,
+    sum_x: Real,
+    sum_y: Real,
+}
+
+impl Serialize for WindowCovariance {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WindowCovarianceRepr {
+            period: self.period,
+            window: self.window.iter().collect(),
+            sum_x: self.sum_x,
+            sum_y: self.sum_y,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for WindowCovariance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = WindowCovarianceRepr::deserialize(d)?;
+        if r.period == 0 {
+            return Err(serde::de::Error::custom(
+                "window period must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            period: r.period,
+            window: Ring::from_logical(r.period, r.window),
+            sum_x: r.sum_x,
+            sum_y: r.sum_y,
+        })
+    }
 }
 
 impl WindowCovariance {
@@ -425,7 +649,7 @@ impl WindowCovariance {
         assert!(period > 0, "window period must be greater than zero");
         Self {
             period,
-            window: VecDeque::with_capacity(period),
+            window: Ring::new(period),
             sum_x: 0.0,
             sum_y: 0.0,
         }
@@ -438,11 +662,10 @@ impl WindowCovariance {
     /// Push a paired sample, evicting the oldest once the window is full.
     /// Returns whether the window is now full (statistics valid).
     pub fn update(&mut self, x: Real, y: Real) -> bool {
-        self.window.push_back((x, y));
+        let evicted = self.window.push((x, y));
         self.sum_x += x;
         self.sum_y += y;
-        if self.window.len() > self.period {
-            let (ox, oy) = self.window.pop_front().expect("window is non-empty");
+        if let Some((ox, oy)) = evicted {
             self.sum_x -= ox;
             self.sum_y -= oy;
         }
@@ -450,7 +673,7 @@ impl WindowCovariance {
     }
 
     pub fn is_full(&self) -> bool {
-        self.window.len() == self.period
+        self.window.is_full()
     }
 
     /// Pearson correlation over the window, from one centred pass. Returns `0.0`
@@ -464,12 +687,23 @@ impl WindowCovariance {
         let mean_x = self.sum_x / n;
         let mean_y = self.sum_y / n;
         let (mut var_x, mut var_y, mut cov) = (0.0, 0.0, 0.0);
-        for (x, y) in &self.window {
-            let (dx, dy) = (x - mean_x, y - mean_y);
-            var_x += dx * dx;
-            var_y += dy * dy;
-            cov += dx * dy;
-        }
+        // The window's two contiguous halves, reduced in turn into the *same*
+        // three accumulators. That keeps the summation order exactly what the
+        // `VecDeque` produced — oldest to newest — so this stays bit-identical;
+        // it is only the per-element "which half am I in?" test of a chained
+        // iterator that goes away. (Summing the halves separately and adding
+        // would not be: see `WindowStats::variance`.)
+        let (a, b) = self.window.slices();
+        let mut accumulate = |xs: &[(Real, Real)]| {
+            for &(x, y) in xs {
+                let (dx, dy) = (x - mean_x, y - mean_y);
+                var_x += dx * dx;
+                var_y += dy * dy;
+                cov += dx * dy;
+            }
+        };
+        accumulate(a);
+        accumulate(b);
         let (var_x, var_y, cov) = (var_x / n, var_y / n, cov / n);
         if var_x < MOMENT_EPS || var_y < MOMENT_EPS {
             return 0.0;
@@ -490,14 +724,60 @@ impl WindowCovariance {
 /// on a plain `Real` stream (no source, no `Indicator` impl) so [`Wma`](super::Wma)
 /// can wrap a source while [`Hma`](super::Hma) reuses it to smooth a value it
 /// computes internally.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// **The serialized shape is unchanged** — see the `Serialize`/`Deserialize`
+/// impls below, which emit the same `{period, window, sum, weighted}` object
+/// with the window in logical (oldest-first) order that the `VecDeque` derive
+/// produced. Run-state files written by earlier versions still load.
+#[derive(Debug, Clone)]
 pub(crate) struct WmaState {
     period: usize,
-    window: VecDeque<Real>,
+    window: Ring<Real>,
     /// Simple sum of the window.
     sum: Real,
     /// Position-weighted sum, `Σ kᵢ·xᵢ` with `kᵢ ∈ 1..=period` oldest→newest.
     weighted: Real,
+}
+
+/// The on-the-wire shape of a [`WmaState`], identical to what the old
+/// `VecDeque`-backed derive produced.
+#[derive(Serialize, Deserialize)]
+struct WmaStateRepr {
+    period: usize,
+    window: Vec<Real>,
+    sum: Real,
+    weighted: Real,
+}
+
+impl Serialize for WmaState {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WmaStateRepr {
+            period: self.period,
+            window: self.window.iter().collect(),
+            sum: self.sum,
+            weighted: self.weighted,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for WmaState {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = WmaStateRepr::deserialize(d)?;
+        // `period` is what sizes the ring, so a zero would panic in `Ring::new`
+        // on a hand-edited blob. Reject it as bad data instead.
+        if r.period == 0 {
+            return Err(serde::de::Error::custom(
+                "WMA period must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            period: r.period,
+            window: Ring::from_logical(r.period, r.window),
+            sum: r.sum,
+            weighted: r.weighted,
+        })
+    }
 }
 
 impl WmaState {
@@ -505,7 +785,7 @@ impl WmaState {
         assert!(period > 0, "WMA period must be greater than zero");
         Self {
             period,
-            window: VecDeque::with_capacity(period),
+            window: Ring::new(period),
             sum: 0.0,
             weighted: 0.0,
         }
@@ -518,20 +798,20 @@ impl WmaState {
     /// Push a sample; returns the weighted average once the window is full
     /// (`None` during warm-up).
     pub fn update(&mut self, x: Real) -> Option<Real> {
-        if self.window.len() == self.period {
+        if let Some(old) = self.window.push(x) {
             // Sliding the window down one step lowers every retained weight by 1
             // (so `weighted` drops by the old simple sum) and the newcomer enters
             // at the top weight; the evicted sample falls out of the simple sum.
-            let old = self.window.pop_front().expect("window is full");
+            // `Ring::push` evicts and hands back the oldest in one operation,
+            // and the arithmetic order is unchanged, so this stays bit-identical
+            // to the `pop_front`/`push_back` pair it replaces.
             self.weighted = self.weighted - self.sum + self.period as Real * x;
             self.sum = self.sum - old + x;
-            self.window.push_back(x);
         } else {
-            self.window.push_back(x);
             self.weighted += self.window.len() as Real * x;
             self.sum += x;
         }
-        if self.window.len() == self.period {
+        if self.window.is_full() {
             let denom = (self.period * (self.period + 1) / 2) as Real;
             Some(self.weighted / denom)
         } else {
@@ -1356,5 +1636,105 @@ mod tests {
         assert!(std::panic::catch_unwind(|| WmaState::new(0)).is_err());
         assert!(std::panic::catch_unwind(|| WindowQuantile::new(0)).is_err());
         assert!(std::panic::catch_unwind(|| WindowExtreme::<MaxOp>::new(0)).is_err());
+        assert!(std::panic::catch_unwind(|| Ring::<Real>::new(0)).is_err());
+    }
+
+    // ---- Ring, and the wire format its adopters must not have moved ---------
+
+    #[test]
+    fn ring_evicts_oldest_first_and_iterates_in_logical_order() {
+        let mut r = Ring::new(3);
+        assert_eq!(r.push(1.0), None);
+        assert_eq!(r.push(2.0), None);
+        assert_eq!(r.push(3.0), None);
+        assert!(r.is_full());
+        assert_eq!(r.iter().collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+        // Full: each push hands back the sample leaving the window.
+        assert_eq!(r.push(4.0), Some(1.0));
+        assert_eq!(r.iter().collect::<Vec<_>>(), vec![2.0, 3.0, 4.0]);
+        // Wrapped: the two halves still read oldest-first.
+        assert_eq!(r.push(5.0), Some(2.0));
+        assert_eq!(r.push(6.0), Some(3.0));
+        assert_eq!(r.iter().collect::<Vec<_>>(), vec![4.0, 5.0, 6.0]);
+        let (a, b) = r.slices();
+        assert_eq!([a, b].concat(), vec![4.0, 5.0, 6.0]);
+        r.clear();
+        assert_eq!(r.len(), 0);
+        assert!(r.iter().next().is_none());
+    }
+
+    /// `load_window` takes the capacity from the destination, never from the
+    /// blob — the whole reason a `Ring` has no `Deserialize`. A window saved
+    /// mid-warm-up is shorter than its period, and restoring it at the array's
+    /// length would silently shrink the window for the rest of the run.
+    #[test]
+    fn load_window_sizes_from_the_destination_not_the_blob() {
+        let dest: Ring<Real> = Ring::new(5);
+        let partial = serde_json::json!([1.0, 2.0]);
+        let restored = dest.load_window(&partial).expect("valid partial window");
+        assert_eq!(restored.capacity(), 5, "capacity came from the blob");
+        assert_eq!(restored.len(), 2);
+        assert!(!restored.is_full());
+        // Over-long is corrupt input, reported rather than silently truncated.
+        let too_long = serde_json::json!([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert!(dest.load_window(&too_long).is_err());
+    }
+
+    /// The conversion from `VecDeque` to [`Ring`] is a representation change,
+    /// and every run-state file already written carries the old one. These are
+    /// literal blobs in the shape the `VecDeque`-backed derive produced; if a
+    /// future change to `Ring` moves the format, these fail rather than the
+    /// breakage surfacing as a resumed run that silently diverges.
+    #[test]
+    fn the_pre_ring_wire_format_still_loads() {
+        // WmaState: `{period, window, sum, weighted}`, window oldest-first.
+        let blob = r#"{"period":3,"window":[10.0,20.0,30.0],"sum":60.0,"weighted":140.0}"#;
+        let mut wma: WmaState = serde_json::from_str(blob).expect("legacy WMA state");
+        assert_eq!(wma.period(), 3);
+        // Continues as a never-paused twin would: 1*20 + 2*30 + 3*40 = 200, /6.
+        assert_eq!(wma.update(40.0), Some(200.0 / 6.0));
+
+        // WindowCovariance: `{period, window, sum_x, sum_y}`.
+        let blob = r#"{"period":2,"window":[[1.0,2.0],[3.0,4.0]],"sum_x":4.0,"sum_y":6.0}"#;
+        let cov: WindowCovariance = serde_json::from_str(blob).expect("legacy cov state");
+        assert_eq!(cov.period(), 2);
+        assert!(cov.is_full());
+        assert_eq!(cov.correlation(), 1.0);
+
+        // A zero period would panic in `Ring::new`; it is bad data, not a bug.
+        assert!(serde_json::from_str::<WmaState>(r#"{"period":0,"window":[],"sum":0.0,"weighted":0.0}"#).is_err());
+    }
+
+    /// Round-tripping mid-warm-up is the case the capacity rule exists for:
+    /// the array is shorter than the period, and the restored window must still
+    /// take `period` more samples to fill.
+    #[test]
+    fn a_partially_filled_window_round_trips_and_continues_identically() {
+        let mut a = WmaState::new(4);
+        let mut b = WmaState::new(4);
+        for x in [1.0, 2.0] {
+            a.update(x);
+            b.update(x);
+        }
+        let json = serde_json::to_string(&a).unwrap();
+        let mut restored: WmaState = serde_json::from_str(&json).unwrap();
+        for x in [3.0, 4.0, 5.0, 6.0] {
+            assert_eq!(restored.update(x), b.update(x), "diverged after resume");
+        }
+
+        let mut a = WindowCovariance::new(4);
+        let mut b = WindowCovariance::new(4);
+        a.update(1.0, 2.0);
+        b.update(1.0, 2.0);
+        let json = serde_json::to_string(&a).unwrap();
+        let mut restored: WindowCovariance = serde_json::from_str(&json).unwrap();
+        for (x, y) in [(2.0, 3.0), (3.0, 5.0), (4.0, 4.0), (5.0, 9.0)] {
+            assert_eq!(restored.update(x, y), b.update(x, y));
+        }
+        assert_eq!(
+            restored.correlation().to_bits(),
+            b.correlation().to_bits(),
+            "restored correlation is not bit-identical"
+        );
     }
 }

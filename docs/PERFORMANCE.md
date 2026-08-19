@@ -64,6 +64,7 @@ instrument, at the cost of a ~50× slowdown.
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. Currently `update(&Input)` and dropping `Indicator::value()`. |
 | `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
 | `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
+| `window_ring` | `VecDeque` against the `Ring<T>` that replaced it, **all variants in one binary** — the arrangement trap 10/11 forces. Carries the shipped indicators too, and a single-workload `-- <name>` mode for callgrind (which is what settled `vwap`/`correlation`, where wall-clock had the sign wrong). |
 | `latency` | Per-event latency distributions (p50…p99.9), warm against cold, for one `update` after an idle gap. The only target that measures latency rather than throughput; carries its own timer noise floor. |
 | `three_tier` | The Rust tier of the TA-Lib comparison, scalar **and** multi-output. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other tiers. Also carries the `Component`-vs-`Shared` pair (Phase 10). |
 
@@ -1374,6 +1375,175 @@ Widening the fixture instead would mean regenerating `metrics_returns.csv`, whic
 re-baselines every metric in the file to fix one. The Rust test is the cheaper
 guard and the stricter one.
 
+## Phase 13 — the windows that never got the ring
+
+Trick #3 records `WindowStats` moving from a `VecDeque` to a hand-rolled fixed
+ring, worth `Sma` 5.25 → 1.38 ns/sample. `WindowExtreme` got the same treatment
+later. **Six other fixed-capacity windows never did**, and nothing in the
+codebase pointed at them — the trick was written up as a fact about
+`WindowStats` rather than as a pattern with unconverted instances.
+
+They were found by asking a different question from the one Phases 1–12 asked.
+Those measured *instruction counts* and *allocation counts*, both of which are
+close to exhausted here. This one asked about **memory layout**, an axis this
+document had not covered at all: a `grep -iE 'cache line|structure of
+arrays|smallvec|prefetch'` over it returned nothing before this section.
+
+### What was converted
+
+A generic `Ring<T>` (`src/indicators/stats.rs`) now backs four of the six:
+
+| core | was | backs |
+|---|---|---|
+| `Lookback` (`ops.rs`) | `VecDeque<Option<Real>>` | `Lag` / `Diff` / `Ratio` — `.lag()`, `.diff()`, `.ratio()`, `!lookback` |
+| `WmaState` | `VecDeque<Real>` | `Wma`, and **three at a time** inside `Hma` |
+| `WindowCovariance` | `VecDeque<(Real, Real)>` | `Correlation`, rolling beta |
+| `Vwap` | `VecDeque<(Real, Real)>` | `Vwap` |
+
+`WindowStats` and `WindowExtreme` are **not** expressed in terms of `Ring` and
+should not be. Each carries a hand-rolled ring tuned to an access pattern the
+generic one does not have: `WindowStats` needs the whole buffer as *one*
+contiguous run when full (splitting a period-10 window into two halves put six
+of ten samples in the scalar remainder and the `LANES` accumulators bought
+nothing), and `WindowExtreme` pushes and pops at both ends to stay monotonic.
+
+**Two were deliberately left alone**, and this is the note that says why rather
+than leaving them to look like oversights. `WindowQuantile`'s update is already
+O(period) from the sorted `Vec`'s insert-and-remove memmove, and
+`VarianceRatio` recomputes its statistic from scratch on every full window — in
+both the deque is a small fraction of an update that is dominated by something
+else. The two `trailing.rs` windows (`MaxDrawdown`, `Calmar`) drive a whole
+`Strategy` per bar, next to which the deque is a rounding error.
+
+### Results
+
+Callgrind, instructions per sample, net of a control workload the change cannot
+touch (`cargo bench --bench window_ring -- <workload>`):
+
+| workload | before | after | |
+|---|---:|---:|---:|
+| `diff_1` | 49.63 | **7.62** | −84.6% |
+| `wma_14` | 65.62 | **26.64** | −59.4% |
+| `hma_14` (3 WMAs) | 200.58 | **121.62** | −39.4% |
+| `correlation_20` | 407.18 | **303.83** | −25.4% |
+| `vwap_20` | 144.63 | **129.64** | −10.4% |
+| `control` | 1 719 255 | 1 719 302 | +0.003% |
+
+The control is the reading that makes the rest trustworthy: 47 instructions out
+of 1.72 M, on a workload the change cannot reach.
+
+`diff_1` is the largest because its element type was wrong too. `Option<Real>`
+is **16 bytes with no niche** (`Option<bool>` is 1), so a period-20 buffer held
+336 bytes of storage for 168 bytes of data.
+
+Wall-clock, same change, same machine:
+
+| | before | after | |
+|---|---:|---:|---|
+| `wma_14` | 4.66 | 3.01 | 1.55× |
+| `hma_14` | 16.94 | 7.10 | 2.39× |
+| `diff_1` | 3.80 | 0.68 | 5.59× |
+| `vwap_20` | 21.40 | 23.45 | **0.91×** |
+| `correlation_20` | 23.65 | 26.13 | **0.91×** |
+
+### The instrument failed on two rows, and the doc predicted how
+
+**Wall-clock said `vwap` and `correlation` got ~10% slower. Callgrind says they
+do 10.4% and 25.4% less work.** The wall-clock reading was code layout, not
+work — and the tell was available without callgrind: the *control* moved 13%
+between the two runs (0.82 → 0.71 ns/sample), so the instrument's own drift was
+larger than the effect being read off it.
+
+This is trap 6 firing exactly as written — "below ~25%, or when a delta moves
+between runs, use callgrind" — on a change where three of the five rows were far
+enough above the band to be read straight off the wall-clock. **A run can be
+trustworthy for some of its rows and not others**, and the noise floor is a
+property of the size of the delta, not of the run.
+
+A second trap fired in the same session, cheaply. The prototype block's absolute
+numbers moved between two runs of `window_ring` (lookback period 14 read
+B/A = 0.77, then 0.43) because a shipped-indicator section had been *added to
+the same file* in between. That is trap 11, and the defence held: the
+shipped-indicator rows were identical in both runs and stayed comparable, while
+the prototype rows were treated as a fresh baseline rather than as a comparison.
+
+### Format preservation, and the derive role it needed
+
+Every window here is part of the run-state blob, and the wire format is a bare
+array in logical (oldest-first) order. A `Ring` **cannot restore itself from
+one**: the array does not record the capacity, and a window saved mid-warm-up is
+shorter than its period, so a plain `Deserialize` would silently restore it at
+the wrong size and the resumed run would diverge for the rest of its life.
+
+For the two serde-derived cores the fix is the pattern trick #4 already
+established — a hand-written `Serialize`/`Deserialize` pair over a `*Repr`
+shadow struct that reads the enclosing `period`.
+
+For the two `#[derive(SaveState)]` cores it needed something new, because that
+derive *assigns* fields wholesale. Rather than hand-write ~35 lines of JSON
+plumbing twice, `fugazi-derive` grew a fourth field role:
+
+```rust
+#[state(window)]
+buffer: Ring<Option<Real>>,
+```
+
+which saves like ordinary state and loads through `stats::LoadWindow`, taking
+the capacity from the **destination** — sound because the run-state contract is
+already that the structure is rebuilt from the spec first and only values are
+replayed in.
+
+Pinned by `the_pre_ring_wire_format_still_loads`,
+`the_pre_ring_lookback_state_still_resumes`, `the_pre_ring_vwap_state_still_resumes`
+and `a_lookback_window_holding_none_round_trips`, each of which carries a
+**literal blob in the pre-conversion shape** rather than a round trip of the new
+code — a round trip would pass just as happily against a format that had moved.
+
+Every conversion is bit-identical, which is why no fixture moved. `Ring::push`
+evicts and returns the oldest in one operation, so the arithmetic order is
+unchanged from the `pop_front`/`push_back` pair it replaces. `WindowCovariance`'s
+centred pass now reduces the window's two contiguous halves into the *same three
+accumulators* instead of driving a chained iterator — order preserved, so still
+bit-identical. Summing the halves *separately* and adding would not be; that is
+the trap recorded under `WindowStats::variance`.
+
+### What is still on this axis
+
+Measured but not taken, in descending confidence:
+
+* **`Snapshot` is array-of-structs and `find` scans it to compare a tag.**
+  `Entry<Symbol>` is **112 bytes**, of which `find` reads only the 24-byte
+  `(Option<Symbol>, Option<Frequency>)` prefix — so it touches 112 cache lines at
+  N = 64 where 24 would do, **4.7× at every universe size**. Splitting the
+  storage into a tags vec and an atoms vec keeps the invariant that blocked
+  breaking-candidate #2 fully intact: `Selector` stays a predicate, no
+  `Sym: Eq + Hash`, duplicates still legal, first-match-wins unchanged. It does
+  not fix the asymptotics, but the residual O(N²) is memory-bound, and this is
+  the part of its constant that needs no design decision.
+* **`WilderState` divides once per bar, and `Adx` holds four of them.** `update`
+  is `(prev * (p - 1.0) + input) / p` with `p = self.period as Real` — an
+  int→float conversion and a genuine `divsd` every bar, which LLVM cannot
+  strength-reduce without fast-math. Precomputing `(p-1)/p` and `1/p` makes it
+  one FMA. `Adx<Identity<Atom>>` is **360 bytes** — 5.6 cache lines — and its
+  three `Dmi` smoothers store `period` identically three times while `seen`/`sum`
+  (16 bytes each) are dead forever after warm-up. **Not bit-identical**, so it
+  moves the TA-Lib fixture: an asserted-divergence judgment, not a free win.
+* **`WindowStats` keeps its window in a separate heap block** (`Box<[Real]>`), so
+  every dispersion read scans a block scattered away from the struct that owns
+  it, and an `optimize` sweep interleaves hundreds of them in allocation order.
+  Inline storage would make `Sma` ~300 bytes and could cost more in tree-walk
+  locality than it recovers — prototype in `benches/breaking.rs` before
+  believing either direction.
+* **`Option<Real>` as the universal per-level currency** — 16 bytes with no
+  niche, stored and returned by every Real-valued level. The textbook answer is a
+  NaN sentinel, which is also branchless. **Recorded as rejected, not as
+  available**: the blast radius exceeds breaking-candidate #1 (~60 indicators,
+  `fugazi-derive`, `runtime`, all five strategy shapes, `python/src`), it
+  collides with the crate's existing NaN conventions (`max_finite`,
+  `Atom::is_priceable`, the wallet's `close <= 0.0` guards), and it cannot cover
+  bool outputs. A register-passed `Some(x)` is already cheap; the win is a store
+  width, not a branch.
+
 ## The Python binding budget — 1.25×, with one exemption
 
 **A fugazi indicator through the Python bindings must cost no more than 1.25×
@@ -1635,7 +1805,7 @@ with the benches named.
 |---|---|---|---|
 | 1 | `strategies/{single_asset,pairs,multi_asset}.rs` | `is_ready()` reads a cached threshold (`OnceLock` / plain field) instead of calling `stable_bars()` | `stable_bars()` walks the whole tree, and `Combine::unstable_bars` re-walks both children, so visits grow **exponentially with depth**. Recomputed per bar it was 40% of a depth-8 run. |
 | 2 | `indicators/component.rs` | `SharedComponent` stores `warm_up`/`unstable` at construction | Both were behind the shared `Mutex`. The readiness walk called them every bar through the whole tree — ~38% of a `.shared()` strategy's runtime. |
-| 3 | `indicators/stats.rs` | `WindowStats` is a hand-rolled ring buffer, not a `VecDeque` | Deque growth checks and index wrapping on a capacity that never changes. Took `Sma` 5.25 → 1.38 ns/sample, which is what put it level with TA-Lib. |
+| 3 | `indicators/stats.rs` | `WindowStats` is a hand-rolled ring buffer, not a `VecDeque`; the generic `Ring<T>` beside it is the same trick for everything else | Deque growth checks and index wrapping on a capacity that never changes. Took `Sma` 5.25 → 1.38 ns/sample, which is what put it level with TA-Lib. **This is a pattern, not a fact about `WindowStats`** — it went unapplied to six sibling windows for as long as it was written up as one. Phase 13 converted four (`Diff` −84.6% instructions, `Wma` −59.4%, `Hma` −39.4%, `Correlation` −25.4%, `Vwap` −10.4%) and records why the other two are correctly left alone. |
 | 4 | `indicators/stats.rs` | Hand-written `Serialize`/`Deserialize` emitting `{period, window, sum}` | Lets #3 change representation **without changing the run-state format**. Delete it and every existing resume file breaks. |
 | 5 | `wallet/paper.rs`, `indicators/book.rs` | Equity sums into a **stack buffer**, sorted, folded from cash | Two things at once: `HashMap` order varies per process, so summing in it made the equity curve drift by a ULP *between runs* (a real bug); and the old code allocated a `Vec` per bar to sort one element. |
 | 6 | `hash.rs` | An in-crate FxHash `BuildHasher` for symbol maps | SipHash on `String` keys, several times per bar per symbol, for keys the user chose. ~30 lines beats a dependency here (crate policy: closed form first). |

@@ -25,6 +25,12 @@
 //!   `load_state`. The derive adds a `where <field-ty>: crate::Indicator` bound.
 //! - `#[state(skip)]` → omitted entirely (`PhantomData`, `Arc<Mutex>` shared
 //!   handles, and config that the spec rebuild already restores identically).
+//! - `#[state(window)]` → a fixed-capacity `Ring<T>`. Saved like plain state (a
+//!   bare array, oldest first), but restored via
+//!   `crate::indicators::stats::LoadWindow`, which sizes the rebuilt ring from
+//!   the *destination's* capacity. A bare array does not record a capacity, and
+//!   a window saved mid-warm-up is shorter than its period, so a plain
+//!   `Deserialize` would restore it at the wrong size.
 //!
 //! Default-is-state is deliberate: forgetting `#[state(source)]` on a new child
 //! field makes the derive try to `serde_json::to_value` a non-`Serialize`
@@ -44,6 +50,12 @@ enum FieldRole {
     Source,
     /// Not part of state: `PhantomData`, shared `Arc<Mutex>` handles, config.
     Skip,
+    /// A fixed-capacity window (`Ring<T>`): saved as a bare array in logical
+    /// order like any other state, but *restored* through
+    /// `crate::indicators::stats::LoadWindow` so the capacity comes from the
+    /// already-rebuilt destination rather than from the blob, which does not
+    /// record it. See that trait's docs.
+    Window,
 }
 
 /// Parse `#[state(source)]` / `#[state(skip)]` off a field; unannotated = state.
@@ -62,8 +74,11 @@ fn field_role(field: &syn::Field) -> Result<FieldRole, syn::Error> {
             } else if meta.path.is_ident("skip") {
                 role = FieldRole::Skip;
                 Ok(())
+            } else if meta.path.is_ident("window") {
+                role = FieldRole::Window;
+                Ok(())
             } else {
-                Err(meta.error("expected `source` or `skip`"))
+                Err(meta.error("expected `source`, `skip` or `window`"))
             }
         })?;
     }
@@ -131,6 +146,22 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
                 load_stmts.push(quote! {
                     self.#ident = ::serde_json::from_value(
                         obj.get(#key).cloned().unwrap_or(::serde_json::Value::Null)
+                    ).map_err(|e| ::std::format!("field `{}`: {}", #key, e))?;
+                });
+            }
+            FieldRole::Window => {
+                save_stmts.push(quote! {
+                    map.insert(
+                        #key.to_owned(),
+                        ::serde_json::to_value(&self.#ident).unwrap_or_else(|e| {
+                            panic!(concat!("save_state: field `", #key, "` is not serializable: {}"), e)
+                        }),
+                    );
+                });
+                load_stmts.push(quote! {
+                    self.#ident = crate::indicators::stats::LoadWindow::load_window(
+                        &self.#ident,
+                        obj.get(#key).unwrap_or(&::serde_json::Value::Null),
                     ).map_err(|e| ::std::format!("field `{}`: {}", #key, e))?;
                 });
             }

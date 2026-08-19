@@ -648,9 +648,20 @@ instantiations are open-ended). The *structure* is rebuilt from the spec; only t
 - **`#[derive(SaveState)]`** (`fugazi-derive`) generates the per-indicator bodies:
   default = plain serde state, `#[state(source)]` = a child indicator (recurse via
   `crate::Indicator::save_state`), `#[state(skip)]` = `PhantomData` / config /
-  `Arc<Mutex>` shared handles. **Default-is-state is deliberate:** forgetting
+  `Arc<Mutex>` shared handles, `#[state(window)]` = a fixed-capacity
+  `indicators::stats::Ring<T>`. **Default-is-state is deliberate:** forgetting
   `#[state(source)]` on a new box field is a **compile error** (a box isn't
   `Serialize`), not silent loss.
+  - **Why `window` is its own role.** A `Ring` serializes as a bare
+    oldest-first array — the shape the `VecDeque` it replaced produced, so old
+    run-state files still load — and that array does **not** record the capacity.
+    A window saved mid-warm-up is shorter than its period, so a plain
+    `Deserialize` would restore it at the array's length and silently shrink the
+    window for the rest of the run. `#[state(window)]` routes the load through
+    `stats::LoadWindow`, which takes the capacity from the **destination**;
+    that is sound precisely because the contract above is that the structure is
+    rebuilt from the spec first and only values are replayed in. This is why
+    `Ring` has no `Deserialize` impl and must not grow one.
 
 **Shared/path-dependent state** is serialized once at the strategy level, never
 per-indicator: `Position::snapshot`/`restore`, `Book::snapshot_state`/`restore_state`,

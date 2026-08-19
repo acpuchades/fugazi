@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
 
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::indicators::stats::Ring;
 use crate::types::{Candle, Real};
 
 /// Volume-Weighted Average Price (VWAP), rolling over the last `period` bars.
@@ -22,7 +22,8 @@ pub struct Vwap<S> {
     #[state(source)]
     source: S,
     period: usize,
-    window: VecDeque<(Real, Real)>,
+    #[state(window)]
+    window: Ring<(Real, Real)>,
     sum_pv: Real,
     sum_volume: Real,
     value: Option<Real>,
@@ -34,7 +35,7 @@ impl<S> Vwap<S> {
         Self {
             source,
             period,
-            window: VecDeque::with_capacity(period),
+            window: Ring::new(period),
             sum_pv: 0.0,
             sum_volume: 0.0,
             value: None,
@@ -49,15 +50,17 @@ impl<S: Indicator<Output = Candle>> Indicator for Vwap<S> {
     fn update(&mut self, input: S::Input) -> Option<Real> {
         let candle = self.source.update(input)?;
         let pv = candle.typical() * candle.volume;
-        self.window.push_back((pv, candle.volume));
+        // `Ring::push` evicts and returns the oldest in one operation; the
+        // arithmetic order is unchanged from the `push_back` / conditional
+        // `pop_front` pair it replaces, so the value stays bit-identical.
+        let evicted = self.window.push((pv, candle.volume));
         self.sum_pv += pv;
         self.sum_volume += candle.volume;
-        if self.window.len() > self.period {
-            let (old_pv, old_v) = self.window.pop_front().expect("window is non-empty");
+        if let Some((old_pv, old_v)) = evicted {
             self.sum_pv -= old_pv;
             self.sum_volume -= old_v;
         }
-        self.value = (self.window.len() == self.period && self.sum_volume != 0.0)
+        self.value = (self.window.is_full() && self.sum_volume != 0.0)
             .then(|| self.sum_pv / self.sum_volume);
         self.value
     }
@@ -95,7 +98,7 @@ impl<S: Indicator<Output = Candle>> Indicator for Vwap<S> {
 mod tests {
     use super::*;
     use crate::indicators::Current;
-    use crate::types::Candle;
+    use crate::types::{Atom, Candle};
 
     #[test]
     fn weights_price_by_volume_over_window() {
@@ -114,6 +117,48 @@ mod tests {
         assert_eq!(
             vwap.update(Candle::new(30.0, 30.0, 30.0, 30.0, 200.0).into()),
             Some(24.0)
+        );
+    }
+
+    /// `Vwap`'s window moved from a `VecDeque<(Real, Real)>` to a
+    /// `Ring<(Real, Real)>`. A literal blob in the old derive's shape — `window`
+    /// as a bare oldest-first array of `[pv, volume]` pairs — must still resume
+    /// a run identically.
+    #[test]
+    fn the_pre_ring_vwap_state_still_resumes() {
+        use crate::Indicator as _;
+
+        let build = || Vwap::new(Current::candle(), 2);
+        let mut paused = build();
+        let blob = serde_json::json!({
+            "source": build().source.save_state(),
+            "period": 2,
+            // One bar seen: typical 10.0 * volume 100.0 = 1000.0.
+            "window": [[1000.0, 100.0]],
+            "sum_pv": 1000.0,
+            "sum_volume": 100.0,
+            "value": null,
+        });
+        paused.load_state(&blob).expect("legacy vwap state");
+
+        let mut twin = build();
+        twin.update(Candle::new(10.0, 10.0, 10.0, 10.0, 100.0).into());
+
+        // Same arithmetic as `weights_price_by_volume_over_window`, so the
+        // window really was restored at one sample rather than at capacity.
+        let second: Atom = Candle::new(20.0, 20.0, 20.0, 20.0, 300.0).into();
+        assert_eq!(paused.update(second.clone()), twin.update(second));
+        assert_eq!(paused.value(), Some(17.5));
+
+        let third: Atom = Candle::new(30.0, 30.0, 30.0, 30.0, 200.0).into();
+        assert_eq!(paused.update(third.clone()), twin.update(third));
+        assert_eq!(paused.value(), Some(24.0));
+
+        // And the shape it writes back is the one it just read.
+        assert_eq!(
+            paused.save_state()["window"],
+            serde_json::json!([[6000.0, 300.0], [6000.0, 200.0]]),
+            "window is no longer a bare oldest-first array"
         );
     }
 

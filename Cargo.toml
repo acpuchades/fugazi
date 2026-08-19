@@ -239,6 +239,13 @@ harness = false
 name = "erasure"
 harness = false
 
+# In-binary A/B of the ring-buffer conversion against the `VecDeque` windows it
+# has not been applied to yet. Its own target because a new workload perturbs
+# what LLVM inlines for its file-mates (trap 11, docs/PERFORMANCE.md).
+[[bench]]
+name = "window_ring"
+harness = false
+
 # The per-bar hot path is generic code that crosses module boundaries
 # (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
 # cross-CGU inlining is worth more here than it is for the average crate.

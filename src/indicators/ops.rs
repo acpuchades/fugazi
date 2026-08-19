@@ -14,13 +14,13 @@
 //!
 //! Candle field accessors live in `candle`.
 
-use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::indicators::stats::Ring;
 use crate::indicators::stats::WindowExtreme;
 use crate::types::Real;
 
@@ -219,7 +219,8 @@ pub struct Lookback<I, Op> {
     #[state(source)]
     source: I,
     period: usize,
-    buffer: VecDeque<Option<Real>>,
+    #[state(window)]
+    buffer: Ring<Option<Real>>,
     /// Latest value; `None` until `period` updates have elapsed.
     pub value: Option<Real>,
     #[state(skip)]
@@ -234,7 +235,10 @@ impl<I, Op> Lookback<I, Op> {
         Self {
             source,
             period,
-            buffer: VecDeque::with_capacity(period + 1),
+            // `period`, not `period + 1`: the deque this replaces pushed and
+            // then popped, so it transiently held one extra. `Ring::push` evicts
+            // and returns in a single step, so the extra slot is dead weight.
+            buffer: Ring::new(period),
             value: None,
             _op: PhantomData,
         }
@@ -255,12 +259,9 @@ where
 
     fn update(&mut self, input: Self::Input) -> Option<Real> {
         let current = self.source.update(input);
-        self.buffer.push_back(current);
-        let past = if self.buffer.len() > self.period {
-            self.buffer.pop_front().flatten()
-        } else {
-            None
-        };
+        // Once full, the evicted sample *is* the one `period` steps back — the
+        // same value the `push_back` / `pop_front` pair produced, in one step.
+        let past = self.buffer.push(current).flatten();
         self.value = match (current, past) {
             (Some(current), Some(past)) => Op::apply(current, past),
             _ => None,
@@ -476,6 +477,65 @@ mod tests {
 
         let mut by_zero = Div::new(Identity::new(), Value::new(0.0));
         assert_eq!(by_zero.update(10.0), None);
+    }
+
+    /// The buffer behind `Lookback` moved from a `VecDeque<Option<Real>>` to a
+    /// `Ring<Option<Real>>`. This is a literal blob in the shape the old derive
+    /// wrote — `buffer` as a bare oldest-first array — and it must still resume a
+    /// run identically, including the `null`s a source that yielded `None`
+    /// leaves behind.
+    #[test]
+    fn the_pre_ring_lookback_state_still_resumes() {
+        use crate::Indicator as _;
+
+        let mut paused: Diff<Identity<Real>> = Diff::new(Identity::new(), 2);
+        let blob = serde_json::json!({
+            "source": paused.source.save_state(),
+            "period": 2,
+            "buffer": [10.0, 20.0],
+            "value": null,
+        });
+        paused.load_state(&blob).expect("legacy lookback state");
+
+        // A twin that was never paused, fed the same prefix.
+        let mut twin: Diff<Identity<Real>> = Diff::new(Identity::new(), 2);
+        twin.update(10.0);
+        twin.update(20.0);
+
+        for x in [30.0, 40.0, 50.0] {
+            assert_eq!(paused.update(x), twin.update(x), "diverged after resume");
+        }
+        // 30 - 10 was the first full-window reading, so the window really was
+        // restored at two samples rather than at its capacity.
+        assert_eq!(twin.value, Some(50.0 - 30.0));
+    }
+
+    /// A `None` from the source has to survive the round trip as a `null`,
+    /// because it is what makes the *next* `period` readings `None` too.
+    #[test]
+    fn a_lookback_window_holding_none_round_trips() {
+        use crate::Indicator as _;
+        use crate::indicators::Sma;
+
+        // An `Sma` of period 2 yields `None` on its first sample, so the
+        // lookback buffer's oldest slot is a genuine `None`.
+        let build = || Diff::new(Sma::new(Identity::<Real>::new(), 2), 2);
+        let (mut a, mut b) = (build(), build());
+        for x in [1.0, 2.0] {
+            a.update(x);
+            b.update(x);
+        }
+        let saved = a.save_state();
+        assert_eq!(
+            saved["buffer"],
+            serde_json::json!([null, 1.5]),
+            "buffer is no longer a bare oldest-first array, or lost its `None`"
+        );
+        let mut restored = build();
+        restored.load_state(&saved).expect("round trip");
+        for x in [3.0, 4.0, 5.0] {
+            assert_eq!(restored.update(x), b.update(x), "diverged after resume");
+        }
     }
 
     #[test]
