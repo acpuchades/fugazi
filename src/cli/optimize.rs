@@ -910,20 +910,24 @@ fn run_multi_symbol_walkforward(
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
 /// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
-/// Under `--smooth`, two further columns are appended — `smooth.value` and
-/// `smooth.support`, the neighbourhood average the rows are ranked by and the
-/// fraction of a fully-interior neighbourhood that average rests on.
+/// Under `--smooth`, two further columns are appended — `<best_by>_smoothed`
+/// and `<best_by>_support`, the neighbourhood average the rows are ranked by
+/// and the fraction of a fully-interior neighbourhood that average rests on.
 ///
-/// They get their **own** `smooth.` scope rather than a `<metric>_smoothed`
-/// suffix or a slot in `selection.`. Not the suffix, because under `-w` it would
-/// sit in a `<metric>_mean` / `<metric>_std` triple reading like a third
-/// aggregation of the metric — it is not, it is the neighbourhood average of
-/// `mean − k·std`. Not `selection.`, because a column that exists only when a
-/// flag is passed should not share a namespace with one that is always emitted:
-/// the prefix is what tells a reader which invocation produced the file.
+/// **Metric-name suffix, not a `smooth.` scope of their own** — matching the
+/// only convention this file has: every flag-gated column here is a suffix on
+/// the metric it derives from (`_mean`/`_std` under `-w`, `_is`/`_oos`/`_wfe`
+/// under `--walkforward`). `_wfe` is the precedent that decides it: a
+/// walk-forward efficiency ratio is not an aggregation of its metric either,
+/// and it still takes the suffix. The suffix also keeps the column
+/// self-describing — `risk_adjusted.sharpe_smoothed` names what was smoothed,
+/// where a scoped `smooth.value` would send the reader back to the invocation
+/// to find out. (Caveat inherited from `-k`, not created here: under
+/// `-k/--risk-aversion` the smoothed column averages `mean − k·std`, and that
+/// shifted key has no raw column of its own in either naming.)
 ///
-/// Existing columns keep their position and their values; smoothing changes row
-/// *order*, never a cell.
+/// Existing columns keep their position and their values; smoothing changes
+/// row *order*, never a cell.
 ///
 /// `,`-delimited to match `fills.csv` / `trades.csv` / `returns.csv`. Axis cells that the
 /// row's subgrid doesn't touch, and missing (omitted) metric values, are both
@@ -938,9 +942,13 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         ..
     } = sweep;
     let (windowed, deflated_sharpe_context) = (*windowed, *deflated_sharpe_context);
-    // Which `--best-by` metric was smoothed is fixed for the whole file and
-    // echoed in the console inputs block, so the columns don't need to carry it.
-    let smoothed = sweep.smoothing.is_some() && sweep.best_by.is_some();
+    // The smoothed columns are named after the metric they average, so the CSV
+    // reads `risk_adjusted.sharpe` next to `risk_adjusted.sharpe_smoothed`.
+    let smoothed_path = sweep
+        .smoothing
+        .as_ref()
+        .and(sweep.best_by.as_ref())
+        .map(|(_, path, _)| path.as_str());
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -964,9 +972,9 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
     if deflated_sharpe_context.is_some() {
         header.push("selection.deflated_sharpe".to_string());
     }
-    if smoothed {
-        header.push("smooth.value".to_string());
-        header.push("smooth.support".to_string());
+    if let Some(path) = smoothed_path {
+        header.push(format!("{path}_smoothed"));
+        header.push(format!("{path}_support"));
     }
     writer.write_record(&header)?;
 
@@ -1048,7 +1056,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
             );
             record.push(cell(dsr));
         }
-        if smoothed {
+        if smoothed_path.is_some() {
             // `support` is written even when the value was dropped by
             // `--smooth-min-support` — a blank smoothed cell next to a low
             // support number is the whole diagnostic.
@@ -1463,7 +1471,7 @@ where
         output,
         &result.union_columns,
         &result.metric_columns,
-        smoothing.is_some() && result.best_by.is_some(),
+        smoothing.and(result.best_by.as_ref()).map(|(_, path, _)| path.as_str()),
         &result.fold_rows,
     )?;
     write_composite_equity_csv(&derive_sibling(output, "composite_oos_equity", "csv"), &result.composite_equity)?;
@@ -1505,7 +1513,7 @@ fn write_walkforward_csv(
     path: &Path,
     union_columns: &[String],
     metric_columns: &[(String, String)],
-    smoothed: bool,
+    smoothed_path: Option<&str>,
     rows: &[crate::spec::optimize::WalkForwardRow],
 ) -> Result<()> {
     if let Some(parent) = path.parent()
@@ -1535,11 +1543,9 @@ fn write_walkforward_csv(
     // Under `--smooth` the IS argmax is no longer what selected the fold — the
     // neighbourhood average is. Emit it, and the support behind it, so the
     // per-fold choice is auditable against the raw `_is` column beside it.
-    // Same two names as the grid CSV: selection only ever happens in-sample, so
-    // there is no OOS counterpart for an `_is` suffix to distinguish it from.
-    if smoothed {
-        header.push("smooth.value".to_string());
-        header.push("smooth.support".to_string());
+    if let Some(path) = smoothed_path {
+        header.push(format!("{path}_is_smoothed"));
+        header.push(format!("{path}_is_support"));
     }
     writer.write_record(&header)?;
 
@@ -1583,7 +1589,7 @@ fn write_walkforward_csv(
             record.push(cell(oos_v));
             record.push(cell(wfe));
         }
-        if smoothed {
+        if smoothed_path.is_some() {
             record.push(cell(row.is_smoothed.and_then(|s| s.value)));
             record.push(cell(row.is_smoothed.map(|s| s.support)));
         }

@@ -385,7 +385,7 @@ fn without_smooth_the_csv_shape_is_untouched() {
     let lines = read_csv(&csv);
     let header = &lines[0];
     assert!(
-        !header.contains("smooth.value") && !header.contains("smooth.support"),
+        !header.contains("_smoothed") && !header.contains("_support"),
         "smoothing columns leaked into a sweep that never asked for them: {header}"
     );
     // Axis columns name-sorted, then the metric, then the DSR cell.
@@ -417,7 +417,7 @@ fn smooth_appends_two_columns_without_reordering_the_others() {
         "existing columns were reordered: {header}"
     );
     assert!(
-        header.ends_with("smooth.value,smooth.support"),
+        header.ends_with("returns.total_pct_smoothed,returns.total_pct_support"),
         "the smoothing columns are not appended last: {header}"
     );
     // Bare `--smooth` is the Moore neighbourhood, and the console says so.
@@ -427,7 +427,7 @@ fn smooth_appends_two_columns_without_reordering_the_others() {
         out.stdout
     );
     // Support is a fraction of a fully-interior neighbourhood: 0 < s <= 1.
-    let sup = column(header, "smooth.support");
+    let sup = column(header, "returns.total_pct_support");
     let supports: Vec<f64> = lines[1..]
         .iter()
         .map(|l| cells(l)[sup].parse::<f64>().expect("support is always defined"))
@@ -472,8 +472,8 @@ fn the_smoothed_column_is_the_neighbourhood_mean_of_the_raw_column() {
     let header = &lines[0];
     let (cf, cs) = (column(header, "FAST"), column(header, "SLOW"));
     let craw = column(header, "returns.total_pct");
-    let csm = column(header, "smooth.value");
-    let csup = column(header, "smooth.support");
+    let csm = column(header, "returns.total_pct_smoothed");
+    let csup = column(header, "returns.total_pct_support");
 
     // raw[i][j] for FAST=fasts[i], SLOW=slows[j].
     let mut raw = [[f64::NAN; 3]; 3];
@@ -548,8 +548,8 @@ fn min_support_empties_the_smoothed_cell_but_keeps_the_support_cell() {
     );
     let lines = read_csv(&csv);
     let header = &lines[0];
-    let csm = column(header, "smooth.value");
-    let csup = column(header, "smooth.support");
+    let csm = column(header, "returns.total_pct_smoothed");
+    let csup = column(header, "returns.total_pct_support");
     let kept = lines[1..].iter().filter(|l| !cells(l)[csm].is_empty()).count();
     assert_eq!(kept, 1, "only the interior cell of a 3x3 clears full support");
     assert!(
@@ -624,7 +624,7 @@ fn smoothing_composes_with_windowing_and_risk_aversion() {
     assert!(header.contains("returns.total_pct_mean"), "{header}");
     let cmean = column(header, "returns.total_pct_mean");
     let cstd = column(header, "returns.total_pct_std");
-    let csm = column(header, "smooth.value");
+    let csm = column(header, "returns.total_pct_smoothed");
 
     // What is smoothed is `mean − k·std`, not `mean`. Rebuild both candidate
     // neighbourhood averages for the winning row and demand the shifted one.
@@ -666,7 +666,7 @@ fn an_ascending_best_by_sorts_the_smoothed_column_ascending() {
         ],
     );
     let lines = read_csv(&csv);
-    let csm = column(&lines[0], "smooth.value");
+    let csm = column(&lines[0], "drawdown.max_pct_smoothed");
     let values: Vec<f64> = lines[1..]
         .iter()
         .filter_map(|l| cells(l)[csm].parse::<f64>().ok())
@@ -694,10 +694,10 @@ fn walkforward_folds_carry_the_smoothed_is_key() {
     let lines = read_csv(&out_str);
     let header = &lines[0];
     assert!(
-        header.ends_with("smooth.value,smooth.support"),
+        header.ends_with("returns.total_pct_is_smoothed,returns.total_pct_is_support"),
         "fold rows should carry the key each fold was actually selected on: {header}"
     );
-    let csm = column(header, "smooth.value");
+    let csm = column(header, "returns.total_pct_is_smoothed");
     assert!(
         lines[1..].iter().all(|l| cells(l)[csm].parse::<f64>().is_ok()),
         "every fold should report its smoothed IS key:\n{lines:#?}"

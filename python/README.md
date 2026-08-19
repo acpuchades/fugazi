@@ -1221,7 +1221,6 @@ sweep = ta.optimize(
     smooth_min_support=0.5,
 )
 sweep.rows[0].smoothed   # -> neighbourhood average, native orientation
-                         #    (the CLI writes this as `smooth.value`)
 sweep.rows[0].support    # -> 1.0 for a fully interior point, less at an edge
 # Under walkforward=, each fold reports the key it was actually selected on:
 # fold.is_smoothed / fold.is_support
