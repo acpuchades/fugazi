@@ -590,9 +590,35 @@ but visible to the strategy. Then drain `wallet.take_rejections()` → `on_rejec
 `is_ready()` (then drain again, for a synchronously-rejecting live wallet) → push
 `wallet.equity().0` to the curve.
 
+**Ruin is a run outcome, decided here.** At that last step, if equity is `<= 0`
+and the run hasn't already been ruined, `run` records the bar in
+`RunReport::ruin_bar`, liquidates through `Wallet::flatten` (fills and refusals
+booked at that bar, like any other), and pushes `0.0` instead. Every later bar
+still `update`s the wallet and the strategy — the one-entry-per-snapshot
+invariant holds and a resumed run's state stays correct — but `trade` is gated
+off and the curve stays pinned at `0.0`. `warm_up` (`DriveMode::WarmUpOnly`)
+never triggers it: it submits nothing, so it must not close anything either.
+
+The reason it lives at the driver rather than in `metrics`: per-bar returns are
+`(e - prev) / prev`, which **inverts sign** once `prev < 0`, so a run allowed to
+continue past zero reported further losses as positive returns and gave whole
+regions of an `optimize` grid a genuinely positive Sharpe. Bounding the curve
+where it is produced makes `drawdown.max_pct <= 100` true *by construction*,
+makes CAGR `-100%` instead of silently `None`, and leaves `--best-by`,
+`--smooth`, the walk-forward composite and the Monte Carlo bootstrap correct
+with no code of their own. `flatten_open_positions` (`--flatten`) returns early
+on a ruined report for the same reason — the book is already closed, and
+overwriting the final point would un-pin the curve. **Only the account's own
+equity counts**: a portfolio is an ordinary strategy trading the wallet it was
+handed, so total ruin is caught at this one site with no per-shape branch, while
+a single child *ledger* going negative is notional attribution netted against
+its siblings on one real balance, not insolvency. A margin model — maintenance
+thresholds, liquidation before zero — is deliberately not here; it needs venue
+assumptions this does not.
+
 `run<Sym, S, W, I, A>` where `A: Into<Snapshot<Sym>>`. `Vec<Atom>` / `Vec<Candle>`
 produce untagged size-1 snapshots; single-series callers use `Snapshot::single(sym,
-atom)`. `RunReport<Sym> { equity_curve, fills, rejections, initial_equity }` —
+atom)`. `RunReport<Sym> { equity_curve, fills, rejections, initial_equity, ruin_bar }` —
 `fills` are `Fill<Sym> { bar, order }`, `rejections` are `Rejected<Sym> { bar,
 rejection }` (non-empty ⇒ the curve/metrics describe a different strategy than the
 one written; `report_slice` rebases them like fills; CLI `run` prints a post-run

@@ -294,6 +294,13 @@ fn column_pvalues(
 
 /// Rebuild an equity path from a return series and reduce it to `Metrics`. The
 /// synthetic report carries no fills, so trade-level metrics come back `None`.
+///
+/// The path is ruined the same way a real run is: an observed return series is
+/// bounded below by `-1` (the driver pins a ruined curve at zero), so a
+/// resampled path can reach zero but never cross it, and the first bar it
+/// reaches zero is this path's [`ruin_bar`](crate::RunReport::ruin_bar). A
+/// bootstrap draw that wipes the account out therefore reports the same
+/// `-100%` and 100%-drawdown the observed run would.
 #[cfg(feature = "montecarlo")]
 fn metrics_from_returns(returns: &[Real], initial: Real, ctx: &EvalContext) -> Metrics {
     let mut prev = initial;
@@ -301,10 +308,11 @@ fn metrics_from_returns(returns: &[Real], initial: Real, ctx: &EvalContext) -> M
         .iter()
         .map(|r| {
             prev *= 1.0 + r;
-            prev
+            prev.max(0.0)
         })
         .collect();
     let report = crate::RunReport {
+        ruin_bar: equity.iter().position(|&e| e <= 0.0),
         equity_curve: equity,
         fills: Vec::new(),
         rejections: Vec::new(),

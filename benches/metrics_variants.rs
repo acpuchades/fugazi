@@ -94,6 +94,7 @@ fn report(bars: usize) -> RunReport<Symbol> {
         fills,
         rejections: Vec::new(),
         initial_equity: candles[0].close * 100.0,
+        ruin_bar: None,
     }
 }
 
@@ -1078,6 +1079,7 @@ fn reduce<Sym: PartialEq>(
             final_equity,
             bars_per_year,
             risk_free_rate,
+            ruin_bar: None,
         },
         returns: ReturnSection {
             total,

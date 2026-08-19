@@ -204,6 +204,22 @@ layer's readiness default (see [Stability gating](#stability-gating)) holds
 the first trade until every source it consults is past its unstable tail —
 no explicit gate on the entry is needed.
 
+Two banners can print between the run and the metrics, because neither is
+knowable until it is over. Orders the wallet **refused** are grouped by reason —
+the metrics below them describe a run that did not trade the way the strategy
+asked. And a run that was **ruined** says so outright:
+
+```
+warn  ruined at bar 34 of 60 — equity reached zero, the book was liquidated
+      there and nothing traded afterwards. …
+```
+
+Reaching zero equity is terminal: nothing trades after that bar and the equity
+curve is pinned at zero, so the metrics report exactly `-100%` return and a 100%
+drawdown rather than the arithmetically meaningless figures a curve allowed
+below zero produces. `run.ruin_bar` carries the index in `metrics.yml`. See
+[Ruin](METRICS.md#ruin).
+
 #### Significance testing (`--montecarlo`)
 
 A single backtest gives one number per metric and no sense of how much of it is
@@ -725,6 +741,22 @@ fine grid stay useful — it turns the extra points into evidence about the
 The three knobs are independent and stack: `-w` for regime consistency, `-k` for
 how conservatively to price that consistency, `--smooth` for parameter
 robustness. None of them replaces the split below.
+
+One class of bad winner is handled below all three of them, at the simulation
+rather than in the ranking: a grid cell that **wiped the account out**. Per-bar
+returns are `(equity - prev) / prev`, which inverts sign once `prev` goes
+negative, so a backtest allowed to trade through zero equity reports further
+losses as *positive* returns — and an argmax over Sharpe finds that region
+reliably. `backtest::run` therefore treats reaching zero equity as terminal: it
+records the bar, liquidates, stops trading, and pins the curve at zero (see
+[Ruin](METRICS.md#ruin)). A ruined cell consequently reports `-100%` return and
+a 100% drawdown and sorts below any solvent one under `--best-by` on its own
+arithmetic — there is no `--exclude-ruined` flag to remember, and none is
+needed. Ask for `run.ruin_bar` in `-m`/`--metrics` if you want to see which
+cells died and when.
+
+Note that `--smooth` cannot substitute for this: where a whole *region* of the
+grid is ruined-but-positive-Sharpe, the neighbourhood average endorses it.
 
 The recommended workflow is therefore an **explicit train / validate
 split**, with `get` and `file:` doing the plumbing:

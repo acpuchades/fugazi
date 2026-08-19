@@ -154,6 +154,7 @@ fn matches_empyrical_reference() {
         fills: Vec::new(),
         rejections: Vec::new(),
         initial_equity: INITIAL_CASH,
+        ruin_bar: None,
     };
     let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE, None);
 

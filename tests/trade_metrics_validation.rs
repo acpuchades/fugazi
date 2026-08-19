@@ -79,6 +79,7 @@ fn load_report() -> RunReport<&'static str> {
         fills,
         rejections: Vec::new(),
         initial_equity: INITIAL_CASH,
+        ruin_bar: None,
     }
 }
 

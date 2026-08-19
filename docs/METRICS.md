@@ -57,7 +57,8 @@ reader can identify the run.
 |---|---|
 | `run.bars` | Number of bars in the run (or window). |
 | `run.initial_equity` | Equity at the start of the run (or window). |
-| `run.final_equity` | Equity at the last bar (or window). |
+| `run.final_equity` | Equity at the last bar (or window). `0` on a ruined run. |
+| `run.ruin_bar` | The bar the account was **wiped out** on, or absent if it stayed solvent. See [Ruin](#ruin). |
 | `run.bars_per_year` | Annualization factor threaded through Sharpe / annualized_* / CAGR. |
 | `run.risk_free_rate` | Annualized rf fraction used by Sharpe / Sortino / UPI / Omega. |
 
@@ -69,7 +70,7 @@ from `initial_equity`.
 | Column | Meaning | Notes |
 |---|---|---|
 | `returns.total` / `_pct` | End-to-end return over the whole run/window. | Always defined. |
-| `returns.cagr_pct` | Compound annual growth rate. | `None` when the equity path is non-positive. |
+| `returns.cagr_pct` | Compound annual growth rate. | Exactly `-100` on a ruined run (see [Ruin](#ruin)). `None` only when it is genuinely *undefined* — a non-positive **initial** equity, no bars, or no `bars_per_year` to annualize against. Check `run.ruin_bar` to tell the two apart. |
 | `returns.mean_bar` / `median_bar` / `stddev_bar` | Per-bar central moments. | Always defined. |
 | `returns.best_bar` / `worst_bar` | Extremes of per-bar returns. | Always defined. |
 | `returns.positive_bars_pct` | Share of bars with a strictly positive return. | |
@@ -111,13 +112,64 @@ Computed from `drawdown_segments(equity)` — one segment per drop
 
 | Column | Meaning | Notes |
 |---|---|---|
-| `drawdown.max` / `max_pct` | Deepest single drawdown. | Always defined. |
+| `drawdown.max` / `max_pct` | Deepest single drawdown. | Always defined, and `max_pct` is **bounded by 100** — a run cannot lose more than the account holds. See [Ruin](#ruin). |
 | `drawdown.max_duration_bars` | Longest stretch below a prior peak — the worst recovery wait. | Always defined. Independent of depth: not necessarily the deepest drawdown's, and measured peak→recovery, not peak→trough. |
 | `drawdown.avg` / `avg_pct` | Mean depth across all segments. | `None` for a monotone-non-decreasing equity curve. |
 | `drawdown.avg_duration_bars` | Mean time below a prior peak across segments. | `None` when there are no segments. Peak→recovery, matching `max_duration_bars`. |
 | `drawdown.count` | Number of drawdown segments. | |
 | `drawdown.time_in_drawdown_pct` | Fraction of bars strictly below the running peak. | |
 | `drawdown.recovery_factor` | `total_return / max_drawdown`. | Non-annualized cousin of Calmar. `None` when max DD is zero. |
+
+## Ruin
+
+An account whose equity reaches zero is **ruined**, and that is a terminal
+outcome of the run rather than an edge case in a formula. On the first bar close
+where total equity is `<= 0`, `backtest::run` records the bar in
+`run.ruin_bar`, liquidates the book through the account's normal execution path,
+submits nothing further, and pins every remaining equity point — that bar's
+included — at exactly `0`.
+
+So a ruined run reports, by construction:
+
+| | |
+|---|---|
+| `run.ruin_bar` | the bar index it happened on |
+| `run.final_equity` | `0` |
+| `returns.total_pct` | `-100` |
+| `returns.cagr_pct` | `-100` |
+| `drawdown.max_pct` | `100` |
+| per-bar returns after the ruin bar | `0` — a dead account earns nothing |
+
+**Why this is at the simulation layer.** Per-bar returns are
+`(equity - prev) / prev`, which *inverts sign* once `prev` is negative: a
+simulation that kept trading through zero reported further losses as **positive
+returns**. That is not a display quirk — it gives whole regions of a parameter
+grid a genuinely positive Sharpe, and `optimize --best-by sharpe` finds them,
+because that is what an argmax does. Bounding the curve at the simulation makes
+every layer above it correct without a filter of its own: `--best-by` ranks a
+ruined cell below a solvent one on its own arithmetic, `--smooth`'s
+neighbourhood average is no longer averaging fiction, the walk-forward composite
+scales fold winners by real equity, and the Monte Carlo bootstrap resamples
+returns that are bounded below by `-1`.
+
+**Reading it.** Ruin is *reported*, never inferred. `fugazi run` prints a banner
+naming the bar; `run.ruin_bar` is a metrics field and an `optimize --metrics`
+column; Python's `RunReport.ruin_bar` carries the same index. A blank
+`returns.cagr_pct` therefore means "undefined", and only that — before this it
+meant "wiped out" *or* "window too short" with no way to tell.
+
+**On a window.** `run.ruin_bar` on a `--windowed` / `-w` reduction is the
+*window's* own bar index. A window entirely after ruin reports `0`, which is the
+same fact as being ruined on its first bar and reads that way in the numbers (a
+flat zero curve) — so no fold can quietly look flat-and-harmless when it is
+actually dead.
+
+**What this is not.** It is a *floor*, not a margin model: nothing here stops a
+six-leg basket running 600% gross, and a real venue would liquidate at a
+maintenance threshold well before zero. One consequence is visible in the
+report — closing a short costs cash a ruined account may no longer have, so the
+liquidation itself can be refused and show up in the rejections. Ruin detection
+needs no venue assumptions; maintenance margin does.
 
 ## `trades.*` — round-trip trade statistics
 

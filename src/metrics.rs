@@ -119,6 +119,14 @@ pub struct DrawdownSegment {
 /// Per-bar fractional return series: `(equity[i] - prev) / prev`, seeded from
 /// `initial_equity` for the first bar. Zero-denominator bars contribute `0.0`.
 /// The returned vector has the same length as `equity_curve`.
+///
+/// **This formula inverts sign below zero** — with `prev < 0`, a further loss
+/// comes back as a *positive* return. It is not guarded here, because the guard
+/// belongs one layer down: [`run`](crate::backtest::run) pins a ruined curve at
+/// `0.0` from [`ruin_bar`](crate::RunReport::ruin_bar) on, so no curve it
+/// produces ever goes negative, and a ruined run's series is one `-1.0`
+/// followed by zeros. A hand-built curve that does go negative gets the
+/// arithmetic it asked for.
 pub fn per_bar_returns(equity_curve: &[Real], initial_equity: Real) -> Vec<Real> {
     let mut out = Vec::with_capacity(equity_curve.len());
     let mut prev = initial_equity;
@@ -246,6 +254,13 @@ pub fn reconstruct_trades<Sym: PartialEq>(fills: &[Fill<Sym>]) -> Vec<Trade> {
 /// Build the drawdown segments of `equity_curve` — one entry per peak → trough
 /// → recovery-or-end stretch. A monotone-non-decreasing curve produces an
 /// empty vector.
+///
+/// Every emitted `depth_ratio` is at most `1.0`, and a debug build asserts it.
+/// A deeper-than-100% drawdown means the curve went below zero, which
+/// [`run`](crate::backtest::run) cannot produce — so on a real report its
+/// appearance is a bug in the driver, not a property of the strategy. (The
+/// assertion is `debug_assert!` rather than a guard because this is a public
+/// function and a caller is free to hand it any series it likes.)
 pub fn drawdown_segments(equity_curve: &[Real]) -> Vec<DrawdownSegment> {
     if equity_curve.is_empty() {
         return Vec::new();
@@ -262,11 +277,7 @@ pub fn drawdown_segments(equity_curve: &[Real]) -> Vec<DrawdownSegment> {
     for (i, &e) in equity_curve.iter().enumerate() {
         if e > peak {
             if in_dd {
-                let depth = if peak > 0.0 {
-                    (peak - trough) / peak
-                } else {
-                    0.0
-                };
+                let depth = depth_ratio(peak, trough);
                 segments.push(DrawdownSegment {
                     peak_bar: peak_idx,
                     trough_bar: trough_idx,
@@ -292,11 +303,7 @@ pub fn drawdown_segments(equity_curve: &[Real]) -> Vec<DrawdownSegment> {
         }
     }
     if in_dd {
-        let depth = if peak > 0.0 {
-            (peak - trough) / peak
-        } else {
-            0.0
-        };
+        let depth = depth_ratio(peak, trough);
         segments.push(DrawdownSegment {
             peak_bar: peak_idx,
             trough_bar: trough_idx,
@@ -1098,6 +1105,24 @@ pub fn exposure_ratio<Sym>(fills: &[Fill<Sym>], total_bars: usize) -> Real {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// One drawdown segment's depth: `(peak - trough) / peak`, or `0.0` when the
+/// peak is not strictly positive (nothing to be down *from*).
+///
+/// Bounded by `1.0` in debug builds — see [`drawdown_segments`] for why that is
+/// an assertion about the driver rather than a clamp.
+fn depth_ratio(peak: Real, trough: Real) -> Real {
+    if peak <= 0.0 {
+        return 0.0;
+    }
+    let depth = (peak - trough) / peak;
+    debug_assert!(
+        depth <= 1.0,
+        "drawdown deeper than 100% ({depth}): equity went below zero, which \
+         `backtest::run` cannot produce — peak {peak}, trough {trough}"
+    );
+    depth
+}
+
 /// Below this magnitude, a residual position after a reducing fill is treated
 /// as fully flat — the same 1e-8 threshold the wallet uses for zero-delta
 /// orders.
@@ -1219,13 +1244,21 @@ pub(crate) fn tail_cutoff(n: usize, p: Real) -> usize {
 }
 
 /// CAGR helper: `(final / initial)^(bars_per_year / bars) − 1`.
+///
+/// A final equity of exactly zero is **ruin**, not an undefined ratio: the
+/// formula evaluates to `-1` there (`0^x = 0` for any positive `x`), so it is
+/// reported as `-100%` rather than as an absent value. That distinction is the
+/// point — a blank CAGR cell used to mean both "the account was wiped out" and
+/// "the window was too short to annualize", and a search ranking by CAGR read
+/// the first as the second. Only a *negative* final equity is undefined, and
+/// [`run`](crate::backtest::run) no longer produces one.
 fn cagr_fraction(
     initial: Real,
     final_equity: Real,
     bars: usize,
     bars_per_year: Real,
 ) -> Option<Real> {
-    if initial <= 0.0 || final_equity <= 0.0 || bars == 0 || bars_per_year <= 0.0 {
+    if initial <= 0.0 || final_equity < 0.0 || bars == 0 || bars_per_year <= 0.0 {
         return None;
     }
     let years = bars as Real / bars_per_year;

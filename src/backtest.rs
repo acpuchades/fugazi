@@ -91,6 +91,21 @@ pub struct RunReport<Sym> {
     pub rejections: Vec<Rejected<Sym>>,
     /// Total wallet equity captured immediately before the first bar.
     pub initial_equity: Real,
+    /// The bar the account was **ruined** on — the first bar close at which
+    /// total equity was `<= 0` — or `None` for a run that stayed solvent.
+    ///
+    /// Ruin is a terminal run outcome, not a metrics curiosity. On that bar
+    /// [`run`] liquidates the book through [`Wallet::flatten`], submits nothing
+    /// further, and pins every remaining
+    /// [`equity_curve`](Self::equity_curve) entry — the ruin bar's included —
+    /// at `0.0`. So a ruined run reports exactly `-100%` total return, a max
+    /// drawdown of exactly 100%, and no fill after this index.
+    ///
+    /// Without this the simulation traded on through negative equity, and
+    /// `(e - prev) / prev` turns *further losses* into **positive** returns
+    /// once `prev < 0` — a region of parameter space with a genuinely positive
+    /// Sharpe that any argmax search finds.
+    pub ruin_bar: Option<usize>,
 }
 
 /// Drive `strategy` over `snapshots`, executing against `wallet`, and return
@@ -198,6 +213,7 @@ where
     let mut equity_curve = Vec::with_capacity(lower);
     let mut fills: Vec<Fill<Sym>> = Vec::new();
     let mut rejections: Vec<Rejected<Sym>> = Vec::new();
+    let mut ruin_bar: Option<usize> = None;
 
     /// Drain the wallet's failure stream, route each entry to the strategy, and
     /// record it against `bar`.
@@ -253,14 +269,43 @@ where
         // runs once the strategy reports ready. is_ready() defaults to true,
         // so this is a no-op for strategies that don't override it.
         // `WarmUpOnly` suppresses exactly this step and nothing else.
-        if mode == DriveMode::Trade && strategy.is_ready() {
+        if mode == DriveMode::Trade && ruin_bar.is_none() && strategy.is_ready() {
             strategy.trade(wallet);
             // Refusals from this bar's own submissions — a live wallet rejecting
             // synchronously. (PaperWallet accepts everything at submit time and
             // fails at fill time instead, so this drain is empty for it.)
             drain_rejections!(bar);
         }
-        equity_curve.push(wallet.equity().0);
+        // Ruin check, at the bar close, after this bar's fills and trades.
+        //
+        // An account at `<= 0` equity cannot fund anything, and nothing may be
+        // recorded past it: `(e - prev) / prev` inverts sign once `prev < 0`, so
+        // a curve allowed below zero reports *further losses as gains*. The
+        // curve is therefore pinned at `0.0` from here on — one entry per
+        // snapshot still, as documented, but a flat terminal one.
+        //
+        // Liquidating is what makes that pin honest rather than cosmetic: with
+        // the book left open the wallet would keep marking it and could carry
+        // equity back above zero, contradicting a curve that says the account is
+        // gone. `Wallet::flatten` is the same call `--flatten` makes, so each
+        // leg closes through the normal cost pipeline; on a live venue at zero
+        // equity there is nothing left to close and it is a no-op.
+        let equity = wallet.equity().0;
+        if ruin_bar.is_some() {
+            equity_curve.push(0.0);
+            continue;
+        }
+        if mode == DriveMode::Trade && equity <= 0.0 {
+            ruin_bar = Some(bar);
+            for fill in wallet.flatten() {
+                strategy.on_fill(&fill);
+                fills.push(Fill { bar, order: fill });
+            }
+            drain_rejections!(bar);
+            equity_curve.push(0.0);
+            continue;
+        }
+        equity_curve.push(equity);
     }
 
     RunReport {
@@ -268,6 +313,7 @@ where
         fills,
         rejections,
         initial_equity,
+        ruin_bar,
     }
 }
 
@@ -293,6 +339,12 @@ where
 /// After this the wallet is genuinely flat: a [`RunState`](crate::spec::RunState)
 /// captured from it holds no position, and resuming from that state continues
 /// from a flat book rather than silently re-inheriting the closed one.
+///
+/// **A ruined run is left alone.** [`run`] already liquidated the book at
+/// [`ruin_bar`](RunReport::ruin_bar), so there is nothing open to finalize —
+/// and overwriting the final equity point would replace the pinned `0.0` with
+/// the account's true negative balance, un-bounding every metric derived from
+/// it.
 pub fn flatten_open_positions<S, W>(
     strategy: &mut S,
     wallet: &mut W,
@@ -302,6 +354,9 @@ pub fn flatten_open_positions<S, W>(
     S: Strategy<Symbol = Symbol, Input = Snapshot<Symbol>> + ?Sized,
     W: Wallet<Symbol>,
 {
+    if report.ruin_bar.is_some() {
+        return;
+    }
     let bar = snapshots.len().saturating_sub(1);
     for order in wallet.flatten() {
         strategy.on_fill(&order);

@@ -2621,15 +2621,21 @@ pub(crate) struct PyRunReport {
 impl PyRunReport {
     /// A report over `equity_curve` (one marked-to-market equity per bar) seeded
     /// from `initial_equity`, optionally carrying the `fills` that produced it.
+    ///
+    /// `ruin_bar` marks a run that was wiped out — see the property of the same
+    /// name. A hand-built report leaves it `None` unless you are reconstructing
+    /// one that was.
     #[new]
-    #[pyo3(signature = (equity_curve, initial_equity, fills = None))]
+    #[pyo3(signature = (equity_curve, initial_equity, fills = None, ruin_bar = None))]
     pub(crate) fn new(
         equity_curve: Vec<f64>,
         initial_equity: f64,
         fills: Option<Vec<PyFill>>,
+        ruin_bar: Option<usize>,
     ) -> Self {
         PyRunReport {
             inner: RunReport {
+                ruin_bar,
                 equity_curve,
                 fills: fills
                     .unwrap_or_default()
@@ -2681,13 +2687,26 @@ impl PyRunReport {
         self.inner.initial_equity
     }
 
+    /// The bar this run was **ruined** on — the first bar close at which total
+    /// equity reached zero — or `None` for a run that stayed solvent.
+    ///
+    /// On that bar the book is liquidated and nothing trades afterwards, and
+    /// the equity curve is pinned at `0.0` from there to the end. So a report
+    /// with a `ruin_bar` reduces to exactly `-100%` total return and a `100%`
+    /// max drawdown, and `metrics["run.ruin_bar"]` carries the same index.
+    #[getter]
+    pub(crate) fn ruin_bar(&self) -> Option<usize> {
+        self.inner.ruin_bar
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "RunReport(bars={}, fills={}, rejections={}, initial_equity={})",
+            "RunReport(bars={}, fills={}, rejections={}, initial_equity={}, ruin_bar={:?})",
             self.inner.equity_curve.len(),
             self.inner.fills.len(),
             self.inner.rejections.len(),
             self.inner.initial_equity,
+            self.inner.ruin_bar,
         )
     }
 }

@@ -719,6 +719,7 @@ fn emit_run(
         stream_fills(iter);
     }
     if !opts.quiet {
+        print_ruin_warning(&iter.report);
         print_rejection_warning(&iter.report);
     }
     write_trades_csv(iter, &opts.out_dir.join("trades.csv"))?;
@@ -1436,6 +1437,23 @@ fn print_inputs_block(opts: &RunOptions, sliced: &Sliced, costs_active: bool) {
         style::field("costs", "none (explicit)");
     }
     style::field("output", &opts.out_dir.display().to_string());
+}
+
+/// The post-run "this account was wiped out" banner.
+///
+/// Ruin has to be *stated*, not inferred. Everything downstream of it is
+/// technically well-formed — a `-100%` return, a 100% drawdown, a flat tail on
+/// the equity curve — and a reader skimming the metrics block has no single
+/// number that says the run ended early because there was no money left.
+fn print_ruin_warning<Sym>(report: &fugazi::RunReport<Sym>) {
+    let Some(bar) = report.ruin_bar else { return };
+    let bars = report.equity_curve.len();
+    style::print_warns(&[format!(
+        "ruined at bar {bar} of {bars} — equity reached zero, the book was \
+         liquidated there and nothing traded afterwards. Every metric below \
+         describes the run up to that point: total return is -100%, max \
+         drawdown is 100%, and the equity curve is flat from bar {bar} on",
+    )]);
 }
 
 /// The post-run "orders were refused" banner.

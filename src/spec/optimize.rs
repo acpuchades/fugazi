@@ -2398,6 +2398,10 @@ where
     }
 
     let composite_report = crate::RunReport {
+        // A fold winner that was ruined inside its own OOS slice contributes a
+        // curve pinned at zero, which scales every later fold to zero too — the
+        // composite is dead from that bar on, and says so.
+        ruin_bar: composite_equity.iter().position(|&e| e <= 0.0),
         equity_curve: composite_equity.clone(),
         fills: composite_fills.clone(),
         rejections: composite_rejections.clone(),
@@ -2443,6 +2447,7 @@ mod tests {
             fills: vec![],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 2);
@@ -3412,6 +3417,7 @@ mod tests {
             fills: vec![],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);
 
@@ -3494,6 +3500,7 @@ mod tests {
             fills: vec![],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);
 

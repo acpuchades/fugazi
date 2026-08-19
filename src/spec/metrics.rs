@@ -118,6 +118,18 @@ pub struct RunSection {
     pub warmup_bars: Option<usize>,
     pub initial_equity: Real,
     pub final_equity: Real,
+    /// The bar this run was **ruined** on — the first bar close at which equity
+    /// reached zero — or `None` for a run that stayed solvent. Copied from
+    /// [`RunReport::ruin_bar`], and the reason to read it is that ruin is
+    /// otherwise only *inferrable*: a wiped-out run and a too-short window both
+    /// used to show up as a blank `returns.cagr_pct` and nothing else. When this
+    /// is `Some`, `final_equity` is `0`, `returns.total_pct` is `-100`, and
+    /// `drawdown.max_pct` is `100`.
+    ///
+    /// On a windowed reduction this is the *window's* index (see
+    /// [`report_slice`]); `Some(0)` on a window whose every bar is post-ruin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruin_bar: Option<usize>,
     pub bars_per_year: Real,
     /// Annualized risk-free rate as a fraction (e.g. `0.045` = 4.5% p.a.).
     /// Subtracted from the annualized mean return before Sharpe/Sortino/UPI,
@@ -398,6 +410,7 @@ pub fn from_report<Sym: PartialEq>(
             warmup_bars: None,
             initial_equity: initial,
             final_equity,
+            ruin_bar: report.ruin_bar,
             bars_per_year,
             risk_free_rate,
         },
@@ -538,6 +551,14 @@ pub struct WindowMetrics {
 /// This is the one measurement primitive the CLI's metric reductions share:
 /// the first-fill anchor slices off the flat warm-up prefix, and each
 /// `--windowed` window is a slice of its own.
+///
+/// [`ruin_bar`](RunReport::ruin_bar) is **clamped into the window**, so a
+/// sliced report can always say whether it is describing a live account:
+/// `None` when ruin falls after the range (this window predates it), the
+/// range-relative index when it falls inside, and `Some(0)` when it falls
+/// before — that window was dead for its whole length, which is the same fact
+/// as being ruined on its first bar and reads that way in the metrics (a flat
+/// zero curve).
 pub fn report_slice<Sym: Clone>(
     report: &RunReport<Sym>,
     bars: std::ops::Range<usize>,
@@ -566,6 +587,10 @@ pub fn report_slice<Sym: Clone>(
         } else {
             report.equity_curve[bars.start - 1]
         },
+        ruin_bar: report
+            .ruin_bar
+            .filter(|&r| r < bars.end)
+            .map(|r| r.saturating_sub(bars.start)),
     }
 }
 
@@ -740,6 +765,7 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ("run.warmup_bars", m.run.warmup_bars.map(|b| b as Real)),
         ("run.initial_equity", real(m.run.initial_equity)),
         ("run.final_equity", real(m.run.final_equity)),
+        ("run.ruin_bar", m.run.ruin_bar.map(|b| b as Real)),
         ("run.bars_per_year", real(m.run.bars_per_year)),
         ("run.risk_free_rate", real(m.run.risk_free_rate)),
         ("returns.total", real(m.returns.total)),
@@ -1075,6 +1101,7 @@ mod tests {
             fills,
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         from_report(&report, 252.0, 0.0, None)
     }
@@ -1170,6 +1197,7 @@ mod tests {
                 .collect(),
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
 
         for start in 0..=BARS {
@@ -1202,6 +1230,7 @@ mod tests {
             }],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         let windows = windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 3);
@@ -1242,6 +1271,7 @@ mod tests {
             }],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         let windows = rolling_from_report(&report, 3, 252.0, 0.0, None);
         assert_eq!(
@@ -1272,6 +1302,7 @@ mod tests {
             fills: Vec::new(),
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
         assert!(rolling_from_report(&report, 3, 252.0, 0.0, None).is_empty());
     }
@@ -1300,6 +1331,7 @@ mod tests {
             fills: vec![],
             rejections: Vec::new(),
             initial_equity: 100.0,
+            ruin_bar: None,
         };
 
         let threads = rayon::current_num_threads();

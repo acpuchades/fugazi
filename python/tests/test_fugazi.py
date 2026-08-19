@@ -2431,6 +2431,65 @@ def test_evaluate_report_round_trips_a_real_run():
     assert direct["trades"]["total"] >= 1
 
 
+def test_a_ruined_run_is_terminal_and_says_so():
+    """Ruin crosses the FFI as a run outcome, not as an inferrable blank cell.
+
+    A short held into a rally is the shortest path to insolvency: the loss is
+    unbounded above, so no leverage knob or cost model is involved. Everything
+    asserted here is a consequence of `backtest::run` pinning the curve at zero
+    — Python adds no logic of its own, which is the parity claim.
+    """
+    enter = ta.close().gt(ta.value(-1.0))  # always true
+    never = ta.close().lt(ta.value(-1.0))  # never true
+    strat = ta.Strategy("X").short_on(enter, never)
+    prices = [100, 100, 150, 260, 320, 400, 450, 500, 600]
+    report = strat.run(ta.PaperWallet(10_000.0), _ohlcv(prices))
+
+    ruin = report.ruin_bar
+    assert ruin is not None, f"a fully-invested short into a 6x rise is ruin: {report}"
+    assert "ruin_bar" in repr(report)
+
+    # One entry per bar still, pinned at zero from ruin on, and nothing traded
+    # after it.
+    assert len(report.equity_curve) == len(prices)
+    assert all(e > 0.0 for e in report.equity_curve[:ruin])
+    assert all(e == 0.0 for e in report.equity_curve[ruin:])
+    assert all(f.bar <= ruin for f in report.fills)
+
+    m = ta.evaluate_report(report, bars_per_year=252.0)
+    assert m["run"]["ruin_bar"] == ruin
+    assert m["run"]["final_equity"] == 0.0
+    assert m["returns"]["total_pct"] == pytest.approx(-100.0)
+    # The two numbers the defect made meaningless: a >100% drawdown, and a CAGR
+    # that vanished instead of reading -100%.
+    assert m["drawdown"]["max_pct"] == pytest.approx(100.0)
+    assert m["returns"]["cagr_pct"] == pytest.approx(-100.0)
+
+    # A hand-built report carries the field too, so a caller reconstructing one
+    # from a live account's curve can say the account was wiped out.
+    rebuilt = ta.RunReport(
+        equity_curve=report.equity_curve,
+        initial_equity=report.initial_equity,
+        fills=report.fills,
+        ruin_bar=ruin,
+    )
+    assert rebuilt.ruin_bar == ruin
+    assert ta.evaluate_report(rebuilt, bars_per_year=252.0) == m
+
+
+def test_a_solvent_run_reports_no_ruin():
+    """The default, and the constraint: nothing changes for a run that lived."""
+    enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
+    down = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
+    strat = ta.Strategy("BTC").long_on(enter, down)
+    report = strat.run(ta.PaperWallet(10_000.0), _ohlcv([14, 13, 12, 11, 10, 11, 13, 15]))
+    assert report.ruin_bar is None
+    # Absent from the document entirely, so `run.ruin_bar` present == ruined.
+    assert "ruin_bar" not in ta.evaluate_report(report, bars_per_year=252.0)["run"]
+    # A bare curve defaults to solvent without the caller passing anything.
+    assert ta.RunReport(equity_curve=[100.0, 101.0], initial_equity=100.0).ruin_bar is None
+
+
 def test_trade_and_drawdown_segment_are_frozen_readonly():
     from fugazi import metrics
 

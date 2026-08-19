@@ -45,6 +45,14 @@ const EXEMPT: &[(&str, &str)] = &[
          warm the chains before evaluation began. No reference library models \
          a warm-up prefix at all. Covered by tests/date_range.rs",
     ),
+    (
+        "run.ruin_bar",
+        "a run outcome, not a measurement: the bar the account's equity reached \
+         zero, after which `backtest::run` liquidates and stops trading. No \
+         reference library models ruin — vectorbt, empyrical and backtesting.py \
+         all keep compounding through negative equity, which is the bug this \
+         field exists to make impossible. Covered by tests/ruin.rs",
+    ),
     // Trade fields no reference library reports.
     (
         "trades.flat",
@@ -133,6 +141,7 @@ fn every_metric_is_cross_validated_or_exempt() {
         fills: Vec::new(),
         rejections: Vec::new(),
         initial_equity: 100.0,
+        ruin_bar: None,
     };
     let sample = metrics::from_report(&empty, 252.0, 0.0, None);
 
@@ -171,6 +180,7 @@ fn no_exemption_names_a_field_that_no_longer_exists() {
         fills: Vec::new(),
         rejections: Vec::new(),
         initial_equity: 100.0,
+        ruin_bar: None,
     };
     let sample = metrics::from_report(&empty, 252.0, 0.0, None);
     let known: HashSet<&str> = metrics::flatten(&sample).into_iter().map(|(k, _)| k).collect();
