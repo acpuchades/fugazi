@@ -2020,7 +2020,7 @@ pub(crate) struct PyBasketStrategy {
     pub(crate) score: Option<Py<PyAny>>,
     pub(crate) sizing: Option<Py<PyAny>>,
     pub(crate) selection: Option<BasketSelection>,
-    pub(crate) dollar_neutral: bool,
+    pub(crate) balance_sides: bool,
     pub(crate) rebalance: Option<SignalBox<Snapshot<Symbol>>>,
     pub(crate) universe: Option<DeclaredUniverse>,
 }
@@ -2031,7 +2031,7 @@ impl Clone for PyBasketStrategy {
             score: self.score.as_ref().map(|p| p.clone_ref(py)),
             sizing: self.sizing.as_ref().map(|p| p.clone_ref(py)),
             selection: self.selection.clone(),
-            dollar_neutral: self.dollar_neutral,
+            balance_sides: self.balance_sides,
             rebalance: self.rebalance.clone(),
             universe: self.universe.clone(),
         })
@@ -2048,7 +2048,7 @@ impl PyBasketStrategy {
             score: None,
             sizing: None,
             selection: None,
-            dollar_neutral: false,
+            balance_sides: true,
             rebalance: None,
             universe: None,
         }
@@ -2134,11 +2134,14 @@ impl PyBasketStrategy {
         s
     }
 
-    /// Enforce dollar-neutrality: scale per-symbol sizes each rebalance so
-    /// `Σ long == Σ short` (never levers up; one-sided bars skip the rebalance).
-    pub(crate) fn dollar_neutral(&self) -> PyBasketStrategy {
+    /// Balance the two sides' target sizes each rebalance so that the long
+    /// weights and the short weights sum to the same gross (never levers up;
+    /// a one-sided bar passes through unscaled). On by default -- pass
+    /// `False` to keep the raw per-leg sizes.
+    #[pyo3(signature = (balance = true))]
+    pub(crate) fn balance_sides(&self, balance: bool) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.dollar_neutral = true;
+        s.balance_sides = balance;
         s
     }
 
@@ -2203,9 +2206,7 @@ impl PyBasketStrategy {
             Some(sel) => strat.selection(core_basket::DynSelection(sel.build())),
             None => strat,
         };
-        if self.dollar_neutral {
-            strat = strat.dollar_neutral();
-        }
+        strat = strat.balance_sides(self.balance_sides);
         if let Some(rebalance) = &self.rebalance {
             strat = strat.rebalance_on(rebalance.clone());
         }

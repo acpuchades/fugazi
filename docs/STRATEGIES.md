@@ -310,7 +310,9 @@ into the expression if you'd rather trade through it.
 On a pair, both legs are scaled together — each leg enters at half the sized
 fraction, so `!value 1.0` is 1.0× gross and dollar-neutral. On a basket, `sizing`
 is *per leg* and **not normalized**: an N-leg basket at 100% gross wants
-`!equal_weight N`.
+`!equal_weight N`. (Normalizing gross is a separate question from balancing the
+long side against the short one, which a basket does do by default — see
+[Balancing the two sides](#balancing-the-two-sides).)
 
 ### Sizing recipes
 
@@ -531,6 +533,7 @@ symbol — the classic cross-sectional momentum / value / carry shape.
 | `score` | source *(template)* | — (**required**) | the per-symbol ranking value |
 | `sizing` | source *(template)* | — (**required**) | the per-leg size, as a fraction of equity |
 | `universe` | universe rule | *floating* (every symbol seen) | which symbols the basket is willing to trade — see [Universe](#universe) |
+| `balance_sides` | bool | `true` | equalize long and short gross — see [Balancing the two sides](#balancing-the-two-sides) |
 | `rebalance_on` | signal | `!every 1` (every bar) | re-rank + resize when this fires (see [Rebalance](#rebalance)) |
 | `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
@@ -660,6 +663,40 @@ fugazi run basket:@basket.yml \
 Costs stay on the command line and are resolved per symbol, so a scoped
 `--costs 'BTC:0.001,ETH:0.0005'` applies per leg — see
 [CLI § `--costs`](CLI.md#--costs).
+
+### Balancing the two sides
+
+`sizing:` is per leg, so a basket whose two sides hold different numbers of legs
+— or whose legs are sized unequally by `!vol_target` / `!atr_risk` — ends up with
+more gross on one side than the other. `!top_bottom { longs: 2, shorts: 1 }` at a
+flat `!value 0.5` is 1.0× gross long against 0.5× gross short: a **net +0.5×
+long position that the ranking never asked for**. A market-wide rally shows up in
+the P&L whether or not the longs actually outranked the shorts, which is the one
+thing a cross-sectional strategy is trying not to measure.
+
+`balance_sides:` (default `true`) removes it. At each rebalance the two sides'
+target sizes are summed, the **smaller** sum becomes the target gross-per-side,
+and each side is scaled to meet it. In the example above the longs drop from 0.5
+to 0.25 each, so both sides carry 0.5× and the net is flat. Taking the smaller
+side means balancing only ever **deleverages** — it never levers the small side
+up to meet the big one, so turning it on cannot increase your exposure.
+
+```yaml
+balance_sides: false   # keep the raw per-leg sizes, net exposure and all
+```
+
+Set it `false` when the net exposure is the point — a long-biased basket that
+shorts only a small hedge, say — or when you are sizing the two sides against
+each other yourself in the `sizing:` expression.
+
+Two things it does **not** do. **A one-sided selection passes through
+unscaled**: with no shorts there is no counter-side to balance against, so a
+long-only basket (`!top_bottom { longs: 5, shorts: 0 }`, or a `!threshold` whose
+cutoffs happen to admit one side on some bars) trades exactly as it would with
+the flag off. Balancing never blocks a trade. And it equalizes *intent at
+rebalance*, not realized notional every bar — like all basket sizing it is read
+on transition, so an already-open leg is not resized and the balance drifts with
+price until the next turnover.
 
 ### Per-leg protective levels
 

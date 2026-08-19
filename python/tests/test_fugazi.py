@@ -1401,15 +1401,16 @@ def test_basket_strategy_selects_top_and_bottom():
     assert "BBB" not in {f.order.symbol for f in rep.fills}
 
 
-def test_basket_dollar_neutral_and_universe_chain():
-    # The builder methods chain and the dollar-neutral + declared-universe
-    # variant still runs end-to-end.
+def test_basket_balance_sides_and_universe_chain():
+    # The builder methods chain and the side-balanced + declared-universe
+    # variant still runs end-to-end. `balance_sides()` defaults its argument
+    # to True, matching the Rust default.
     strat = (
         ta.BasketStrategy()
         .scored_by(lambda sym: ta.close(ta.pick(sym)).roc(1))
         .sized_by(lambda sym: ta.value(1.0))
         .top_bottom(1, 1)
-        .dollar_neutral()
+        .balance_sides()
         .any_of(["AAA", "BBB", "CCC"])
     )
     snaps = _msnaps({

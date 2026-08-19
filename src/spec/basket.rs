@@ -242,13 +242,16 @@ pub struct BasketStrategySpec {
     #[serde(default)]
     pub rebalance_on: Option<NodeSpec>,
 
-    /// Enforce **dollar-neutrality**: at each rebalance, per-symbol sizes
-    /// are scaled so that Σ long_sizes == Σ short_sizes. The smaller
-    /// per-side sum is taken as the target gross-per-side (never levers
-    /// up); a one-sided selection this bar skips the rebalance entirely
-    /// (the hedge is undefined). Off by default.
-    #[serde(default)]
-    pub dollar_neutral: bool,
+    /// **Balance the two sides' target sizes** at each rebalance, so that
+    /// Σ long_sizes == Σ short_sizes. The smaller per-side sum is taken
+    /// as the target gross-per-side (never levers up); a one-sided
+    /// selection passes through unscaled, since there is no counter-side
+    /// to balance against.
+    ///
+    /// **On by default** — an unbalanced basket carries net exposure its
+    /// ranking never asked for. Set `false` to keep the raw per-leg sizes.
+    #[serde(default = "default_balance_sides")]
+    pub balance_sides: bool,
 
     /// Per-leg protective levels — same shape as the single-asset
     /// `long:` / `short:` spec sides but templated (`!arg SYM` for the
@@ -269,6 +272,13 @@ pub struct BasketStrategySpec {
     /// never interpreted — see [`spec::meta`](crate::spec::meta).
     #[serde(default)]
     pub meta: Option<Meta>,
+}
+
+/// `balance_sides` defaults to `true` — see
+/// [`BasketStrategySpec::balance_sides`]. A plain `#[serde(default)]`
+/// would give `false`, which is the opt-out, not the default.
+fn default_balance_sides() -> bool {
+    true
 }
 
 /// Per-leg protective template for a [`BasketStrategySpec`] side. Only
@@ -484,11 +494,7 @@ impl BasketStrategySpec {
             strat
         };
 
-        let strat = if self.dollar_neutral {
-            strat.dollar_neutral()
-        } else {
-            strat
-        };
+        let strat = strat.balance_sides(self.balance_sides);
 
         Ok(DynBasketStrategy { inner: strat })
     }
@@ -1190,15 +1196,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_dollar_neutral_flag() {
-        let yaml = r#"
+    fn balance_sides_defaults_on_and_parses_the_opt_out() {
+        // Omitted → `true`. A plain `#[serde(default)]` would give `false`
+        // here, which is the opt-out rather than the default.
+        let base = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.5
-            dollar_neutral: true
         "#;
-        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
-        assert!(spec.dollar_neutral);
+        let spec = BasketStrategySpec::from_text_with_params(base, &HashMap::new()).unwrap();
+        assert!(spec.balance_sides, "balance_sides defaults to true");
+
+        let opted_out = format!("{base}    balance_sides: false\n");
+        let spec =
+            BasketStrategySpec::from_text_with_params(&opted_out, &HashMap::new()).unwrap();
+        assert!(!spec.balance_sides);
+
+        // The old spelling is now an unknown field, not a silently-ignored
+        // one — `deny_unknown_fields` turns a stale document into an error.
+        let stale = format!("{base}    dollar_neutral: true\n");
+        assert!(BasketStrategySpec::from_text_with_params(&stale, &HashMap::new()).is_err());
     }
 
     #[test]
