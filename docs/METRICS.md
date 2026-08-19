@@ -271,11 +271,11 @@ n_returns, bpy, n_trials, trial_var)`.
 
 **Emitted in two places, with two different trial populations:**
 
-- **`optimize`'s grid CSV.** `n_trials` = number of grid rows,
-  `trial_var` = sample variance of the grid's annualized Sharpes. Answers
-  "does *this* cell's Sharpe survive correction for the fact that N cells
-  were searched and the best was picked?" — post-selection inference in
-  the textbook sense.
+- **`optimize`'s grid CSV.** `n_trials` = number of grid rows that were
+  **candidates**, `trial_var` = sample variance of *their* annualized
+  Sharpes. Answers "does *this* cell's Sharpe survive correction for the
+  fact that N cells were searched and the best was picked?" — post-selection
+  inference in the textbook sense.
 - **`run -w`'s `metrics.csv`.** `n_trials` = number of non-overlapping
   windows, `trial_var` = sample variance of the window Sharpes. Answers
   "does *this* window's Sharpe survive correction for the fact that N
@@ -291,8 +291,20 @@ n_returns, bpy, n_trials, trial_var)`.
   counts. Aggregating higher moments by cross-window mean isn't quite the
   pooled-returns skew — it matches how the windowed `_mean` columns
   aggregate, so the DSR cell stays comparable to its neighbours.
+- **A ruined cell is not a trial.** On `optimize`, a wiped-out row is
+  barred from winning any `--best-by` (see [CLI](CLI.md), *ruin*), so the
+  maximum was never taken over it and neither `n_trials` nor `trial_var`
+  counts it. This is not a conservatism knob in either direction: a dead
+  cell whose pre-ruin Sharpe sat near the grid's mean used to *shrink*
+  `trial_var`, lowering `E[max SR₀]` and inflating every surviving cell's
+  DSR. The ruined row still gets its own DSR cell, measured against the
+  candidates' null — "would this cell's pre-ruin Sharpe have survived the
+  search, had it lived?". Ruin costs a cell its candidacy, never its
+  description.
 - **Emitted only when the null is defined.** Omitted when fewer than two
-  rows/windows have a defined Sharpe or when `trial_var` is zero.
+  candidate rows / windows have a defined Sharpe or when `trial_var` is
+  zero — so a grid in which nothing survived has no DSR column at all,
+  there having been no selection to correct for.
 - **Not emitted for `rolling.csv`.** Adjacent rolling windows share
   `LEN − 1` bars, so `trial_var` is understated and the DSR would be
   optimistic. Use non-overlapping windows for this correction.

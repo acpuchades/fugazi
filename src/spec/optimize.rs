@@ -420,13 +420,14 @@ pub fn subgrid_label(subgrid: &Subgrid, union_columns: &[String]) -> String {
     }
 }
 
-/// Grid-wide inputs to the per-row DSR: `(n_trials, sample_variance_of_sharpe)`.
-/// `None` when fewer than two rows have a defined Sharpe or the variance is
-/// zero — DSR is meaningless in either case (no null distribution, no
-/// dispersion to correct against). In windowed mode a row's Sharpe is the
+/// Grid-wide inputs to the per-row DSR: `(n_trials, sample_variance_of_sharpe)`,
+/// over the rows that were **candidates** — see [`trial_sharpe`].
+/// `None` when fewer than two candidate rows have a defined Sharpe or the
+/// variance is zero — DSR is meaningless in either case (no null distribution,
+/// no dispersion to correct against). In windowed mode a row's Sharpe is the
 /// cross-window mean of window Sharpes (see the [`Sweep`] field's rustdoc).
 pub fn compute_dsr_context(rows: &[Row]) -> Option<(usize, Real)> {
-    let sharpes: Vec<Real> = rows.iter().filter_map(row_summary_sharpe).collect();
+    let sharpes: Vec<Real> = rows.iter().filter_map(trial_sharpe).collect();
     if sharpes.len() < 2 {
         return None;
     }
@@ -439,6 +440,37 @@ pub fn compute_dsr_context(rows: &[Row]) -> Option<(usize, Real)> {
         return None;
     }
     Some((sharpes.len(), var))
+}
+
+/// A row's Sharpe **as a trial statistic** — the [`row_summary_sharpe`] of a
+/// row that was a candidate, and `None` for one that was ruined.
+///
+/// This is [`ranking_lookup`]'s rule carried to the one other place a grid-wide
+/// number is derived from the rows, and it is here for the same reason it is
+/// there: DSR is a *selection* correction, so its trial population has to be
+/// the set the selection could have returned. After `ranking_lookup`, a ruined
+/// cell cannot win a sweep whatever its Sharpe says — so it is not a draw the
+/// observed maximum was taken over, and neither `N` nor `Var[SR]` should count
+/// it. Counting it is not merely conservative: a ruined Sharpe near the grid's
+/// mean *shrinks* the variance, which shrinks `E[max SR₀]` and inflates every
+/// cell's DSR.
+///
+/// The second reason is that it is not the same estimator. `backtest::run` pins
+/// the curve at zero from the ruin bar on, so a ruined cell's Sharpe is a
+/// statistic over a truncated sample of a different length — `Var[SR]` across a
+/// mix of those and full-length ones is not the dispersion of one estimator
+/// across trials, which is the quantity the closed form wants.
+///
+/// **This does not null the ruined row's own cells.** Its `sharpe` column keeps
+/// its number, and so does its `selection.deflated_sharpe` — measured against
+/// the candidates' null, which is exactly the question "would this cell's
+/// pre-ruin Sharpe have survived the search, had it lived?". Ruin costs a row
+/// its candidacy, never its description; see [`ranking_lookup`] and `TODO.md`.
+pub fn trial_sharpe(row: &Row) -> Option<Real> {
+    if row.eval.ruin_bar().is_some() {
+        return None;
+    }
+    row_summary_sharpe(row)
 }
 
 /// A row's summary Sharpe: the whole-run value in [`Evaluation::Whole`], the
@@ -613,10 +645,16 @@ pub struct Sweep {
     /// `<name>_mean` / `<name>_std` columns per metric.
     pub windowed: bool,
     /// `(n_trials, Var[SR])` collected across the sweep, or `None` when the
-    /// grid has fewer than two rows with a defined Sharpe or when the trial
-    /// variance is zero — DSR is meaningless in either case. Consumed by the
-    /// CSV writer to emit the `selection.deflated_sharpe` column: the per-row DSR
-    /// against the grid-wide null (Bailey & López de Prado, 2014).
+    /// grid has fewer than two **candidate** rows with a defined Sharpe or when
+    /// the trial variance is zero — DSR is meaningless in either case. Consumed
+    /// by the CSV writer to emit the `selection.deflated_sharpe` column: the
+    /// per-row DSR against the grid-wide null (Bailey & López de Prado, 2014).
+    ///
+    /// The trial population is the rows a `--best-by` could have returned, so a
+    /// ruined row is not in it — see [`trial_sharpe`]. Every row still gets a
+    /// DSR *cell* against that population, ruined ones included; a grid where
+    /// fewer than two cells survived has no selection to correct for, and the
+    /// column disappears.
     ///
     /// Windowing regularizes but does not eliminate multiple-testing bias: the
     /// user still picked *this* cell out of `N`, and its cross-window mean
@@ -1077,6 +1115,10 @@ pub fn mean_std_of<I: Iterator<Item = Option<Real>>>(values: I) -> Option<(Real,
 /// already treats it as missing evidence rather than as a plateau (so a ruined
 /// neighbour contributes no weight and lowers `_support`), and the CSV column
 /// keeps the number it always had.
+///
+/// One place downstream does have to know this rule rather than just consume
+/// `None`: the DSR trial population, which is grid-wide rather than per-row and
+/// so cannot inherit it. [`trial_sharpe`] carries it there.
 ///
 /// The number is *kept* on purpose. A pre-ruin Sharpe is a true description of
 /// the strategy while it was alive, `run.ruin_bar` sits beside it saying so,

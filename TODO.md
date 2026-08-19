@@ -90,6 +90,51 @@ but actively misleading as a description — one where reading it at all invites
 the wrong conclusion regardless of the ruin flag next to it. None in the current
 catalogue is; `tests/ruin.rs` pins the choice.
 
+### …and it is not a *trial* either — the DSR population
+
+`ranking_lookup` covers every place a `Metrics` becomes a per-row key. It left
+one number behind, because that one is derived grid-wide and so had nothing to
+inherit the rule from: `compute_dsr_context`'s `(N, Var[SR])` counted a ruined
+row as a trial and put its pre-ruin Sharpe into the variance, while the same row
+was barred from ever being returned. `trial_sharpe` (0.65.0) carries the rule
+across — the trial population is the candidates.
+
+The argument is not "a dead account deserves no say". It is that DSR corrects
+for a maximum having been taken over a set, so the set has to be the one the
+maximum could have come from; after `ranking_lookup` that set excludes the
+ruined rows by construction. Two things follow, and both were checked rather
+than assumed:
+
+- **Counting them is not conservative.** The intuition says a bigger `N` means a
+  bigger correction. But a ruined cell whose pre-ruin Sharpe sits near the
+  grid's mean *shrinks* `Var[SR]`, and `E[max SR₀] = √V·[…]` shrinks with it, so
+  the whole grid's DSR goes **up**. `a_ruined_row_is_not_a_dsr_trial` pins the
+  harmful direction with a fixture that reproduces it.
+- **It is not even the same estimator.** `run` pins the curve at zero from the
+  ruin bar on, so a ruined cell's Sharpe is a statistic over a truncated sample
+  of a different effective length. `Var[SR]` across a mix of those and
+  full-length ones is not the dispersion of one estimator across trials, which
+  is the quantity the closed form asks for.
+
+The ruined row keeps its own `selection.deflated_sharpe` cell, against the
+candidates' null — the same call the decision above makes for `sharpe`, and for
+the same reason. Nulling it would have made DSR the single metric that blanks on
+ruin, which is alternative (1) reintroduced for one column.
+
+Visible consequence, accepted: a grid in which fewer than two cells survived now
+emits **no DSR column at all** rather than a column built from dead accounts.
+That reads correctly — there was no selection to correct for. `optimize`'s ruin
+banner already says every cell died.
+
+What would change it: a use of DSR where the question really is "how many
+configurations did I try", independent of which could win — a search-effort
+audit rather than post-selection inference. That is a different statistic and
+should be a different column, not this one re-pointed.
+
+`run -w`'s `windows_dsr_context` is deliberately untouched: its population is
+the windows of one run, no ranking predicate acts on them, and the post-ruin
+windows are flat zeros whose Sharpe is already `None`.
+
 ### The rest of the plateau summary: "fraction of the grid above baseline"
 
 `--smooth`'s console block reports the largest connected plateau within 5% of

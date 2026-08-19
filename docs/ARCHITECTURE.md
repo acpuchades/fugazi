@@ -841,8 +841,11 @@ plotting. CLI emits data files only: `fills.csv`, `trades.csv`, `returns.csv`,
   `plateau_size` connects `±1` in *sorted* position, not within the bandwidth —
   the console prints it as a cell count.
 - **`selection.deflated_sharpe` on `optimize`** — per-row DSR against the grid-wide
-  null (`N` = trials, `Var[SR]` = sample variance of the grid's annualized Sharpes).
-  Omitted if <2 rows have defined Sharpe or trial variance is zero.
+  null (`N` = trials, `Var[SR]` = sample variance of their annualized Sharpes). The
+  trial population is the rows a `--best-by` could have returned, so a **ruined row
+  is not in it** (`optimize::trial_sharpe`, `ranking_lookup`'s rule carried to the
+  one selection number derived grid-wide) — though it still gets a DSR *cell*.
+  Omitted if <2 candidate rows have defined Sharpe or trial variance is zero.
 
 `Trade`/`DrawdownSegment` re-exported at crate root.
 

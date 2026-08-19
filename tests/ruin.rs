@@ -576,7 +576,8 @@ fn run_reports_ruin_rather_than_leaving_it_to_be_inferred() {
 // `ruin_is_unrankable_but_its_numbers_are_still_reported` pins the choice.
 
 use fugazi::spec::optimize::{
-    Direction, Evaluation, argbest, direction_for, lookup, ranking_lookup, ranking_value,
+    Direction, Evaluation, Row, argbest, compute_dsr_context, direction_for, lookup,
+    ranking_lookup, ranking_value, row_dsr_inputs, trial_sharpe,
 };
 use fugazi::wallet::{OrderId, OrderKind};
 use fugazi::{Fill, Order, RunReport};
@@ -852,6 +853,165 @@ fn a_windowed_row_is_unrankable_if_any_window_was_ruined() {
 }
 
 // ---------------------------------------------------------------------------
+// Selection corrections: a dead account is not a trial either
+// ---------------------------------------------------------------------------
+//
+// `ranking_lookup` covers every place a `Metrics` becomes a *per-row* key. The
+// DSR trial context is the one selection number derived grid-wide instead, so
+// it could not inherit that rule and did not have it: a ruined row counted
+// toward `N` and its pre-ruin Sharpe went into `Var[SR]`, while the same row
+// was barred from ever winning. `trial_sharpe` carries the rule across.
+
+/// A solvent equity curve whose per-bar drift is `drift` — the one knob, so a
+/// few of these make a trial population with real dispersion in its Sharpes.
+fn drifting_curve(drift: Real) -> Vec<Real> {
+    let mut equity = Vec::with_capacity(RANKING_BARS);
+    let mut e = 10_000.0;
+    for i in 0..RANKING_BARS {
+        e *= 1.0 + drift + 0.02 * (i as Real * 1.7).sin();
+        equity.push(e);
+    }
+    equity
+}
+
+fn solvent_with_drift(drift: Real) -> metrics::Metrics {
+    reduce_curve(drifting_curve(drift), Vec::new(), None)
+}
+
+/// The same curve, killed on the final bar. One `-100%` bar out of 1 858 costs
+/// it about a point of Sharpe and no more — the defect in miniature — so a dead
+/// cell given a *higher* drift than any solvent one still lands mid-population,
+/// which is what lets the test below show that counting it is not merely
+/// conservative.
+fn ruined_with_drift(drift: Real) -> metrics::Metrics {
+    let mut equity = drifting_curve(drift);
+    *equity.last_mut().unwrap() = 0.0;
+    let fills = round_trip(RANKING_BARS - 2, 100.0, 0.0001);
+    reduce_curve(equity, fills, Some(RANKING_BARS - 1))
+}
+
+fn row_of(m: metrics::Metrics) -> Row {
+    Row { values: Vec::new(), eval: whole(m), smoothed: None }
+}
+
+/// **The decision.** DSR corrects for the fact that a maximum was taken over a
+/// set of candidates, so the set it is taken over has to be the candidates.
+/// After `ranking_lookup` a ruined cell cannot be returned by any `--best-by`,
+/// so the observed maximum was never a draw from a population containing it.
+///
+/// The bad direction is the point: a ruined Sharpe near the grid's mean
+/// *shrinks* `Var[SR]`, which shrinks `E[max SR₀]` and hands every surviving
+/// cell a **higher** DSR. Counting dead accounts as trials does not buy
+/// conservatism, it leaks the exact optimism DSR exists to remove.
+#[test]
+fn a_ruined_row_is_not_a_dsr_trial() {
+    // Ten candidates spanning a realistic Sharpe spread, and one dead account
+    // whose pre-ruin Sharpe sits in the middle of them.
+    let drifts: Vec<Real> = (0..10).map(|i| 0.0004 + i as Real * 0.0002).collect();
+    let solvent: Vec<metrics::Metrics> =
+        drifts.iter().copied().map(solvent_with_drift).collect();
+    let dead = ruined_with_drift(0.00306);
+
+    let sharpes: Vec<Real> = solvent
+        .iter()
+        .map(|m| m.risk_adjusted.sharpe.expect("a solvent Sharpe"))
+        .collect();
+    let dead_sharpe = dead.risk_adjusted.sharpe.expect("a pre-ruin Sharpe");
+    let mean = sharpes.iter().sum::<Real>() / sharpes.len() as Real;
+    let spread = sharpes[sharpes.len() - 1] - sharpes[0];
+    assert!(
+        (dead_sharpe - mean).abs() < 0.1 * spread,
+        "the dead cell's Sharpe must land near the *middle* of the candidates ({mean} ± \
+         {spread}), or this test shows the trivial direction rather than the harmful one — \
+         adjust the drift knobs, not the assertion: got {dead_sharpe}"
+    );
+
+    let candidates: Vec<Row> = solvent.iter().cloned().map(row_of).collect();
+    let mut everything: Vec<Row> = solvent.iter().cloned().map(row_of).collect();
+    everything.push(row_of(dead.clone()));
+
+    // The rule: a ruined row has no trial Sharpe, and the context computed over
+    // the whole grid is the context computed over the candidates alone.
+    assert_eq!(trial_sharpe(everything.last().unwrap()), None);
+    assert_eq!(trial_sharpe(&everything[0]), Some(sharpes[0]));
+    let (n, var) = compute_dsr_context(&everything).expect("ten solvent cells is a population");
+    assert_eq!(
+        (n, var),
+        compute_dsr_context(&candidates).unwrap(),
+        "the grid's trial context must equal its candidates' trial context"
+    );
+    assert_eq!(n, 10, "eleven rows were run; ten could have been picked");
+
+    // And what the old reading gave, in the direction it gave it.
+    let all: Vec<Real> = sharpes.iter().copied().chain([dead_sharpe]).collect();
+    let k = all.len() as Real;
+    let mean_all = all.iter().sum::<Real>() / k;
+    let var_with_dead = all.iter().map(|s| (s - mean_all).powi(2)).sum::<Real>() / (k - 1.0);
+    assert!(
+        var_with_dead < var,
+        "the fixture must exercise the anti-conservative direction: counting the dead cell \
+         should shrink Var[SR] ({var_with_dead} vs {var})"
+    );
+
+    let winner = solvent.last().expect("the best candidate");
+    let dsr = |n_trials: usize, trial_var: Real| {
+        fugazi::metrics::deflated_sharpe_from_stats(
+            winner.risk_adjusted.sharpe,
+            winner.returns.skewness,
+            winner.returns.kurtosis,
+            winner.run.bars,
+            winner.run.bars_per_year,
+            n_trials,
+            trial_var,
+        )
+        .expect("a defined DSR")
+    };
+    assert!(
+        dsr(all.len(), var_with_dead) > dsr(n, var),
+        "counting a dead account as a trial should have *inflated* the winner's DSR — if it \
+         no longer does, the fixture stopped reproducing the thing this guards"
+    );
+}
+
+/// The other half of the same decision, and the one it shares with
+/// `ruin_is_unrankable_but_its_numbers_are_still_reported`: the ruined row is
+/// out of the *population*, not out of the CSV. Its own DSR cell is written,
+/// against the candidates' null — "would this cell's pre-ruin Sharpe have
+/// survived the search, had it lived?".
+#[test]
+fn a_ruined_row_still_gets_a_dsr_cell() {
+    let dead = ruined_with_drift(0.0012);
+    let context = compute_dsr_context(&[
+        row_of(solvent_with_drift(0.0006)),
+        row_of(solvent_with_drift(0.0020)),
+        row_of(dead.clone()),
+    ])
+    .expect("two solvent cells is a population");
+
+    let (sharpe, skew, kurt, n_returns, bpy) = row_dsr_inputs(&row_of(dead.clone()));
+    assert_eq!(sharpe, dead.risk_adjusted.sharpe, "the row keeps its own summary stats");
+    assert!(
+        fugazi::metrics::deflated_sharpe_from_stats(
+            sharpe, skew, kurt, n_returns, bpy, context.0, context.1
+        )
+        .is_some(),
+        "a ruined row's DSR cell is computed like any other — only the null excludes it"
+    );
+}
+
+/// A grid with nothing left alive had no selection to correct for, so there is
+/// no null and no column — `None`, not a context built from the dead.
+#[test]
+fn an_all_ruined_grid_has_no_dsr_context() {
+    let rows: Vec<Row> = [0.0006, 0.0012, 0.0020]
+        .into_iter()
+        .map(|d| row_of(ruined_with_drift(d)))
+        .collect();
+    assert!(rows.iter().all(|r| r.eval.ruin_bar().is_some()));
+    assert_eq!(compute_dsr_context(&rows), None);
+}
+
+// ---------------------------------------------------------------------------
 // The CLI: `optimize` neither picks a dead account nor hides one
 // ---------------------------------------------------------------------------
 
@@ -1060,6 +1220,30 @@ fn a_ruined_cell_keeps_its_metrics_in_the_csv() {
             column(&header, row, "returns.cagr_pct"),
             "-100",
             "and its terminal-wealth metrics still read ruin:\n{row}"
+        );
+    }
+}
+
+/// The trial-population rule, end to end. Two things at once, because in this
+/// grid they are the same CSV: the `selection.deflated_sharpe` column is built
+/// from the cells that could have won, and it is still *written* for the ones
+/// that could not.
+#[test]
+fn the_dsr_column_is_built_from_the_candidates_and_written_for_everyone() {
+    let (_console, header, rows) = ma_sweep(&["--best-by", "sharpe"], "dsr");
+    let solvent = rows.iter().filter(|r| !is_ruined(&header, r)).count();
+    assert!(solvent >= 2 && solvent < rows.len(), "need a mixed grid: {solvent}/{}", rows.len());
+
+    assert!(
+        header.contains("selection.deflated_sharpe"),
+        "a grid with two solvent cells has a null to correct against:\n{header}"
+    );
+    for row in &rows {
+        let dsr = column(&header, row, "selection.deflated_sharpe");
+        assert!(
+            dsr.parse::<Real>().is_ok(),
+            "every row gets a DSR cell, ruined ones included — only the null excludes \
+             them:\n{header}\n{row}"
         );
     }
 }

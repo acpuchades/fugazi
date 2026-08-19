@@ -1059,6 +1059,11 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         // Trailing `selection.deflated_sharpe` cell — uses per-row summary stats extracted
         // via `row_dsr_inputs` (whole-run passthrough or windowed cross-window
         // means; see [`row_dsr_inputs`] and the [`Sweep`] field's rustdoc).
+        //
+        // Written for *every* row, ruined ones included: only the grid-wide
+        // context excludes them (`trial_sharpe`), because they were never
+        // candidates. The cell itself is a description, like the `sharpe` one
+        // beside it.
         if let Some((n_trials, trial_var)) = deflated_sharpe_context {
             let (sharpe, skew, kurt, n_returns, bpy) = row_dsr_inputs(row);
             let dsr = fugazi::metrics::deflated_sharpe_from_stats(
