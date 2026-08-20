@@ -741,6 +741,11 @@ def _rebuild_size(kind: str, value: float) -> Size:
     the same names.
     """
     ...
+def _rebuild_snapshot(items: Any) -> Snapshot:
+    """Rebuild a [`Snapshot`](PySnapshot) from `(selector, atom)` pairs, preserving
+    duplicates and insertion order.
+    """
+    ...
 def ad() -> Indicator:
     """Chaikin accumulation/distribution line (cumulative)."""
     ...

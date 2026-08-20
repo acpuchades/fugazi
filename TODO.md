@@ -20,32 +20,6 @@ silently take the config's `default:` leg — quietly wrong for any config using
 shape is probably `set_costs_for_all(symbols, costs, freq=None)` looping the
 existing call, not a `with_costs` mirror.
 
-### `Atom` / `OverlayInfo` / `Snapshot` are not picklable
-
-Every other value type on the surface round-trips through `pickle` as of the
-`__reduce__` work — `Candle`, `Order`, `Fill`, `RunReport`, `Size`, `Frequency`,
-`Selector`, `Schema`, `Trade`, `DrawdownSegment` — which is what makes
-`ProcessPoolExecutor` / `joblib` fan-out possible at all. These three do not.
-
-`OverlayInfo` holds an `Rc<[OverlayValue]>`, deliberately: a non-atomic refcount
-keeps the per-bar overlay clone cheap, and under the GIL nothing needs the atomic.
-pyo3 therefore marks it `unsendable`, and `Atom` and `Snapshot` inherit that
-transitively. The flag makes pyo3 assert the accessing thread on *every* method
-call, `__reduce__` included — and `multiprocessing` pickles on a background feeder
-thread. So a `__reduce__` here would pass a plain `pickle.dumps` and then **panic
-and hang the pool** under the one caller that wanted it. A clean `TypeError:
-cannot pickle` is strictly better, so they have none.
-
-The workaround costs nothing in the common case: send the *inputs* as plain data
-(candle tuples, a DataFrame) and build the `Snapshot`s inside the worker, which is
-where they were going to be consumed anyway. Only the results come back.
-
-What would change it: `Rc` → `Arc` in `OverlayInfo` drops the flag from all three
-at once. That is a measurement, not a rewrite — the atomic lands in the per-bar
-clone on the hot path, so it needs `benches/` numbers before anyone spends it, and
-the answer may well be "not worth it for a use case a two-line worker refactor
-already covers".
-
 ### The GIL is held for the whole of `run()`
 
 `Strategy.run` / `StrategySpec.run` are now **interruptible** — the snapshots go
@@ -63,11 +37,27 @@ error[E0277]: `dyn RunnableStrategy` cannot be sent between threads safely
 error[E0277]: `W` cannot be sent between threads safely
 ```
 
-`py.detach` demands a `Send` closure, and neither `RunnableStrategy` nor `Wallet`
-carries a `Send` bound — nor should they lightly, since adding one constrains
-every strategy and wallet implementation, present and future, including the live
-venue wallets. (`Snapshot` is separately `!Send` via `OverlayInfo`'s `Rc`; that
-one is the entry above.)
+`py.detach` demands a `Send` closure. The interesting part is *what* is missing:
+a compile-time probe says `PaperWallet`, `SingleAssetStrategy`, `BasketStrategy`,
+`Portfolio` and `Snapshot<Symbol>` are **all already `Send`** — every shared
+handle is an `Arc<Mutex<…>>` and `DynIndicator` is declared `Send + Sync`. Only
+`dyn RunnableStrategy` fails, and only because the *trait declaration* omits the
+bound, not because any implementation misses it.
+
+So the shape of the fix is known and small:
+
+1. `try_build` returns `Box<dyn RunnableStrategy + Send>` — that coerces to the
+   plain trait object, so Rust consumers are unaffected, and only the five
+   in-crate shapes have to satisfy it.
+2. Bound `W: Wallet<Symbol> + Send` **at the Python call sites**, not on the
+   `Wallet` trait, so a third-party wallet impl stays unconstrained.
+3. `interruptible` swaps its held GIL for `Python::attach(|py| py.check_signals())`
+   per stride — ~200 acquisitions on an 800 k-bar run.
+4. `py.detach` around `backtest::run`.
+
+The hazard that looks fatal and isn't: a basket calling a Python `scored_by`
+factory from a detached thread. `source_factory_from_callable` already returns
+`impl Fn + Send + Sync` and re-enters via `Python::attach` itself.
 
 Note the two goals are also in mild tension: `check_signals` needs the GIL, so a
 detached run has to re-attach at each stride anyway. The shape that would give

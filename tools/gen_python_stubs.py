@@ -153,6 +153,7 @@ RETURNS = {
     "spec_document_json_schema": "dict[str, Any]",
     # --- unpickling entry points -------------------------------------------
     "_rebuild_schema": "Schema",
+    "_rebuild_snapshot": "Snapshot",
     "_rebuild_size": "Size",
     "_rebuild_order": "Order",
     "_rebuild_run_report": "RunReport",

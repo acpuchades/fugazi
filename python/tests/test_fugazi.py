@@ -3282,9 +3282,21 @@ def _pickle_cases():
     b.add_real("funding")
     b.add_bool("halted")
     b.add_str("regime")
+    schema = b.finish()
+    overlays = ta.OverlayInfo(schema, [0.01, True, "bull"])
+    atom = ta.Atom(candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0), overlays=overlays, time=1)
+    snapshot = ta.Snapshot()
+    snapshot.push("BTC", atom)
+    # Two entries under one symbol at different cadences: the case a `dict`
+    # round-trip would silently collapse, which is why `Snapshot.__reduce__`
+    # replays `push` rather than the mapping constructor.
+    snapshot.push(("BTC", "1h"), atom)
     return {
         "Candle": ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0),
-        "Schema": b.finish(),
+        "Schema": schema,
+        "OverlayInfo": overlays,
+        "Atom": atom,
+        "Snapshot": snapshot,
         "Frequency": ta.Frequency("1h"),
         "Selector": ta.Selector(symbol="BTC", freq=ta.Frequency("1d")),
         "Size": ta.Size.value_frac(0.5),
@@ -3355,24 +3367,51 @@ def test_overlay_info_reports_what_it_was_built_from():
     assert ta.OverlayInfo(schema, [None, True, "bull"]).values == [None, True, "bull"]
 
 
-def test_unsendable_types_refuse_to_pickle_cleanly():
-    """`Atom`/`OverlayInfo`/`Snapshot` hold an `Rc`, so pyo3 marks them
-    unsendable and asserts the thread on every method call — `__reduce__`
-    included. `multiprocessing` pickles on a feeder *thread*, so a `__reduce__`
-    here would pass a plain `pickle.dumps` and then panic-and-hang the pool.
-    A plain TypeError is the better answer; this pins that it stays one."""
+@pytest.mark.parametrize("name", sorted(_pickle_cases()))
+def test_pickling_works_off_the_creating_thread(name):
+    """The regression that kept `Atom`/`OverlayInfo`/`Snapshot` unpicklable.
+
+    They carried pyo3's `unsendable` long after `OverlayInfo` moved from `Rc` to
+    `Arc`. That flag makes pyo3 assert the accessing thread on *every* method
+    call, `__reduce__` included — and `multiprocessing` pickles on its queue
+    feeder **thread**, so the marker turned a working `pickle.dumps` into a
+    panic that hung the pool. A plain main-thread round-trip cannot see it; this
+    can.
+    """
+    import pickle
+    import threading
+
+    obj = _pickle_cases()[name]
+    result: list[object] = []
+
+    def round_trip():
+        try:
+            result.append(repr(pickle.loads(pickle.dumps(obj))))
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            result.append(exc)
+
+    worker = threading.Thread(target=round_trip)
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive(), f"{name}: pickling hung on a non-creating thread"
+    assert result, f"{name}: worker produced nothing"
+    assert not isinstance(result[0], BaseException), f"{name}: {result[0]!r}"
+    assert result[0] == repr(obj)
+
+
+def test_a_snapshot_round_trip_keeps_two_cadences_of_one_symbol():
+    """`Snapshot(mapping)` would collapse them into one dict key, so
+    `__reduce__` replays `push` instead."""
     import pickle
 
-    b = ta.SchemaBuilder()
-    b.add_real("funding")
-    schema = b.finish()
-    for obj in (
-        ta.OverlayInfo(schema, [0.01]),
-        ta.Atom(candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0)),
-        ta.Snapshot({"BTC": ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0)}),
-    ):
-        with pytest.raises(TypeError, match="cannot pickle"):
-            pickle.dumps(obj)
+    atom = ta.Atom(candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0))
+    snap = ta.Snapshot()
+    snap.push(("BTC", "1h"), atom)
+    snap.push(("BTC", "1d"), atom)
+    assert len(snap) == 2
+    restored = pickle.loads(pickle.dumps(snap))
+    assert restored.keys() == snap.keys()
+    assert len(restored) == 2
 
 
 def test_equity_array_matches_equity_curve():

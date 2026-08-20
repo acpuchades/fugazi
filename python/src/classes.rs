@@ -339,26 +339,16 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -
 /// typed accessors (`get_real` / `get_bool` / `get_str`) return `None` on an
 /// absent slot or a type mismatch.
 ///
-/// The internal `Rc<[OverlayValue]>` (per-atom, non-atomic refcount) makes
-/// this class `unsendable` — it's confined to the Python thread that created
-/// it. This is fine under the GIL and keeps overlay clones cheap in the hot
-/// per-bar loop.
+/// Cheap to clone: [`OverlayInfo`] is two `Arc`s (the shared schema and this
+/// bar's values), so a clone is two atomic bumps and no allocation.
 ///
-/// # Why this type, `Atom` and `Snapshot` are not picklable
-///
-/// The `unsendable` flag makes pyo3 assert the accessing thread on **every**
-/// method call, `__reduce__` included — and `multiprocessing` pickles on a
-/// background feeder thread. A `__reduce__` here would therefore work under a
-/// plain `pickle.dumps` and then **panic and hang the pool** under the one
-/// caller that actually wanted it. A clean `TypeError: cannot pickle` is the
-/// better answer, so these three deliberately have none, while every sendable
-/// value type (`Candle`, `Order`, `Fill`, `RunReport`, `Trade`, …) does.
-///
-/// What would change it: making `OverlayInfo` hold an `Arc` instead of an `Rc`,
-/// which would drop the flag from all three. That trades an atomic increment
-/// into the per-bar overlay clone, so it is a measurement, not a rewrite — see
-/// `TODO.md`.
-#[pyclass(name = "OverlayInfo", module = "fugazi", frozen, unsendable, skip_from_py_object)]
+/// Both fields being `Arc` is also what makes this class **sendable**, and so
+/// picklable. It carried `unsendable` long after the core moved off `Rc` — and
+/// that flag makes pyo3 assert the accessing thread on *every* method call,
+/// `__reduce__` included, which is precisely what `multiprocessing` does from
+/// its queue feeder thread. Don't reinstate it without re-checking `OverlayInfo`:
+/// the marker is what decides whether an `Atom` can leave the process.
+#[pyclass(name = "OverlayInfo", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyOverlayInfo {
     pub(crate) inner: OverlayInfo,
@@ -411,6 +401,14 @@ impl PyOverlayInfo {
                 None => Ok(py.None()),
             })
             .collect()
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(
+            py,
+            py.get_type::<PyOverlayInfo>(),
+            (self.schema(), self.values(py)?),
+        )
     }
 
     pub(crate) fn __len__(&self) -> usize {
@@ -527,9 +525,7 @@ pub(crate) fn overlay_to_python(py: Python<'_>, v: &OverlayValue) -> PyResult<Py
 /// to an atom with no overlays) or an `Atom` — pass an `Atom` when the chain
 /// includes a `get()` indicator that needs overlay context.
 ///
-/// `unsendable` because the inner [`OverlayInfo`] holds an `Rc<[Real]>` for
-/// per-atom overlay values. The Python GIL confines it to one thread anyway.
-#[pyclass(name = "Atom", module = "fugazi", frozen, unsendable, skip_from_py_object)]
+#[pyclass(name = "Atom", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyAtom {
     pub(crate) inner: Atom,
@@ -599,6 +595,14 @@ impl PyAtom {
     #[getter]
     pub(crate) fn time(&self) -> Option<i64> {
         self.inner.time.map(|t| t.0)
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(
+            py,
+            py.get_type::<PyAtom>(),
+            (self.candle(), self.overlays(), self.time()),
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -881,7 +885,7 @@ pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbo
 /// asset out by [`Selector`]. Dict-like: `snap[selector]` reads,
 /// `snap[selector] = atom` writes, `selector in snap` tests membership,
 /// `len(snap)` counts assets.
-#[pyclass(name = "Snapshot", module = "fugazi", unsendable, skip_from_py_object)]
+#[pyclass(name = "Snapshot", module = "fugazi", skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySnapshot {
     pub(crate) inner: Snapshot<Symbol>,
@@ -1024,6 +1028,21 @@ impl PySnapshot {
     /// by index.
     pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         iter_over(py, self.keys())
+    }
+
+    /// Rebuild by replaying [`push`](Self::push) over `items()`.
+    ///
+    /// Deliberately **not** the `Snapshot(mapping)` constructor: a snapshot may
+    /// legitimately carry two entries under one tag — the same symbol at two
+    /// cadences — and routing those through a `dict` would silently collapse
+    /// them. `push` keeps duplicates and insertion order, so the round-trip is
+    /// exact.
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(
+            py,
+            py.import("fugazi")?.getattr("_rebuild_snapshot")?,
+            (self.items(),),
+        )
     }
 
     /// True if this snapshot carries no assets.
@@ -2121,6 +2140,18 @@ impl PySharedMulti {
 // Underscore-prefixed because they are a serialization detail, not surface —
 // but public members all the same, since pickle has to be able to find them.
 // ---------------------------------------------------------------------------
+
+/// Rebuild a [`Snapshot`](PySnapshot) from `(selector, atom)` pairs, preserving
+/// duplicates and insertion order.
+#[pyfunction]
+pub(crate) fn _rebuild_snapshot(items: &Bound<'_, PyAny>) -> PyResult<PySnapshot> {
+    let mut snap = PySnapshot::new(None)?;
+    for item in items.try_iter()? {
+        let pair = item?;
+        snap.push(&pair.get_item(0)?, pair.get_item(1)?.extract()?)?;
+    }
+    Ok(snap)
+}
 
 /// Rebuild a [`Schema`](PySchema) by replaying its columns through a
 /// `SchemaBuilder`. `types` are the strings [`PySchema::type_of`] returns.

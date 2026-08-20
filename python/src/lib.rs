@@ -94,7 +94,7 @@ use crate::constructors::{
 };
 // Unpickling entry points. Not surface — but `__reduce__` names its callable by
 // `module.qualname`, so each has to be a real, importable module member.
-use crate::classes::_rebuild_schema;
+use crate::classes::{_rebuild_schema, _rebuild_snapshot};
 use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
 use crate::strategy::{
     everything, top_bottom, threshold, quantile, buy_and_hold, ma_crossover,
@@ -209,7 +209,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // honours `__all__` — so filtering them out for tidiness would take
         // them off the package and break every `__reduce__` that resolves
         // `fugazi._rebuild_*`. Exported is a requirement here, not an oversight.
-        _rebuild_schema, _rebuild_size, _rebuild_order, _rebuild_run_report,
+        _rebuild_schema, _rebuild_snapshot, _rebuild_size, _rebuild_order,
+        _rebuild_run_report,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

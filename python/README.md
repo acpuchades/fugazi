@@ -1609,6 +1609,45 @@ against.
 
 ---
 
+## Running in parallel
+
+A grid sweep parallelises inside Rust — `ta.optimize(..., jobs=N)` — and that is
+the right tool when the thing you are varying is a parameter.
+
+For anything else, use processes. **Every value type pickles**, so snapshots go
+out and reports come back. The worker has to live at module level — that is
+`multiprocessing`'s rule, not fugazi's; a child imports it by name:
+
+```text
+# workers.py
+import fugazi as ta
+
+def run_one(args):
+    snaps, doc = args
+    return ta.load_spec(doc).run(ta.PaperWallet(10_000.0), snaps)
+
+# main.py
+from concurrent.futures import ProcessPoolExecutor
+from workers import run_one
+
+with ProcessPoolExecutor() as pool:
+    reports = list(pool.map(run_one, [(snaps, doc) for doc in documents]))
+```
+
+`Candle`, `Atom`, `Snapshot`, `Schema`, `OverlayInfo`, `Order`, `Fill`, `Size`,
+`Frequency`, `Selector`, `RunReport`, `Trade` and `DrawdownSegment` all round-trip,
+and a `Snapshot` carrying one symbol at two cadences survives as two entries
+rather than collapsing to one.
+
+Threads are the one thing that won't help: a run holds the GIL start to finish.
+It is *interruptible* — Ctrl-C ends it within a few milliseconds — but it will not
+overlap with other Python threads. Reach for processes, or `jobs=`.
+
+**Indicators, signals and strategies do not pickle**, by design: they own live
+incremental state, and half a warmed-up EMA is not a thing to ship between
+processes. Send the *description* (a YAML document, or the parameters) and build
+the chain inside the worker, as above.
+
 ## Types
 
 The wheel ships **`py.typed`** and generated stubs, so `mypy` and `pyright` see
