@@ -25,3 +25,11 @@ __pycache__/
 # The repo's docs are the ones a *user* reads; a proposal that shipped belongs
 # in ARCHITECTURE.md or a commit message, not as a file of its own.
 docs/proposals/
+
+# Scratch screenshots at the repo root — browser-automation output, not assets.
+# Root-anchored so `docs/assets/` can still carry a real image. These were
+# swept in once by a `git add -A` and put the packaged crate over crates.io's
+# 10 MiB limit, which surfaced as an opaque 503 from the CDN rather than a
+# size error. `exclude` in Cargo.toml is the second line of defence.
+/*.png
+.playwright-mcp/

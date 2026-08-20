@@ -1,6 +1,12 @@
 [package]
 name = "fugazi"
 version = "0.66.0"
+# Keep stray working-tree files out of the published tarball. A `git add -A`
+# once swept 15.5 MiB of scratch screenshots into the repo; the packaged crate
+# went over crates.io's 10 MiB limit and the upload came back as a bare 503
+# from the CDN with no body, which reads exactly like an outage. This makes the
+# package contents independent of what happens to be lying around.
+exclude = ["/*.png", "/.playwright-mcp/", "/docs/assets/performance-samples.json"]
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
