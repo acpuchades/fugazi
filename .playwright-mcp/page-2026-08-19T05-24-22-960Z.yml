@@ -1,0 +1,154 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e3]:
+    - link "fugazi" [ref=e4] [cursor=pointer]:
+      - /url: ./hero.html
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - link "How it works" [ref=e16] [cursor=pointer]:
+      - /url: ./hero.html
+    - link "Sign in" [ref=e17] [cursor=pointer]:
+      - /url: ./login.html
+    - link "Create account" [ref=e18] [cursor=pointer]:
+      - /url: ./login.html?new=1
+  - generic [ref=e19]:
+    - generic [ref=e20]:
+      - heading "Test as much as you like. Pay when it goes live." [level=1] [ref=e21]:
+        - text: Test as much as you like.
+        - emphasis [ref=e22]: Pay when it goes live.
+      - paragraph [ref=e23]: The backtester is free and stays free — sweeps, walk-forward, your own data. What costs money is scale, and connecting the account that actually trades.
+      - group "Billing period" [ref=e24]:
+        - button "Monthly" [pressed] [ref=e25] [cursor=pointer]
+        - button "Annual − 2 months" [ref=e26] [cursor=pointer]
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - heading "Free" [level=2] [ref=e29]
+        - paragraph [ref=e30]: Prove it to yourself. Everything you need to find out whether an idea is real.
+        - generic [ref=e31]:
+          - generic [ref=e32]: $0
+          - generic [ref=e33]: forever
+        - paragraph [ref=e34]: No card, ever.
+        - link "Start free" [ref=e35] [cursor=pointer]:
+          - /url: ./login.html?new=1
+        - paragraph [ref=e36]: No card required
+        - list [ref=e37]:
+          - generic [ref=e38]:
+            - text: 200 backtests per sweep
+            - generic [ref=e39]:
+              - text: Walk-forward folds and embargo
+              - generic [ref=e40]:
+                - text: 64 MB of your own data, 5M rows
+                - generic [ref=e41]:
+                  - text: Paper deployments, running on your cadence
+                  - listitem [ref=e42]:
+                    - text: ✕
+                    - generic [ref=e43]: No venue connection — paper money only
+      - generic [ref=e44]:
+        - generic [ref=e45]: Recommended
+        - heading "Pro" [level=2] [ref=e46]
+        - paragraph [ref=e47]: Trade it. The sweeps get serious and the account is real.
+        - generic [ref=e48]:
+          - generic [ref=e49]: $39
+          - generic [ref=e50]: / month
+        - paragraph [ref=e51]: Billed monthly
+        - link "Go Pro" [ref=e52] [cursor=pointer]:
+          - /url: ./login.html?new=1
+        - paragraph [ref=e53]: Cancel anytime
+        - list [ref=e54]:
+          - generic [ref=e55]:
+            - generic [ref=e56]:
+              - strong [ref=e57]: Connect OKX or Coinbase
+              - text: and trade live
+            - generic [ref=e58]:
+              - text: 2,000 backtests per sweep — 10× Free
+              - generic [ref=e59]:
+                - text: 25 grids, 15 axes, 250 values per axis
+                - generic [ref=e60]:
+                  - text: 256 MB uploads, 25M rows, 2,000 series
+                  - generic [ref=e61]: Priority in the run queue
+      - generic [ref=e62]:
+        - heading "Unlimited" [level=2] [ref=e63]
+        - paragraph [ref=e64]: No ceilings. The sweep is as big as your patience, not as big as your plan.
+        - generic [ref=e65]:
+          - generic [ref=e66]: $149
+          - generic [ref=e67]: / month
+        - paragraph [ref=e68]: Billed monthly
+        - link "Go Unlimited" [ref=e69] [cursor=pointer]:
+          - /url: ./login.html?new=1
+        - paragraph [ref=e70]: Cancel anytime
+        - list [ref=e71]:
+          - generic [ref=e72]:
+            - text: Everything in Pro
+            - generic [ref=e73]:
+              - generic [ref=e74]:
+                - strong [ref=e75]: No product limits at all
+                - text: — sweep size, uploads, rows, series
+              - generic [ref=e76]:
+                - text: As many runs in flight as the pool allows
+                - generic [ref=e77]:
+                  - text: Every venue we support, on one account
+                  - generic [ref=e78]: Direct line for provider and metric requests
+    - generic [ref=e79]:
+      - heading "The actual ceilings" [level=3] [ref=e80]
+      - table [ref=e81]:
+        - rowgroup [ref=e82]:
+          - row "Per account Free Pro Unlimited" [ref=e83]:
+            - columnheader "Per account" [ref=e84]
+            - columnheader "Free" [ref=e85]
+            - columnheader "Pro" [ref=e86]
+            - columnheader "Unlimited" [ref=e87]
+        - rowgroup [ref=e88]:
+          - row "Backtests in one sweep 200 2,000 no limit" [ref=e89]:
+            - cell "Backtests in one sweep" [ref=e90]
+            - cell "200" [ref=e91]
+            - cell "2,000" [ref=e92]
+            - cell "no limit" [ref=e93]
+          - row "Grids per sweep 10 25 no limit" [ref=e94]:
+            - cell "Grids per sweep" [ref=e95]
+            - cell "10" [ref=e96]
+            - cell "25" [ref=e97]
+            - cell "no limit" [ref=e98]
+          - row "Parameters per grid 10 15 no limit" [ref=e99]:
+            - cell "Parameters per grid" [ref=e100]
+            - cell "10" [ref=e101]
+            - cell "15" [ref=e102]
+            - cell "no limit" [ref=e103]
+          - row "Values per parameter 100 250 no limit" [ref=e104]:
+            - cell "Values per parameter" [ref=e105]
+            - cell "100" [ref=e106]
+            - cell "250" [ref=e107]
+            - cell "no limit" [ref=e108]
+          - row "Dataset upload 64 MB 256 MB no limit" [ref=e109]:
+            - cell "Dataset upload" [ref=e110]
+            - cell "64 MB" [ref=e111]
+            - cell "256 MB" [ref=e112]
+            - cell "no limit" [ref=e113]
+          - row "Rows across an archive 5M 25M no limit" [ref=e114]:
+            - cell "Rows across an archive" [ref=e115]
+            - cell "5M" [ref=e116]
+            - cell "25M" [ref=e117]
+            - cell "no limit" [ref=e118]
+          - row "Series across an archive 500 2,000 no limit" [ref=e119]:
+            - cell "Series across an archive" [ref=e120]
+            - cell "500" [ref=e121]
+            - cell "2,000" [ref=e122]
+            - cell "no limit" [ref=e123]
+          - row "Connect a broker and trade live — ✓ ✓" [ref=e124]:
+            - cell "Connect a broker and trade live" [ref=e125]
+            - cell "—" [ref=e126]
+            - cell "✓" [ref=e127]
+            - cell "✓" [ref=e128]
+          - row "Paper deployments ✓ ✓ ✓" [ref=e129]:
+            - cell "Paper deployments" [ref=e130]
+            - cell "✓" [ref=e131]
+            - cell "✓" [ref=e132]
+            - cell "✓" [ref=e133]
+    - generic [ref=e134]:
+      - generic [ref=e135]:
+        - heading "What happens when I hit a limit?" [level=4] [ref=e136]
+        - paragraph [ref=e137]: The request is refused and says which ceiling it hit. Nothing is silently trimmed — a sweep that quietly dropped points would be a wrong answer, not a smaller one.
+      - generic [ref=e138]:
+        - heading "Do you take a cut of what I trade?" [level=4] [ref=e139]
+        - paragraph [ref=e140]: No. Flat monthly price, whatever the account does. Your venue keys stay encrypted at rest and orders go straight to your own account.
+      - generic [ref=e141]:
+        - heading "What if I want to run it myself?" [level=4] [ref=e142]
+        - paragraph [ref=e143]: The engine underneath is MIT-licensed and public. This service is the hosted version — the datasets, the sweeps, the scheduling and the live pipeline.

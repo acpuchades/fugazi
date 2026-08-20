@@ -34,7 +34,7 @@ type Spread<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Sen
 /// Fetch a matching atom out of a per-bar [`Snapshot`], for the [`Position`]
 /// tracker's own view. Returns `None` on a miss (the pair leg is absent on this
 /// bar); the caller then simply skips the position fold for that side.
-fn find_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym) -> Option<Atom> {
+fn find_atom<Sym: PartialEq + Clone + Eq + std::hash::Hash>(snap: &Snapshot<Sym>, symbol: &Sym) -> Option<Atom> {
     let query = Selector::by_symbol(symbol.clone());
     snap.find(&query).cloned()
 }

@@ -1,0 +1,34 @@
+- generic [ref=e3]:
+  - generic:
+    - img
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - img [ref=e7]
+        - generic [ref=e18]: fugazi
+      - paragraph [ref=e19]: Your backtesting framework
+      - heading "Every edge looks real before you test it." [level=2] [ref=e20]
+      - paragraph [ref=e21]: Get inspired. Test everything. Keep what survives. Deploy.
+      - list [ref=e22]:
+        - listitem [ref=e23]: Upload your own market data
+        - listitem [ref=e24]: Build strategies without code
+        - listitem [ref=e25]: Find your edge, then sharpen it
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - link "fugazi" [ref=e29] [cursor=pointer]:
+          - /url: /
+          - img [ref=e30]
+          - generic [ref=e41]: fugazi
+        - heading "Sign in" [level=1] [ref=e42]
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - text: Email or username
+          - textbox "Email or username" [ref=e45]
+        - generic [ref=e46]:
+          - generic [ref=e47]: Password
+          - textbox "Password Forgot?" [ref=e48]
+          - button "Forgot?" [ref=e49] [cursor=pointer]
+        - button "Sign in" [ref=e50] [cursor=pointer]
+      - paragraph [ref=e52]:
+        - text: New here?
+        - button "Create an account" [ref=e53] [cursor=pointer]

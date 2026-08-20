@@ -1,0 +1,36 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e3]:
+    - link "fugazi" [ref=e4] [cursor=pointer]:
+      - /url: ./hero.html
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - link "← Back" [ref=e16] [cursor=pointer]:
+      - /url: ./hero.html
+  - generic [ref=e17]:
+    - generic [ref=e18]:
+      - heading "Every edge looks real before you test it." [level=1] [ref=e19]:
+        - text: Every edge looks real
+        - emphasis [ref=e20]: before you test it.
+      - paragraph [ref=e21]: "Pick up where you left off: your datasets, your sweeps, and whatever is running live."
+      - list [ref=e22]:
+        - listitem [ref=e23]: 144-run sweeps in a few seconds
+        - listitem [ref=e24]: Walk-forward folds with an embargo between them
+        - listitem [ref=e25]: Paper or a real OKX / Coinbase account
+    - generic [ref=e26]:
+      - heading "Sign in" [level=2] [ref=e27]
+      - paragraph [ref=e28]: to your fugazi account
+      - generic [ref=e29]:
+        - generic [ref=e30]: Email or username
+        - textbox "Email or username" [ref=e31]:
+          - /placeholder: you@desk.com
+      - generic [ref=e32]:
+        - generic [ref=e33]: Password
+        - textbox "Password" [ref=e34]:
+          - /placeholder: ••••••••••
+      - link "Forgot your password?" [ref=e36] [cursor=pointer]:
+        - /url: "#"
+      - button "Sign in" [ref=e37] [cursor=pointer]
+      - paragraph [ref=e38]:
+        - text: No account yet?
+        - link "Create one — it's free" [ref=e39] [cursor=pointer]:
+          - /url: "#"

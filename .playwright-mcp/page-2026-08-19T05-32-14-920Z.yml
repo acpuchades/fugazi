@@ -1,0 +1,26 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e3]:
+    - link "fugazi" [ref=e4] [cursor=pointer]:
+      - /url: ./hero.html
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - link "← Back" [ref=e16] [cursor=pointer]:
+      - /url: ./hero.html
+  - generic [ref=e18]:
+    - heading "Sign in" [level=2] [ref=e19]
+    - paragraph [ref=e20]: to your fugazi account
+    - generic [ref=e21]:
+      - generic [ref=e22]: Email or username
+      - textbox "Email or username" [ref=e23]:
+        - /placeholder: you@desk.com
+    - generic [ref=e24]:
+      - generic [ref=e25]: Password
+      - textbox "Password" [ref=e26]:
+        - /placeholder: ••••••••••
+    - link "Forgot your password?" [ref=e28] [cursor=pointer]:
+      - /url: "#"
+    - button "Sign in" [ref=e29] [cursor=pointer]
+    - paragraph [ref=e30]:
+      - text: No account yet?
+      - link "Create one — it's free" [ref=e31] [cursor=pointer]:
+        - /url: "#"

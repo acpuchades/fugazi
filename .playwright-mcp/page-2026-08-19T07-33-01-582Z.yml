@@ -1,0 +1,38 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - link "Sign in" [ref=e16] [cursor=pointer]:
+      - /url: ./login.html
+    - link "Create account" [ref=e17] [cursor=pointer]:
+      - /url: ./login.html?new=1
+  - generic [ref=e19]:
+    - generic [ref=e20]: Backtesting · walk-forward
+    - heading "Every edge looks real before you test it." [level=1] [ref=e21]:
+      - text: Every edge looks real
+      - emphasis [ref=e22]: before you test it.
+    - paragraph [ref=e23]: Test it the way it will actually be traded — costs on every fill, a period you held back before you looked, and the same engine running it live when it earns that.
+    - generic [ref=e24]:
+      - link "Create your free account" [ref=e25] [cursor=pointer]:
+        - /url: ./login.html?new=1
+      - link "See a real sweep →" [ref=e26] [cursor=pointer]:
+        - /url: "#"
+    - paragraph [ref=e27]: Free while it's in beta. No card. Paper money until you connect a broker.
+  - generic [ref=e28]:
+    - generic [ref=e29]: Parameter surface · ENTRY × EXIT
+    - generic [ref=e30]: BTC/USDT · 1d
+    - generic [ref=e31]: 144 backtests
+    - generic [ref=e32]: Sharpe -0.04 → 1.21
+    - generic [ref=e33]: peak at ENTRY 70 · EXIT 7
+    - generic [ref=e34]: animated illustration
+  - contentinfo [ref=e35]:
+    - generic [ref=e36]: © 2026 fugazi
+    - link "Pricing" [ref=e37] [cursor=pointer]:
+      - /url: ./pricing.html
+    - link "The engine (MIT)" [ref=e38] [cursor=pointer]:
+      - /url: https://github.com/acpuchades/fugazi
+    - link "Docs" [ref=e39] [cursor=pointer]:
+      - /url: https://docs.rs/fugazi
+    - link "Sign in" [ref=e40] [cursor=pointer]:
+      - /url: ./login.html

@@ -1,0 +1,28 @@
+- generic [ref=e5]:
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - img [ref=e8]
+      - generic [ref=e19]: fugazi
+    - heading "Every edge looks real before you test it." [level=1] [ref=e20]:
+      - text: Every edge looks real
+      - generic [ref=e21]: before you test it.
+    - paragraph [ref=e22]: Pick up where you left off.
+  - generic [ref=e24]:
+    - generic [ref=e25]:
+      - link "fugazi" [ref=e26] [cursor=pointer]:
+        - /url: /
+        - img [ref=e27]
+        - generic [ref=e38]: fugazi
+      - heading "Sign in" [level=1] [ref=e39]
+    - generic [ref=e40]:
+      - generic [ref=e41]:
+        - text: Email or username
+        - textbox "Email or username" [ref=e42]
+      - generic [ref=e43]:
+        - generic [ref=e44]: Password
+        - textbox "Password Forgot?" [ref=e45]
+        - button "Forgot?" [ref=e46] [cursor=pointer]
+      - button "Sign in" [ref=e47] [cursor=pointer]
+    - paragraph [ref=e49]:
+      - text: New here?
+      - button "Create an account" [ref=e50] [cursor=pointer]

@@ -42,7 +42,7 @@ use crate::types::{Atom, Real, Snapshot};
 ///
 /// # Panics
 /// Panics if `n_legs == 0` (division by zero).
-pub fn equal_weight<Sym: Clone + PartialEq + 'static>(
+pub fn equal_weight<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
     n_legs: usize,
 ) -> Value<Snapshot<Sym>> {
     assert!(n_legs > 0, "n_legs must be > 0");
@@ -85,7 +85,7 @@ pub fn equal_weight<Sym: Clone + PartialEq + 'static>(
 /// # Panics
 /// Panics if `target_annualized_vol <= 0`, `window == 0`, or
 /// `bars_per_year <= 0`.
-pub fn vol_target<Sym: Clone + PartialEq + 'static>(
+pub fn vol_target<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
     target_annualized_vol: Real,
     window: usize,
     bars_per_year: Real,
@@ -158,7 +158,7 @@ where
 ///
 /// # Panics
 /// Panics if `risk_frac <= 0`, `period == 0`, or `atr_multiple <= 0`.
-pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
+pub fn atr_risk<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
     risk_frac: Real,
     period: usize,
     atr_multiple: Real,

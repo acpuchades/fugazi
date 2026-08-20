@@ -57,7 +57,7 @@ struct MacdCrossoverManual<Sym> {
     event: Option<Side>,
 }
 
-impl<Sym: Clone + PartialEq + 'static> MacdCrossoverManual<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> MacdCrossoverManual<Sym> {
     fn new(symbol: Sym, fast: usize, slow: usize, signal: usize) -> Self {
         use fugazi::indicators::{Close, Pick};
         Self {
@@ -69,7 +69,7 @@ impl<Sym: Clone + PartialEq + 'static> MacdCrossoverManual<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + 'static> Strategy for MacdCrossoverManual<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for MacdCrossoverManual<Sym> {
     type Input = fugazi::types::Snapshot<Sym>;
     type Symbol = Sym;
     fn update(&mut self, snap: fugazi::types::Snapshot<Sym>) {

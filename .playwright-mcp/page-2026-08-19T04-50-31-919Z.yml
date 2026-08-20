@@ -1,0 +1,22 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - generic [ref=e16]:
+      - generic [ref=e17]: Backtesting · sweeps · live
+      - heading "Every edge looks real before you test it." [level=1] [ref=e18]:
+        - text: Every edge looks real
+        - emphasis [ref=e19]: before you test it.
+      - paragraph [ref=e20]: Sweep it. Hold data back. Pay the costs. Then trade what survived.
+      - generic [ref=e21]:
+        - link "Start free" [ref=e22] [cursor=pointer]:
+          - /url: "#"
+        - link "See a real sweep →" [ref=e23] [cursor=pointer]:
+          - /url: "#"
+  - generic [ref=e24]: Parameter surface · ENTRY × EXIT · Sharpe
+  - generic [ref=e25]:
+    - generic [ref=e26]: BTC/USDT · 1d
+    - generic [ref=e27]: 144 backtests
+    - generic [ref=e28]: Sharpe -0.04 → 1.21
+    - generic [ref=e29]: peak at ENTRY 70 · EXIT 7

@@ -1,0 +1,31 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - img [ref=e5]
+      - generic [ref=e15]: fugazi
+    - link "How it works" [ref=e16] [cursor=pointer]:
+      - /url: "#"
+    - link "Pricing" [ref=e17] [cursor=pointer]:
+      - /url: "#"
+    - link "Sign in" [ref=e18] [cursor=pointer]:
+      - /url: ./login.html
+    - link "Create account" [ref=e19] [cursor=pointer]:
+      - /url: ./login.html?new=1
+  - generic [ref=e21]:
+    - generic [ref=e22]: Backtesting · walk-forward · live trading
+    - heading "Every edge looks real before you test it." [level=1] [ref=e23]:
+      - text: Every edge looks real
+      - emphasis [ref=e24]: before you test it.
+    - paragraph [ref=e25]: Test it the way it will actually be traded — costs on every fill, a period you held back before you looked, and the same engine running it live when it earns that.
+    - generic [ref=e26]:
+      - link "Create your free account" [ref=e27] [cursor=pointer]:
+        - /url: ./login.html?new=1
+      - link "See a real sweep →" [ref=e28] [cursor=pointer]:
+        - /url: "#"
+    - paragraph [ref=e29]: Free while it's in beta. No card. Paper money until you connect a broker.
+  - generic [ref=e30]: Parameter surface · ENTRY × EXIT · Sharpe
+  - generic [ref=e31]:
+    - generic [ref=e32]: BTC/USDT · 1d
+    - generic [ref=e33]: 144 backtests
+    - generic [ref=e34]: Sharpe -0.04 → 1.21
+    - generic [ref=e35]: peak at ENTRY 70 · EXIT 7

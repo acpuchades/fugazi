@@ -1,0 +1,125 @@
+- generic [ref=e3]:
+  - banner [ref=e5]:
+    - link "fugazi" [ref=e6] [cursor=pointer]:
+      - /url: /
+      - img [ref=e7]
+      - text: fugazi
+    - link "Sign in" [ref=e18] [cursor=pointer]:
+      - /url: /login
+    - link "Create account" [ref=e19] [cursor=pointer]:
+      - /url: /signup
+  - generic [ref=e20]:
+    - generic [ref=e21]:
+      - heading "Test as much as you like. Pay when it goes live." [level=1] [ref=e22]:
+        - text: Test as much as you like.
+        - emphasis [ref=e23]: Pay when it goes live.
+      - paragraph [ref=e24]: The backtester is free. What costs money is scale, and the account that trades.
+      - group "Billing period" [ref=e25]:
+        - button "Monthly" [pressed] [ref=e26] [cursor=pointer]
+        - button "Annual − 2 months" [ref=e27] [cursor=pointer]
+    - generic [ref=e28]:
+      - generic [ref=e29]:
+        - heading "Free" [level=2] [ref=e30]
+        - paragraph [ref=e31]: Find out whether the edge was ever there.
+        - generic [ref=e32]:
+          - generic [ref=e33]: $0
+          - generic [ref=e34]: forever
+        - paragraph [ref=e35]: No card, ever.
+        - list [ref=e36]:
+          - listitem [ref=e37]:
+            - text: ✓
+            - generic [ref=e38]: 200 backtests per sweep
+          - listitem [ref=e39]:
+            - text: ✓
+            - generic [ref=e40]: Walk-forward folds
+          - listitem [ref=e41]:
+            - text: ✓
+            - generic [ref=e42]: 64 MB of your own data
+          - listitem [ref=e43]:
+            - text: ✕
+            - generic [ref=e44]: Paper money only — no venue
+        - link "Start free" [ref=e45] [cursor=pointer]:
+          - /url: /signup
+        - paragraph [ref=e46]: No card required
+      - generic [ref=e47]:
+        - generic [ref=e48]: Recommended
+        - heading "Pro" [level=2] [ref=e49]
+        - paragraph [ref=e50]: Sweeps get serious, and the account is real.
+        - generic [ref=e51]:
+          - generic [ref=e52]: $39
+          - generic [ref=e53]: / month
+        - paragraph [ref=e54]: Billed monthly
+        - list [ref=e55]:
+          - listitem [ref=e56]:
+            - text: ✓
+            - generic [ref=e57]: Connect OKX or Coinbase and trade live
+          - listitem [ref=e58]:
+            - text: ✓
+            - generic [ref=e59]: 2,000 backtests per sweep
+          - listitem [ref=e60]:
+            - text: ✓
+            - generic [ref=e61]: 256 MB uploads, 25M rows
+        - link "Go Pro" [ref=e62] [cursor=pointer]:
+          - /url: /signup
+        - paragraph [ref=e63]: Cancel anytime
+      - generic [ref=e64]:
+        - heading "Unlimited" [level=2] [ref=e65]
+        - paragraph [ref=e66]: The sweep is as big as your patience.
+        - generic [ref=e67]:
+          - generic [ref=e68]: $149
+          - generic [ref=e69]: / month
+        - paragraph [ref=e70]: Billed monthly
+        - list [ref=e71]:
+          - listitem [ref=e72]:
+            - text: ✓
+            - generic [ref=e73]: Everything in Pro
+          - listitem [ref=e74]:
+            - text: ✓
+            - generic [ref=e75]: No product limits at all
+          - listitem [ref=e76]:
+            - text: ✓
+            - generic [ref=e77]: Every venue on one account
+        - link "Go Unlimited" [ref=e78] [cursor=pointer]:
+          - /url: /signup
+        - paragraph [ref=e79]: Cancel anytime
+    - generic [ref=e80]:
+      - heading "The actual ceilings" [level=3] [ref=e81]
+      - table [ref=e82]:
+        - rowgroup [ref=e83]:
+          - row "Per account Free Pro Unlimited" [ref=e84]:
+            - columnheader "Per account" [ref=e85]
+            - columnheader "Free" [ref=e86]
+            - columnheader "Pro" [ref=e87]
+            - columnheader "Unlimited" [ref=e88]
+        - rowgroup [ref=e89]:
+          - row "Backtests in one sweep 200 2,000 no limit" [ref=e90]:
+            - cell "Backtests in one sweep" [ref=e91]
+            - cell "200" [ref=e92]
+            - cell "2,000" [ref=e93]
+            - cell "no limit" [ref=e94]
+          - row "Parameters per grid 10 15 no limit" [ref=e95]:
+            - cell "Parameters per grid" [ref=e96]
+            - cell "10" [ref=e97]
+            - cell "15" [ref=e98]
+            - cell "no limit" [ref=e99]
+          - row "Dataset upload 64 MB 256 MB no limit" [ref=e100]:
+            - cell "Dataset upload" [ref=e101]
+            - cell "64 MB" [ref=e102]
+            - cell "256 MB" [ref=e103]
+            - cell "no limit" [ref=e104]
+          - row "Rows across an archive 5M 25M no limit" [ref=e105]:
+            - cell "Rows across an archive" [ref=e106]
+            - cell "5M" [ref=e107]
+            - cell "25M" [ref=e108]
+            - cell "no limit" [ref=e109]
+          - row "Connect a broker and trade live — ✓ ✓" [ref=e110]:
+            - cell "Connect a broker and trade live" [ref=e111]
+            - cell "—" [ref=e112]
+            - cell "✓" [ref=e113]
+            - cell "✓" [ref=e114]
+  - contentinfo [ref=e115]:
+    - generic [ref=e116]: © 2026 fugazi
+    - link "The engine (MIT)" [ref=e117] [cursor=pointer]:
+      - /url: https://github.com/acpuchades/fugazi
+    - link "Sign in" [ref=e118] [cursor=pointer]:
+      - /url: /login

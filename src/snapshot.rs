@@ -3,7 +3,10 @@
 //! tagged [`Atom`]s that lets a strategy or an indicator reason about more
 //! than one instrument at a time.
 
-use std::sync::Arc;
+use std::hash::Hash;
+use std::sync::{Arc, OnceLock};
+
+use crate::hash::SymMap;
 
 use crate::market::Atom;
 use crate::time::Frequency;
@@ -429,7 +432,115 @@ impl<Sym: PartialEq> Selector<Sym> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Snapshot<Sym> {
-    entries: Arc<Vec<Entry<Sym>>>,
+    entries: Arc<Entries<Sym>>,
+}
+
+/// A snapshot's rows, plus a lazily-built `symbol → first row` index.
+///
+/// The rows stay **interleaved** — the tag beside the atom it describes, one
+/// allocation. Splitting them was tried and is 14% slower (see [`Snapshot`]).
+/// This is a *side table*, which is a different thing: it does not change how
+/// the rows are scanned, it removes the need to scan them at all.
+#[derive(Debug)]
+struct Entries<Sym> {
+    rows: Vec<Entry<Sym>>,
+    /// `hash(symbol) → the earliest row whose symbol hashes to it`. Built on
+    /// the first symbol-named [`Snapshot::find`] of a snapshot wide enough to be
+    /// worth it, then shared by every other lookup that bar (a snapshot is built
+    /// once per bar and cloned to every leaf, and a clone is a refcount bump, so
+    /// the whole universe's lookups amortise one build).
+    ///
+    /// **Keyed by hash, not by symbol, and that is deliberate.** Keying by `Sym`
+    /// would clone one into the map per row per bar — for `Symbol` that is an
+    /// atomic refcount bump each, and it measured as most of the build cost. A
+    /// `u64` key clones for free and compares in one instruction.
+    ///
+    /// It costs nothing in soundness because the value is a **lower bound, not
+    /// an answer**. Two symbols that collide share the *earliest* of their rows,
+    /// so the scan starts at or before the true first match and still lands on
+    /// it; it can never start too late and miss one. A hash that is absent
+    /// proves no symbol with that hash is present, so the lookup can answer
+    /// `None` without touching a row.
+    ///
+    /// `OnceLock` rather than `RefCell`: a snapshot is handed to worker threads
+    /// by the `optimize` sweep, so the cache has to be `Sync`.
+    index: OnceLock<SymMap<u64, usize>>,
+}
+
+/// Hash `sym` to the `u64` the index is keyed by.
+fn sym_hash<Sym: Hash>(sym: &Sym) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::hash::FxHasher::default();
+    sym.hash(&mut h);
+    h.finish()
+}
+
+/// Rows below which [`Snapshot::find`] scans rather than indexing.
+///
+/// Building the index costs one hash and one insert per row; using it costs one
+/// hash and one probe per lookup. Narrow snapshots do not recover the build,
+/// because the scan they would replace is short. **Swept, not guessed** — the
+/// same `MultiAssetStrategy` drive at four widths (`snapshot_scan --
+/// drive_equal16` / `32` / `drive_equal`, each measured against a build with
+/// this constant raised out of reach):
+///
+/// | universe | indexed vs scan |
+/// |---|---:|
+/// | 16 | **+6.5%** — the build does not pay for itself |
+/// | 32 | −2.5% |
+/// | 64 | −16.7% |
+/// | 64, one leaf per symbol (basket) | −2.1% |
+/// | 1 (single asset) | −0.0%, never indexes |
+///
+/// The crossover sits between 16 and 32, so 32 is the first width where every
+/// measured shape is a win or neutral. A first draft used 8 and made a 16-symbol
+/// run 6.5% *slower*.
+const INDEX_THRESHOLD: usize = 32;
+
+/// Cloning drops the index rather than copying it. The only thing that clones
+/// `Entries` is [`Arc::make_mut`], which is always followed by a mutation that
+/// would invalidate it anyway — so copying it would be work spent on a value
+/// about to be thrown away.
+impl<Sym: Clone> Clone for Entries<Sym> {
+    fn clone(&self) -> Self {
+        Self {
+            rows: self.rows.clone(),
+            index: OnceLock::new(),
+        }
+    }
+}
+
+impl<Sym> Entries<Sym> {
+    fn new(rows: Vec<Entry<Sym>>) -> Self {
+        Self {
+            rows,
+            index: OnceLock::new(),
+        }
+    }
+
+    /// Drop the cached index. **Every mutation of `rows` must call this**, or a
+    /// lookup could resolve to a row that has moved or gone.
+    fn invalidate(&mut self) {
+        self.index.take();
+    }
+}
+
+impl<Sym: Hash> Entries<Sym> {
+    /// The index, built on first use. Rows are walked in order and
+    /// `or_insert` keeps the first writer, so each hash maps to the
+    /// **earliest** row carrying it — which is what makes the indexed path
+    /// agree with the first-match-wins scan it replaces.
+    fn index(&self) -> &SymMap<u64, usize> {
+        self.index.get_or_init(|| {
+            let mut m = SymMap::with_capacity_and_hasher(self.rows.len(), Default::default());
+            for (i, (sym, _, _)) in self.rows.iter().enumerate() {
+                if let Some(sym) = sym {
+                    m.entry(sym_hash(sym)).or_insert(i);
+                }
+            }
+            m
+        })
+    }
 }
 
 /// One tagged atom inside a [`Snapshot`]: `(symbol, frequency, atom)`, with
@@ -440,7 +551,7 @@ impl<Sym> Snapshot<Sym> {
     /// An empty snapshot with no assets.
     pub fn new() -> Self {
         Self {
-            entries: Arc::new(Vec::new()),
+            entries: Arc::new(Entries::new(Vec::new())),
         }
     }
 
@@ -456,7 +567,7 @@ impl<Sym> Snapshot<Sym> {
     /// use [`single`](Self::single) instead.
     pub fn of_atom(atom: Atom) -> Self {
         Self {
-            entries: Arc::new(vec![(None, None, atom)]),
+            entries: Arc::new(Entries::new(vec![(None, None, atom)])),
         }
     }
 
@@ -466,7 +577,7 @@ impl<Sym> Snapshot<Sym> {
     /// this entry's `symbol` each bar.
     pub fn single(symbol: Sym, atom: Atom) -> Self {
         Self {
-            entries: Arc::new(vec![(Some(symbol), None, atom)]),
+            entries: Arc::new(Entries::new(vec![(Some(symbol), None, atom)])),
         }
     }
 
@@ -481,22 +592,25 @@ impl<Sym> Snapshot<Sym> {
     where
         Sym: Clone,
     {
-        Arc::make_mut(&mut self.entries).push((symbol, freq, atom));
+        let e = Arc::make_mut(&mut self.entries);
+        e.rows.push((symbol, freq, atom));
+        e.invalidate();
     }
 
     /// Number of tagged atoms in this snapshot.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.rows.len()
     }
 
     /// True if this snapshot carries no atoms.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.rows.is_empty()
     }
 
     /// Iterate over `(symbol, freq, atom)` triples in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (Option<&Sym>, Option<Frequency>, &Atom)> {
         self.entries
+            .rows
             .iter()
             .map(|(s, f, a)| (s.as_ref(), *f, a))
     }
@@ -513,7 +627,7 @@ impl<Sym> Snapshot<Sym> {
     /// single-series safety net: it panics on 2+ entries because most price
     /// leaves (`!close`, `!high`, …) genuinely depend on *which* asset.
     pub fn any_atom(&self) -> Option<&Atom> {
-        self.entries.first().map(|(_, _, a)| a)
+        self.entries.rows.first().map(|(_, _, a)| a)
     }
 
     /// The sole atom in a single-entry snapshot, if there is exactly one.
@@ -534,7 +648,7 @@ impl<Sym> Snapshot<Sym> {
         // price series and is reached deliberately, with `!pick`; it must stay
         // invisible to the implicit unpack, or attaching one would break every
         // bare `!close` in a single-asset strategy that never asked for it.
-        let mut priceable = self.entries.iter().filter(|(_, _, a)| a.is_priceable());
+        let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
         let first = priceable.next();
         match (first, priceable.count()) {
             (None, _) => None,
@@ -570,7 +684,7 @@ impl<Sym> Snapshot<Sym> {
     /// `sole_atom` is for the genuinely mis-wired case, where nothing named an
     /// asset at all.
     pub fn lone_atom(&self) -> Option<&Atom> {
-        let mut priceable = self.entries.iter().filter(|(_, _, a)| a.is_priceable());
+        let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
         match (priceable.next(), priceable.next()) {
             (Some(entry), None) => Some(&entry.2),
             _ => None,
@@ -584,8 +698,35 @@ impl<Sym: PartialEq> Snapshot<Sym> {
     /// is a wildcard). Scans entries in insertion order — the caller's push
     /// sequence is the precedence when a query could match more than one
     /// entry; disambiguate by supplying both `symbol` and `freq`.
-    pub fn find(&self, query: &Selector<Sym>) -> Option<&Atom> {
-        self.entries.iter().find_map(|(s, f, a)| {
+    pub fn find(&self, query: &Selector<Sym>) -> Option<&Atom>
+    where
+        Sym: Clone + Eq + Hash,
+    {
+        let rows = &self.entries.rows;
+        // A query naming a symbol can be answered from the index: no row before
+        // that symbol's first can match (a row's tag must *equal* the named
+        // symbol, and an untagged row never does), so the first match is at or
+        // after it.
+        //
+        // The scan then resumes from there rather than stopping there, which is
+        // what keeps this general. With `freq: None` — the common case, and what
+        // every blessed root and basket leg builds — the very first row hits and
+        // it is O(1). With a `freq` named too, a symbol may appear more than once
+        // on different cadences, so the scan continues from the first candidate
+        // and lands on the same row the full scan would have.
+        //
+        // A symbol absent from the index is absent from the snapshot, so that
+        // case answers `None` without touching a row at all.
+        let from = match query.symbol.as_ref() {
+            Some(sym) if rows.len() >= INDEX_THRESHOLD => {
+                match self.entries.index().get(&sym_hash(sym)) {
+                    Some(&i) => i,
+                    None => return None,
+                }
+            }
+            _ => 0,
+        };
+        rows[from..].iter().find_map(|(s, f, a)| {
             if query.matches(s.as_ref(), *f) {
                 Some(a)
             } else {
@@ -602,13 +743,15 @@ impl<Sym: PartialEq> Snapshot<Sym> {
     where
         Sym: Clone,
     {
-        Arc::make_mut(&mut self.entries).retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
+        let e = Arc::make_mut(&mut self.entries);
+        e.rows.retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
+        e.invalidate();
     }
 }
 
 impl<Sym: PartialEq> PartialEq for Snapshot<Sym> {
     fn eq(&self, other: &Self) -> bool {
-        self.entries == other.entries
+        self.entries.rows == other.entries.rows
     }
 }
 
@@ -621,7 +764,7 @@ impl<Sym> Default for Snapshot<Sym> {
 impl<Sym> FromIterator<Entry<Sym>> for Snapshot<Sym> {
     fn from_iter<I: IntoIterator<Item = Entry<Sym>>>(iter: I) -> Self {
         Self {
-            entries: Arc::new(iter.into_iter().collect()),
+            entries: Arc::new(Entries::new(iter.into_iter().collect())),
         }
     }
 }
@@ -792,5 +935,174 @@ mod symbol_tests {
         assert_eq!(&*s, "BTCUSDT");
         assert_eq!(format!("{s}"), "BTCUSDT");
         assert_eq!(format!("{s:?}"), "\"BTCUSDT\"");
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use crate::market::Candle;
+    use crate::time::Frequency;
+    use crate::types::Real;
+
+    fn atom(px: Real) -> Atom {
+        Atom::new(Candle::new(px, px, px, px, 1.0))
+    }
+
+    /// The scan `find` used to be, kept verbatim as the oracle. Any divergence
+    /// between this and the indexed path is a bug in the index.
+    fn find_by_scan<'a>(snap: &'a Snapshot<Symbol>, q: &Selector<Symbol>) -> Option<&'a Atom> {
+        snap.entries
+            .rows
+            .iter()
+            .find_map(|(s, f, a)| q.matches(s.as_ref(), *f).then_some(a))
+    }
+
+    /// Wide enough to index, with duplicate symbols on different cadences and
+    /// an untagged row mixed in — every shape the index has to answer the same
+    /// way the scan does.
+    fn awkward() -> (Snapshot<Symbol>, Vec<Selector<Symbol>>) {
+        let mut snap: Snapshot<Symbol> = Snapshot::new();
+        // Untagged first, so an index built from row 0 cannot accidentally
+        // become the answer to a symbol-named query.
+        snap.push(None, None, atom(1.0));
+        for i in 0..40 {
+            let s = symbol(format!("S{i:02}"));
+            snap.push(Some(s.clone()), Some(Frequency::Hour(1)), atom(100.0 + i as Real));
+            // Every third symbol appears twice — once hourly, once daily — so
+            // first-match-wins and freq-qualified lookups are both exercised.
+            if i % 3 == 0 {
+                snap.push(Some(s), Some(Frequency::Day(1)), atom(900.0 + i as Real));
+            }
+        }
+        assert!(snap.len() >= INDEX_THRESHOLD, "test must exercise the index");
+
+        let mut queries = vec![Selector::default(), Selector::by_freq(Frequency::Day(1))];
+        for i in 0..42 {
+            let s = symbol(format!("S{i:02}")); // S40/S41 are absent
+            queries.push(Selector::by_symbol(s.clone()));
+            queries.push(Selector::exact(s.clone(), Frequency::Hour(1)));
+            queries.push(Selector::exact(s, Frequency::Day(1)));
+        }
+        (snap, queries)
+    }
+
+    #[test]
+    fn the_index_answers_exactly_what_the_scan_would() {
+        let (snap, queries) = awkward();
+        for q in &queries {
+            let want = find_by_scan(&snap, q).map(|a| a.candle.unwrap().close);
+            let got = snap.find(q).map(|a| a.candle.unwrap().close);
+            assert_eq!(got, want, "indexed find disagreed with the scan for {q:?}");
+        }
+    }
+
+    /// The property the index could most easily break: a duplicate tag must
+    /// still resolve to the **earliest** row, because that is what the scan did
+    /// and what `Snapshot`'s docs promise.
+    #[test]
+    fn a_duplicate_tag_still_resolves_first_match_wins() {
+        let (snap, _) = awkward();
+        // S00 appears hourly (100.0) then daily (900.0). A symbol-only query
+        // must find the hourly one — the first pushed.
+        let hit = snap.find(&Selector::by_symbol(symbol("S00"))).unwrap();
+        assert_eq!(hit.candle.unwrap().close, 100.0);
+        // Naming the later cadence explicitly must still reach the second row,
+        // which is the case that forces the scan to *resume* from the index
+        // rather than stop at it.
+        let hit = snap
+            .find(&Selector::exact(symbol("S00"), Frequency::Day(1)))
+            .unwrap();
+        assert_eq!(hit.candle.unwrap().close, 900.0);
+    }
+
+    /// A cached index that outlives a mutation would resolve to a row that has
+    /// moved or gone. Both mutators must drop it.
+    #[test]
+    fn mutating_a_snapshot_invalidates_the_index() {
+        let (mut snap, _) = awkward();
+        // Force the index to exist.
+        assert!(snap.find(&Selector::by_symbol(symbol("S01"))).is_some());
+
+        // Push a symbol that was absent when the index was built.
+        snap.push(Some(symbol("S99")), None, atom(42.0));
+        let hit = snap.find(&Selector::by_symbol(symbol("S99")));
+        assert_eq!(
+            hit.map(|a| a.candle.unwrap().close),
+            Some(42.0),
+            "a row pushed after the index was built was not found",
+        );
+
+        // Removing shifts every later row's position.
+        snap.find(&Selector::by_symbol(symbol("S02"))).unwrap();
+        snap.remove_matching(&Selector::by_symbol(symbol("S00")));
+        assert!(snap.find(&Selector::by_symbol(symbol("S00"))).is_none());
+        let (s, q) = (&snap, Selector::by_symbol(symbol("S02")));
+        assert_eq!(
+            s.find(&q).map(|a| a.candle.unwrap().close),
+            find_by_scan(s, &q).map(|a| a.candle.unwrap().close),
+            "the index survived a removal and now points at the wrong row",
+        );
+    }
+
+    /// A symbol type whose every value hashes the same, so **every** lookup
+    /// takes the collision path. The index then maps one bucket to row 0 and
+    /// answers are decided entirely by the scan that resumes from it — which is
+    /// exactly the property the index's soundness rests on, and the one no
+    /// realistic symbol set would exercise.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    struct Collide(&'static str);
+
+    impl std::hash::Hash for Collide {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            state.write_u8(0);
+        }
+    }
+
+    #[test]
+    fn total_hash_collision_still_answers_correctly() {
+        let mut snap: Snapshot<Collide> = Snapshot::new();
+        // Must clear INDEX_THRESHOLD, or this silently stops testing the
+        // collision path it exists for — hence the assertion below.
+        let names: Vec<String> = (0..40).map(|i| format!("N{i:02}")).collect();
+        let names: Vec<&'static str> = names
+            .into_iter()
+            .map(|s| &*Box::leak(s.into_boxed_str()))
+            .collect();
+        for (i, n) in names.iter().enumerate() {
+            snap.push(Some(Collide(n)), None, atom(100.0 + i as Real));
+        }
+        assert!(snap.len() >= INDEX_THRESHOLD);
+        for (i, n) in names.iter().enumerate() {
+            let q = Selector::by_symbol(Collide(n));
+            assert_eq!(
+                snap.find(&q).map(|a| a.candle.unwrap().close),
+                Some(100.0 + i as Real),
+                "collision path returned the wrong row for {n}",
+            );
+        }
+        // An absent symbol collides with every present one, so the index cannot
+        // short-circuit it — the scan has to reject it.
+        assert!(snap.find(&Selector::by_symbol(Collide("ZZZ"))).is_none());
+    }
+
+    /// A snapshot below the threshold must never build an index, and must still
+    /// answer identically — the single-asset path takes this branch.
+    #[test]
+    fn a_narrow_snapshot_skips_the_index_entirely() {
+        let mut snap: Snapshot<Symbol> = Snapshot::new();
+        snap.push(Some(symbol("BTC")), None, atom(1.0));
+        snap.push(Some(symbol("ETH")), None, atom(2.0));
+        assert!(snap.len() < INDEX_THRESHOLD);
+        assert_eq!(
+            snap.find(&Selector::by_symbol(symbol("ETH")))
+                .map(|a| a.candle.unwrap().close),
+            Some(2.0)
+        );
+        assert!(snap.find(&Selector::by_symbol(symbol("SOL"))).is_none());
+        assert!(
+            snap.entries.index.get().is_none(),
+            "a narrow snapshot built an index it cannot pay for",
+        );
     }
 }

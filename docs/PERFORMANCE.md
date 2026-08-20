@@ -1883,11 +1883,56 @@ iteration. Shrinking `INLINE` trades against a basket spilling to the heap, and
 avoiding the zero-init means `MaybeUninit`. Neither is worth it for 3.7% of the
 cheapest workload.
 
+### Phase 14 — the index table, and a bound that was never the problem
+
+Phase 13 closed by listing the `symbol → index` side table as compatibility-
+breaking. **That was wrong**, and the error is worth naming: it generalised from
+the `AsRef<str>` experiment, where the bound cascaded into `indicator.rs` (34
+sites) and `ext.rs` (56). `Eq + Hash` does not cascade, because *the strategy
+layer already demands it everywhere* — `SingleAssetStrategy`,
+`MultiAssetStrategy`, `BasketStrategy`, `PaperWallet`, `Book` and `Portfolio` all
+require it today. Only the leaf helpers had not caught up, and `sizing.rs` is the
+tell: three of its eight functions already carried `Hash + Eq` because they read
+a `Book`. The whole thread is **nine signature lines across five files**.
+
+Two things make the index cheap enough to be worth building per bar:
+
+* **It is keyed by `hash(symbol)`, not by the symbol.** Keying by `Sym` clones
+  one into the map per row per bar — for `Symbol` an atomic refcount bump each —
+  and that was most of the build cost: −11.1% on the 64-symbol drive keyed by
+  symbol, **−16.7%** keyed by hash.
+* **The value is a lower bound, not an answer.** Colliding symbols share the
+  *earliest* of their rows, so the scan resumes at or before the true first match
+  and still lands on it. That is what lets a `u64` key be sound, and it is what
+  keeps first-match-wins and duplicate tags intact — the invariants that blocked
+  this for so long. `total_hash_collision_still_answers_correctly` pins it with a
+  `Sym` whose every value hashes identically.
+
+The threshold was **swept, not guessed**, and the first draft was wrong:
+
+| universe | indexed vs scan |
+|---|---:|
+| 16 | **+6.5%** — at 8, the shipped constant would have made this *slower* |
+| 32 | −2.5% |
+| 64 | **−16.7%** |
+| 64, one leaf per symbol (basket) | −2.1% |
+| 1 (single asset) | −0.0%, never indexes |
+
+At 32 every measured shape is a win or neutral. Cumulative on the 64-symbol
+drive against 0.64.0: **2.58×**.
+
+**What the generic `Sym` actually costs, now it has been priced.** In the whole
+test corpus there are exactly two instantiations — `&'static str` (113 use sites)
+and `Symbol` — so genericity buys the pure-Rust ergonomics and nothing else. It
+is worth keeping: `AsRef<str>` would tax integer and enum symbol types, which are
+precisely the ones that never had the `memcmp` problem in the first place. That
+is why the hash went on `Symbol` rather than into a bound.
+
 **What is left all breaks compatibility**, which is why this phase stops here:
 
 | lever | what it would cost |
 |---|---|
-| `symbol → index` side table (30% of a 64-symbol run, ~1.43×) | `Sym: Eq + Hash` on `find`, which propagates into `indicator.rs` and `ext.rs` — the same ripple measured for `SymbolKey` |
+| ~~`symbol → index` side table~~ | **Done in Phase 14** — the `Eq + Hash` ripple was nine lines, not the `AsRef<str>` cascade this row assumed |
 | `latest_score` / `Sides` off SipHash (the residual 6.2% of the basket profile) | `Selection::select(&self, &HashMap<Sym, Real>)` is a **public trait**; narrowing the hasher breaks every caller-written impl |
 | `Indicator::update(&mut self, &Self::Input)` (breaking candidate #1) | ~60 indicators, `fugazi-derive`, `runtime`, five strategy shapes, `python/src` |
 | `WilderState` precomputing `1/p` and `(p−1)/p` into one FMA | not bit-identical, so it moves the TA-Lib fixture — an asserted-divergence decision |

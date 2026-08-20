@@ -219,6 +219,33 @@ fn workload(name: &str) {
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
+        // A 16-symbol universe: the width where INDEX_THRESHOLD actually
+        // decides something. Wide enough to index under the shipped constant,
+        // narrow enough that the O(n) build might not pay for itself.
+        "drive_equal16" | "drive_equal32" => {
+            use fugazi::strategies::MultiAssetStrategy;
+            let width: usize = if name.ends_with("16") { 16 } else { 32 };
+            let names: Vec<String> = (0..width).map(|i| format!("S{i:03}")).collect();
+            let snaps = drive_snapshots(&names, 300);
+            let close = |sym: &Symbol| {
+                fugazi::indicators::Close::of(fugazi::indicators::Pick::matching(
+                    Selector::by_symbol(sym.clone()),
+                ))
+            };
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
+                .long_on(
+                    move |sym: &Symbol| {
+                        fugazi::indicators::Sma::new(close(sym), 5)
+                            .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
+                    },
+                    move |sym: &Symbol| {
+                        fugazi::indicators::Sma::new(close(sym), 5)
+                            .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
+                    },
+                );
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
+        }
         "drive_equal" | "drive_ragged" => {
             use fugazi::strategies::MultiAssetStrategy;
             let names: Vec<String> = if name == "drive_equal" {

@@ -147,7 +147,7 @@ impl<Sym> Default for Pick<Sym, Identity<Snapshot<Sym>>> {
 
 impl<Sym, S> Indicator for Pick<Sym, S>
 where
-    Sym: Clone + PartialEq,
+    Sym: Clone + PartialEq + Eq + std::hash::Hash,
     S: Indicator<Output = Snapshot<Sym>>,
 {
     type Input = S::Input;
@@ -252,7 +252,7 @@ impl<Sym> Default for PickAny<Sym, Identity<Snapshot<Sym>>> {
 
 impl<Sym, S> Indicator for PickAny<Sym, S>
 where
-    Sym: Clone + PartialEq,
+    Sym: Clone + PartialEq + Eq + std::hash::Hash,
     S: Indicator<Output = Snapshot<Sym>>,
 {
     type Input = S::Input;
