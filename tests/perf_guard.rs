@@ -243,11 +243,37 @@ fn performance_invariants_hold() {
         size_of::<fugazi::runtime::PayloadValue>(),
     );
 
-    // A symbol is an `Arc<str>`, so cloning one is a refcount bump rather than
-    // an allocation — the invariant behind the run-driving guards above.
+    // A symbol wraps an `Arc<str>`, so cloning one is a refcount bump rather
+    // than an allocation — the invariant behind the run-driving guards above.
+    //
+    // Three words, not two: Phase 13 added a cached hash of the name beside the
+    // handle, so that comparing two symbols rejects on 8 bytes instead of
+    // reaching `memcmp` (which measured at 47% of a 64-symbol backtest). The
+    // *invariant* this guard exists for is unchanged and is the one asserted
+    // below — a clone must still allocate nothing. The width is allowed to be
+    // three words and no more.
     assert_eq!(
         size_of::<Symbol>(),
-        2 * size_of::<usize>(),
-        "Symbol must stay a thin-cloneable handle — see docs/PERFORMANCE.md, Phase 5",
+        3 * size_of::<usize>(),
+        "Symbol must stay a thin-cloneable handle — see docs/PERFORMANCE.md, Phases 5 and 13",
     );
+
+    // The property that actually matters, asserted directly rather than
+    // inferred from the width. The width was only ever a proxy for it, and the
+    // hash field is exactly the kind of change that breaks the proxy while
+    // leaving the property intact.
+    {
+        let sym = fugazi::types::symbol("BTCUSDT");
+        let mut sink: Vec<Symbol> = Vec::with_capacity(1_000);
+        let allocated = allocs_of(|| {
+            for _ in 0..1_000 {
+                sink.push(sym.clone());
+            }
+        });
+        assert_eq!(
+            allocated, 0,
+            "cloning a Symbol allocates — it must stay a refcount bump; \
+             see docs/PERFORMANCE.md, Phase 5",
+        );
+    }
 }

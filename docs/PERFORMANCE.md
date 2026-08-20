@@ -317,7 +317,11 @@ Small universes pay slightly more for the keyed lookup than a two-element scan
 (`update/2` is +11%); the crossover is around N = 16, and `drive/2` is −7.2%
 because the wallet-side hashing win more than covers it.
 
-## Phase 5 — `Symbol = Arc<str>`
+## Phase 5 — `Symbol` becomes a shared handle
+
+> Phase 13 later made `Symbol` a newtype over that `Arc<str>` so it could carry a
+> precomputed hash. Everything below still holds — the handle is still shared and
+> a clone is still a refcount bump.
 
 The symbol type the spec / runtime / CLI / Python layers key assets by is now
 `Arc<str>` (`fugazi::Symbol`) instead of `String`. A symbol is cloned constantly
@@ -1643,18 +1647,72 @@ hashes 32-character keys where the equal-length one hashes 4.
 `symbol → first index` side table attacks the scan *length*, needs
 `Sym: Eq + Hash`, breaks the documented predicate-not-key invariant — and still
 has to hash the symbol's bytes, which is a pass over exactly the data `memcmp`
-was reading. Making the *comparison* cheap instead attacks 76% of the cost, needs
-no change to the O(N), no new storage layout (the mistake above), and no
-invariant: a fingerprint stored inline in the tag is a sound **negative** filter,
-because a mismatch proves inequality and a match falls through to the real
-compare. Its obstacle is a different one — `Sym` is generic and `Selector`
-requires only `PartialEq`, so an inline fingerprint needs a bound that today's
-API does not ask for.
+was reading. Making the *comparison* cheap attacks 76% of the cost with no
+change to the O(N), no new storage layout, and no invariant: comparing a
+fingerprint first is a sound **negative** filter, because a mismatch proves
+inequality and a match falls through to the real compare.
 
-Both remain open. The measured ceiling on the cheap-comparison route is the 1.89×
-above; the index table's ceiling is higher (it removes the scan rather than
-narrowing it) but it is the more invasive of the two and buys the smaller share
-of what is actually being spent.
+### The fix, and the two places it did *not* belong
+
+Taken, in 0.65.0. What matters is where it ended up, because the first two
+attempts were worse than the problem.
+
+**Not on `Snapshot`.** The obvious shape is a fingerprint stored inline in the
+tag, compared before the bytes. It works, and it needs `Sym: SymbolKey` on
+`find` and `push` — a bound that propagates into **`indicator.rs` (34 sites)
+and `indicators/ext.rs` (56)**, the crate's most central generic surfaces. That
+would permanently couple the indicator layer to "symbols are strings" in
+exchange for a perf fix, and contradict `snapshot.rs`'s standing promise that a
+pure-Rust caller may use any `Sym`. Built, compiled, measured for blast radius,
+discarded.
+
+**Not pointer equality.** Cheaper still, and unsound — see [`Symbol`]'s own docs.
+`symbol()` is `Arc::from`, a fresh allocation per call, so `symbol("BTC")` twice
+gives two pointers. The selector's symbol is interned when the spec is built and
+the snapshot's when data is loaded, so pointer equality would match nothing and
+the run would report a plausible **zero-fill backtest**.
+
+**On `Symbol` itself.** It stopped being `pub type Symbol = Arc<str>` and became
+a newtype carrying a precomputed FxHash of its own bytes, with `PartialEq`
+comparing the hash first. That needs **no bound anywhere** — every existing
+`Sym: PartialEq` call site gets it for free — and it reaches further than the
+`Snapshot` version could: the wallet's `HashMap` collision checks, `Position`
+lookups and `marked_equity`'s sort are all comparisons too.
+
+| | before | after | |
+|---|---:|---:|---:|
+| `miss_prebuilt` (instr/entry) | 36.30 | **8.35** | −77% |
+| `hit_prebuilt` (instr/entry) | 36.42 | **9.43** | −74% |
+| `miss_freq` — no string work, the control | 6.21 | 6.24 | +0.5% |
+| `drive_equal` (64-symbol backtest) | 137 108 116 | **67 076 273** | **2.04×** |
+| `multi_asset/drive/64` (wall-clock) | 79.5 ms | **41.1 ms** | **−48.3%** |
+
+Two tells that it landed cleanly. `miss_freq` — the workload that walks the same
+entries doing no string comparison — is unchanged, so nothing but the comparison
+moved. And `drive_equal` (67.1 M) is now **cheaper** than `drive_ragged`
+(73.7 M): the equal-length universe went from the penalised case to the cheap
+one, because ragged symbols are longer and so cost more to hash once at
+interning. The wall-clock delta scales monotonically with the universe — −8.4% at
+N = 2, −16.8% at 16, −39.4% at 32, −48.3% at 64 — which is the shape a
+per-symbol-scan cost has, and the reason to believe it over a flat shift.
+
+2.04× exceeds the 1.89× ceiling measured from the equal-vs-ragged gap, and that
+is the point: the gap only priced what `find` was paying, and the newtype makes
+every `Symbol` comparison in the crate cheap.
+
+**What it costs.** `Symbol` is three words rather than two. `tests/perf_guard.rs`
+asserted two, and that guard was right to fire — but it was asserting a *proxy*.
+The invariant behind it is that cloning a symbol allocates nothing, so the guard
+now asserts **that**, directly, with the counting allocator it already had. A
+width check would have had to be relaxed on every future change; the allocation
+check does not.
+
+`Hash` still delegates to the bytes rather than to the cached hash, and must:
+`Borrow<str>` requires an owned symbol to hash exactly as the `&str` it is looked
+up with, and the crate documents that `HashMap<Symbol, _>` stays `&str`-queryable.
+So this buys cheap **equality**, not cheap hashing. The remaining
+`symbol → index` side table is still open and now clearly second: after this,
+what is left of `find` is the 6.24 instr/entry of pure scan.
 
 ## The Python binding budget — 1.25×, with one exemption
 
@@ -1921,7 +1979,7 @@ with the benches named.
 | 4 | `indicators/stats.rs` | Hand-written `Serialize`/`Deserialize` emitting `{period, window, sum}` | Lets #3 change representation **without changing the run-state format**. Delete it and every existing resume file breaks. |
 | 5 | `wallet/paper.rs`, `indicators/book.rs` | Equity sums into a **stack buffer**, sorted, folded from cash | Two things at once: `HashMap` order varies per process, so summing in it made the equity curve drift by a ULP *between runs* (a real bug); and the old code allocated a `Vec` per bar to sort one element. |
 | 6 | `hash.rs` | An in-crate FxHash `BuildHasher` for symbol maps | SipHash on `String` keys, several times per bar per symbol, for keys the user chose. ~30 lines beats a dependency here (crate policy: closed form first). |
-| 7 | `snapshot.rs` | `Symbol = Arc<str>`, interned at every boundary | A symbol is cloned constantly and mutated never. Took a 200k-bar run from 200 045 allocations to **37**. |
+| 7 | `snapshot.rs` | `Symbol` is a newtype over `Arc<str>` **carrying a precomputed hash**, interned at every boundary | Two costs, not one. *Cloning*: a symbol is cloned constantly and mutated never — took a 200k-bar run from 200 045 allocations to **37** (Phase 5). *Comparing*: `Arc<str>` compares by content, and same-length symbols (`BTCUSDT`/`ETHUSDT`) reach `memcmp`, which was **47% of a 64-symbol backtest** — hash-first `PartialEq` made it **2.04×** (Phase 13). Comparing `Arc` pointers instead is **unsound**: `symbol()` allocates fresh, so the spec-interned and data-interned handles differ and every run would report a plausible zero-fill backtest. `Hash` must keep delegating to the bytes or `Borrow<str>` breaks. |
 | 8 | `strategies/single_asset.rs` | `extract_self_atom` returns `Option<&Atom>` | Cloning an 88-byte `Atom` per bar to read one `Copy` candle out of it. |
 | 9 | `wallet/paper.rs`, `strategies/basket.rs` | `get_mut`-then-`insert` instead of bare `insert` | After the first bar the key is present, so `insert` clones the symbol every bar only to drop it. |
 | 10 | `python/src/constructors.rs` | `column_to_vec` takes a buffer-protocol fast path | Otherwise one Python `float` object per element: ~155 ns/element, against ~1 ns of indicator work. **This is why the wheel is `abi3-py311`.** |

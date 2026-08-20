@@ -8,38 +8,269 @@ use std::sync::Arc;
 use crate::market::Atom;
 use crate::time::Frequency;
 
-/// The symbol type the spec, runtime, CLI and Python layers key assets by.
+/// The symbol type the spec, runtime, CLI and Python layers key assets by: a
+/// shared string that **carries a precomputed hash of its own bytes**.
 ///
-/// `Arc<str>` rather than `String` because a symbol is **cloned constantly and
-/// mutated never**: the driver clones one per symbol per bar to price the
-/// wallet, every `Snapshot` entry holds one, and each spec-built leaf carries
-/// one in its `Selector`. With `String` each of those is a heap allocation and a
-/// memcpy of the same handful of bytes; with `Arc<str>` it is a refcount bump,
-/// and a run interns one allocation per *distinct* symbol rather than one per
-/// symbol per bar.
+/// # Why a shared string
+///
+/// A symbol is **cloned constantly and mutated never**: the driver clones one
+/// per symbol per bar to price the wallet, every `Snapshot` entry holds one, and
+/// each spec-built leaf carries one in its `Selector`. With `String` each of
+/// those is a heap allocation and a memcpy of the same handful of bytes; with a
+/// shared `Arc<str>` inside it is a refcount bump, and a run interns one
+/// allocation per *distinct* symbol rather than one per symbol per bar.
 ///
 /// Measured (`docs/PERFORMANCE.md`): snapshot construction went from 3.00 to
 /// 2.00 allocations per bar and 201 to 160 bytes per bar. The Python bindings
 /// gain most, because they rebuild symbols across the FFI boundary on every
 /// call — see `python/bench/bench_run.py`.
 ///
-/// The indicator and strategy layers stay **generic** over `Sym`; this alias is
-/// only what the runtime-typed layers pick. A pure-Rust caller can still use
-/// `&'static str` and pay nothing at all.
+/// # Why it carries a hash
 ///
-/// `Arc<str>` derefs to `str` and implements `Borrow<str>`, so a
+/// This was a bare `pub type Symbol = Arc<str>`, which compares by **content**.
+/// The fat pointer carries the length inline, so a length mismatch is free, and
+/// `std`'s `Arc` specialisation short-circuits pointer-equal operands — but two
+/// *different* symbols of the *same* length force a deref and a `memcmp`, and
+/// real universes are overwhelmingly same-length (`BTCUSDT`/`ETHUSDT`,
+/// `AAPL`/`MSFT`).
+///
+/// [`Snapshot::find`] runs once per `!pick`-rooted leaf per symbol per bar and
+/// rejects `N − 1` entries each time, so that `memcmp` measured at **76% of
+/// `find` and 47% of a 64-symbol backtest** — a **1.89×** whole-run gap between
+/// an equal-length universe and a ragged one (`docs/PERFORMANCE.md` Phase 13,
+/// `cargo bench --bench snapshot_scan`).
+///
+/// [`eq`](Symbol::eq) therefore compares the hash first. Two symbols with
+/// different hashes cannot be equal, so the bytes are never touched; equal
+/// hashes fall through to the real comparison, so a collision costs one wasted
+/// `memcmp` and **cannot produce a wrong answer**.
+///
+/// # Why not compare pointers
+///
+/// Cheaper still, and unsound. [`symbol`] is `Arc::from`, a fresh allocation per
+/// call, so the selector's symbol (interned when the spec is built) and the
+/// snapshot's (interned when data is loaded) are different allocations holding
+/// the same bytes — `symbol("BTC") ` twice over already gives two pointers.
+/// Pointer equality would match nothing and the run would report a plausible
+/// **zero-fill backtest**, the failure this crate goes out of its way to make
+/// impossible. Canonical interning could fix that, at the cost of a global
+/// invariant no type enforces; hashing needs no invariant at all.
+///
+/// # What is preserved
+///
+/// The indicator and strategy layers stay **generic** over `Sym`; this type is
+/// only what the runtime-typed layers pick, and nothing here adds a bound to
+/// them. A pure-Rust caller can still use `&'static str` and pay nothing.
+///
+/// `Symbol` derefs to `str` and implements `Borrow<str>`, so a
 /// `HashMap<Symbol, _>` is still queryable with a plain `&str` and comparisons
-/// against string literals work unchanged.
-pub type Symbol = Arc<str>;
+/// against string literals work unchanged. **[`Hash`] delegates to the bytes,
+/// not to the cached hash** — it has to, or `Borrow<str>` would be unsound
+/// (borrowed and owned forms must hash alike). So this buys cheap *equality*,
+/// not cheap hashing.
+#[derive(Clone)]
+pub struct Symbol {
+    /// FxHash of `name`. Derived, so it never participates in ordering or in
+    /// [`Hash`] — only in the equality fast path.
+    hash: u64,
+    name: Arc<str>,
+}
+
+impl Symbol {
+    /// The symbol's text.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    /// The shared handle backing this symbol.
+    pub fn as_arc(&self) -> &Arc<str> {
+        &self.name
+    }
+
+    fn hash_of(s: &str) -> u64 {
+        use std::hash::Hasher;
+        let mut h = crate::hash::FxHasher::default();
+        h.write(s.as_bytes());
+        h.finish()
+    }
+}
+
+/// Compares the cached hash before the bytes — see the type docs. Equivalent to
+/// comparing the strings, because the hash is a pure function of them.
+impl PartialEq for Symbol {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.name == other.name
+    }
+}
+
+impl Eq for Symbol {}
+
+/// Delegates to the **bytes**, so that `Borrow<str>` holds: a `HashMap<Symbol,
+/// _>` must hash an owned symbol exactly as it hashes the `&str` it is looked up
+/// with. Hashing the cached `hash` field instead would break every `&str` query.
+impl std::hash::Hash for Symbol {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Lexicographic on the text. The cached hash takes no part — an ordering by
+/// hash would be stable but meaningless, and `marked_equity` sorts symbols to
+/// give its sum a canonical order that a reader can reason about.
+impl Ord for Symbol {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl std::ops::Deref for Symbol {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl AsRef<str> for Symbol {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::borrow::Borrow<str> for Symbol {
+    #[inline]
+    fn borrow(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Prints as the bare string, like the `Arc<str>` this replaced — so error
+/// messages and `{:?}` output are unchanged.
+impl std::fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.name, f)
+    }
+}
+
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&*self.name, f)
+    }
+}
+
+impl PartialEq<str> for Symbol {
+    fn eq(&self, other: &str) -> bool {
+        &*self.name == other
+    }
+}
+
+impl PartialEq<&str> for Symbol {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.name == *other
+    }
+}
+
+impl PartialEq<String> for Symbol {
+    fn eq(&self, other: &String) -> bool {
+        &*self.name == other.as_str()
+    }
+}
+
+impl PartialEq<Symbol> for str {
+    fn eq(&self, other: &Symbol) -> bool {
+        self == &*other.name
+    }
+}
+
+impl PartialEq<Symbol> for &str {
+    fn eq(&self, other: &Symbol) -> bool {
+        *self == &*other.name
+    }
+}
+
+impl PartialEq<Symbol> for String {
+    fn eq(&self, other: &Symbol) -> bool {
+        self.as_str() == &*other.name
+    }
+}
+
+impl From<&str> for Symbol {
+    fn from(s: &str) -> Self {
+        symbol(s)
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(s: String) -> Self {
+        symbol(s)
+    }
+}
+
+impl From<&String> for Symbol {
+    fn from(s: &String) -> Self {
+        symbol(s)
+    }
+}
+
+impl From<Arc<str>> for Symbol {
+    fn from(name: Arc<str>) -> Self {
+        Self {
+            hash: Self::hash_of(&name),
+            name,
+        }
+    }
+}
+
+impl From<Symbol> for Arc<str> {
+    fn from(s: Symbol) -> Self {
+        s.name
+    }
+}
+
+impl std::str::FromStr for Symbol {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(symbol(s))
+    }
+}
+
+/// Serializes as a bare string, exactly as the `Arc<str>` this replaced did —
+/// so every run-state blob, spec document and report already written still
+/// round-trips.
+impl serde::Serialize for Symbol {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.name)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Symbol {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(symbol(String::deserialize(d)?))
+    }
+}
 
 /// Intern `name` into a [`Symbol`].
 ///
 /// A free function rather than a `From` impl so call sites read as a deliberate
 /// conversion — the point of [`Symbol`] is that you allocate once and clone
 /// thereafter, and a conversion buried in an `.into()` inside a per-bar loop
-/// defeats it.
+/// defeats it. It is also where the cached hash is paid for, once per
+/// interning rather than once per comparison.
 pub fn symbol(name: impl AsRef<str>) -> Symbol {
-    Arc::from(name.as_ref())
+    let name = name.as_ref();
+    Symbol {
+        hash: Symbol::hash_of(name),
+        name: Arc::from(name),
+    }
 }
 
 /// A **selector**: a matching predicate naming *which* asset in a [`Snapshot`]
@@ -451,5 +682,115 @@ mod overlay_only_tests {
         let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
         assert!(snap.sole_atom().is_none());
+    }
+}
+
+#[cfg(test)]
+mod symbol_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// The case pointer equality would have got wrong, and the reason [`Symbol`]
+    /// hashes instead: two symbols reach the same run through different
+    /// interning sites — one when the spec is built, one when data is loaded —
+    /// and must compare equal despite being separate allocations.
+    #[test]
+    fn symbols_from_different_interning_sites_are_equal() {
+        let from_spec = symbol("BTCUSDT");
+        let from_data = symbol("BTCUSDT");
+        assert!(
+            !std::ptr::eq(from_spec.as_arc().as_ptr(), from_data.as_arc().as_ptr()),
+            "test is vacuous — these happen to share an allocation",
+        );
+        assert_eq!(from_spec, from_data);
+
+        // Every construction path has to agree, since they are mixed freely.
+        let built: [Symbol; 6] = [
+            symbol("BTCUSDT"),
+            Symbol::from("BTCUSDT"),
+            Symbol::from(String::from("BTCUSDT")),
+            Symbol::from(Arc::<str>::from("BTCUSDT")),
+            serde_json::from_str(r#""BTCUSDT""#).unwrap(),
+            "BTCUSDT".parse().unwrap(),
+        ];
+        for (i, a) in built.iter().enumerate() {
+            assert_eq!(*a, from_spec, "construction path {i} disagrees");
+        }
+    }
+
+    /// Hash-first equality must be *equivalent* to comparing the text, not
+    /// merely correlated with it — in both directions.
+    #[test]
+    fn hash_first_equality_agrees_with_the_text() {
+        let names = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "AAPL", "MSFT", "", "A", "a",
+            "BTC-USDT-SWAP", "BTC-USDT-PERP",
+        ];
+        for a in names {
+            for b in names {
+                assert_eq!(
+                    symbol(a) == symbol(b),
+                    a == b,
+                    "`{a}` vs `{b}`: hash-first equality disagrees with the text",
+                );
+            }
+        }
+    }
+
+    /// `Borrow<str>` is load-bearing — the crate documents that a
+    /// `HashMap<Symbol, _>` stays queryable with a plain `&str`. That requires
+    /// `Hash` to delegate to the bytes, not to the cached hash, so this is the
+    /// guard against "optimising" `Hash` to use the field.
+    #[test]
+    fn a_symbol_keyed_map_is_still_queryable_with_a_str() {
+        let mut m: HashMap<Symbol, i32> = HashMap::new();
+        m.insert(symbol("BTCUSDT"), 1);
+        m.insert(symbol("ETHUSDT"), 2);
+        assert_eq!(m.get("BTCUSDT"), Some(&1));
+        assert_eq!(m.get("ETHUSDT"), Some(&2));
+        assert_eq!(m.get("SOLUSDT"), None);
+        // And a symbol interned separately still finds its entry.
+        assert_eq!(m.get(&symbol("BTCUSDT")), Some(&1));
+    }
+
+    /// Ordering is on the text, not on the hash: `marked_equity` sorts symbols
+    /// to give its sum a canonical order, and a hash order would be stable but
+    /// meaningless.
+    #[test]
+    fn ordering_is_lexicographic_on_the_text() {
+        let mut v = [symbol("SOL"), symbol("BTC"), symbol("ETH")];
+        v.sort();
+        assert_eq!(
+            v.iter().map(Symbol::as_str).collect::<Vec<_>>(),
+            ["BTC", "ETH", "SOL"],
+        );
+    }
+
+    /// The wire format is a bare string, exactly as the `Arc<str>` this replaced
+    /// produced — so run-state blobs and spec documents already written still
+    /// load. A round trip of the *new* code would pass against a moved format;
+    /// the literal is the point.
+    #[test]
+    fn a_symbol_serializes_as_a_bare_string() {
+        assert_eq!(serde_json::to_string(&symbol("BTCUSDT")).unwrap(), r#""BTCUSDT""#);
+        let back: Symbol = serde_json::from_str(r#""BTCUSDT""#).unwrap();
+        assert_eq!(back, symbol("BTCUSDT"));
+        // Also as a map key, which is how the run-state blobs carry it.
+        let m: HashMap<Symbol, i32> = HashMap::from([(symbol("X"), 7)]);
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"X":7}"#);
+    }
+
+    /// String comparisons and `Deref` keep working unchanged, which is what
+    /// lets the ~150 existing call sites stay as they were.
+    #[test]
+    fn a_symbol_still_behaves_like_a_str() {
+        let s = symbol("BTCUSDT");
+        assert_eq!(s, "BTCUSDT");
+        assert_eq!("BTCUSDT", s);
+        assert_eq!(s.len(), 7);
+        assert!(s.starts_with("BTC"));
+        assert_eq!(&*s, "BTCUSDT");
+        assert_eq!(format!("{s}"), "BTCUSDT");
+        assert_eq!(format!("{s:?}"), "\"BTCUSDT\"");
     }
 }

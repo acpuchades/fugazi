@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.64.0"
+version = "0.65.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -110,7 +110,7 @@ clap_complete = { version = "4", optional = true }
 # per-indicator run-state save/load bodies for run resuming. It is a normal
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
-fugazi-derive = { path = "fugazi-derive", version = "0.64.0" }
+fugazi-derive = { path = "fugazi-derive", version = "0.65.0" }
 # `rc` provides `Serialize`/`Deserialize` for `Arc<str>` — the crate's `Symbol`
 # type. serde gates it because deserializing two `Arc`s that were shared at
 # serialize time yields two independent allocations; that is fine here, since a
