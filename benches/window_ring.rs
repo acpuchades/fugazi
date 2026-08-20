@@ -394,14 +394,14 @@ macro_rules! window_impl {
                 let mean = self.sum / self.period as Real;
                 let xs = &self.buf[..self.period];
                 let mut acc = [0.0 as Real; 4];
-                let mut chunks = xs.chunks_exact(4);
-                for chunk in &mut chunks {
+                let (chunks, remainder) = xs.as_chunks::<4>();
+                for chunk in chunks {
                     for (a, &v) in acc.iter_mut().zip(chunk) {
                         let d = v - mean;
                         *a += d * d;
                     }
                 }
-                for &v in chunks.remainder() {
+                for &v in remainder {
                     let d = v - mean;
                     acc[0] += d * d;
                 }

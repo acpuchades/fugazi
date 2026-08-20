@@ -69,8 +69,8 @@ const LANES: usize = 4;
 #[inline]
 fn lanes_sum_sq(xs: &[Real], mean: Real) -> Real {
     let mut acc = [0.0 as Real; LANES];
-    let mut chunks = xs.chunks_exact(LANES);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = xs.as_chunks::<LANES>();
+    for chunk in chunks {
         for (a, &x) in acc.iter_mut().zip(chunk) {
             let d = x - mean;
             *a += d * d;
@@ -79,7 +79,7 @@ fn lanes_sum_sq(xs: &[Real], mean: Real) -> Real {
     // The tail folds into lane 0. Which lane it lands in is arbitrary — it only
     // has to be the same one every call, so a given window always reduces the
     // same way.
-    for &x in chunks.remainder() {
+    for &x in remainder {
         let d = x - mean;
         acc[0] += d * d;
     }
