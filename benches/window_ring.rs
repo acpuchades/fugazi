@@ -310,9 +310,121 @@ fn icount_one(name: &str) {
                 black_box(ind.update(x));
             }
         }
+        // The four windows left on `VecDeque` after Phase 13, skipped there on
+        // the argument that their updates are already O(period) so the deque is
+        // a small fraction. Measured here rather than argued.
+        "percentile_100" => {
+            let mut ind = fugazi::indicators::Percentile::new(Identity::new(), 100, 0.5);
+            for &x in &xs {
+                black_box(ind.update(x));
+            }
+        }
+        "variance_ratio_20" => {
+            let mut ind = fugazi::indicators::VarianceRatio::new(Identity::new(), 20, 4);
+            for &x in &xs {
+                black_box(ind.update(x));
+            }
+        }
+        // The last open layout question from Phase 13: `WindowStats` keeps its
+        // samples in a `Box<[Real]>`, one heap block per windowed indicator,
+        // separate from the struct that owns it. Inline storage would remove an
+        // indirection; it would also make `Sma` ~300 bytes. Both shapes here,
+        // same binary, so the answer is a measurement rather than an argument.
+        "win_heap" | "win_inline" => {
+            const P: usize = 20;
+            let heap = name == "win_heap";
+            let mut hb = HeapWindow::new(P);
+            let mut ib = InlineWindow::new(P);
+            for &x in &xs {
+                if heap {
+                    hb.update(x);
+                    black_box(hb.variance());
+                } else {
+                    ib.update(x);
+                    black_box(ib.variance());
+                }
+            }
+        }
         other => panic!("unknown workload `{other}`"),
     }
 }
+
+/// The shipped shape: samples in a separate heap block.
+struct HeapWindow {
+    period: usize,
+    buf: Box<[Real]>,
+    head: usize,
+    len: usize,
+    sum: Real,
+}
+
+/// The candidate: samples inline in the struct, capped at `CAP`.
+struct InlineWindow {
+    period: usize,
+    buf: [Real; 32],
+    head: usize,
+    len: usize,
+    sum: Real,
+}
+
+macro_rules! window_impl {
+    ($t:ty, $mk:expr) => {
+        impl $t {
+            fn new(period: usize) -> Self {
+                $mk(period)
+            }
+            fn update(&mut self, x: Real) -> bool {
+                if self.len == self.period {
+                    self.sum -= self.buf[self.head];
+                    self.buf[self.head] = x;
+                    self.head += 1;
+                    if self.head == self.period {
+                        self.head = 0;
+                    }
+                } else {
+                    let at = self.head + self.len;
+                    let at = if at >= self.period { at - self.period } else { at };
+                    self.buf[at] = x;
+                    self.len += 1;
+                }
+                self.sum += x;
+                self.len == self.period
+            }
+            fn variance(&self) -> Real {
+                let mean = self.sum / self.period as Real;
+                let xs = &self.buf[..self.period];
+                let mut acc = [0.0 as Real; 4];
+                let mut chunks = xs.chunks_exact(4);
+                for chunk in &mut chunks {
+                    for (a, &v) in acc.iter_mut().zip(chunk) {
+                        let d = v - mean;
+                        *a += d * d;
+                    }
+                }
+                for &v in chunks.remainder() {
+                    let d = v - mean;
+                    acc[0] += d * d;
+                }
+                ((acc[0] + acc[1]) + (acc[2] + acc[3])) / self.period as Real
+            }
+        }
+    };
+}
+
+window_impl!(HeapWindow, |period| HeapWindow {
+    period,
+    buf: vec![0.0; period].into_boxed_slice(),
+    head: 0,
+    len: 0,
+    sum: 0.0,
+});
+window_impl!(InlineWindow, |period| InlineWindow {
+    period,
+    buf: [0.0; 32],
+    head: 0,
+    len: 0,
+    sum: 0.0,
+});
 
 fn main() {
     // `cargo bench --bench window_ring -- <workload>` runs one workload once,

@@ -1803,6 +1803,63 @@ arbitrary choice repeatable.
 workload, so neither is measured here — which is the reason to check rather than
 assume they are fine.
 
+### Closing Phase 13 — the non-breaking levers are exhausted
+
+Where it finished, callgrind instructions net of control
+(`cargo bench --bench snapshot_scan -- <workload>`):
+
+| workload | 0.64.0 | now | | per symbol-bar |
+|---|---:|---:|---:|---:|
+| `drive_equal` — 64-symbol multi-asset | 137 108 116 | **63 865 706** | **2.15×** | 3 326 |
+| `drive_basket` — 64-symbol basket | 92 874 542 † | **77 777 695** | **1.19×** † | 4 051 |
+| `drive_index0` — the same, scan removed | — | 43 680 976 | — | 2 275 |
+
+† the basket baseline was taken *after* the `Symbol` change, so 1.19× is the
+basket-specific gain on top of it, not the total since 0.64.0.
+
+What was taken, in order: the `Ring<T>` conversions; `Symbol` carrying its hash;
+`Book::update`, `MultiAssetStrategy::states` and eight of `BasketStrategy`'s nine
+maps off SipHash; and `ranked_take` partitioning instead of sorting.
+
+**Four things were measured and *not* taken.** Each is recorded so the next
+person spends the machine time on something else:
+
+* **Splitting `Snapshot` into tags and atoms** — 14% slower. The cache-line ratio
+  was right and irrelevant; see above.
+* **Inline storage for `WindowStats`' window** (`[Real; 32]` in the struct rather
+  than a `Box<[Real]>` beside it) — **22.8% worse** at period 20
+  (`window_ring -- win_heap` vs `win_inline`, both shapes in one binary). Same
+  lesson as the split, from the other direction: the block is L1-resident either
+  way, so the indirection it removes was free, while the fatter struct is not.
+* **Converting the last four `VecDeque` windows.** Phase 13 skipped
+  `WindowQuantile`, `VarianceRatio` and the two `trailing.rs` windows on the
+  argument that their updates are already O(period). Now measured rather than
+  argued: in `percentile_100` the deque is a slice of `WindowQuantile::update`'s
+  42.5%, while **`memcpy` alone is 22.7%** — the sorted `Vec`'s two memmoves, not
+  the deque. The argument held.
+* **Fusing those two memmoves.** `WindowQuantile::update` inserts the new sample
+  and then removes the evicted one, each a memmove averaging `period/2`. One
+  fused shift of `|insert_pos − remove_pos|` slots would replace both, and for a
+  random walk those ranks are usually adjacent. **Declined on risk, not on
+  size.** `cmp_asc` makes `NaN` compare `Equal` to everything, so
+  `binary_search_by` may legitimately match a `NaN` when searching for an
+  ordinary value — and today's insert happens *before* the search, so the search
+  runs against a vector that already contains the new sample. Reproducing that
+  index exactly without materialising the intermediate vector means emulating
+  `binary_search_by` under a non-total comparator, which is implementation-
+  defined. It is one indicator, already only ~3× an `Sma`, and this file already
+  warns that green tests are not evidence for a change of this class.
+
+**What is left all breaks compatibility**, which is why this phase stops here:
+
+| lever | what it would cost |
+|---|---|
+| `symbol → index` side table (30% of a 64-symbol run, ~1.43×) | `Sym: Eq + Hash` on `find`, which propagates into `indicator.rs` and `ext.rs` — the same ripple measured for `SymbolKey` |
+| `latest_score` / `Sides` off SipHash (the residual 6.2% of the basket profile) | `Selection::select(&self, &HashMap<Sym, Real>)` is a **public trait**; narrowing the hasher breaks every caller-written impl |
+| `Indicator::update(&mut self, &Self::Input)` (breaking candidate #1) | ~60 indicators, `fugazi-derive`, `runtime`, five strategy shapes, `python/src` |
+| `WilderState` precomputing `1/p` and `(p−1)/p` into one FMA | not bit-identical, so it moves the TA-Lib fixture — an asserted-divergence decision |
+| `Option<Real>` → a `NaN` sentinel | rejected above on blast radius and on collision with the crate's own `NaN` conventions |
+
 ## The Python binding budget — 1.25×, with one exemption
 
 **A fugazi indicator through the Python bindings must cost no more than 1.25×
