@@ -273,9 +273,11 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
         if tag.group != "node" && tag.group != "selection" {
             continue;
         }
-        needed.extend(tag.fields.iter().filter(|f| f.required).map(|f| f.ty.as_str()));
-        if let Some(p) = tag.payload.as_deref() {
-            needed.insert(p);
+        for form in &tag.forms {
+            needed.extend(form.fields.iter().filter(|f| f.required).map(|f| f.ty.as_str()));
+            if let Some(p) = form.payload.as_deref() {
+                needed.insert(p);
+            }
         }
     }
 

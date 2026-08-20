@@ -245,7 +245,11 @@ def test_constructor_signatures_match_the_descriptor():
         for py_param, param in params.items():
             field_name = renames.get(py_param, py_param)
             for tag in tags:
-                fields = {f["name"]: f for f in grammar[tag]["fields"]}
+                fields = {
+                    f["name"]: f
+                    for form in grammar[tag]["forms"]
+                    for f in form["fields"]
+                }
                 assert field_name in fields, (
                     f"{ctor_name}({py_param}) maps to field {field_name!r}, absent from !{tag}"
                 )

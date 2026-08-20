@@ -34,17 +34,23 @@ def _dummy(ty):
     }[ty]
 
 
-def _valid_instance(tag):
-    """A minimal instance of `tag` in the JSON bridge form."""
+def _valid_instance(tag, form=None):
+    """A minimal instance of `tag` in the JSON bridge form.
+
+    `form` selects which spelling to build; the canonical one by default. A tag
+    accepts every entry of `forms`, so the schema has to validate every entry —
+    see `test_every_declared_form_validates`.
+    """
     name = tag["name"]
-    shape = tag["shape"]
+    form = form if form is not None else tag["forms"][0]
+    shape = form["shape"]
     if shape == "unit":
         return name  # bare-string form
     if shape == "map":
-        body = {f["name"]: _dummy(f["type"]) for f in tag["fields"] if f["required"]}
+        body = {f["name"]: _dummy(f["type"]) for f in form["fields"] if f["required"]}
         return {name: body}
     if shape == "newtype":
-        return {name: _dummy(tag["payload"])}
+        return {name: _dummy(form["payload"])}
     if shape == "seq":
         return {name: [_dummy("node")]}
     raise AssertionError(f"unknown shape {shape!r}")
@@ -100,7 +106,7 @@ def test_unknown_tag_and_unknown_field_are_rejected():
     map_tag = next(
         t
         for t in ta.spec_grammar()["tags"]
-        if t["group"] == "node" and t["shape"] == "map"
+        if t["group"] == "node" and t["forms"][0]["shape"] == "map"
     )
     good = _valid_instance(map_tag)
     bad = copy.deepcopy(good)
@@ -115,3 +121,31 @@ def test_bare_literal_shorthands_validate_as_nodes():
         assert node.is_valid(literal), f"bare {literal!r} should validate as a node"
     # A wrapped constant is equally valid.
     assert node.is_valid({"value": 70})
+
+
+def test_every_declared_form_validates():
+    """The schema accepts every spelling the descriptor declares.
+
+    A tag with more than one form (`!changed <node>` and `!changed { source }`,
+    `!unstable { source }` and bare `!unstable <node>`) is emitted as an `anyOf`
+    over its forms. Before v5 the schema knew one shape per tag and rejected the
+    other — so a consumer generating a document from the descriptor's alternate
+    spelling produced something the schema called invalid and fugazi accepted.
+    """
+    node = jsonschema.Draft202012Validator(ta.spec_json_schema())
+    multi = 0
+    for tag in ta.spec_grammar()["tags"]:
+        if tag["group"] != "node":
+            continue
+        if len(tag["forms"]) > 1:
+            multi += 1
+        for i, form in enumerate(tag["forms"]):
+            try:
+                instance = _valid_instance(tag, form)
+            except KeyError:
+                continue  # a field type with no dummy (an embedded strategy)
+            assert node.is_valid(instance), (
+                f"!{tag['name']} form[{i}] ({form['shape']}) is declared but the "
+                f"schema rejects it: {instance!r}"
+            )
+    assert multi >= 4, "the four unary wrappers each declare two spellings"

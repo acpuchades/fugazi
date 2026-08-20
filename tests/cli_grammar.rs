@@ -29,7 +29,11 @@ fn run_json(args: &[&str]) -> serde_json::Value {
 #[test]
 fn grammar_emits_the_descriptor_document() {
     let doc = run_json(&["grammar"]);
-    assert_eq!(doc["schema_version"], 4, "schema_version");
+    assert_eq!(
+        doc["schema_version"],
+        fugazi::spec::grammar::SCHEMA_VERSION,
+        "schema_version"
+    );
     let tags = doc["tags"].as_array().expect("tags is an array");
     assert!(!tags.is_empty(), "tags non-empty");
 
@@ -43,39 +47,65 @@ fn grammar_emits_the_descriptor_document() {
 
     // A record carries the full contract shape.
     let first = &tags[0];
-    for key in [
-        "name", "group", "kind", "shape", "fields", "output", "projections", "payload",
-        "category", "doc", "since",
-    ] {
+    for key in ["name", "group", "kind", "forms", "output", "projections", "category", "doc", "since"]
+    {
         assert!(first.get(key).is_some(), "record missing key {key}");
     }
+    // Every form carries its own shape/fields/payload — the v5 move off the tag.
+    let form = &first["forms"][0];
+    for key in ["shape", "fields", "payload"] {
+        assert!(form.get(key).is_some(), "form missing key {key}");
+    }
 
-    // The v4 addition: an expression slot says what it must be filled with, so
-    // a consumer can offer only the tags whose `output` matches.
-    let and = tags
-        .iter()
-        .find(|t| t["name"] == "and")
-        .expect("!and is a node tag");
-    let lhs = and["fields"]
-        .as_array()
-        .expect("fields")
-        .iter()
-        .find(|f| f["name"] == "lhs")
-        .expect("!and has an lhs");
+    let by_name = |n: &str| {
+        tags.iter()
+            .find(|t| t["name"] == n)
+            .unwrap_or_else(|| panic!("!{n} is a tag"))
+    };
+    let field = |tag: &serde_json::Value, form: usize, name: &str| {
+        tag["forms"][form]["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("no field {name}"))
+            .clone()
+    };
+
+    // An expression slot says what it must be filled with, so a consumer can
+    // offer only the tags whose `output` matches.
+    let lhs = field(by_name("and"), 0, "lhs");
     assert_eq!(lhs["node_output"], serde_json::json!(["bool"]), "!and lhs");
-    // Omitted, not null, on a slot that holds no free expression — so a v3
-    // consumer sees the record it always saw.
-    let sma = tags
-        .iter()
-        .find(|t| t["name"] == "sma")
-        .expect("!sma is a node tag");
-    let period = sma["fields"]
-        .as_array()
-        .expect("fields")
-        .iter()
-        .find(|f| f["name"] == "period")
-        .expect("!sma has a period");
+    // Omitted, not null, on a slot that holds no free expression.
+    let period = field(by_name("sma"), 0, "period");
     assert!(period.get("node_output").is_none(), "scalar field unstamped");
+
+    // The v5 point: a tag with more than one spelling reports all of them,
+    // canonical first, each alternate carrying prose for why it exists.
+    let changed = by_name("changed");
+    let shapes: Vec<&str> = changed["forms"]
+        .as_array()
+        .expect("forms")
+        .iter()
+        .map(|f| f["shape"].as_str().expect("shape"))
+        .collect();
+    assert_eq!(shapes, ["newtype", "map"], "!changed is written two ways");
+    assert!(
+        changed["forms"][1]["doc"].is_string(),
+        "an alternate spelling explains itself"
+    );
+    // The alternate's slot is stamped with the same demand as the canonical
+    // payload — a consumer completing inside `!changed { source: ` needs it.
+    assert_eq!(
+        field(changed, 1, "source")["node_output"],
+        changed["forms"][0]["payload_output"],
+        "!changed's two spellings hold the same slot"
+    );
+
+    // `scope` is how a consumer learns that `group == "document"` is not a
+    // position claim: `!param` goes anywhere, `!arg` only inside a template.
+    assert!(by_name("param")["forms"][0].get("scope").is_none(), "!param is position-free");
+    assert_eq!(by_name("arg")["forms"][0]["scope"], "template");
 }
 
 #[test]

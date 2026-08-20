@@ -13,9 +13,11 @@
 //!   `serde_json::to_value(...)`) only for scalar fields with a serde default.
 //! - **doc** — the variant's `///`.
 //!
-//! The three fields serde cannot know come from `#[grammar(...)]`:
+//! The four things serde cannot know come from `#[grammar(...)]`:
 //! `kind` (mandatory), `output` (default `"scalar"`), `since` (default
-//! `SINCE_BASELINE`). The container carries `#[grammar(group = "...")]`.
+//! `SINCE_BASELINE`), and `alt` (an **alternate spelling** the parser accepts
+//! that the variant's own field form doesn't express — see [`alt_form`]). The
+//! container carries `#[grammar(group = "...")]`.
 
 use quote::quote;
 use syn::{Attribute, Data, DeriveInput, Fields, Type, Variant};
@@ -61,7 +63,12 @@ fn variant_tag(
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     let tag_name = serde_name(variant);
     let doc = doc_string(&variant.attrs);
-    let (kind, output, since) = variant_grammar(variant)?;
+    let VariantGrammar {
+        kind,
+        output,
+        since,
+        alt,
+    } = variant_grammar(variant)?;
 
     // `payload` is the grammar type of the single positional value on a
     // `newtype` / `seq` tag (which has no named fields) — the schema layer needs
@@ -91,22 +98,39 @@ fn variant_tag(
         }
     };
 
-    let doc_expr = opt_string(doc);
-    let payload_expr = opt_string(payload);
-    Ok(quote! {
-        crate::spec::grammar::GrammarTag {
-            name: #tag_name.to_owned(),
-            group: #group.to_owned(),
-            kind: #kind.to_owned(),
+    let doc_expr = opt_string(doc.clone());
+    let payload_expr = opt_string(payload.clone());
+    // The canonical form — the variant's own field shape, which is what a
+    // generator emits.
+    let canonical = quote! {
+        crate::spec::grammar::GrammarForm {
             shape: #shape.to_owned(),
             fields: ::std::vec![ #(#field_exprs),* ],
-            output: #output.to_owned(),
-            projections: ::std::vec::Vec::new(),
             payload: #payload_expr,
             // Stamped after reflection by `spec::grammar::spec_grammar`, from
             // `check`'s own demand table — serde knows a slot holds a nested
             // expression, not what that expression has to produce.
             payload_output: ::std::option::Option::None,
+            // Every reflected form is a slot-fillable expression, so it is
+            // legal wherever its group is; only the hand-authored
+            // document/weighting rows narrow this.
+            scope: ::std::option::Option::None,
+            doc: ::std::option::Option::None,
+        }
+    };
+    let alt_expr = alt_form(variant, alt.as_deref(), shape, payload.as_deref())?;
+    let forms = match alt_expr {
+        Some(alt) => quote! { ::std::vec![ #canonical, #alt ] },
+        None => quote! { ::std::vec![ #canonical ] },
+    };
+    Ok(quote! {
+        crate::spec::grammar::GrammarTag {
+            name: #tag_name.to_owned(),
+            group: #group.to_owned(),
+            kind: #kind.to_owned(),
+            forms: #forms,
+            output: #output.to_owned(),
+            projections: ::std::vec::Vec::new(),
             // The conceptual sub-group is editorial and can't be reflected off
             // the type — `spec::grammar::spec_grammar` stamps it from the
             // `CATEGORIES` taxonomy table after reflection.
@@ -116,6 +140,133 @@ fn variant_tag(
         }
     })
 }
+
+/// Expand a `#[grammar(alt = "…")]` declaration into the extra
+/// [`GrammarForm`](crate::spec::grammar::GrammarForm) it names.
+///
+/// The alternate spelling of a tag is not visible on its variant — it lives in
+/// `NodeSpec::parse_unchecked`'s normalisation pass, which the derive cannot
+/// read. So it is *declared* next to the variant, joining `kind` / `output` /
+/// `since` as the things serde does not know. Declaring it rather than
+/// hand-writing a second table is what keeps the reflected tier drift-proof:
+/// `tests/spec_grammar.rs` parses a probe in every declared form and, for the
+/// `unary_source` pattern, probes the mirror spelling of *undeclared* tags too,
+/// so a form can neither be claimed without existing nor exist without being
+/// claimed.
+///
+/// One value today, because there is one pattern:
+///
+/// - **`unary_source`** — a one-slot wrapper that accepts its inner expression
+///   either bare (`!changed <node>`) or under a single `source:` key
+///   (`!changed { source: <node> }`), interchangeably. Implemented by
+///   `expr::extract_edge_inner` / `try_dispatch_wrappers`. The derive synthesises
+///   whichever of the two the variant *isn't*: a `newtype(node)` variant gains
+///   the map form, a `map { source }` variant gains the newtype form. It is an
+///   error to declare it on anything else, so the attribute cannot outlive a
+///   refactor that changes the variant's shape.
+fn alt_form(
+    variant: &Variant,
+    alt: Option<&str>,
+    shape: &str,
+    payload: Option<&str>,
+) -> Result<Option<proc_macro2::TokenStream>, syn::Error> {
+    let Some(alt) = alt else {
+        return Ok(None);
+    };
+    if alt != "unary_source" {
+        return Err(syn::Error::new_spanned(
+            variant,
+            format!("unknown `#[grammar(alt = \"{alt}\")]` — the only pattern is `unary_source`"),
+        ));
+    }
+    let bad = |detail: &str| {
+        syn::Error::new_spanned(
+            variant,
+            format!(
+                "`#[grammar(alt = \"unary_source\")]` on `{}`: {detail}. The pattern names a \
+                 wrapper that accepts `!tag <node>` and `!tag {{ source: <node> }}` \
+                 interchangeably, so the variant must be one of those two shapes.",
+                variant.ident
+            ),
+        )
+    };
+    match shape {
+        // A `newtype(node)` variant also parses under a lone `source:` key.
+        "newtype" => {
+            if payload != Some("node") {
+                return Err(bad(&format!(
+                    "the variant is a newtype carrying `{}`, not `node`",
+                    payload.unwrap_or("nothing")
+                )));
+            }
+            let doc = SOURCE_MAP_DOC;
+            Ok(Some(quote! {
+                crate::spec::grammar::GrammarForm {
+                    shape: "map".to_owned(),
+                    fields: ::std::vec![crate::spec::grammar::GrammarField {
+                        name: "source".to_owned(),
+                        ty: "node".to_owned(),
+                        required: true,
+                        default: ::std::option::Option::None,
+                        node_output: ::std::option::Option::None,
+                        doc: ::std::option::Option::Some(#SOURCE_FIELD_DOC.to_owned()),
+                    }],
+                    payload: ::std::option::Option::None,
+                    payload_output: ::std::option::Option::None,
+                    scope: ::std::option::Option::None,
+                    doc: ::std::option::Option::Some(#doc.to_owned()),
+                }
+            }))
+        }
+        // A `map { source }` variant also parses with the inner written bare.
+        "map" => {
+            let named = match &variant.fields {
+                Fields::Named(named) => named,
+                _ => unreachable!("shape == map implies named fields"),
+            };
+            let only_source = named.named.len() == 1
+                && named
+                    .named
+                    .first()
+                    .and_then(|f| f.ident.as_ref())
+                    .is_some_and(|i| i == "source");
+            if !only_source {
+                return Err(bad("the variant's body is not a lone `source` field"));
+            }
+            let doc = BARE_INNER_DOC;
+            Ok(Some(quote! {
+                crate::spec::grammar::GrammarForm {
+                    shape: "newtype".to_owned(),
+                    fields: ::std::vec::Vec::new(),
+                    payload: ::std::option::Option::Some("node".to_owned()),
+                    payload_output: ::std::option::Option::None,
+                    scope: ::std::option::Option::None,
+                    doc: ::std::option::Option::Some(#doc.to_owned()),
+                }
+            }))
+        }
+        other => Err(bad(&format!("the variant is a `{other}` tag"))),
+    }
+}
+
+/// Prose for the synthesised `{ source: … }` spelling of a `newtype` wrapper.
+const SOURCE_MAP_DOC: &str =
+    "The keyed spelling: the same inner expression written under a lone \
+     `source:` key. Equivalent to the bare form, and the one to reach for when \
+     YAML forbids the bare one — a tag cannot carry another tag directly, so an \
+     inner that is itself a `!tag` has to be keyed (or spelled as a single-key \
+     map).";
+
+/// Prose for the synthesised bare spelling of a `map { source }` wrapper.
+const BARE_INNER_DOC: &str =
+    "The bare spelling: the inner expression written directly as the tag's \
+     payload, with no `source:` key. Equivalent to the keyed form. Reachable in \
+     YAML only when the inner needs no tag of its own (a bare word like \
+     `close`), since YAML forbids two tags on one node — the JSON bridge form \
+     has no such limit.";
+
+/// Prose for the `source` field of a synthesised keyed spelling.
+const SOURCE_FIELD_DOC: &str = "The wrapped expression.";
 
 /// Build the `GrammarField { .. }` expression for one named field.
 fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error> {
@@ -327,15 +478,28 @@ fn container_group(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
     Ok(group)
 }
 
-/// Parse the per-variant `#[grammar(kind = "...", output = "...", since = "...")]`.
+/// What `#[grammar(...)]` declares on one variant — everything about a tag that
+/// serde's own definition cannot express.
+struct VariantGrammar {
+    kind: String,
+    output: String,
+    /// A token expression, because the default reads the `SINCE_BASELINE` const
+    /// rather than being a literal.
+    since: proc_macro2::TokenStream,
+    /// The named alternate-spelling pattern, if any. See [`alt_form`].
+    alt: Option<String>,
+}
+
+/// Parse the per-variant
+/// `#[grammar(kind = "...", output = "...", since = "...", alt = "...")]`.
 /// `kind` is mandatory; `output` defaults to `"scalar"`; `since` defaults to
-/// the crate's `SINCE_BASELINE` (emitted as a token that reads the const).
-fn variant_grammar(
-    variant: &Variant,
-) -> Result<(String, String, proc_macro2::TokenStream), syn::Error> {
+/// the crate's `SINCE_BASELINE` (emitted as a token that reads the const); `alt`
+/// defaults to none.
+fn variant_grammar(variant: &Variant) -> Result<VariantGrammar, syn::Error> {
     let mut kind = None;
     let mut output = None;
     let mut since = None;
+    let mut alt = None;
     for attr in &variant.attrs {
         if !attr.path().is_ident("grammar") {
             continue;
@@ -347,8 +511,10 @@ fn variant_grammar(
                 output = Some(meta.value()?.parse::<syn::LitStr>()?.value());
             } else if meta.path.is_ident("since") {
                 since = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            } else if meta.path.is_ident("alt") {
+                alt = Some(meta.value()?.parse::<syn::LitStr>()?.value());
             } else {
-                return Err(meta.error("expected `kind`, `output`, or `since`"));
+                return Err(meta.error("expected `kind`, `output`, `since`, or `alt`"));
             }
             Ok(())
         })?;
@@ -368,7 +534,12 @@ fn variant_grammar(
         Some(v) => quote! { #v },
         None => quote! { crate::spec::grammar::SINCE_BASELINE },
     };
-    Ok((kind, output, since))
+    Ok(VariantGrammar {
+        kind,
+        output,
+        since,
+        alt,
+    })
 }
 
 /// Concatenate a run of `#[doc = "..."]` attrs into one trimmed string.

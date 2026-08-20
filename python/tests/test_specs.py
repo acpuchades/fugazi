@@ -1358,11 +1358,12 @@ def test_slot_demand_agrees_with_the_grammar_descriptor():
     for tag in ta.spec_grammar()["tags"]:
         if tag["group"] != "node":
             continue
-        for field in tag["fields"]:
-            slot = "case value" if field["type"] == "match_cases" else field["name"]
-            assert field.get("node_output") == ta.slot_demand(tag["name"], slot), (
-                f"!{tag['name']} `{field['name']}`"
-            )
+        for form in tag["forms"]:
+            for field in form["fields"]:
+                slot = "case value" if field["type"] == "match_cases" else field["name"]
+                assert field.get("node_output") == ta.slot_demand(tag["name"], slot), (
+                    f"!{tag['name']} `{field['name']}`"
+                )
 
 
 def test_slot_demand_names_the_tags_that_can_fill_a_slot():

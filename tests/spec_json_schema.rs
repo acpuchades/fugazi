@@ -30,11 +30,17 @@ fn collect_refs(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// The tag name(s) a `oneOf` branch covers — the `const` of a bare form, or the
-/// single required key of a `{tag: body}` form. Recurses through nested `oneOf`.
+/// The tag name(s) a branch covers — the `const` of a bare form, or the single
+/// required key of a `{tag: body}` form.
+///
+/// Recurses through both nested unions: `oneOf` for the bare-vs-keyed pair of a
+/// single spelling, `anyOf` for a tag written more than one way (`!changed
+/// <node>` and `!changed { source }` are one tag, two branches).
 fn branch_names(v: &Value) -> Vec<String> {
-    if let Some(Value::Array(alts)) = v.get("oneOf") {
-        return alts.iter().flat_map(branch_names).collect();
+    for key in ["oneOf", "anyOf"] {
+        if let Some(Value::Array(alts)) = v.get(key) {
+            return alts.iter().flat_map(branch_names).collect();
+        }
     }
     if let Some(Value::String(c)) = v.get("const") {
         return vec![c.clone()];

@@ -276,7 +276,15 @@ Foo { source, period } => dyn_indicator::wrap(
   (`source` / `indicator` / `operator` / `predicate` / `function`) is mandatory
   and the crate will not compile without it. Add `output = "bool"` (etc.) when
   the tag isn't a scalar, and `since = "X.Y"` on the new variant (existing tags
-  carry the baseline). The descriptor's `default` for a scalar field is read
+  carry the baseline).
+  **If your tag parses in a shape its variant doesn't have**, say so with
+  `alt = "…"` — a variant's field form is one spelling, and the descriptor's
+  `forms` list is what a consumer validates and completes against. There is one
+  pattern today, `unary_source` (the inner written bare *or* under a lone
+  `source:` key, as `!changed` / `!unstable` do); adding a second means adding an
+  arm to `alt_form` in the derive. Don't skip this on the theory that nobody
+  reads it: `no_unary_wrapper_hides_an_undeclared_mirror` probes the mirror
+  spelling of every unary-shaped tag and fails if one parses undeclared. The descriptor's `default` for a scalar field is read
   from its `#[serde(default = "…")]`, so a canonical numeric default belongs in
   a const-backed default fn (see `MACD_FAST` & co. in `expr.rs`), not hard-coded
   in the Python signature — the parity test pins the two together.

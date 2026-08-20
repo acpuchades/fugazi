@@ -638,12 +638,15 @@ fn prototype_filler(ty: &str) -> Option<&'static str> {
 /// `children`'s `opt` helper reports nothing for an absent one, and an
 /// unreported slot is exactly what this is trying to avoid.
 fn prototype(tag: &GrammarTag) -> Option<NodeSpec> {
-    let body = match tag.shape.as_str() {
+    // The canonical spelling only. An alternate form holds the same slots under
+    // different syntax, so probing it would report the same demands twice.
+    let form = tag.canonical();
+    let body = match form.shape.as_str() {
         "unit" => String::new(),
-        "newtype" | "seq" => format!(" {}", prototype_filler(tag.payload.as_deref()?)?),
+        "newtype" | "seq" => format!(" {}", prototype_filler(form.payload.as_deref()?)?),
         "map" => {
             let mut parts = Vec::new();
-            for field in &tag.fields {
+            for field in &form.fields {
                 let is_node = matches!(field.ty.as_str(), "node" | "node_list" | "match_cases");
                 if !field.required && !is_node {
                     continue;
@@ -1102,22 +1105,28 @@ mod tests {
         let mut unreported = Vec::new();
         for tag in NodeSpec::grammar_tags() {
             let slots = slot_demands(&tag.name);
-            for field in &tag.fields {
-                let slot = match field.ty.as_str() {
-                    "node" | "node_list" => field.name.as_str(),
-                    "match_cases" => "case value",
-                    _ => continue,
-                };
-                if slots.iter().any(|(s, _)| *s == slot) {
-                    continue;
+            // Every form: an alternate spelling exposes the same slots under
+            // different syntax, and a consumer completing inside one still needs
+            // the demand, so an unreported slot there is the same hole.
+            for form in &tag.forms {
+                for field in &form.fields {
+                    let slot = match field.ty.as_str() {
+                        "node" | "node_list" => field.name.as_str(),
+                        "match_cases" => "case value",
+                        _ => continue,
+                    };
+                    if slots.iter().any(|(s, _)| *s == slot) {
+                        continue;
+                    }
+                    if BOOK_SELECTOR_SLOTS.contains(&tag.name.as_str()) && slot == "source" {
+                        continue;
+                    }
+                    unreported.push(format!("!{} `{}`", tag.name, field.name));
                 }
-                if BOOK_SELECTOR_SLOTS.contains(&tag.name.as_str()) && slot == "source" {
-                    continue;
+                if matches!(form.payload.as_deref(), Some("node" | "node_list")) && slots.is_empty()
+                {
+                    unreported.push(format!("!{} payload", tag.name));
                 }
-                unreported.push(format!("!{} `{}`", tag.name, field.name));
-            }
-            if matches!(tag.payload.as_deref(), Some("node" | "node_list")) && slots.is_empty() {
-                unreported.push(format!("!{} payload", tag.name));
             }
         }
         assert!(

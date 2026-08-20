@@ -1712,7 +1712,7 @@ pub enum NodeSpec {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
-    #[grammar(kind = "operator", output = "any")]
+    #[grammar(kind = "operator", output = "any", alt = "unary_source")]
     Unstable {
         /// The source whose unstable settling tail is ignored (required).
         source: Box<NodeSpec>,
@@ -1963,13 +1963,13 @@ pub enum NodeSpec {
     /// output type at build: a Bool inner is a rising-or-falling toggle, a
     /// Real inner fires on any value change. Subsumes the former
     /// `Changed` / `ChangedReal` split of the signal layer.
-    #[grammar(kind = "predicate", output = "bool")]
+    #[grammar(kind = "predicate", output = "bool", alt = "unary_source")]
     Changed(Box<NodeSpec>),
     /// Rising-edge detector for a Bool inner (`false → true`).
-    #[grammar(kind = "predicate", output = "bool")]
+    #[grammar(kind = "predicate", output = "bool", alt = "unary_source")]
     BecameTrue(Box<NodeSpec>),
     /// Falling-edge detector (`true → false`).
-    #[grammar(kind = "predicate", output = "bool")]
+    #[grammar(kind = "predicate", output = "bool", alt = "unary_source")]
     BecameFalse(Box<NodeSpec>),
     /// `lhs == rhs` on two `Str`-typed operands.
     #[grammar(kind = "predicate", output = "bool")]
@@ -3446,11 +3446,32 @@ fn rewrite_cadence_sugar(v: serde_norway::Value) -> serde_norway::Value {
     }))
 }
 
-/// Extract the inner payload of a unary wrapper tag, accepting both the bare
-/// form (`!changed !gt { ... }`) and the `{ source: <inner> }` mapping form
-/// (`!changed { source: !month }`). `None` when the outer tag doesn't match
-/// `wanted`.
-fn extract_edge_inner(v: &serde_norway::Value, wanted: &str) -> Option<serde_norway::Value> {
+/// One spelling of a unary wrapper's inner expression, extracted.
+struct WrapperInner {
+    /// The inner expression, still untyped.
+    value: serde_norway::Value,
+    /// Whether the body named `source:` explicitly. This decides what happens
+    /// when [`value`](Self::value) turns out not to parse: a keyed body has no
+    /// other possible reading, so its error is *the* error; an unkeyed mapping
+    /// might instead be a mis-spelled field, and the derived parse gives a
+    /// better message for that than "unknown tag" would.
+    keyed: bool,
+}
+
+/// Extract the inner payload of a unary wrapper tag. `None` when the outer tag
+/// doesn't match `wanted`.
+///
+/// Three spellings, all equivalent — the `unary_source` pattern the grammar
+/// descriptor declares (`spec::grammar::GrammarForm`):
+///
+/// - **bare** — `!changed close`, or the JSON bridge's
+///   `{ "changed": { "sma": … } }`. A tagged inner cannot be written bare in
+///   YAML (two tags on one node is a syntax error), so the tagged spelling is
+///   reachable only through the bridge, which is exactly what a programmatic
+///   consumer emits.
+/// - **keyed** — `!changed { source: !month }`.
+/// - **bare word** — `!changed close`, a plain string.
+fn extract_wrapper_inner(v: &serde_norway::Value, wanted: &str) -> Option<WrapperInner> {
     let inner_payload = match v {
         serde_norway::Value::Tagged(tv)
             if tv.tag.to_string().trim_start_matches('!') == wanted =>
@@ -3461,53 +3482,60 @@ fn extract_edge_inner(v: &serde_norway::Value, wanted: &str) -> Option<serde_nor
     };
     match inner_payload {
         serde_norway::Value::Mapping(m) if m.len() == 1 => match m.iter().next() {
-            Some((serde_norway::Value::String(k), source)) if k == "source" => Some(source.clone()),
-            _ => Some(inner_payload.clone()),
+            Some((serde_norway::Value::String(k), source)) if k == "source" => Some(WrapperInner {
+                value: source.clone(),
+                keyed: true,
+            }),
+            _ => Some(WrapperInner {
+                value: inner_payload.clone(),
+                keyed: false,
+            }),
         },
-        _ => Some(inner_payload.clone()),
+        _ => Some(WrapperInner {
+            value: inner_payload.clone(),
+            keyed: false,
+        }),
     }
 }
 
-/// Dispatch the wrapper tags whose inner is a bare tagged node: `!changed`,
-/// `!became_true`, `!became_false`, and `!unstable`'s bare form. Returns
-/// `Ok(Some(spec))` on match, `Ok(None)` otherwise, `Err` when the inner
-/// fails to parse.
+/// The unary wrappers whose inner may be written bare or under `source:`, and
+/// the node each builds. Kept as one table so the four cannot drift apart —
+/// `!unstable` used to take a narrower set of spellings than the three edge
+/// detectors, which meant the JSON bridge form `{"unstable": {"sma": …}}` was
+/// rejected while `{"changed": {"sma": …}}` was accepted. Each of these is
+/// declared to the grammar descriptor by `#[grammar(alt = "unary_source")]`,
+/// and `tests/spec_grammar.rs` probes both spellings of every entry.
+type WrapperCtor = fn(Box<NodeSpec>) -> NodeSpec;
+const UNARY_WRAPPERS: &[(&str, WrapperCtor)] = &[
+    ("changed", NodeSpec::Changed),
+    ("became_true", NodeSpec::BecameTrue),
+    ("became_false", NodeSpec::BecameFalse),
+    ("unstable", |source| NodeSpec::Unstable { source }),
+];
+
+/// Dispatch the unary wrapper tags, whose inner is a bare node rather than the
+/// `{ field: … }` map the derived Raw parse expects. Returns `Ok(Some(spec))`
+/// on match, `Ok(None)` when this isn't one (or when the body is better
+/// reported by the derived parse), `Err` when a keyed inner fails to parse.
 ///
-/// The Real-vs-Bool decision for `!changed` now happens at *build* time
-/// (dispatch on the inner's `output_type`), so the inner is parsed once as a
-/// general [`NodeSpec`] with no parse-time fallback dance.
+/// The Real-vs-Bool decision for `!changed` happens at *build* time (dispatch
+/// on the inner's `output_type`), so the inner is parsed once as a general
+/// [`NodeSpec`] with no parse-time fallback dance.
 fn try_dispatch_wrappers(v: &serde_norway::Value) -> Result<Option<NodeSpec>, String> {
-    if let Some(inner) = extract_edge_inner(v, "changed") {
-        return Ok(Some(NodeSpec::Changed(Box::new(NodeSpec::try_from(inner)?))));
-    }
-    if let Some(inner) = extract_edge_inner(v, "became_true") {
-        return Ok(Some(NodeSpec::BecameTrue(Box::new(NodeSpec::try_from(
-            inner,
-        )?))));
-    }
-    if let Some(inner) = extract_edge_inner(v, "became_false") {
-        return Ok(Some(NodeSpec::BecameFalse(Box::new(NodeSpec::try_from(
-            inner,
-        )?))));
-    }
-    // `!unstable`: only intercept the bare-inner forms (a tagged node or a
-    // bare word). The `{ source: X }` mapping form and any mis-spelled field
-    // (`{ signal: X }`) fall through to the derived Raw parse, which handles
-    // `source` and rejects the unknown field cleanly.
-    if let serde_norway::Value::Tagged(tv) = v {
-        let name = tv.tag.to_string();
-        let name = name.strip_prefix('!').unwrap_or(&name);
-        if name == "unstable"
-            && matches!(
-                tv.value,
-                serde_norway::Value::Tagged(_) | serde_norway::Value::String(_)
-            )
-        {
-            let inner = NodeSpec::try_from(tv.value.clone())?;
-            return Ok(Some(NodeSpec::Unstable {
-                source: Box::new(inner),
-            }));
-        }
+    for (wanted, build) in UNARY_WRAPPERS {
+        let Some(inner) = extract_wrapper_inner(v, wanted) else {
+            continue;
+        };
+        return match NodeSpec::try_from(inner.value) {
+            Ok(spec) => Ok(Some(build(Box::new(spec)))),
+            // `{ source: <broken> }` says what it is; report the inner's error.
+            Err(e) if inner.keyed => Err(e),
+            // An unkeyed body that isn't a node — most likely a mis-spelled
+            // field (`!unstable { signal: X }`). Fall through so the derived
+            // parse can answer with `unknown field ...`, which names the slot;
+            // "unknown tag `signal`" would not.
+            Err(_) => Ok(None),
+        };
     }
     Ok(None)
 }

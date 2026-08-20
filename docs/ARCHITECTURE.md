@@ -1176,8 +1176,8 @@ tag is bound, or listed with a reason) and
 
 **The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
 (the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` / `UniverseSpec` into one
-JSON-serializable record per tag — names, shape, fields (types, required-ness, defaults),
-prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
+JSON-serializable record per tag — names, `forms` (each with a shape, fields with types /
+required-ness / defaults, or a payload), prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
 spec's *presentation* metadata, the way `known_*_tags` is for its *names*: `spec_tags()` is
 now a projection of it, `test_parity.py` pins each Python constructor's defaults against it,
 and external tooling (docs, editor LSP, the web grammar table) generates from it rather than
@@ -1207,11 +1207,45 @@ the type), so `grammar::spec_grammar` *stamps* it from the `pub CATEGORIES` taxo
 the single authority for both the classification and its curated order — after reflection; a
 test pins the table to cover every tag exactly once, so nothing ships uncategorised. The CLI
 `fugazi list indicators` catalogue is now a **pure projection** of the descriptor (signatures
-derived from `shape`/`fields`/`payload`, prose from the stamped records, grouping + order from
+derived from the canonical form's `shape`/`fields`/`payload`, prose from the stamped records, grouping + order from
 `CATEGORIES`) rather than a hand-maintained parallel table — the drift-prone duplication the
 descriptor exists to kill. Prose is stripped of rustdoc link markup (`` [`Type`] ``,
 `[text](url)`) in the derive's `doc_string` so it reads as clean presentation text for every
 consumer. `category` is a new *field*, so it **did** bump `SCHEMA_VERSION` to 3.
+
+**A tag is a set of spellings, not one — `forms` (v5, 0.67).** `shape` / `fields` / `payload` /
+`payload_output` sit on a `GrammarForm`, and a record carries a list of them, canonical first.
+The single `shape` the descriptor used to report was silently wrong for eight tags: `!param` /
+`!arg` (`NAME` or `{ key, default }` — only the second can carry a default), `!import` (a path
+or `{ path, params }`), `!equal_weight` (bare in a portfolio `weights:`, `<N>` as sizing —
+different meanings), and the four unary wrappers `!changed` / `!became_true` / `!became_false` /
+`!unstable`, which take their inner bare *or* under a `source:` key. The last four are in the
+**reflected** group, and that is the point: their alternate spelling lives in
+`NodeSpec::parse_unchecked`'s normalisation pass, not in the variant, so the derive cannot see
+it. It is therefore *declared* — `#[grammar(alt = "unary_source")]`, joining `kind`/`output`/
+`since` as the things serde doesn't know — and the derive synthesises whichever of the two the
+variant isn't. **The claim is settled against the parser, both ways**: `every_declared_form_parses`
+runs a probe in every declared form, and `no_unary_wrapper_hides_an_undeclared_mirror` probes the
+mirror spelling of *undeclared* unary-shaped tags and fails if one parses. So a form can neither
+be claimed without existing nor exist without being claimed. `forms[0]` is canonical (what a
+generator emits, what `GrammarTag::canonical()` returns); a consumer that *accepts* documents
+must iterate all of them. `spec_json_schema()` emits a multi-form tag as an `anyOf` over its
+forms, which is what makes `{"unstable": "close"}` and `{"changed": {"source": …}}` validate —
+both had always parsed. Building this found and fixed one real asymmetry: `!unstable`'s
+bare-inner branch matched only a tagged or bare-word payload, so the **JSON bridge** form
+`{"unstable": {"sma": …}}` was rejected while `{"changed": {"sma": …}}` was accepted; all four
+now share `expr::UNARY_WRAPPERS`.
+
+**`scope` says where a form is legal, because `group` doesn't.** `document` is a *provenance*
+label — resolved by a `Value` pass before the typed parse — and reading it as a position claim
+is wrong for half of that group. `!param` and `!import` genuinely go anywhere a value goes (an
+expression slot, `period:`, `symbol:`, a list element). `!arg` is `scope: "template"`: it is
+substituted only inside a deferred `SpecTemplate` body (a basket's `score:`/`sizing:`, a
+multi-asset side's `enter:`, a portfolio's `weights:`), and one written elsewhere is a hard
+parse error — `check` included, since no pass touches it. `!undefined` is `scope: "internal"`.
+On the `weighting` side, `!fixed` and bare `!equal_weight` are `scope: "portfolio_weights"`,
+while `!equal_weight <N>` is unscoped. Absent `scope` means unrestricted, which is every
+expression tag.
 
 Records carry one datum that is **not** reflected off serde: **`node_output`** (v4, 0.61), on
 every field whose `type` is `node` / `node_list` / `match_cases`, plus **`payload_output`** for
@@ -1222,14 +1256,16 @@ a newtype/seq tag's positional payload. `type: "node"` says a slot holds a neste
 `typecheck::slot_demand`: **absent** = not a free-expression slot (a scalar field, or a *book
 selector* like `!drawdown`'s `source`, which takes only `!strategy_book` / `!portfolio_book`);
 `[]` = a passthrough that demands nothing (`!unstable`'s `source`, `!resample`'s `inner`);
-otherwise the admitted set. Both are omitted when absent, so a v3 consumer reads an unchanged
-record.
+otherwise the admitted set. Both are omitted when absent. They are stamped on **every** form,
+not just the canonical one — an alternate spelling holds the same slots under different syntax,
+and a consumer completing inside `!changed { source: ` needs the demand there too.
 
 The demand lives in **`spec::typecheck`**, whose `children()` table is keyed on a *node*, not a
 tag — so `spec_grammar` can't read it directly. Rather than hand-write a second table (which
 would drift, and lose the exhaustive-match guard that makes the first trustworthy),
 `typecheck::slot_demand(tag, slot)` synthesises one **prototype** node per tag from that tag's
-own grammar record — filling every expression slot with a `!get`, whose `output_type()` is
+own grammar record (its canonical form — an alternate holds the same slots, so probing it would
+report each demand twice) — filling every expression slot with a `!get`, whose `output_type()` is
 `None` and therefore satisfies any demand — and runs `children()` on it. One authority, no
 duplication. `demand_table_covers_every_node_slot` pins the coverage, since a tag whose
 prototype failed to build would silently report *no* demands. Building it caught two slots

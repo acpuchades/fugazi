@@ -95,6 +95,9 @@ fn every_tag_is_well_formed() {
         "document",
     ];
     const SHAPES: &[&str] = &["unit", "newtype", "seq", "map"];
+    // Every narrowing a form can declare. Absent means "wherever the group is
+    // accepted", which is the case for all ~150 expression tags.
+    const SCOPES: &[&str] = &["template", "portfolio_weights", "internal"];
     const OUTPUTS: &[&str] = &[
         "scalar",
         "bool",
@@ -132,47 +135,71 @@ fn every_tag_is_well_formed() {
         assert!(!tag.category.trim().is_empty(), "!{}: empty category", tag.name);
         assert!(KINDS.contains(&tag.kind.as_str()), "!{}: bad kind {}", tag.name, tag.kind);
         assert!(
-            SHAPES.contains(&tag.shape.as_str()),
-            "!{}: bad shape {}",
-            tag.name,
-            tag.shape
-        );
-        assert!(
             OUTPUTS.contains(&tag.output.as_str()),
             "!{}: bad output {}",
             tag.name,
             tag.output
         );
-        // Only `map` tags carry fields; only `newtype`/`seq` carry a payload.
-        if tag.shape != "map" {
-            assert!(tag.fields.is_empty(), "!{}: non-map tag has fields", tag.name);
-        }
-        match tag.shape.as_str() {
-            "newtype" | "seq" => assert!(
-                tag.payload.as_deref().is_some_and(|p| FIELD_TYPES.contains(&p)),
-                "!{}: {} tag needs a known payload type, got {:?}",
-                tag.name,
-                tag.shape,
-                tag.payload
-            ),
-            _ => assert!(tag.payload.is_none(), "!{}: {} tag has a payload", tag.name, tag.shape),
-        }
-        for f in &tag.fields {
+
+        // Every tag has at least a canonical form, and no two forms share a
+        // shape — two `map` spellings of one tag would be indistinguishable to
+        // a consumer, and nothing in the parser produces that.
+        assert!(!tag.forms.is_empty(), "!{}: no forms", tag.name);
+        let shapes: BTreeSet<&str> = tag.forms.iter().map(|f| f.shape.as_str()).collect();
+        assert_eq!(
+            shapes.len(),
+            tag.forms.len(),
+            "!{}: two forms share a shape",
+            tag.name
+        );
+
+        for (i, form) in tag.forms.iter().enumerate() {
+            let at = format!("!{} form[{i}]", tag.name);
             assert!(
-                FIELD_TYPES.contains(&f.ty.as_str()),
-                "!{}.{}: bad field type {}",
-                tag.name,
-                f.name,
-                f.ty
+                SHAPES.contains(&form.shape.as_str()),
+                "{at}: bad shape {}",
+                form.shape
             );
-            // A required field never carries a default; an optional one may.
-            if f.required {
+            if let Some(scope) = form.scope.as_deref() {
+                assert!(SCOPES.contains(&scope), "{at}: bad scope {scope}");
+            }
+            // Only `map` forms carry fields; only `newtype`/`seq` carry a payload.
+            if form.shape != "map" {
+                assert!(form.fields.is_empty(), "{at}: non-map form has fields");
+            }
+            match form.shape.as_str() {
+                "newtype" | "seq" => assert!(
+                    form.payload.as_deref().is_some_and(|p| FIELD_TYPES.contains(&p)),
+                    "{at}: {} form needs a known payload type, got {:?}",
+                    form.shape,
+                    form.payload
+                ),
+                _ => assert!(
+                    form.payload.is_none(),
+                    "{at}: {} form has a payload",
+                    form.shape
+                ),
+            }
+            // An alternate exists because it does something the canonical form
+            // can't; a consumer offering it has to be able to say what.
+            if i > 0 {
                 assert!(
-                    f.default.is_none(),
-                    "!{}.{}: required field has a default",
-                    tag.name,
-                    f.name
+                    form.doc.as_deref().unwrap_or("").trim().len() > 20,
+                    "{at}: a non-canonical form needs a `doc` explaining what it \
+                     does that the canonical spelling cannot",
                 );
+            }
+            for f in &form.fields {
+                assert!(
+                    FIELD_TYPES.contains(&f.ty.as_str()),
+                    "{at}.{}: bad field type {}",
+                    f.name,
+                    f.ty
+                );
+                // A required field never carries a default; an optional one may.
+                if f.required {
+                    assert!(f.default.is_none(), "{at}.{}: required field has a default", f.name);
+                }
             }
         }
     }
@@ -189,7 +216,7 @@ fn every_tag_and_field_is_documented() {
         if tag.doc.as_deref().unwrap_or("").trim().is_empty() {
             missing_tags.push(tag.name.clone());
         }
-        for f in &tag.fields {
+        for f in tag.forms.iter().flat_map(|form| &form.fields) {
             if f.doc.as_deref().unwrap_or("").trim().is_empty() {
                 missing_fields.push(format!("{}.{}", tag.name, f.name));
             }
@@ -211,7 +238,11 @@ fn every_tag_and_field_is_documented() {
     // which the derive strips so the descriptor reads as presentation text.
     let mut artifacts = Vec::new();
     for tag in spec_grammar() {
-        for doc in std::iter::once(&tag.doc).chain(tag.fields.iter().map(|f| &f.doc)) {
+        let form_docs = tag
+            .forms
+            .iter()
+            .flat_map(|form| std::iter::once(&form.doc).chain(form.fields.iter().map(|f| &f.doc)));
+        for doc in std::iter::once(&tag.doc).chain(form_docs) {
             let d = doc.as_deref().unwrap_or("");
             if d.contains("{{") || d.contains("[`") || d.contains("](") {
                 artifacts.push(tag.name.clone());
@@ -243,13 +274,14 @@ fn reflects_fields_and_defaults() {
     let by_name = |n: &str| grammar.iter().find(|t| t.name == n).expect(n);
 
     let sma = by_name("sma");
-    assert_eq!(sma.shape, "map");
+    assert_eq!(sma.canonical().shape, "map");
+    assert_eq!(sma.forms.len(), 1, "!sma has one spelling");
     assert_eq!(sma.output, "scalar");
-    let src = sma.fields.iter().find(|f| f.name == "source").unwrap();
+    let src = sma.canonical().fields.iter().find(|f| f.name == "source").unwrap();
     assert_eq!(src.ty, "node");
     assert!(!src.required, "sma.source has a default -> optional");
     assert!(src.default.is_none(), "node default is null, not a literal");
-    let period = sma.fields.iter().find(|f| f.name == "period").unwrap();
+    let period = sma.canonical().fields.iter().find(|f| f.name == "period").unwrap();
     // A period is a `NonZeroUsize`, which the descriptor reports as
     // `positive_uint` so the generated JSON schema can say `minimum: 1`.
     assert_eq!(period.ty, "positive_uint");
@@ -257,18 +289,18 @@ fn reflects_fields_and_defaults() {
 
     // Const-backed defaults surface as literals.
     let macd = by_name("macd_line");
-    let fast = macd.fields.iter().find(|f| f.name == "fast").unwrap();
+    let fast = macd.canonical().fields.iter().find(|f| f.name == "fast").unwrap();
     assert!(!fast.required);
     assert_eq!(fast.default, Some(serde_json::json!(12)));
     let bb = by_name("bb_upper");
-    let k = bb.fields.iter().find(|f| f.name == "k").unwrap();
+    let k = bb.canonical().fields.iter().find(|f| f.name == "k").unwrap();
     assert_eq!(k.default, Some(serde_json::json!(2.0)));
 
     // A bool predicate and its optional epsilon.
     let gt = by_name("gt");
     assert_eq!(gt.kind, "predicate");
     assert_eq!(gt.output, "bool");
-    let eps = gt.fields.iter().find(|f| f.name == "epsilon").unwrap();
+    let eps = gt.canonical().fields.iter().find(|f| f.name == "epsilon").unwrap();
     assert!(!eps.required, "Option field is optional even without serde default");
 }
 
@@ -308,5 +340,295 @@ fn every_tag_appears_in_the_strategies_reference() {
          Every tag needs a line in the reference — see docs/CONTRIBUTING.md step 9.",
         missing.join("`, no `!"),
         if missing.len() > 1 { format!(" ({} tags)", missing.len()) } else { String::new() },
+    );
+}
+
+/// Build a probe document for one form of `tag` in the JSON bridge encoding,
+/// or `None` when this form holds something no probe can fabricate (an
+/// embedded strategy document).
+///
+/// Expression slots are filled with `!get { key: probe }`, whose output type is
+/// schema-dependent and therefore admitted everywhere — the probe has to
+/// *parse*, not to typecheck.
+fn probe(name: &str, form: &fugazi::spec::grammar::GrammarForm) -> Option<serde_json::Value> {
+    use serde_json::json;
+    fn filler(ty: &str) -> Option<serde_json::Value> {
+        Some(match ty {
+            "node" => json!({ "get": { "key": "probe" } }),
+            "node_list" => json!([{ "get": { "key": "probe" } }]),
+            "match_cases" => json!([{ "when": 1, "value": { "get": { "key": "probe" } } }]),
+            "positive_uint" | "uint" | "number" | "literal" => json!(1),
+            "str" | "str_operand" => json!("probe"),
+            "str_list" => json!(["PROBE"]),
+            "number_list" => json!([1.0]),
+            "bool" => json!(true),
+            // `strategy` — a whole embedded document, out of reach here.
+            _ => return None,
+        })
+    }
+    let body = match form.shape.as_str() {
+        "unit" => serde_json::Value::Null,
+        "newtype" | "seq" => filler(form.payload.as_deref()?)?,
+        "map" => {
+            let mut body = serde_json::Map::new();
+            for f in &form.fields {
+                // Optional non-expression keys are omitted — the point is the
+                // minimal document, and a default is not this test's business.
+                let is_node = matches!(f.ty.as_str(), "node" | "node_list" | "match_cases");
+                if !f.required && !is_node {
+                    continue;
+                }
+                body.insert(f.name.clone(), filler(&f.ty)?);
+            }
+            serde_json::Value::Object(body)
+        }
+        other => panic!("!{name}: unknown shape {other}"),
+    };
+    Some(json!({ name: body }))
+}
+
+/// Whether a JSON-bridge document parses as an expression.
+fn parses(doc: &serde_json::Value) -> bool {
+    serde_json::from_value::<fugazi::spec::NodeSpec>(doc.clone()).is_ok()
+}
+
+/// **A declared form must actually parse.** The descriptor claims a set of
+/// spellings per tag; this runs each one through the real parser.
+///
+/// Without this, `forms` is prose: an alternate could be declared for a
+/// spelling the parser never took, or survive a refactor that removed it, and
+/// the only symptom would be a downstream tool generating documents fugazi
+/// rejects. With it, the reflected tier keeps the guarantee the module docs
+/// claim — the derive reads the variant, the attribute declares what the
+/// variant can't express, and the parser is what settles both.
+#[test]
+fn every_declared_form_parses() {
+    let mut broken = Vec::new();
+    for tag in spec_grammar() {
+        // Only the expression vocabularies parse as a `NodeSpec`; the
+        // document-level groups are exercised by `document_forms_resolve`.
+        if tag.group != "node" {
+            continue;
+        }
+        for (i, form) in tag.forms.iter().enumerate() {
+            let Some(doc) = probe(&tag.name, form) else {
+                continue;
+            };
+            if !parses(&doc) {
+                broken.push(format!("!{} form[{i}] ({}): {doc}", tag.name, form.shape));
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "the descriptor declares these spellings, but the parser rejects them:\n  {}",
+        broken.join("\n  "),
+    );
+}
+
+/// **A form the parser accepts must be declared.** The converse guard, and the
+/// one that would have caught the v4 bug.
+///
+/// The undeclared spellings were all one pattern — a one-slot wrapper taking
+/// its inner either bare or under a lone `source:` key, which
+/// `expr::extract_edge_inner` implements — so that is the pattern probed here:
+/// for every tag shaped like a unary wrapper, the *mirror* spelling must parse
+/// exactly when a form declares it. `!changed` / `!became_true` /
+/// `!became_false` / `!unstable` declare it and do; `!not`, `!close`, and the
+/// other unary-looking tags don't and must not.
+#[test]
+fn no_unary_wrapper_hides_an_undeclared_mirror() {
+    let mut undeclared = Vec::new();
+    for tag in spec_grammar() {
+        if tag.group != "node" {
+            continue;
+        }
+        let canonical = tag.canonical();
+        // The mirror of the canonical spelling, when the tag is shaped like a
+        // unary wrapper at all.
+        let mirror = match canonical.shape.as_str() {
+            "newtype" if canonical.payload.as_deref() == Some("node") => {
+                serde_json::json!({ &tag.name: { "source": { "get": { "key": "probe" } } } })
+            }
+            "map" if canonical.fields.iter().all(|f| f.name == "source") => {
+                serde_json::json!({ &tag.name: { "get": { "key": "probe" } } })
+            }
+            _ => continue,
+        };
+        let declared = tag.forms.len() > 1;
+        if parses(&mirror) && !declared {
+            undeclared.push(format!("!{}: {mirror}", tag.name));
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "the parser takes these spellings, but no `forms` entry declares them — add \
+         `#[grammar(alt = \"unary_source\")]` to the variant:\n  {}",
+        undeclared.join("\n  "),
+    );
+}
+
+/// The hand-authored `document` / `weighting` rows, exercised through the
+/// passes that actually resolve them.
+///
+/// These tags never reach the typed parse, so `every_declared_form_parses`
+/// cannot see them — and they are the rows most able to drift, being the one
+/// part of the descriptor written by hand. Each declared form is run through
+/// its own pass and must resolve.
+#[test]
+fn document_forms_resolve() {
+    use std::collections::HashMap;
+
+    let grammar = spec_grammar();
+    let forms_of = |name: &str| {
+        grammar
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("!{name} has a descriptor row"))
+            .forms
+            .clone()
+    };
+
+    // `!param` — bare string and `{ key, default }`, the second being the only
+    // one that can carry a fallback.
+    let param = forms_of("param");
+    assert_eq!(param.len(), 2, "!param has two spellings");
+    let table = HashMap::from([("SET".to_string(), serde_json::json!(3))]);
+    for (doc, want) in [
+        (serde_json::json!({ "param": "SET" }), serde_json::json!(3)),
+        (
+            serde_json::json!({ "param": { "key": "SET" } }),
+            serde_json::json!(3),
+        ),
+        (
+            serde_json::json!({ "param": { "key": "UNSET", "default": 8 } }),
+            serde_json::json!(8),
+        ),
+    ] {
+        let got = fugazi::spec::params::substitute(doc.clone(), &table)
+            .unwrap_or_else(|e| panic!("!param spelling {doc} must resolve: {e}"));
+        assert_eq!(got, want, "!param {doc}");
+    }
+    // The bare form cannot carry a default — which is the whole reason the map
+    // form is declared, so pin it rather than leaving it to the prose.
+    assert!(
+        fugazi::spec::params::substitute(
+            serde_json::json!({ "param": "UNSET" }),
+            &HashMap::new()
+        )
+        .is_err(),
+        "the bare spelling has nowhere to put a default, so an unset key is an error",
+    );
+
+    // `!arg` — the same two spellings, resolved by the build-time twin.
+    assert_eq!(forms_of("arg").len(), 2, "!arg has two spellings");
+    let args = HashMap::from([("SYM".to_string(), serde_json::json!("BTC"))]);
+    for (doc, want) in [
+        (serde_json::json!({ "arg": "SYM" }), serde_json::json!("BTC")),
+        (
+            serde_json::json!({ "arg": { "key": "SYM" } }),
+            serde_json::json!("BTC"),
+        ),
+        (
+            serde_json::json!({ "arg": { "key": "OTHER", "default": "ETH" } }),
+            serde_json::json!("ETH"),
+        ),
+    ] {
+        let got = fugazi::spec::args::substitute(doc.clone(), &args)
+            .unwrap_or_else(|e| panic!("!arg spelling {doc} must resolve: {e}"));
+        assert_eq!(got, want, "!arg {doc}");
+    }
+
+    // `!import` — bare path and `{ path, params }`, the second being the only
+    // one that can parameterise the imported subtree.
+    assert_eq!(forms_of("import").len(), 2, "!import has two spellings");
+    let dir = std::env::temp_dir().join("fugazi_grammar_forms");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("frag.yml"), "period: !param { key: N, default: 7 }\n")
+        .expect("write fragment");
+    let bare = fugazi::spec::imports::resolve(serde_json::json!({ "import": "frag.yml" }), &dir)
+        .expect("bare !import resolves");
+    assert_eq!(bare["period"], serde_json::json!({ "param": { "key": "N", "default": 7 } }));
+    let keyed = fugazi::spec::imports::resolve(
+        serde_json::json!({ "import": { "path": "frag.yml", "params": { "N": 21 } } }),
+        &dir,
+    )
+    .expect("keyed !import resolves");
+    assert_eq!(
+        keyed["period"],
+        serde_json::json!(21),
+        "inline params are what the keyed spelling exists for",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // `!equal_weight` — the bare portfolio-weights spelling and the sizing
+    // `<N>` one, which mean different things and are scoped differently.
+    let ew = forms_of("equal_weight");
+    assert_eq!(ew.len(), 2, "!equal_weight has two spellings");
+    assert_eq!(ew[0].shape, "unit");
+    assert_eq!(ew[0].scope.as_deref(), Some("portfolio_weights"));
+    assert_eq!(ew[1].shape, "newtype");
+    assert_eq!(ew[1].scope, None, "the sizing spelling goes wherever a node does");
+    // The sizing spelling lowers to `!value 1/N` and parses as an expression.
+    assert!(
+        parses(&serde_json::json!({ "equal_weight": 4 })),
+        "!equal_weight <N> is an ordinary node",
+    );
+}
+
+/// `!arg` is a `document` tag but **not** legal in any position — the one place
+/// where reading `group` as a position claim goes wrong, which is why
+/// `GrammarForm::scope` exists.
+///
+/// Nothing substitutes an `!arg` outside a deferred template body, so one
+/// written elsewhere reaches the typed parse verbatim and fails. Pin both
+/// halves: the descriptor says `template`, and the parser agrees.
+#[test]
+fn arg_is_scoped_to_templates_and_param_is_not() {
+    let grammar = spec_grammar();
+    let scopes = |name: &str| -> BTreeSet<Option<String>> {
+        grammar
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("!{name} has a descriptor row"))
+            .forms
+            .iter()
+            .map(|f| f.scope.clone())
+            .collect()
+    };
+    assert_eq!(
+        scopes("arg"),
+        BTreeSet::from([Some("template".to_string())]),
+        "every !arg spelling is template-scoped",
+    );
+    assert_eq!(
+        scopes("param"),
+        BTreeSet::from([None]),
+        "!param is position-free — its pass rewrites any value position",
+    );
+
+    // The parser's half of the same claim, in a non-template slot.
+    let with = |placeholder: &str| {
+        format!(
+            "symbol: BTC\nlong:\n  enter: !gt\n    lhs: !sma\n      source: !close\n      \
+             period: {placeholder}\n    rhs: !value 1\n"
+        )
+    };
+    let load = |text: &str| {
+        fugazi::spec::SingleStrategySpec::from_text_with_params_in(
+            text,
+            &std::collections::HashMap::new(),
+            std::path::Path::new("."),
+            "probe",
+        )
+    };
+    assert!(
+        load(&with("!param { key: N, default: 5 }")).is_ok(),
+        "!param resolves in a scalar slot of an ordinary document",
+    );
+    assert!(
+        load(&with("!arg N")).is_err(),
+        "!arg outside a template has no pass to resolve it — a tool that offers it \
+         wherever !param goes emits documents that do not load",
     );
 }

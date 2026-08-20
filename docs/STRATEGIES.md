@@ -118,6 +118,24 @@ enter: !not
 enter: !not !below { source: !rsi { period: 14 }, level: 30 }
 ```
 
+The four **edge / passthrough wrappers** — `!changed`, `!became_true`,
+`!became_false`, `!unstable` — take a third way out: a lone `source:` key,
+which is the same thing spelled without the nesting.
+
+```yaml
+enter: !became_true                      # keyed — always available
+  source: !below { source: !rsi { period: 14 }, level: 30 }
+
+enter: !became_true                      # the same, inner as a map
+  below: { source: !rsi { period: 14 }, level: 30 }
+
+exit: !changed day_of_week               # bare word, when the inner needs no tag
+```
+
+Both spellings are equivalent and both are reported by `fugazi grammar` (each of
+these tags carries two entries in its `forms` list). `!not` has only the map
+form — it is a plain newtype, with no `source:` key.
+
 ## Metadata — `meta:`
 
 Every fugazi document rejects unknown fields, deliberately: a typo'd `symbl:` or
@@ -1364,7 +1382,7 @@ candle-field leaves.
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
-| `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
+| `!unstable` | `{ source }` or `<source>` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (one `source:` slot for any output type, signals included) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
 
@@ -1488,11 +1506,11 @@ those behind a comparison or `!str_eq` instead). The signal-side form takes only
 | `!all` | `[ … ]` | AND-fold of a list of signals (empty ⇒ always true) |
 | `!any` | `[ … ]` | OR-fold of a list of signals (empty ⇒ always false) |
 | `!not` | `<signal>` | negation (see the [nesting caveat](#nesting)) |
-| `!changed` | `<signal>` | fires on **any** transition of the inner signal (the edge primitive) — bidirectional by design; pair it with a comparison for a directional event |
-| `!became_true` | `<signal>` | rising edge only (`false → true`) |
-| `!became_false` | `<signal>` | falling edge only (`true → false`) |
+| `!changed` | `<signal>` or `{ source }` | fires on **any** transition of the inner signal (the edge primitive) — bidirectional by design; pair it with a comparison for a directional event |
+| `!became_true` | `<signal>` or `{ source }` | rising edge only (`false → true`) |
+| `!became_false` | `<signal>` or `{ source }` | falling edge only (`true → false`) |
 | `!has_column` | `{ name }` | schema-level check: true if the overlay column `name` exists. Lets one document run against series with and without an optional side channel |
-| `!unstable` | `{ signal: <signal> }` | passthrough wrapper that forces the reported `unstable_bars()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_bars()` before allowing a trade). A source-side twin `!unstable { source: <source> }` does the same for real-valued sources. |
+| `!unstable` | `{ source }` or `<signal>` | passthrough wrapper that forces the reported `unstable_bars()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_bars()` before allowing a trade). One `source:` slot for any output type — the same tag wraps a real-valued source. |
 | `!value` | `<bool>` | a constant boolean leaf — `!value true` / `!value false` (same tag as the numeric `!value`; typed by position) |
 
 ```yaml

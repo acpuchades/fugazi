@@ -343,22 +343,27 @@ fn write_indicators<W: Write>(w: &mut W) -> io::Result<()> {
 /// and render without the `!`; everything else renders in its `!tag`-prefixed
 /// form, with an optional `map` key marked by a trailing `?`.
 fn signature(tag: &crate::spec::grammar::GrammarTag) -> String {
-    match tag.shape.as_str() {
+    // The canonical spelling. A tag with alternates (`!changed`, `!unstable`,
+    // `!param`, …) renders the one to reach for by default; the alternates are
+    // in the descriptor for tooling and in `docs/STRATEGIES.md` for readers —
+    // a one-line-per-tag catalogue is the wrong surface for them.
+    let form = tag.canonical();
+    match form.shape.as_str() {
         // A candle leaf whose only key is the blessed `source:` selector
         // (`!close`, `!high`, …) reads best as the bare word — that's how it's
         // written 99% of the time. Anything with a real parameter shows its
         // body, optional keys marked `?`.
-        "map" if tag.fields.iter().all(|f| f.name == "source") => tag.name.clone(),
+        "map" if form.fields.iter().all(|f| f.name == "source") => tag.name.clone(),
         "map" => {
-            let body: Vec<String> = tag
+            let body: Vec<String> = form
                 .fields
                 .iter()
                 .map(|f| if f.required { f.name.clone() } else { format!("{}?", f.name) })
                 .collect();
             format!("!{} {{ {} }}", tag.name, body.join(", "))
         }
-        "newtype" => format!("!{} {}", tag.name, payload_form(tag.payload.as_deref())),
-        "seq" => format!("!{} {}", tag.name, seq_form(tag.payload.as_deref())),
+        "newtype" => format!("!{} {}", tag.name, payload_form(form.payload.as_deref())),
+        "seq" => format!("!{} {}", tag.name, seq_form(form.payload.as_deref())),
         // `unit` and anything unforeseen: the bare word.
         _ => tag.name.clone(),
     }

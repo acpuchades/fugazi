@@ -1179,23 +1179,54 @@ fugazi schema --document   # JSON Schema for a whole strategy document (five sha
 ```
 
 `grammar` prints one record per YAML tag — `name`, `group` (`node` / `selection`
-/ `universe` / `weighting` / `document`), `kind`, `shape`, `fields` (with types,
-required-ness, defaults, and prose), `output`, `payload`, `category` (the fine
-conceptual sub-group — `moving averages`, `oscillators`, … — that `list
-indicators` groups by), and `since` — all reflected off the serde definitions,
-so it never drifts from what the parser accepts. It's what downstream tooling
-generates docs, editor autocomplete, and conformance checks from (`list
-indicators` itself is one such consumer). Guard on `schema_version` for
-record-*shape* changes.
+/ `universe` / `weighting` / `document`), `kind`, `forms`, `output`, `category`
+(the fine conceptual sub-group — `moving averages`, `oscillators`, … — that
+`list indicators` groups by), and `since` — all reflected off the serde
+definitions, so it never drifts from what the parser accepts. It's what
+downstream tooling generates docs, editor autocomplete, and conformance checks
+from (`list indicators` itself is one such consumer). Guard on `schema_version`
+for record-*shape* changes.
 
-Each expression-holding field also carries **`node_output`** — what the nested
+**`forms` is a list, and a tag can have more than one.** Each entry is one
+spelling: `shape` (`unit` / `newtype` / `seq` / `map`), `fields` (with types,
+required-ness, defaults, prose) for a `map`, `payload` for a `newtype`/`seq`.
+`forms[0]` is canonical — generate that. But eight tags accept a second
+spelling, and it's usually the one that can do more: `!param NAME` versus
+`!param { key, default }`, `!import <path>` versus `!import { path, params }`,
+`!changed <node>` versus `!changed { source: <node> }`. If you're *validating* or
+*completing* rather than emitting, iterate all of them.
+
+```sh
+# every tag with more than one spelling, and what they are
+fugazi grammar | jq -r '.tags[] | select(.forms|length > 1)
+  | "\(.name): \([.forms[].shape] | join(" | "))"'
+# unstable: map | newtype
+# changed: newtype | map
+# became_true: newtype | map
+# became_false: newtype | map
+# equal_weight: unit | newtype
+# import: newtype | map
+# param: newtype | map
+# arg: newtype | map
+```
+
+A form may carry **`scope`**, which narrows where it's legal. Absent (the case
+for every expression tag) means "wherever its `group` is accepted". Otherwise:
+`template` — only inside a deferred template body, which is what `!arg` is, and
+the reason `group == "document"` is a provenance label rather than a position
+claim; `portfolio_weights` — only at the top of a portfolio `weights:`;
+`internal` — never authored by hand (`!undefined`). A tool that offers `!arg`
+everywhere `!param` goes emits documents that don't load.
+
+Each expression-holding slot also carries **`node_output`** — what the nested
 expression must *produce*, as `output` values you can match by string equality.
 This is the one part that doesn't come from serde: it's read from the same type
 table [`check`](#check) enforces.
 
 ```sh
 # what does !and's lhs have to be filled with?
-fugazi grammar | jq -r '.tags[] | select(.name=="and") | .fields[] | "\(.name): \(.node_output)"'
+fugazi grammar | jq -r '.tags[] | select(.name=="and") | .forms[0].fields[]
+  | "\(.name): \(.node_output)"'
 # lhs: ["bool"]
 # rhs: ["bool"]
 

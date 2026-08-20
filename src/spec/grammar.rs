@@ -21,12 +21,22 @@
 //! [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS) by a test, so a
 //! new load-time tag can't ship without a row.
 //!
-//! The derive fills every field except the three that serde cannot know —
-//! `kind`, `output`, and `since` — which are declared next to each variant via
-//! `#[grammar(kind = "…", output = "…", since = "…")]` (see the derive in the
-//! `fugazi-derive` crate). `kind` is mandatory: a new variant fails to compile
-//! until it is classified, the same "every tag is a decision" discipline the
-//! Python parity test enforces.
+//! The derive fills every field except the four that serde cannot know —
+//! `kind`, `output`, `since`, and any **alternate spelling** — which are
+//! declared next to each variant via
+//! `#[grammar(kind = "…", output = "…", since = "…", alt = "…")]` (see the
+//! derive in the `fugazi-derive` crate). `kind` is mandatory: a new variant
+//! fails to compile until it is classified, the same "every tag is a decision"
+//! discipline the Python parity test enforces.
+//!
+//! `alt` is there because a tag's YAML shape is not always its variant's shape.
+//! `!changed <node>` is a newtype variant that also parses as
+//! `!changed { source: <node> }`; `!unstable { source }` is a struct variant
+//! that also parses with its inner written bare. Those spellings live in
+//! `NodeSpec::parse_unchecked`'s normalisation pass, which the derive cannot
+//! read — so they are declared, and `tests/spec_grammar.rs` settles the claim
+//! against the parser in both directions: every declared form must parse, and
+//! no unary wrapper may accept a mirror spelling it hasn't declared.
 
 use serde::Serialize;
 
@@ -36,25 +46,35 @@ use serde::Serialize;
 /// breaking change tracked by `since` instead.
 ///
 /// - v1 (0.47): initial descriptor.
-/// - v2 (0.48): added [`GrammarTag::payload`]; `literal` joined the field-type
+/// - v2 (0.48): added the positional `payload`; `literal` joined the field-type
 ///   vocabulary; `spec_json_schema()` shipped.
 /// - v3 (0.51): added [`GrammarTag::category`], the fine conceptual sub-group
 ///   (a new field ⇒ a record-shape change ⇒ a bump). Consumers keyed on the
 ///   old shape keep working — the field is additive — but a generator that
 ///   hard-guards on the version needs to accept 3.
-/// - v4 (0.61): added [`GrammarField::node_output`] and
-///   [`GrammarTag::payload_output`] — the output type each expression slot
-///   demands, the first part of the descriptor sourced from `check`'s type
-///   table rather than reflected off serde. Both are omitted when absent, so a
-///   v3 consumer reads an unchanged record.
+/// - v4 (0.61): added `GrammarField::node_output` and `payload_output` — the
+///   output type each expression slot demands, the first part of the descriptor
+///   sourced from `check`'s type table rather than reflected off serde. Both
+///   are omitted when absent, so a v3 consumer reads an unchanged record.
+/// - v5 (0.67): **`shape` / `fields` / `payload` / `payload_output` moved off
+///   the tag and onto [`GrammarTag::forms`]**, a list. A tag's surface grammar
+///   is a *set* of alternative spellings — `!param NAME` and
+///   `!param { key, default }`, `!changed <node>` and `!changed { source }`,
+///   `!unstable { source }` and bare `!unstable <node>` — and a single `shape`
+///   could only ever name one of them. Eight tags were mis-described that way,
+///   four of them in the reflected `node` group. `forms[0]` is the **canonical**
+///   spelling (what a generator should emit); the rest are alternates a parser
+///   also accepts. This is a breaking record-shape change: a consumer reading
+///   `tag["shape"]` must move to `tag["forms"][0]["shape"]` and, if it validates
+///   or completes, iterate all of `forms`.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
 /// and new *legend values* don't change the record *shape*, so that stayed at 2
 /// — a bump would trip downstream version guards for no shape change. A consumer
-/// with an exhaustive `group` / `kind` switch should treat unknown values as
-/// inert, not as an error.
-pub const SCHEMA_VERSION: u32 = 4;
+/// with an exhaustive `group` / `kind` / `scope` switch should treat unknown
+/// values as inert, not as an error.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The `since` stamped on every tag that shipped at or before this release —
 /// the baseline. Tags added afterwards carry their own real `since` via
@@ -105,6 +125,66 @@ pub struct GrammarField {
     pub doc: Option<String>,
 }
 
+/// One **spelling** a tag accepts — its YAML shape and whatever that shape
+/// carries.
+///
+/// A tag's surface grammar is a *set* of these, not one: `!param NAME` and
+/// `!param { key: NAME, default: 8 }` are the same tag written two ways, and
+/// only the second can carry a default. Before v5 the descriptor reported a
+/// single `shape` per tag, which was silently wrong for eight of them — four in
+/// the reflected `node` group, where the alternate spelling lives in
+/// `NodeSpec::parse_unchecked`'s normalisation pass rather than in the variant,
+/// so the derive could not see it. A consumer that validates, completes, or
+/// scaffolds must iterate every form; one that only ever emits reads
+/// [`GrammarTag::canonical`].
+#[derive(Debug, Clone, Serialize)]
+pub struct GrammarForm {
+    /// How this spelling is written in YAML: `unit` (bare `!foo`) · `newtype`
+    /// (`!foo <x>`) · `seq` (`!foo [ … ]`) · `map` (`!foo { … }`).
+    pub shape: String,
+    /// The `map` body's keys; empty for the other shapes.
+    pub fields: Vec<GrammarField>,
+    /// The grammar type of the single positional value a `newtype` / `seq`
+    /// spelling carries (which has no named `fields`): `node` for
+    /// `!not <node>`, `uint` for `!every <n>`, `node_list` for `!all [ … ]`,
+    /// `literal` for `!value <x>`. `None` for `unit` / `map`.
+    pub payload: Option<String>,
+    /// [`GrammarField::node_output`] for the positional [`payload`](Self::payload)
+    /// — `["bool"]` for `!not` / `!all` / `!any`, `["bool", "scalar"]` for
+    /// `!changed`. Absent unless `payload` is `node` / `node_list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_output: Option<Vec<String>>,
+    /// Where this spelling may be written, when that is narrower than "wherever
+    /// the tag's `group` is accepted". Absent (the common case) means
+    /// unrestricted: every `node` / `selection` form, and the position-free
+    /// load-time placeholders `!param` / `!import`, whose `Value`-tree passes
+    /// rewrite them in *any* value position — an expression slot, a scalar field
+    /// like `period:`, a string field like `symbol:`, a list element.
+    ///
+    /// The closed vocabulary, all of it on `document` / `weighting` tags:
+    ///
+    /// - `template` — only inside a deferred [`SpecTemplate`](crate::spec::SpecTemplate)
+    ///   body (a basket's `score:` / `sizing:`, a multi-asset side's `enter:`, a
+    ///   portfolio's `weights:`). `!arg` is resolved at *build* time by
+    ///   `args::substitute`, which runs nowhere else — outside a template it is
+    ///   a hard parse error, under `check` too. **`group == "document"` is a
+    ///   provenance label, not a position claim**; this is the field that says
+    ///   where.
+    /// - `portfolio_weights` — only at the top level of a portfolio `weights:`
+    ///   template, where `rewrite_weights_sugar` runs.
+    /// - `internal` — never authored by hand. `!undefined` is a check-mode
+    ///   stand-in; a runnable document carrying one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// What this spelling means, when the tag's own prose doesn't already say
+    /// it. Required on every non-canonical form (a test pins it): an alternate
+    /// exists because it does something the canonical one can't — carry a
+    /// `default`, name a different asset, mean 1/N instead of a literal weight
+    /// — and that difference is exactly what a completion engine has to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
 /// One tag's full grammar record. See the module docs for the legend.
 #[derive(Debug, Clone, Serialize)]
 pub struct GrammarTag {
@@ -124,11 +204,13 @@ pub struct GrammarTag {
     /// `selection` · `universe` · `weighting` · `document`. The semantic family;
     /// declared per variant (or per hand-authored row).
     pub kind: String,
-    /// How the tag is written in YAML: `unit` (bare `!foo`) · `newtype`
-    /// (`!foo <x>`) · `seq` (`!foo [ … ]`) · `map` (`!foo { … }`).
-    pub shape: String,
-    /// The `map` body's keys; empty for the other shapes.
-    pub fields: Vec<GrammarField>,
+    /// Every spelling the tag accepts, **canonical first** — never empty.
+    ///
+    /// `forms[0]` is what a generator should emit and what
+    /// [`canonical`](Self::canonical) returns; `forms[1..]` are alternates a
+    /// parser also takes, each carrying its own `doc`. Most tags have exactly
+    /// one. See [`GrammarForm`] for why this is a list and not a `shape`.
+    pub forms: Vec<GrammarForm>,
     /// What the tag evaluates to: `scalar` (a `Real`) · `bool` · `str` ·
     /// `time` · `candle` · `atom` · `book` · `any` (schema- or
     /// operand-dependent) · `selection` (a `selection`-group rule) · `struct` ·
@@ -140,16 +222,6 @@ pub struct GrammarTag {
     /// multi-output indicators are modelled as separate scalar tags
     /// (`macd_line`, `bb_upper`, …) rather than one struct-output tag.
     pub projections: Vec<String>,
-    /// The grammar type of the single positional value a `newtype` / `seq` tag
-    /// carries (which has no named `fields`): `node` for `!not <node>`, `uint`
-    /// for `!every <n>`, `node_list` for `!all [ … ]`, `literal` for
-    /// `!value <x>`. `None` for `unit` / `map` tags.
-    pub payload: Option<String>,
-    /// [`GrammarField::node_output`] for the positional [`payload`](Self::payload)
-    /// — `["bool"]` for `!not` / `!all` / `!any`, `["bool", "scalar"]` for
-    /// `!changed`. Absent unless `payload` is `node` / `node_list`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_output: Option<Vec<String>>,
     /// The fine **conceptual sub-group** — `moving averages`, `oscillators`,
     /// `bands`, `trend / directional`, … — one rung finer than `kind`, for
     /// consumers that present the vocabulary in curated sections (the CLI
@@ -163,6 +235,22 @@ pub struct GrammarTag {
     /// The release the tag first shipped in. [`SINCE_BASELINE`] for everything
     /// present at that baseline; a real version for anything added since.
     pub since: String,
+}
+
+impl GrammarTag {
+    /// The canonical spelling — `forms[0]`, the one a generator should emit.
+    ///
+    /// Use this when you are *producing* a document. When you are *accepting*
+    /// one (validating, completing, scaffolding), iterate [`forms`](Self::forms)
+    /// instead: the canonical form is not the only one that parses.
+    ///
+    /// # Panics
+    ///
+    /// If `forms` is empty, which the derive and `document_grammar_tags` never
+    /// produce and `tests/spec_grammar.rs` pins.
+    pub fn canonical(&self) -> &GrammarForm {
+        self.forms.first().expect("every tag has a canonical form")
+    }
 }
 
 /// Every tag in every document vocabulary. The one authority `spec_tags()`, the
@@ -216,24 +304,30 @@ fn stamp_node_outputs(tag: &mut GrammarTag) {
     if tag.group != "node" {
         return;
     }
-    for field in &mut tag.fields {
-        // `!match`'s `cases:` holds one expression per case, all under the same
-        // demand; the table names that pseudo-slot `case value`.
-        let slot = match field.ty.as_str() {
-            "node" | "node_list" => field.name.as_str(),
-            "match_cases" => "case value",
-            _ => continue,
-        };
-        field.node_output = slot_demand(&tag.name, slot).map(demand_labels);
-    }
-    // A `newtype` / `seq` tag has no named fields, so its payload's demand is
-    // the tag's only slot — `source` for the unary wrappers, `item` for the
-    // folds. Take whichever the table reports rather than re-deriving it.
-    if matches!(tag.payload.as_deref(), Some("node" | "node_list")) {
-        tag.payload_output = crate::spec::typecheck::slot_demands(&tag.name)
-            .into_iter()
-            .next()
-            .map(|(_, types)| demand_labels(types));
+    // Every form, not just the canonical one: an alternate spelling holds the
+    // *same* slots under different syntax, so a consumer completing inside
+    // `!changed { source: ` needs the demand there too.
+    for form in &mut tag.forms {
+        for field in &mut form.fields {
+            // `!match`'s `cases:` holds one expression per case, all under the
+            // same demand; the table names that pseudo-slot `case value`.
+            let slot = match field.ty.as_str() {
+                "node" | "node_list" => field.name.as_str(),
+                "match_cases" => "case value",
+                _ => continue,
+            };
+            field.node_output = slot_demand(&tag.name, slot).map(demand_labels);
+        }
+        // A `newtype` / `seq` spelling has no named fields, so its payload's
+        // demand is the tag's only slot — `source` for the unary wrappers,
+        // `item` for the folds. Take whichever the table reports rather than
+        // re-deriving it.
+        if matches!(form.payload.as_deref(), Some("node" | "node_list")) {
+            form.payload_output = crate::spec::typecheck::slot_demands(&tag.name)
+                .into_iter()
+                .next()
+                .map(|(_, types)| demand_labels(types));
+        }
     }
 }
 
@@ -375,43 +469,125 @@ fn category_of(name: &str) -> &'static str {
 /// ship without a row here. `output` is `none`: none of them evaluate to a
 /// runtime value — they resolve to another node (or nothing) at load.
 fn document_grammar_tags() -> Vec<GrammarTag> {
+    /// A `newtype` form carrying one positional value of grammar type `payload`.
+    fn newtype(payload: &str, scope: Option<&str>, doc: Option<&str>) -> GrammarForm {
+        GrammarForm {
+            shape: "newtype".to_owned(),
+            fields: Vec::new(),
+            payload: Some(payload.to_owned()),
+            payload_output: None,
+            scope: scope.map(str::to_owned),
+            doc: doc.map(str::to_owned),
+        }
+    }
+    /// A `map` form over the given `(name, type, required, doc)` keys.
+    fn map(
+        fields: &[(&str, &str, bool, &str)],
+        scope: Option<&str>,
+        doc: Option<&str>,
+    ) -> GrammarForm {
+        GrammarForm {
+            shape: "map".to_owned(),
+            fields: fields
+                .iter()
+                .map(|(name, ty, required, doc)| GrammarField {
+                    name: (*name).to_owned(),
+                    ty: (*ty).to_owned(),
+                    required: *required,
+                    default: None,
+                    node_output: None,
+                    doc: Some((*doc).to_owned()),
+                })
+                .collect(),
+            payload: None,
+            payload_output: None,
+            scope: scope.map(str::to_owned),
+            doc: doc.map(str::to_owned),
+        }
+    }
     fn tag(
         name: &str,
         group: &str,
         kind: &str,
-        shape: &str,
-        payload: Option<&str>,
+        forms: Vec<GrammarForm>,
         doc: &str,
     ) -> GrammarTag {
         GrammarTag {
             name: name.to_owned(),
             group: group.to_owned(),
             kind: kind.to_owned(),
-            shape: shape.to_owned(),
-            fields: Vec::new(),
+            forms,
             output: "none".to_owned(),
             projections: Vec::new(),
-            payload: payload.map(str::to_owned),
-            // These are the load-time `document` / `weighting` tags, resolved
-            // away before the typed parse — the type checker never sees one, so
-            // there is no demand to report on their payloads.
-            payload_output: None,
             // Stamped by `spec_grammar` from `CATEGORIES`, like every other tag.
             category: String::new(),
             doc: Some(doc.to_owned()),
             since: SINCE_BASELINE.to_owned(),
         }
     }
+    // The `{ key, default }` body `!param` and `!arg` share verbatim —
+    // `spec/args.rs` says so in as many words ("the `!arg` grammar mirrors
+    // `!param`"), and both are read by the same two-arm match on a string or an
+    // object with a string `key`.
+    const PLACEHOLDER_BODY: &[(&str, &str, bool, &str)] = &[
+        (
+            "key",
+            "str",
+            true,
+            "The placeholder's name — what a `--params NAME=…` term (or the \
+             driver's per-symbol binding) is matched against.",
+        ),
+        (
+            "default",
+            "other",
+            false,
+            "The value to fall back to when the name is unset. Any value tree, \
+             not just a scalar. Omitting it makes the placeholder **required**: \
+             an unset one is an error at load (`fugazi check` holds it as a \
+             typed hole instead).",
+        ),
+    ];
     vec![
         // --- weighting: portfolio `weights:` sugar --------------------------
         tag(
-            "fixed", "weighting", "weighting", "seq", Some("number_list"),
+            "fixed", "weighting", "weighting",
+            vec![GrammarForm {
+                shape: "seq".to_owned(),
+                fields: Vec::new(),
+                payload: Some("number_list".to_owned()),
+                payload_output: None,
+                scope: Some("portfolio_weights".to_owned()),
+                doc: None,
+            }],
             "Portfolio `weights:` sugar. `!fixed [w0, w1, …]` assigns a literal \
              weight per child by position; rewritten to `!value [w0, w1, …]` \
              (per-child indexed) at load.",
         ),
         tag(
-            "equal_weight", "weighting", "weighting", "newtype", Some("uint"),
+            "equal_weight", "weighting", "weighting",
+            vec![
+                GrammarForm {
+                    shape: "unit".to_owned(),
+                    fields: Vec::new(),
+                    payload: None,
+                    payload_output: None,
+                    scope: Some("portfolio_weights".to_owned()),
+                    doc: None,
+                },
+                newtype(
+                    "positive_uint",
+                    None,
+                    Some(
+                        "The sizing spelling, and a different tag entirely in \
+                         meaning: `!equal_weight <N>` lowers to `!value <1/N>`, a \
+                         constant fraction for a known leg count, and is accepted \
+                         wherever a node is. The bare form lowers to `!value 1.0` \
+                         and only means anything in a portfolio `weights:` \
+                         template, where every child's 1.0 normalises to 1/N at \
+                         rebalance.",
+                    ),
+                ),
+            ],
             "Equal-weight sugar. Bare `!equal_weight` in a portfolio `weights:` \
              template lowers to `!value 1.0` (each child normalises to 1/N at \
              rebalance); as sizing, `!equal_weight <N>` lowers to `!value <1/N>`. \
@@ -419,28 +595,95 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
         ),
         // --- document: load-time composition / substitution -----------------
         tag(
-            "import", "document", "document", "newtype", Some("str"),
+            "import", "document", "document",
+            vec![
+                newtype("str", None, None),
+                map(
+                    &[
+                        (
+                            "path",
+                            "str",
+                            true,
+                            "The document to splice in, resolved against the \
+                             importing document's own directory.",
+                        ),
+                        (
+                            "params",
+                            "other",
+                            false,
+                            "A `NAME: value` mapping the imported subtree's own \
+                             `!param` placeholders resolve against **first**. A \
+                             key not listed here falls through to the outer \
+                             document's `--params` pass, so one fragment can be \
+                             imported N times with N parameterizations.",
+                        ),
+                    ],
+                    None,
+                    Some(
+                        "The only spelling that can carry inline `params:` — the \
+                         shape a portfolio-of-strategies document needs, where the \
+                         same fragment is imported once per child with different \
+                         values.",
+                    ),
+                ),
+            ],
             "Document composition. `!import <path>` splices another YAML spec at \
-             load time (an extended `!import { path, params: … }` form passes \
-             inline params); resolved by `imports::resolve` before parse.",
+             load time (the `!import { path, params }` form passes inline params); \
+             resolved by `imports::resolve` before parse.",
         ),
         tag(
-            "param", "document", "document", "newtype", Some("str"),
-            "Load-time substitution placeholder. `!param <name>` is replaced from \
-             the `--param` / `params:` table by `params::substitute` before the \
-             typed parse.",
+            "param", "document", "document",
+            vec![
+                newtype("str", None, None),
+                map(
+                    PLACEHOLDER_BODY,
+                    None,
+                    Some(
+                        "The only spelling that can carry a `default:`. The bare \
+                         form is exactly `{ key: NAME }` — always required, never \
+                         defaulted.",
+                    ),
+                ),
+            ],
+            "Load-time substitution placeholder, legal in any value position — an \
+             expression slot, a scalar field like `period:`, a string field like \
+             `symbol:`, a list element. Replaced from the `--params` / `params:` \
+             table by `params::substitute` before the typed parse.",
         ),
         tag(
-            "arg", "document", "document", "newtype", Some("str"),
-            "Build-time substitution placeholder. `!arg <name>` (e.g. `!arg SYM`, \
-             `!arg CHILD_NAME`, `!arg CHILD_INDEX`) is substituted per symbol / \
-             child by `args::substitute` when a per-leg template is built.",
+            "arg", "document", "document",
+            vec![
+                newtype("str", Some("template"), None),
+                map(
+                    PLACEHOLDER_BODY,
+                    Some("template"),
+                    Some(
+                        "The only spelling that can carry a `default:` — what a \
+                         template falls back to when the driver doesn't bind that \
+                         name.",
+                    ),
+                ),
+            ],
+            "Build-time substitution placeholder. `!arg SYM` / `!arg CHILD_NAME` / \
+             `!arg CHILD_INDEX` is substituted per symbol or child by \
+             `args::substitute` when a per-leg template is built. Unlike `!param` \
+             it is **not** legal everywhere: nothing substitutes it outside a \
+             deferred template body, so one written elsewhere is a parse error.",
         ),
         tag(
-            "undefined", "document", "document", "unit", None,
+            "undefined", "document", "document",
+            vec![GrammarForm {
+                shape: "unit".to_owned(),
+                fields: Vec::new(),
+                payload: None,
+                payload_output: None,
+                scope: Some("internal".to_owned()),
+                doc: None,
+            }],
             "Internal check-mode stand-in for a not-yet-substituted `!arg` / \
              `!param`, letting a `SpecTemplate` type-check with its placeholders \
-             held undefined. Never authored by hand.",
+             held undefined. Never authored by hand — a document still carrying \
+             one is refused at run.",
         ),
     ]
 }
@@ -742,13 +985,33 @@ fn doc_portfolio() -> serde_json::Value {
 /// normalise to `{close:{}}`, so both forms are accepted. That covers unit tags
 /// and every all-optional map tag (the atom leaves, calendar accessors, …).
 fn tag_schema(tag: &GrammarTag) -> serde_json::Value {
+    let mut forms = tag.forms.iter().map(|f| form_schema(&tag.name, f));
+    let first = forms.next().expect("every tag has a canonical form");
+    let rest: Vec<serde_json::Value> = forms.collect();
+    if rest.is_empty() {
+        return first;
+    }
+    // `anyOf`, not `oneOf`: these are alternative *spellings* of one tag, and
+    // the question is whether the instance is written as any of them. `oneOf`
+    // would additionally demand that no two forms ever match the same document,
+    // which is a property nothing here needs and a future form could break.
+    //
+    // This union is why the schema now accepts `{"unstable": "close"}` and
+    // `{"changed": {"source": …}}`, both of which the parser has always taken
+    // and the single-`shape` schema rejected.
+    let mut all = vec![first];
+    all.extend(rest);
+    serde_json::json!({ "anyOf": all })
+}
+
+/// The schema for one [`GrammarForm`] of a tag.
+fn form_schema(name: &str, form: &GrammarForm) -> serde_json::Value {
     use serde_json::json;
-    let name = tag.name.as_str();
     let bare = json!({ "type": "string", "const": name });
-    match tag.shape.as_str() {
+    match form.shape.as_str() {
         "map" => {
-            let keyed = single_key(name, map_body(&tag.fields));
-            if tag.fields.iter().any(|f| f.required) {
+            let keyed = single_key(name, map_body(&form.fields));
+            if form.fields.iter().any(|f| f.required) {
                 keyed
             } else {
                 json!({ "oneOf": [bare, keyed] })
@@ -762,9 +1025,9 @@ fn tag_schema(tag: &GrammarTag) -> serde_json::Value {
                 })),
             ]
         }),
-        "newtype" => single_key(name, payload_schema(tag.payload.as_deref())),
+        "newtype" => single_key(name, payload_schema(form.payload.as_deref())),
         "seq" => single_key(name, json!({ "type": "array", "items": node_ref() })),
-        // Unreachable: every variant is unit/map/newtype/seq. Stay permissive.
+        // Unreachable: every form is unit/map/newtype/seq. Stay permissive.
         _ => json!(true),
     }
 }

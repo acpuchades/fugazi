@@ -920,20 +920,49 @@ impl PyStrategySpec {
 /// group        "node" | "selection" | "universe" | "weighting" | "document"
 /// kind         "source" | "indicator" | "operator" | "predicate" | "function" |
 ///              "selection" | "universe" | "weighting" | "document"
-/// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
-/// fields       [ {name, type, required, default, node_output?, doc} ]
-///              (map tags only)
+/// forms        every spelling the tag accepts, canonical first (never empty)
 /// output       what it evaluates to: "scalar" | "bool" | "str" | ... | "none"
 /// projections  struct-output accessors (empty for fugazi's flattened tags)
-/// payload      positional payload type of a newtype/seq tag ("node" |
-///              "literal" | "node_list" | "str_list" | "number_list"); null for
-///              unit/map tags
-/// payload_output  node_output for that positional payload (v4)
 /// category     fine conceptual sub-group ("moving averages", "oscillators",
 ///              "bands", …) — one rung finer than kind, for curated grouping
 /// doc          the variant's `///`, as clean presentation prose
 /// since        release it first shipped in
 /// ```
+///
+/// Each entry of `forms`:
+///
+/// ```text
+/// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
+/// fields       [ {name, type, required, default, node_output?, doc} ]
+///              (map forms only)
+/// payload      positional payload type of a newtype/seq form ("node" |
+///              "literal" | "node_list" | "str_list" | "number_list"); null for
+///              unit/map forms
+/// payload_output  node_output for that positional payload
+/// scope        where this spelling is legal, when narrower than its group:
+///              "template" | "portfolio_weights" | "internal"; absent = anywhere
+/// doc          what this spelling does that the canonical one cannot
+///              (present on every non-canonical form)
+/// ```
+///
+/// **`forms` — a tag is a *set* of spellings, not one.** `!param NAME` and
+/// `!param {key, default}` are the same tag written two ways, and only the
+/// second can carry a default; `!changed <node>` and `!changed {source: <node>}`
+/// likewise. `forms[0]` is canonical — emit that. If you *accept* documents
+/// (validate, complete, scaffold), iterate all of `forms`: eight tags have more
+/// than one, and reading only the first is how a generator ends up unable to
+/// scaffold `!param`'s `default`.
+///
+/// **`scope` — `group` is provenance, not position.** All four `document` tags
+/// are resolved by a load- or build-time `Value` pass, but they are not
+/// interchangeable in placement. `!param` and `!import` are genuinely
+/// position-free: their passes rewrite *any* value position, an expression slot
+/// or a scalar field like `period:` or a string field like `symbol:` alike.
+/// `!arg` is `scope: "template"` — it is substituted only inside a deferred
+/// template body (a basket's `score:` / `sizing:`, a multi-asset side's
+/// `enter:`, a portfolio's `weights:`), and one written anywhere else is a hard
+/// parse error, `check` included. `!undefined` is `scope: "internal"` and
+/// should never be offered at all.
 ///
 /// **`node_output` — what a slot must be filled *with*.** `type: "node"` says a
 /// field holds a nested expression; `node_output` says which expressions are
@@ -967,10 +996,12 @@ impl PyStrategySpec {
 /// Python constructors, editor tooling, docs, external grammar tables) generate
 /// from one artifact rather than re-encoding by hand. Guard on `schema_version`
 /// for *shape* changes: `payload` + its `"literal"` field type landed in v2,
-/// `category` in v3 (0.51), and `node_output` / `payload_output` in v4 (0.61).
-/// The 0.50 group additions did **not** bump it — new groups and legend values
-/// leave the record shape unchanged, only a new *field* does. Both v4 fields are
-/// omitted when absent, so a v3 consumer reads an unchanged record.
+/// `category` in v3 (0.51), `node_output` / `payload_output` in v4 (0.61), and
+/// v5 (0.67) moved `shape` / `fields` / `payload` / `payload_output` off the tag
+/// and onto `forms`. The 0.50 group additions did **not** bump it — new groups
+/// and legend values leave the record shape unchanged, only a new *field* does.
+/// v5 is the one breaking change so far: `tag["shape"]` becomes
+/// `tag["forms"][0]["shape"]`.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();
@@ -988,6 +1019,11 @@ pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// *structure* — the Real/Bool/Str type discipline stays in the build-time type
 /// checker. (Phase 1: the expression grammar; the whole-document envelope is a
 /// planned follow-up.)
+///
+/// A tag that accepts more than one spelling (see [`spec_grammar`]'s `forms`)
+/// is emitted as an `anyOf` over them, so `{"unstable": "close"}` and
+/// `{"unstable": {"source": "close"}}` both validate — as they both always
+/// parsed.
 #[pyfunction]
 pub(crate) fn spec_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let schema = fugazi_core::spec::grammar::spec_json_schema();

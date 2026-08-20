@@ -520,6 +520,44 @@ mod tests {
         assert!(err.contains("signal"), "{err}");
     }
 
+    /// The four unary wrappers take the same three spellings as each other.
+    ///
+    /// `!unstable` used to be the odd one out: its bare-inner branch only
+    /// matched a tagged or bare-word payload, so the **JSON bridge** form
+    /// `{"unstable": {"sma": …}}` was rejected while `{"changed": {"sma": …}}`
+    /// was accepted. The bridge form is exactly what a programmatic consumer
+    /// emits — the Python dict path, a web form, anything generating off
+    /// `spec_grammar()` — so the inconsistency landed on the callers least able
+    /// to see it. All four now share one table (`expr::UNARY_WRAPPERS`), and
+    /// the grammar descriptor declares both spellings on each.
+    #[test]
+    fn every_unary_wrapper_takes_both_spellings() {
+        for tag in ["changed", "became_true", "became_false", "unstable"] {
+            // Keyed, in YAML.
+            let keyed = format!("!{tag} {{ source: !value true }}");
+            assert!(
+                serde_norway::from_str::<NodeSpec>(&keyed).is_ok(),
+                "!{tag} keyed spelling"
+            );
+            // Bare word, in YAML — the only bare form YAML can express, since
+            // it forbids two tags on one node. `is_weekday` because two of the
+            // four demand a Bool inner; this is a shape test, not a type one.
+            let bare_word = format!("!{tag} is_weekday");
+            assert!(
+                serde_norway::from_str::<NodeSpec>(&bare_word).is_ok(),
+                "!{tag} bare-word spelling"
+            );
+            // Bare, through the JSON bridge — a tagged inner as a single-key
+            // object. This is the one `!unstable` used to refuse.
+            let bridged =
+                serde_json::json!({ tag: { "gt": { "lhs": "close", "rhs": 1 } } });
+            assert!(
+                serde_json::from_value::<NodeSpec>(bridged.clone()).is_ok(),
+                "!{tag} bridged bare spelling: {bridged}"
+            );
+        }
+    }
+
     #[test]
     fn unstable_source_zeroes_unstable_bars_but_forwards_output() {
         let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
