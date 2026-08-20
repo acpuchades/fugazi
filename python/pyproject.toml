@@ -35,9 +35,16 @@ Changelog = "https://github.com/acpuchades/fugazi/releases"
 Funding = "https://github.com/sponsors/acpuchades"
 
 [project.optional-dependencies]
-test = ["pytest", "numpy", "pandas", "polars", "jsonschema", "pyyaml"]
+test = ["pytest", "numpy", "pandas", "polars", "jsonschema", "pyyaml", "mypy"]
 
 [tool.maturin]
 # The crate's `[lib] name = "fugazi"` produces the importable module.
 module-name = "fugazi"
 features = ["pyo3/extension-module"]
+# Mixed layout: `fugazi/` is a real package directory, so the wheel can carry
+# `py.typed` and the generated `.pyi` stubs beside the compiled extension. Its
+# `__init__.py` is the same re-export shim maturin writes for a pure-extension
+# build — see the docstring there. Regenerate the stubs with
+# `python tools/gen_python_stubs.py`; `tests/test_stubs.py` fails on a stale one.
+python-source = "."
+include = ["fugazi/py.typed", "fugazi/*.pyi"]

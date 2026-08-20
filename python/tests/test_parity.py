@@ -412,3 +412,138 @@ def test_protective_legs_expose_their_size():
     # Must accept a size; a TypeError here means the binding lost the parameter.
     w.set_stop("A", 9.0, ta.Size.units(1.0))
     w.set_take_profit("A", 11.0, ta.Size.units(1.0))
+
+
+# --------------------------------------------------------------------------
+# Keyword-only boundaries.
+#
+# Two kinds of defaulted parameter live on this surface and they want opposite
+# calling conventions:
+#
+#   * **Domain parameters** — an indicator's periods. `ta.macd(close, 12, 26, 9)`
+#     is the spelling every TA library uses and every example here uses, so the
+#     order is *already* API and positional stays.
+#   * **Configuration** — `optimize`'s 18 knobs, a Monte Carlo config, a provider's
+#     endpoint overrides. Nobody means `optimize(doc, snaps, 1.0, None, None,
+#     "auto", …)`; leaving those positional makes the declaration order API by
+#     accident, and reordering or retiring one then breaks callers silently.
+#
+# This test pins the second group keyword-only. A new knob appended to one of
+# these signatures fails here unless it lands after the `*`.
+# --------------------------------------------------------------------------
+
+KEYWORD_ONLY_AFTER = {
+    # callable: the last parameter that stays positional (None = all kw-only)
+    "optimize": "snapshots",
+    "evaluate_report": "report",
+    "load_spec": "text",
+    "compute_overlays": "overlays",
+}
+
+KEYWORD_ONLY_AFTER_METHOD = {
+    ("StrategySpec", "evaluate"): "snapshots",
+    ("StrategySpec", "run_resumable"): "snapshots",
+    ("Order", "__init__"): "price",
+    ("RunReport", "__init__"): "initial_equity",
+    ("MonteCarloConfig", "__init__"): None,
+    ("Yahoo", "__init__"): None,
+    ("CoinGecko", "__init__"): None,
+    # `market` names *which* archive this is, not how to talk to it.
+    ("BinanceVision", "__init__"): "market",
+    # The (symbol, freq, since, until) window reads naturally positionally;
+    # `output` selects a return type, so it alone is keyword-only.
+    ("Binance", "fetch"): "until",
+    ("Okx", "fetch"): "until",
+    ("Coinbase", "fetch"): "until",
+    ("Yahoo", "fetch"): "until",
+    ("CoinGecko", "fetch"): "until",
+    ("BinanceVision", "fetch"): "until",
+}
+
+
+def _assert_kw_only_after(fn, label, boundary):
+    params = [
+        p
+        for p in inspect.signature(fn).parameters.values()
+        if p.kind is not p.VAR_KEYWORD
+    ]
+    names = [p.name for p in params]
+    cut = 0 if boundary is None else names.index(boundary) + 1
+    for p in params[cut:]:
+        assert p.kind is p.KEYWORD_ONLY, (
+            f"{label}: `{p.name}` is configuration and must be keyword-only "
+            f"(it sits after `{boundary}`) — put it after the `*` in the "
+            f"#[pyo3(signature = ...)]"
+        )
+    for p in params[:cut]:
+        assert p.kind is not p.KEYWORD_ONLY, (
+            f"{label}: `{p.name}` is a positional parameter that went "
+            f"keyword-only — that breaks existing callers"
+        )
+
+
+def test_configuration_arguments_are_keyword_only():
+    for name, boundary in KEYWORD_ONLY_AFTER.items():
+        _assert_kw_only_after(getattr(ta, name), f"ta.{name}", boundary)
+    for (cls, meth), boundary in KEYWORD_ONLY_AFTER_METHOD.items():
+        owner = getattr(ta, cls)
+        fn = owner if meth == "__init__" else getattr(owner, meth)
+        _assert_kw_only_after(fn, f"{cls}.{meth}", boundary)
+
+
+def test_indicator_periods_stay_positional():
+    """The other half of the rule: an indicator's periods are domain parameters
+    with a conventional order, and `ta.macd(close, 12, 26, 9)` must keep working."""
+    src = ta.close()
+    assert ta.macd(src, 12, 26, 9) is not None
+    assert ta.bollinger(src, 20, 2.0) is not None
+    assert ta.keltner(src, 20, 10, 2.0) is not None
+    assert ta.stoch_rsi(src, 14, 14) is not None
+    assert ta.sar(0.02, 0.2) is not None
+
+
+# --------------------------------------------------------------------------
+# `fugazi.Wallet` — the classification the three concrete wallets lacked
+# --------------------------------------------------------------------------
+
+# The methods the `Wallet` ABC's docstring claims every wallet answers. Kept in
+# step with `WALLET_SURFACE` in `python/src/strategy.rs` by the test below, which
+# reads the claim back out of the docstring rather than restating it.
+WALLET_CLASSES = ("PaperWallet", "OkxWallet", "CoinbaseWallet")
+
+
+def test_every_concrete_wallet_is_a_virtual_subclass():
+    """Rust has a `Wallet` trait; Python had three unrelated classes and no way
+    to ask "is this a wallet?" or to annotate one."""
+    for name in WALLET_CLASSES:
+        cls = getattr(ta, name)
+        assert issubclass(cls, ta.Wallet), f"{name} is not registered on ta.Wallet"
+    assert isinstance(ta.PaperWallet(1000.0), ta.Wallet)
+    # ...and it does not over-claim.
+    assert not isinstance(ta.Candle(1.0, 2.0, 0.5, 1.5, 1.0), ta.Wallet)
+
+
+def test_the_wallet_abc_claims_only_what_all_three_have():
+    """The docstring lists a common surface. If a method is dropped from one
+    wallet, or the list drifts, that claim becomes a lie — so it is checked
+    against the three classes rather than trusted."""
+    doc = ta.Wallet.__doc__
+    claimed = doc.split("Common surface: ")[1].split(".\n")[0]
+    claimed = {name.strip() for name in claimed.split(",")}
+    assert claimed, "Wallet.__doc__ no longer lists a common surface"
+    for name in WALLET_CLASSES:
+        actual = {n for n in dir(getattr(ta, name)) if not n.startswith("_")}
+        missing = claimed - actual
+        assert not missing, (
+            f"ta.Wallet claims {sorted(missing)} but {name} does not have them — "
+            "fix WALLET_SURFACE in python/src/strategy.rs"
+        )
+    # The converse: anything all three share should be claimed, or the list is
+    # quietly incomplete.
+    shared = set.intersection(
+        *({n for n in dir(getattr(ta, c)) if not n.startswith("_")} for c in WALLET_CLASSES)
+    )
+    assert not shared - claimed, (
+        f"all three wallets share {sorted(shared - claimed)} but ta.Wallet does "
+        "not claim it — add it to WALLET_SURFACE"
+    )

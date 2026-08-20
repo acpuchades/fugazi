@@ -130,11 +130,11 @@ if [[ $job == all || $job == python ]]; then
     # equivalent from `setup-python` + `pip install`. Runs before the FAST guard
     # because pytest needs the venv in both modes.
     #
-    # The package list mirrors ci.yml's explicit install. `jsonschema` and
-    # `pyyaml` are load-bearing rather than incidental: the two schema test
-    # files `importorskip` them, so a venv built without them makes those tests
-    # skip silently — green by not running, which is the one outcome a gate must
-    # never produce.
+    # The package list mirrors ci.yml's explicit install. `jsonschema`,
+    # `pyyaml` and `mypy` are load-bearing rather than incidental: the schema
+    # test files and `test_stubs.py` `importorskip` them, so a venv built
+    # without them makes those tests skip silently — green by not running, which
+    # is the one outcome a gate must never produce.
     run "python / Venv" bash -c '
         cd python
         [ -x .venv/bin/python ] && exit 0
@@ -142,7 +142,7 @@ if [[ $job == all || $job == python ]]; then
         echo "no python/.venv — creating one"
         uv venv .venv --python 3.13 &&
         uv pip install --python .venv/bin/python \
-            maturin pytest numpy pandas polars jsonschema pyyaml
+            maturin pytest numpy pandas polars jsonschema pyyaml mypy
     '
     if [[ -z ${FAST:-} ]]; then
         # CI builds a release wheel and pip-installs it. Locally the dev venv is

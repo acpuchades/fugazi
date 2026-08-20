@@ -362,6 +362,41 @@ def test_optimize_two_axis_grid():
     assert all(len(pair) == 2 for pair in sweep.metric_columns)
 
 
+def test_sweep_is_a_sequence_of_its_rows():
+    """`Sweep` exposed `.rows` and nothing else, so the obvious `for row in
+    sweep` / `len(sweep)` / `sweep[0]` all failed. Indexing delegates to the
+    materialised list, so slices and negative indices come out standard."""
+    sweep = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        best_by="risk_adjusted.sharpe",
+    )
+    assert len(sweep) == len(sweep.rows) == 4
+    assert [r.values for r in sweep] == [r.values for r in sweep.rows]
+    assert sweep[0].values == sweep.rows[0].values
+    assert sweep[-1].values == sweep.rows[-1].values
+    assert [r.values for r in sweep[:2]] == [r.values for r in sweep.rows[:2]]
+    with pytest.raises(IndexError):
+        _ = sweep[99]
+
+
+def test_walkforward_result_is_a_sequence_of_its_folds():
+    result = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5], "SLOW": [10]}],
+        best_by="risk_adjusted.sharpe",
+        walkforward=(20, 10),
+    )
+    assert len(result) == len(result.folds)
+    assert [f.fold for f in result] == [f.fold for f in result.folds]
+    assert result[0].fold == result.folds[0].fold
+    assert result[-1].fold == result.folds[-1].fold
+
+
 def test_optimize_smooth_ranks_by_the_neighbourhood_average():
     """`smooth=` populates `row.smoothed` / `row.support` and reorders by them."""
     sweep = ta.optimize(
@@ -1469,3 +1504,105 @@ def test_optimize_smooth_gives_a_ruined_cell_no_weight():
     assert by_leverage[3.0].smoothed is None, "no ranking key, so nothing to smooth"
     # Its solvent neighbour's average rests on one cell fewer.
     assert by_leverage[0.4].support < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Exception hierarchy
+# ---------------------------------------------------------------------------
+
+
+def test_errors_subclass_value_error_so_old_handlers_still_catch():
+    """The whole tree hangs off `ValueError`, which is what these sites raised
+    before it existed — so adding resolution cannot break an existing handler."""
+    for exc in (ta.FugaziError, ta.SpecError, ta.WalletError, ta.FetchError):
+        assert issubclass(exc, ValueError)
+    for exc in (ta.SpecError, ta.WalletError, ta.FetchError):
+        assert issubclass(exc, ta.FugaziError)
+
+
+def test_a_document_that_will_not_build_raises_spec_error():
+    bad = "symbol: BTC\nlong:\n  enter: !gt { lhs: !get { key: absent }, rhs: !value 1 }"
+    with pytest.raises(ta.SpecError):
+        ta.load_spec(bad).run(ta.PaperWallet(1000.0), _trend_snaps())
+    # ...and the `!tag > ` breadcrumb still reaches the message.
+    try:
+        ta.load_spec(bad).run(ta.PaperWallet(1000.0), _trend_snaps())
+    except ta.SpecError as e:
+        assert "at:" in str(e)
+
+
+def test_an_account_refusal_raises_wallet_error_not_spec_error():
+    """The distinction that motivates the split: a refused order is a property
+    of the account right now, not of the strategy — so it must not be catchable
+    as a SpecError, and vice versa."""
+    wallet = ta.PaperWallet(100.0)
+    with pytest.raises(ta.WalletError):
+        wallet.adjust_funds(-500.0)
+    assert not issubclass(ta.WalletError, ta.SpecError)
+    assert not issubclass(ta.SpecError, ta.WalletError)
+
+
+def test_call_errors_stay_type_errors():
+    """`TypeError` is not rehomed under FugaziError — an ordinary Python call
+    bug must not be caught by `except FugaziError`."""
+    with pytest.raises(TypeError) as excinfo:
+        ta.ema(ta.close(), 3).update("not a candle")
+    assert not isinstance(excinfo.value, ta.FugaziError)
+
+
+# ---------------------------------------------------------------------------
+# Interruptibility
+# ---------------------------------------------------------------------------
+
+
+def test_a_long_run_can_be_interrupted():
+    """A run used to hold the GIL and poll nothing, so Ctrl-C in a notebook did
+    nothing until the run finished on its own. The snapshots now go through
+    `classes::interruptible`, which checks Python's signal handlers every 4096
+    bars and ends the drive.
+
+    The signal comes from a *separate process* on purpose: that is what a real
+    Ctrl-C is. A Python timer thread would first need the GIL, which the run
+    still holds — see TODO.md.
+
+    The assertion is calibrated against this machine rather than a fixed number.
+    Without the fix a `KeyboardInterrupt` still surfaces — just *after* the run
+    completes, at the next bytecode boundary — so only "it stopped early" tells
+    the two apart, and "early" has to mean early relative to the real duration.
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+    snaps = _snaps_single("BTC", bars * 30_000)  # ~600k bars: seconds of work
+    spec = ta.load_spec(_trend_yaml(), params={"FAST": 3, "SLOW": 8})
+
+    started = time.monotonic()
+    spec.run(ta.PaperWallet(1000.0), snaps)
+    uninterrupted = time.monotonic() - started
+    if uninterrupted < 1.0:
+        pytest.skip(f"machine too fast to time an interrupt ({uninterrupted:.2f}s run)")
+
+    fire_at = uninterrupted / 4
+    killer = subprocess.Popen([
+        sys.executable, "-c",
+        f"import os,signal,time; time.sleep({fire_at}); "
+        f"os.kill({os.getpid()}, signal.SIGINT)",
+    ])
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spec.run(ta.PaperWallet(1000.0), snaps)
+        elapsed = time.monotonic() - started
+    finally:
+        killer.wait()
+
+    # Stopped near the signal, not merely raised once the work was done anyway.
+    assert elapsed < uninterrupted / 2, (
+        f"ran {elapsed:.2f}s after a signal at {fire_at:.2f}s; an uninterrupted "
+        f"run of the same series takes {uninterrupted:.2f}s — the drive did not "
+        "stop early, so the signal check is not reaching it"
+    )

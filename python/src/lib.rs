@@ -40,6 +40,7 @@
 // wiring and the `#[pymodule]` registration. Every module's items are
 // re-exported here so cross-module references stay path-free, which is
 // how they read when this was one file.
+pub(crate) mod errors;
 pub(crate) mod carriers;
 #[macro_use]
 pub(crate) mod macros;
@@ -91,6 +92,10 @@ use crate::constructors::{
     day_of_week, day_of_year, week_of_year, quarter, unix_seconds, unix_millis,
     is_weekday, is_weekend, every, pick,
 };
+// Unpickling entry points. Not surface — but `__reduce__` names its callable by
+// `module.qualname`, so each has to be a real, importable module member.
+use crate::classes::_rebuild_schema;
+use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
 use crate::strategy::{
     everything, top_bottom, threshold, quantile, buy_and_hold, ma_crossover,
     rsi_reversal, donchian_breakout, keltner_breakout, sharpe_of, sortino_of, volatility_of,
@@ -152,6 +157,25 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWalkForwardResult>()?;
     m.add_class::<PyWalkForwardFold>()?;
 
+    // `fugazi.Wallet` — an ABC with the three concrete wallets registered as
+    // virtual subclasses, so `isinstance(w, ta.Wallet)` works. See there.
+    crate::strategy::register_wallet_protocol(m)?;
+
+    // `fugazi.__version__`. Taken from `CARGO_PKG_VERSION` at compile time, so
+    // it is `python/Cargo.toml`'s version — already one of the seven places a
+    // release bump touches, which is why this adds no eighth. Reading it from
+    // `importlib.metadata` instead would cost an import and only work for an
+    // installed wheel, not a `maturin develop` tree.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+    // The exception hierarchy (`errors.rs`). Added by explicit `get_type`
+    // because `create_exception!` produces a plain Rust type, not a
+    // `#[pyclass]` that `add_class` would pick up.
+    m.add("FugaziError", m.py().get_type::<crate::errors::FugaziError>())?;
+    m.add("SpecError", m.py().get_type::<crate::errors::SpecError>())?;
+    m.add("WalletError", m.py().get_type::<crate::errors::WalletError>())?;
+    m.add("FetchError", m.py().get_type::<crate::errors::FetchError>())?;
+
     // The default comparison tolerance is hybrid (absolute floor + relative
     // term), so it is exposed as its two components rather than one scalar. An
     // `epsilon=` argument stays absolute — a deadband the caller means literally.
@@ -179,13 +203,24 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of, fetch,
         load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
         spec_json_schema, spec_tags, evaluate_report,
+        // Unpickling entry points. These deliberately stay in the module's
+        // generated `__all__`, underscore prefix and all: maturin's shim
+        // populates the `fugazi` package with `from .fugazi import *`, which
+        // honours `__all__` — so filtering them out for tidiness would take
+        // them off the package and break every `__reduce__` that resolves
+        // `fugazi._rebuild_*`. Exported is a requirement here, not an oversight.
+        _rebuild_schema, _rebuild_size, _rebuild_order, _rebuild_run_report,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a
     // submodule *and* injected into `sys.modules` so `from fugazi.metrics
     // import sharpe` works (pyo3 submodules aren't visible to Python's import
     // machinery by default).
-    let metrics = PyModule::new(m.py(), "metrics")?;
+    // Named `fugazi.metrics`, not `metrics`: `PyModule::new` sets `__name__`
+    // verbatim, and pickle resolves a function by `__module__` + import —
+    // so a bare `metrics` makes every `__reduce__` pointing into this
+    // submodule fail with "import of module 'metrics' failed".
+    let metrics = PyModule::new(m.py(), "fugazi.metrics")?;
     register_metrics_module(&metrics)?;
     m.add_submodule(&metrics)?;
     m.py()
@@ -198,7 +233,11 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // an equity fan chart) themselves. Same submodule + `sys.modules` dance as
     // `fugazi.metrics` so `from fugazi.montecarlo import resample_index_matrix`
     // works.
-    let montecarlo = PyModule::new(m.py(), "montecarlo")?;
+    // Named `fugazi.montecarlo`, not `montecarlo`: `PyModule::new` sets `__name__`
+    // verbatim, and pickle resolves a function by `__module__` + import —
+    // so a bare `montecarlo` makes every `__reduce__` pointing into this
+    // submodule fail with "import of module 'montecarlo' failed".
+    let montecarlo = PyModule::new(m.py(), "fugazi.montecarlo")?;
     register_montecarlo_module(&montecarlo)?;
     m.add_submodule(&montecarlo)?;
     m.py()

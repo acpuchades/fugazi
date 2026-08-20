@@ -20,6 +20,96 @@ silently take the config's `default:` leg — quietly wrong for any config using
 shape is probably `set_costs_for_all(symbols, costs, freq=None)` looping the
 existing call, not a `with_costs` mirror.
 
+### `Atom` / `OverlayInfo` / `Snapshot` are not picklable
+
+Every other value type on the surface round-trips through `pickle` as of the
+`__reduce__` work — `Candle`, `Order`, `Fill`, `RunReport`, `Size`, `Frequency`,
+`Selector`, `Schema`, `Trade`, `DrawdownSegment` — which is what makes
+`ProcessPoolExecutor` / `joblib` fan-out possible at all. These three do not.
+
+`OverlayInfo` holds an `Rc<[OverlayValue]>`, deliberately: a non-atomic refcount
+keeps the per-bar overlay clone cheap, and under the GIL nothing needs the atomic.
+pyo3 therefore marks it `unsendable`, and `Atom` and `Snapshot` inherit that
+transitively. The flag makes pyo3 assert the accessing thread on *every* method
+call, `__reduce__` included — and `multiprocessing` pickles on a background feeder
+thread. So a `__reduce__` here would pass a plain `pickle.dumps` and then **panic
+and hang the pool** under the one caller that wanted it. A clean `TypeError:
+cannot pickle` is strictly better, so they have none.
+
+The workaround costs nothing in the common case: send the *inputs* as plain data
+(candle tuples, a DataFrame) and build the `Snapshot`s inside the worker, which is
+where they were going to be consumed anyway. Only the results come back.
+
+What would change it: `Rc` → `Arc` in `OverlayInfo` drops the flag from all three
+at once. That is a measurement, not a rewrite — the atomic lands in the per-bar
+clone on the hot path, so it needs `benches/` numbers before anyone spends it, and
+the answer may well be "not worth it for a use case a two-line worker refactor
+already covers".
+
+### The GIL is held for the whole of `run()`
+
+`Strategy.run` / `StrategySpec.run` are now **interruptible** — the snapshots go
+through `classes::interruptible`, which polls Python's signal handlers every 4096
+bars, so Ctrl-C ends a run within ~50 ms of a 3.2 s / 800 k-bar backtest instead
+of doing nothing until it finished. That was the half that actually bit people in
+a notebook, and it needed no core change: `backtest::drive` takes an
+`IntoIterator`, which is the whole seam.
+
+What is *not* done is releasing the GIL for the duration, so a long run still
+blocks every other Python thread. It was tried and does not compile:
+
+```
+error[E0277]: `dyn RunnableStrategy` cannot be sent between threads safely
+error[E0277]: `W` cannot be sent between threads safely
+```
+
+`py.detach` demands a `Send` closure, and neither `RunnableStrategy` nor `Wallet`
+carries a `Send` bound — nor should they lightly, since adding one constrains
+every strategy and wallet implementation, present and future, including the live
+venue wallets. (`Snapshot` is separately `!Send` via `OverlayInfo`'s `Rc`; that
+one is the entry above.)
+
+Note the two goals are also in mild tension: `check_signals` needs the GIL, so a
+detached run has to re-attach at each stride anyway. The shape that would give
+both is `detach` per chunk with an `attach` between — which is what the resumable
+API already does at a coarser grain.
+
+What would change it: someone actually blocked by thread-parallel runs from one
+process. Process parallelism is the better answer today and now works — every
+value type pickles, so `ProcessPoolExecutor` fan-out is a `RunReport` round trip —
+and `ta.optimize(jobs=N)` already parallelises the sweep case inside Rust, where
+the `Send` question is answered locally rather than in the public trait bounds.
+
+### No async surface — `fetch` and the live wallets are blocking
+
+Every network call on the Python side is synchronous: `Binance.fetch(...)` and
+friends block, and `OkxWallet` / `CoinbaseWallet` do their REST work inside
+`update()` / `refresh_account()`. Internally there *is* a tokio runtime — a
+process-wide one in `sources.rs`, driven with `block_on` under a `py.detach`, so
+the GIL is at least free for the duration.
+
+Deferred, not overlooked. Three reasons:
+
+1. **The engine is a per-bar state machine, not an IO pipeline.** `update(candle)`
+   is nanoseconds of arithmetic; there is nothing inside a strategy to await. An
+   `async def update` would be a coroutine wrapper around synchronous work — the
+   shape people mean by "async-washing" — and would buy latency nowhere.
+2. **The IO is at the edges, and the edges are already the caller's.** A live loop
+   is *their* `while True`. Someone on asyncio can put the blocking call in
+   `asyncio.to_thread(...)` today and lose nothing, because the GIL is released
+   across the request.
+3. **`async fn` in a pyclass means committing to an executor.** pyo3-async-runtimes
+   binds the extension to a specific one, and getting it wrong is worse than not
+   offering it — an `OkxWallet` that only works under `asyncio` and not `trio`, or
+   that deadlocks against the caller's own runtime, is a support burden the
+   blocking version does not have.
+
+What would change it: a caller running enough concurrent venue connections that
+one thread per stream is the actual bottleneck. The honest first step then is an
+async **`SeriesSource`** — the fetch path, which is genuinely IO-bound and has no
+per-bar state — and leaving the wallets blocking behind `to_thread`. Binding the
+whole surface async is not the increment.
+
 ### `Wallet.take_rejections`
 
 Still unbound, with the reason recorded in `python/tests/test_parity.py`: it

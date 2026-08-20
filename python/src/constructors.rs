@@ -2281,7 +2281,7 @@ pub(crate) fn atoms_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Atom>>
 /// it warms up. **Use the returned schema for downstream `get(...)`** — the
 /// augmented atoms are bound to it by `Arc` identity.
 #[pyfunction]
-#[pyo3(signature = (series, overlays, params = None))]
+#[pyo3(signature = (series, overlays, *, params = None))]
 pub(crate) fn compute_overlays<'py>(
     py: Python<'py>,
     series: &Bound<'py, PyAny>,

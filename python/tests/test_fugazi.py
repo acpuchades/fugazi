@@ -164,6 +164,44 @@ def test_arithmetic_operators():
     assert feed(plus, closes([5.0]))[0] == pytest.approx(15.0)
 
 
+def test_comparison_operators_build_signals():
+    """`>` `<` `>=` `<=` are the operator spelling of `gt`/`lt`/`ge`/`le`, so
+    they read like the arithmetic dunders right beside them."""
+    bars = closes([1.0, 2.0, 3.0, 4.0])
+    fast, slow = ta.close(), ta.sma(ta.close(), 2)
+    assert isinstance(fast > slow, ta.Signal)
+    assert feed(fast > slow, bars) == feed(fast.gt(slow), bars)
+    assert feed(fast <= slow, bars) == feed(fast.le(slow), bars)
+    # A bare number lifts on either side; Python reflects the ordering itself,
+    # so `2.0 < ind` resolves to `ind.__gt__(2.0)` with no `__r*__` twin.
+    assert feed(ta.close() > 2.0, bars) == [False, False, True, True]
+    assert feed(2.0 < ta.close(), bars) == [False, False, True, True]
+
+
+def test_comparison_operators_do_not_cost_hashability():
+    """Regression: filling `tp_richcompare` makes CPython null `tp_hash` unless
+    the type declares one, so adding `>` would otherwise have silently made
+    every Indicator unusable as a dict key or set member."""
+    a, b = ta.close(), ta.ema(ta.close(), 3)
+    assert hash(a) == hash(a)
+    assert len({a, b, a}) == 2
+    assert {a: "x"}[a] == "x"
+
+
+def test_equality_stays_identity_not_elementwise():
+    """`==` is deliberately *not* overloaded — a Signal from it would be truthy
+    and unhashable. The elementwise form is `.eq()`, which also takes epsilon."""
+    a = ta.close()
+    assert (a == a) is True
+    assert (a == ta.close()) is False  # separately built, not the same object
+    assert isinstance(a.eq(ta.close()), ta.Signal)
+    assert feed(a.eq(3.0, epsilon=0.5), closes([1.0, 3.0, 9.0])) == [
+        False,
+        True,
+        False,
+    ]
+
+
 def test_macd_returns_named_dict():
     node = ta.macd(ta.close(), 2, 4, 2)
     out = feed(node, closes([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
@@ -2571,6 +2609,30 @@ def test_snapshot_dict_like_operations():
     assert snap.get("SOL") is None
 
 
+def test_snapshot_iterates_its_keys():
+    """Regression: with `__len__` + `__getitem__` and no `__iter__`, `list(snap)`
+    fell into Python's legacy sequence protocol and probed `snap[0]`, which
+    `coerce_selector` rejected — so iterating reported a *key type* error for
+    something the caller never asked to index."""
+    snap = ta.Snapshot({"BTC": _atom(ms=1, close=100.0), "ETH": _atom(ms=1, close=50.0)})
+    assert list(snap) == snap.keys()
+    assert [snap[k].candle.close for k in snap] == [100.0, 50.0]
+    assert [a.candle.close for a in snap.values()] == [100.0, 50.0]
+    assert {k.symbol: a.candle.close for k, a in snap.items()} == {
+        "BTC": 100.0,
+        "ETH": 50.0,
+    }
+
+
+def test_schema_iterates_its_column_names():
+    b = ta.SchemaBuilder()
+    b.add_real("funding")
+    b.add_bool("halted")
+    schema = b.finish()
+    assert list(schema) == schema.keys() == ["funding", "halted"]
+    assert [k for k in schema if k in schema] == ["funding", "halted"]
+
+
 def test_snapshot_construct_from_mapping():
     # Both a dict of Atom and a dict of Candle work (candle → atom lifted).
     snap = ta.Snapshot({"BTC": _atom(ms=1, close=100.0), "ETH": ta.Candle(1, 2, 0.5, 50, 1)})
@@ -3192,3 +3254,189 @@ def test_adjust_funds_credits_and_refuses_overdraft():
     assert w.funds == 1_000.0
     with pytest.raises(ValueError):
         w.adjust_funds(-5_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Pickling
+#
+# The point is `multiprocessing` / `joblib` / `ProcessPoolExecutor` — the
+# standard way a Python caller fans work over cores. None of it worked before,
+# because pickle stores a type by `module.qualname` and every pyclass answered
+# `builtins`.
+# ---------------------------------------------------------------------------
+
+
+def _pickle_cases():
+    import fugazi.metrics as mm
+
+    order = ta.Order(
+        symbol="BTC", side="buy", units=2.0, price=100.0,
+        kind="limit", id=7, commission=0.5,
+    )
+    fill = ta.Fill(bar=3, order=order)
+    trades = mm.reconstruct_trades([
+        ta.Fill(bar=0, order=ta.Order(symbol="B", side="buy", units=1.0, price=10.0)),
+        ta.Fill(bar=1, order=ta.Order(symbol="B", side="sell", units=1.0, price=12.0)),
+    ])
+    b = ta.SchemaBuilder()
+    b.add_real("funding")
+    b.add_bool("halted")
+    b.add_str("regime")
+    return {
+        "Candle": ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0),
+        "Schema": b.finish(),
+        "Frequency": ta.Frequency("1h"),
+        "Selector": ta.Selector(symbol="BTC", freq=ta.Frequency("1d")),
+        "Size": ta.Size.value_frac(0.5),
+        "Order": order,
+        "Fill": fill,
+        "RunReport": ta.RunReport(
+            equity_curve=[100.0, 110.0, 90.0], initial_equity=100.0, fills=[fill]
+        ),
+        "Trade": trades[0],
+        "DrawdownSegment": mm.drawdown_segments([100.0, 110.0, 90.0, 120.0])[0],
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_pickle_cases()))
+def test_value_types_round_trip_through_pickle(name):
+    import pickle
+
+    obj = _pickle_cases()[name]
+    assert repr(pickle.loads(pickle.dumps(obj))) == repr(obj)
+
+
+@pytest.mark.parametrize("name", sorted(_pickle_cases()))
+def test_value_types_survive_deepcopy(name):
+    import copy
+
+    obj = _pickle_cases()[name]
+    assert repr(copy.deepcopy(obj)) == repr(obj)
+
+
+def test_pickled_types_name_a_real_module():
+    """The regression that made all of the above impossible: without
+    `module = "fugazi"` on the pyclass, every type reported `builtins` and
+    pickle could not resolve it back."""
+    import fugazi.metrics as mm
+
+    for obj in _pickle_cases().values():
+        mod = type(obj).__module__
+        assert mod in ("fugazi", "fugazi.metrics"), (type(obj), mod)
+    # The submodule must answer its *dotted* name, or a `__reduce__` pointing
+    # into it fails with "import of module 'metrics' failed".
+    assert mm.__name__ == "fugazi.metrics"
+
+
+def test_size_reports_what_it_was_built_as():
+    """`Size` was write-only — four constructors in, nothing out. `kind`/`value`
+    are what `__reduce__` reconstructs from, so they cannot silently drift."""
+    for kind, ctor in [
+        ("units", ta.Size.units),
+        ("funds_frac", ta.Size.funds_frac),
+        ("value_frac", ta.Size.value_frac),
+        ("position_frac", ta.Size.position_frac),
+    ]:
+        size = ctor(0.25)
+        assert size.kind == kind
+        assert size.value == pytest.approx(0.25)
+
+
+def test_overlay_info_reports_what_it_was_built_from():
+    b = ta.SchemaBuilder()
+    b.add_real("funding")
+    b.add_bool("halted")
+    b.add_str("regime")
+    schema = b.finish()
+    info = ta.OverlayInfo(schema, [0.01, True, "bull"])
+    assert info.schema.keys() == schema.keys()
+    assert info.values == [0.01, True, "bull"]
+    # An absent slot round-trips as None, not as a zero.
+    assert ta.OverlayInfo(schema, [None, True, "bull"]).values == [None, True, "bull"]
+
+
+def test_unsendable_types_refuse_to_pickle_cleanly():
+    """`Atom`/`OverlayInfo`/`Snapshot` hold an `Rc`, so pyo3 marks them
+    unsendable and asserts the thread on every method call — `__reduce__`
+    included. `multiprocessing` pickles on a feeder *thread*, so a `__reduce__`
+    here would pass a plain `pickle.dumps` and then panic-and-hang the pool.
+    A plain TypeError is the better answer; this pins that it stays one."""
+    import pickle
+
+    b = ta.SchemaBuilder()
+    b.add_real("funding")
+    schema = b.finish()
+    for obj in (
+        ta.OverlayInfo(schema, [0.01]),
+        ta.Atom(candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0)),
+        ta.Snapshot({"BTC": ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0)}),
+    ):
+        with pytest.raises(TypeError, match="cannot pickle"):
+            pickle.dumps(obj)
+
+
+def test_equity_array_matches_equity_curve():
+    """`equity_array` is the same numbers written straight into a NumPy buffer —
+    no intermediate list, and the form `Series` takes its fast memcpy path over."""
+    np = pytest.importorskip("numpy")
+    rep = ta.RunReport(equity_curve=[100.0, 110.0, 90.0], initial_equity=100.0)
+    arr = rep.equity_array
+    assert isinstance(arr, np.ndarray)
+    assert arr.dtype == np.float64
+    assert arr.tolist() == rep.equity_curve
+    # Same answer downstream, whichever form you hand the metrics.
+    assert ta.metrics.per_bar_returns(arr, 100.0) == pytest.approx(
+        ta.metrics.per_bar_returns(rep.equity_curve, 100.0)
+    )
+
+
+def test_equity_curve_stays_a_list_so_plus_still_concatenates():
+    """Why `equity_curve` was *not* switched to an ndarray: `+` concatenates two
+    lists and adds two arrays elementwise, and the chunked-run examples in the
+    README rely on concatenation. `equity_array` is the opt-in instead."""
+    rep = ta.RunReport(equity_curve=[1.0, 2.0], initial_equity=1.0)
+    assert isinstance(rep.equity_curve, list)
+    assert rep.equity_curve + rep.equity_curve == [1.0, 2.0, 1.0, 2.0]
+
+
+def test_module_reports_its_version():
+    """`fugazi.__version__` is `CARGO_PKG_VERSION` from `python/Cargo.toml`,
+    which a release bump already touches — so this adds no new place to sync,
+    and this test is what proves it stays in step with the wheel metadata."""
+    import re
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ta.__version__), ta.__version__
+
+
+def test_unpickling_helpers_stay_exported():
+    """They must be on the package, not merely on the extension module: a
+    `__reduce__` resolves `fugazi._rebuild_*`, and maturin's shim populates the
+    package with `from .fugazi import *`, which honours `__all__`."""
+    for name in ("_rebuild_schema", "_rebuild_size", "_rebuild_order", "_rebuild_run_report"):
+        assert name in ta.__all__, f"{name} missing from __all__ — pickling will break"
+        assert hasattr(ta, name)
+
+
+def test_shared_multi_is_a_named_collection():
+    """`.shared()` is the one place Rust's typing does not survive the boundary:
+    Rust has a distinct type per multi, Python has one class carrying the union
+    of every accessor — so `bollinger(...).shared().adx()` type-checks and fails
+    at call time. `names()` is the only honest source of truth, and the container
+    protocol makes that the natural thing to reach for."""
+    macd = ta.macd(ta.close(), 2, 4, 2).shared()
+    assert list(macd) == macd.names() == ["macd", "signal", "histogram"]
+    assert len(macd) == 3
+    assert "signal" in macd and "adx" not in macd
+    # Subscript is `component()` — same projection, spelled as the lookup it is.
+    # Each handle gets its own multi: projections off *one* `.shared()` handle
+    # share the underlying state, so feeding one advances the other.
+    bars = closes([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    by_subscript = ta.macd(ta.close(), 2, 4, 2).shared()["signal"]
+    by_method = ta.macd(ta.close(), 2, 4, 2).shared().component("signal")
+    assert feed(by_subscript, bars) == feed(by_method, bars)
+    with pytest.raises(ValueError, match="adx"):
+        _ = macd["adx"]
+
+    bands = ta.bollinger(ta.close(), 3, 2.0).shared()
+    assert list(bands) == ["upper", "middle", "lower"]
+    assert "macd" not in bands

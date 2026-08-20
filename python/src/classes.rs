@@ -19,7 +19,7 @@ use crate::spec::*;
 // ---------------------------------------------------------------------------
 
 /// A single OHLCV bar.
-#[pyclass(name = "Candle", frozen, skip_from_py_object)]
+#[pyclass(name = "Candle", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyCandle {
     pub(crate) inner: Candle,
@@ -56,6 +56,24 @@ impl PyCandle {
     }
 
     /// Typical price, `(high + low + close) / 3`.
+    /// Support `pickle` / `copy.deepcopy` by naming the constructor and the five
+    /// fields that rebuild it.
+    ///
+    /// This is what lets a `Candle` cross a `multiprocessing` / `joblib` /
+    /// `ProcessPoolExecutor` boundary — the standard way a Python caller fans a
+    /// backtest out over cores. It only works because the class declares
+    /// `module = "fugazi"`; pickle stores a type by `module.qualname` and every
+    /// pyclass here used to answer `builtins`.
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(py, py.get_type::<PyCandle>(), (
+            self.open(),
+            self.high(),
+            self.low(),
+            self.close(),
+            self.volume(),
+        ))
+    }
+
     pub(crate) fn typical(&self) -> f64 {
         self.inner.typical()
     }
@@ -83,7 +101,7 @@ impl PyCandle {
 /// `SchemaBuilder` and frozen once — every column carries its declared type
 /// (`"real"` / `"bool"` / `"str"`), which `get()` reads to pick the right typed
 /// leaf.
-#[pyclass(name = "Schema", frozen, skip_from_py_object)]
+#[pyclass(name = "Schema", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySchema {
     pub(crate) inner: Arc<Schema>,
@@ -121,6 +139,37 @@ impl PySchema {
         self.inner.keys().map(str::to_string).collect()
     }
 
+    /// Rebuild through [`_rebuild_schema`] — a `Schema` is frozen and has no
+    /// `__new__` (a `SchemaBuilder` produces it), so the reconstruction replays
+    /// the builder rather than reaching past it.
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let types: Vec<&'static str> = (0..self.inner.len())
+            .map(|i| {
+                self.inner
+                    .type_of(i)
+                    .map(overlay_type_name)
+                    .unwrap_or("real")
+            })
+            .collect();
+        reduce_with(
+            py,
+            py.import("fugazi")?.getattr("_rebuild_schema")?,
+            (self.keys(), types),
+        )
+    }
+
+    /// Iterate the column names, in insertion order — so `list(schema)` and
+    /// `for key in schema` read the way `len(schema)` and `key in schema`
+    /// already promised.
+    ///
+    /// Without this a `__len__` + `__getitem__`-shaped type falls back to
+    /// Python's *legacy* sequence-iteration protocol, which probes integer
+    /// indices and surfaces whatever error that produces instead of a plain
+    /// `TypeError: not iterable`.
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        iter_over(py, self.keys())
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         let cols: Vec<String> = self
             .inner
@@ -132,6 +181,39 @@ impl PySchema {
             .collect();
         format!("Schema(columns={cols:?})")
     }
+}
+
+/// Build the 2-tuple `__reduce__` return value: `(callable, args)`.
+///
+/// `callable` is either the class itself (when its `__new__` takes every field
+/// positionally) or a module-level `_rebuild_*` function (when it doesn't —
+/// keyword-only parameters, or a type Python cannot construct at all, like
+/// `Trade`). Either way pickle stores it by `module.qualname` and calls it with
+/// `args` on the way back in, so the reconstruction path is ordinary public
+/// behaviour rather than a parallel deserializer that can drift.
+pub(crate) fn reduce_with<'py, C, A>(py: Python<'py>, callable: C, args: A) -> PyResult<Py<PyAny>>
+where
+    C: pyo3::IntoPyObject<'py>,
+    A: pyo3::IntoPyObject<'py>,
+{
+    // The tuple `IntoPyObject` impl's `Error` is already `PyErr`, so `?` needs
+    // no conversion here.
+    Ok((callable, args).into_pyobject(py)?.into_any().unbind())
+}
+
+/// Back an `__iter__` with a materialised `list`'s own iterator.
+///
+/// Every collection bound here is small and already fully realised on the Rust
+/// side (a schema's columns, a snapshot's keys, a sweep's rows), so the honest
+/// implementation is to hand Python a list iterator rather than a bespoke
+/// `__next__` pyclass holding a cursor into borrowed state — which would also
+/// have to answer what happens when the collection mutates mid-iteration.
+pub(crate) fn iter_over<T>(py: Python<'_>, items: Vec<T>) -> PyResult<Py<PyAny>>
+where
+    T: for<'py> pyo3::IntoPyObject<'py>,
+{
+    let list = pyo3::types::PyList::new(py, items)?;
+    Ok(list.try_iter()?.into_any().unbind())
 }
 
 pub(crate) fn overlay_type_name(ty: OverlayType) -> &'static str {
@@ -146,7 +228,7 @@ pub(crate) fn overlay_type_name(ty: OverlayType) -> &'static str {
 /// `add_bool()` / `add_str()` (each idempotent per key), then freeze into an
 /// immutable [`Schema`] with `finish()`. `add()` remains for the pre-typed
 /// callers as an alias for `add_real()`.
-#[pyclass(name = "SchemaBuilder")]
+#[pyclass(name = "SchemaBuilder", module = "fugazi")]
 pub(crate) struct PySchemaBuilder {
     pub(crate) inner: Option<SchemaBuilder>,
 }
@@ -261,7 +343,22 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -
 /// this class `unsendable` — it's confined to the Python thread that created
 /// it. This is fine under the GIL and keeps overlay clones cheap in the hot
 /// per-bar loop.
-#[pyclass(name = "OverlayInfo", frozen, unsendable, skip_from_py_object)]
+///
+/// # Why this type, `Atom` and `Snapshot` are not picklable
+///
+/// The `unsendable` flag makes pyo3 assert the accessing thread on **every**
+/// method call, `__reduce__` included — and `multiprocessing` pickles on a
+/// background feeder thread. A `__reduce__` here would therefore work under a
+/// plain `pickle.dumps` and then **panic and hang the pool** under the one
+/// caller that actually wanted it. A clean `TypeError: cannot pickle` is the
+/// better answer, so these three deliberately have none, while every sendable
+/// value type (`Candle`, `Order`, `Fill`, `RunReport`, `Trade`, …) does.
+///
+/// What would change it: making `OverlayInfo` hold an `Arc` instead of an `Rc`,
+/// which would drop the flag from all three. That trades an atomic increment
+/// into the per-bar overlay clone, so it is a measurement, not a rewrite — see
+/// `TODO.md`.
+#[pyclass(name = "OverlayInfo", module = "fugazi", frozen, unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyOverlayInfo {
     pub(crate) inner: OverlayInfo,
@@ -293,6 +390,27 @@ impl PyOverlayInfo {
         Ok(Self {
             inner: OverlayInfo::sparse(schema.inner.clone(), typed),
         })
+    }
+
+    /// The schema this bundle's slots are declared by.
+    #[getter]
+    pub(crate) fn schema(&self) -> PySchema {
+        PySchema {
+            inner: self.inner.schema().clone(),
+        }
+    }
+
+    /// Every slot, in schema order, as native Python values — `None` for a slot
+    /// absent this bar. Exactly the `values` argument `OverlayInfo(schema,
+    /// values)` takes, so `OverlayInfo(o.schema, o.values)` reconstructs `o`.
+    #[getter]
+    pub(crate) fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        (0..self.inner.values().len())
+            .map(|i| match self.inner.get(i) {
+                Some(v) => overlay_to_python(py, v),
+                None => Ok(py.None()),
+            })
+            .collect()
     }
 
     pub(crate) fn __len__(&self) -> usize {
@@ -411,7 +529,7 @@ pub(crate) fn overlay_to_python(py: Python<'_>, v: &OverlayValue) -> PyResult<Py
 ///
 /// `unsendable` because the inner [`OverlayInfo`] holds an `Rc<[Real]>` for
 /// per-atom overlay values. The Python GIL confines it to one thread anyway.
-#[pyclass(name = "Atom", frozen, unsendable, skip_from_py_object)]
+#[pyclass(name = "Atom", module = "fugazi", frozen, unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyAtom {
     pub(crate) inner: Atom,
@@ -551,7 +669,7 @@ impl PyAtom {
 /// "minute"). Round-trips through `str()` and `repr()`. Hashable and total-order
 /// sortable by duration (so `Frequency("120m") > Frequency("1h")` behaves the
 /// way you expect regardless of variant tag).
-#[pyclass(name = "Frequency", frozen, skip_from_py_object)]
+#[pyclass(name = "Frequency", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyFrequency {
     pub(crate) inner: Frequency,
@@ -571,6 +689,10 @@ impl PyFrequency {
     /// The canonical token — the round-trip of the constructor.
     pub(crate) fn __str__(&self) -> String {
         self.inner.as_token()
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(py, py.get_type::<PyFrequency>(), (self.__str__(),))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -619,7 +741,7 @@ impl PyFrequency {
 /// `Frequency` (freq only), from a `(str, Frequency | str | None)` tuple, and
 /// from a `dict` — so `ta.Snapshot({"BTC": ...})` and
 /// `ta.Snapshot({ta.Selector(symbol="BTC", freq="1h"): ...})` both work.
-#[pyclass(name = "Selector", frozen, skip_from_py_object)]
+#[pyclass(name = "Selector", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySelector {
     pub(crate) inner: Selector<Symbol>,
@@ -647,6 +769,10 @@ impl PySelector {
     #[getter]
     pub(crate) fn freq(&self) -> Option<PyFrequency> {
         self.inner.freq.map(|inner| PyFrequency { inner })
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reduce_with(py, py.get_type::<PySelector>(), (self.symbol(), self.freq()))
     }
 
     /// True when both fields are `None` — the `Pick` no-query case.
@@ -755,7 +881,7 @@ pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbo
 /// asset out by [`Selector`]. Dict-like: `snap[selector]` reads,
 /// `snap[selector] = atom` writes, `selector in snap` tests membership,
 /// `len(snap)` counts assets.
-#[pyclass(name = "Snapshot", unsendable, skip_from_py_object)]
+#[pyclass(name = "Snapshot", module = "fugazi", unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySnapshot {
     pub(crate) inner: Snapshot<Symbol>,
@@ -858,6 +984,48 @@ impl PySnapshot {
             .collect()
     }
 
+    /// Every atom in this snapshot, in insertion order — the `values()` half of
+    /// the mapping shape `keys()` starts.
+    pub(crate) fn values(&self) -> Vec<PyAtom> {
+        self.inner
+            .iter()
+            .map(|(_, _, atom)| PyAtom {
+                inner: atom.clone(),
+            })
+            .collect()
+    }
+
+    /// `(selector, atom)` pairs, in insertion order — so `dict(snapshot.items())`
+    /// and `for sel, atom in snapshot.items()` work.
+    pub(crate) fn items(&self) -> Vec<(PySelector, PyAtom)> {
+        self.inner
+            .iter()
+            .map(|(sym, freq, atom)| {
+                (
+                    PySelector {
+                        inner: Selector::new(sym.cloned(), freq),
+                    },
+                    PyAtom {
+                        inner: atom.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Iterate the `Selector` keys, in insertion order — matching `keys()`, the
+    /// way a `dict` iterates its keys.
+    ///
+    /// Regression-worthy: `Snapshot` has `__len__` and `__getitem__`, and
+    /// without `__iter__` Python falls back to the legacy sequence protocol and
+    /// probes `snapshot[0]`. That went through `coerce_selector`, so `list(snap)`
+    /// reported *"keys must be a Selector, a str, a Frequency, or a tuple"* —
+    /// an error about key types, for an iteration the caller never asked to do
+    /// by index.
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        iter_over(py, self.keys())
+    }
+
     /// True if this snapshot carries no assets.
     pub(crate) fn is_empty(&self) -> bool {
         self.inner.is_empty()
@@ -920,7 +1088,7 @@ pub(crate) enum AnyAtomSource {
 /// btc_close = ta.close(ta.pick("BTC"))
 /// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
 /// ```
-#[pyclass(name = "AtomSource", skip_from_py_object)]
+#[pyclass(name = "AtomSource", module = "fugazi", skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyAtomSource {
     pub(crate) inner: AnyAtomSource,
@@ -986,7 +1154,18 @@ impl PyAtomSource {
 /// An indicator is rooted either at a candle accessor (`close()`, `atr()`, …),
 /// in which case it consumes `Candle`s, or at `identity()`, in which case it
 /// consumes a raw value stream of `float`s.
-#[pyclass(name = "Indicator")]
+///
+/// `+ - * /` build a new `Indicator`; `> < >= <=` build a `Signal`. Both accept
+/// a number on either side.
+///
+/// **`==` is the one exception, and it is not elementwise.** `a == b` is
+/// Python's ordinary identity comparison, so two separately-built chains over
+/// the same source compare `False`. Overloading it would return a `Signal` —
+/// truthy, unhashable — and silently break `in`, `dict` and `set` for every
+/// indicator. Use `a.eq(b)` (and `a.ne(b)`) for the elementwise form; they take
+/// an `epsilon=` too, which is the reason the named `gt`/`lt`/`ge`/`le` twins
+/// exist alongside the operators.
+#[pyclass(name = "Indicator", module = "fugazi")]
 pub(crate) struct PyIndicator {
     pub(crate) src: AnySource,
     /// The chain's root, kept **concrete** when it is a plain leaf, purely so a
@@ -1276,6 +1455,55 @@ impl PyIndicator {
         )?))
     }
 
+    // --- comparison dunders -> Signal -----------------------------------------
+    //
+    // `ind > other` is [`gt`](Self::gt) at the default tolerance — the spelling
+    // to reach for, and the one that matches `+`/`-`/`*`/`/` right above. The
+    // named methods stay because they are the only way to pass an `epsilon=`.
+    //
+    // Python reflects an ordering comparison on its own (`2.0 < ind` retries as
+    // `ind.__gt__(2.0)` once `float.__lt__` declines), so the four here also
+    // cover a scalar on the left with no `__r*__` twins.
+    //
+    // `__eq__`/`__ne__` are deliberately **absent**. Returning a `Signal` from
+    // them would make an `Indicator` unhashable and silently break `in`, `dict`
+    // and `set` — so `==` stays Python's identity comparison and the elementwise
+    // form is [`eq`](Self::eq) / [`ne`](Self::ne) only. That asymmetry is the
+    // price of staying a well-behaved Python object; it is called out in the
+    // class docstring.
+    /// `self > other`, elementwise, at the default tolerance — the operator form
+    /// of [`gt`](Self::gt).
+    pub(crate) fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        self.gt(other, None)
+    }
+    /// `self < other`, elementwise, at the default tolerance — the operator form
+    /// of [`lt`](Self::lt).
+    pub(crate) fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        self.lt(other, None)
+    }
+    /// `self >= other`, elementwise, at the default tolerance — the operator
+    /// form of [`ge`](Self::ge).
+    pub(crate) fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        self.ge(other, None)
+    }
+    /// `self <= other`, elementwise, at the default tolerance — the operator
+    /// form of [`le`](Self::le).
+    pub(crate) fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        self.le(other, None)
+    }
+
+    /// Identity hash — the default an object without `__eq__` would have had.
+    ///
+    /// **Not redundant.** Defining the four orderings above fills `tp_richcompare`,
+    /// and CPython nulls `tp_hash` for any type that has the one and not the
+    /// other — so without this line adding `>` would silently make every
+    /// `Indicator` unhashable and break `set`/`dict` use that worked before.
+    /// `__eq__` is still Python's identity comparison, so hashing by address
+    /// keeps the hash/eq contract exactly as it was.
+    pub(crate) fn __hash__(&self) -> u64 {
+        std::ptr::from_ref(self) as u64
+    }
+
     // --- lookback / rolling -> Indicator --------------------------------------
     /// `self` delayed by `period` steps.
     pub(crate) fn lag(&self, period: usize) -> PyIndicator {
@@ -1348,7 +1576,7 @@ impl PyIndicator {
 
 /// A boolean signal. Combine signals with `&` / `|` / `^` / `~` (or the named
 /// `and_` / `or_` / `xor_` / `not_` / `changed` methods).
-#[pyclass(name = "Signal")]
+#[pyclass(name = "Signal", module = "fugazi")]
 pub(crate) struct PySignal {
     pub(crate) sig: AnySignal,
 }
@@ -1489,7 +1717,7 @@ impl PySignal {
 /// compare it (against another `StrSource` or a Python `str`). All string
 /// sources are atom-rooted: `get_str()` reads an overlay slot, and
 /// `value_str()`'s constant ignores its input.
-#[pyclass(name = "StrSource")]
+#[pyclass(name = "StrSource", module = "fugazi")]
 pub(crate) struct PyStrSource {
     pub(crate) src: AnyStrSource,
 }
@@ -1598,7 +1826,7 @@ pub(crate) fn coerce_str_operand(other: &Bound<'_, PyAny>) -> PyResult<AnyStrSou
 /// A multi-output indicator (MACD, Bollinger, ADX, …). `update`/`value`
 /// return a dict of the named output lines. Terminal: it cannot be used as a
 /// source for further composition.
-#[pyclass(name = "MultiIndicator")]
+#[pyclass(name = "MultiIndicator", module = "fugazi")]
 pub(crate) struct PyMulti {
     pub(crate) inner: AnyMulti,
 }
@@ -1767,7 +1995,7 @@ impl PyMulti {
 /// returns a plain [`Indicator`](PyIndicator) — the returned handle is
 /// composable with the same operators (`gt`, `crosses_above`, `add`, …) any
 /// other `Real`-output source is.
-#[pyclass(name = "SharedMultiIndicator")]
+#[pyclass(name = "SharedMultiIndicator", module = "fugazi")]
 pub(crate) struct PySharedMulti {
     pub(crate) inner: AnySharedMulti,
 }
@@ -1844,9 +2072,135 @@ impl PySharedMulti {
         self.inner.project(name)
     }
 
+    /// `handle["signal"]` — [`component`](Self::component) by subscript.
+    ///
+    /// Worth having because this class is the one place the Rust type system
+    /// does *not* survive the boundary: Rust has a distinct type per multi, each
+    /// exposing only its own accessors, while Python has one class carrying the
+    /// union of all of them. So `bollinger(...).shared().adx()` looks fine and
+    /// fails at call time, and `names()` is the only honest source of truth.
+    /// Subscripting reads as the lookup it is, rather than as a method that
+    /// might have been checked.
+    pub(crate) fn __getitem__(&self, name: &str) -> PyResult<PyIndicator> {
+        self.inner.project(name)
+    }
+
+    /// The number of output lines — `len(handle)` == `len(handle.names())`.
+    pub(crate) fn __len__(&self) -> usize {
+        self.inner.names().len()
+    }
+
+    /// Iterate the field names, so `for line in handle` and `list(handle)`
+    /// match [`names`](Self::names).
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        iter_over(py, self.names())
+    }
+
+    /// `"signal" in handle` — whether this particular multi has that line.
+    pub(crate) fn __contains__(&self, name: &str) -> bool {
+        self.inner.names().contains(&name)
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         let names = self.inner.names();
         format!("SharedMultiIndicator(fields={names:?})")
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Unpickling entry points
+//
+// `__reduce__` names a callable, and pickle stores that callable by
+// `module.qualname` — so anything a `__reduce__` points at has to be a real,
+// importable module member. These are that, for the two types whose public
+// constructor cannot express their full state: `Schema` has no `__new__` at all
+// (a `SchemaBuilder` produces it), and `Snapshot(mapping)` would collapse two
+// entries sharing one tag.
+//
+// Underscore-prefixed because they are a serialization detail, not surface —
+// but public members all the same, since pickle has to be able to find them.
+// ---------------------------------------------------------------------------
+
+/// Rebuild a [`Schema`](PySchema) by replaying its columns through a
+/// `SchemaBuilder`. `types` are the strings [`PySchema::type_of`] returns.
+#[pyfunction]
+pub(crate) fn _rebuild_schema(keys: Vec<String>, types: Vec<String>) -> PyResult<PySchema> {
+    if keys.len() != types.len() {
+        return Err(PyValueError::new_err(
+            "_rebuild_schema: keys and types must be the same length",
+        ));
+    }
+    let mut builder = PySchemaBuilder::new();
+    for (key, ty) in keys.iter().zip(&types) {
+        match ty.as_str() {
+            "real" => builder.add_real(key)?,
+            "bool" => builder.add_bool(key)?,
+            "str" => builder.add_str(key)?,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "_rebuild_schema: unknown column type {other:?} (expected real/bool/str)"
+                )));
+            }
+        };
+    }
+    builder.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Interruptible drives
+// ---------------------------------------------------------------------------
+
+/// How many samples pass between signal polls.
+///
+/// `check_signals` is not free (it re-enters the interpreter to run pending
+/// handlers), and a backtest's inner loop is 1-13 ns/bar — polling every bar
+/// would be visible. At 4096 the amortised cost is far below measurement noise
+/// and the worst-case latency between Ctrl-C and the run stopping is well under
+/// a millisecond on any series big enough to want interrupting.
+const SIGNAL_CHECK_STRIDE: usize = 4096;
+
+/// Wrap a snapshot/sample iterator so a pending `KeyboardInterrupt` ends the
+/// drive.
+///
+/// `backtest::drive` takes an `IntoIterator`, which is the only seam the Python
+/// side needs: this yields the same items and polls Python's signal handlers
+/// every [`SIGNAL_CHECK_STRIDE`] of them. On a pending signal it parks the error
+/// in `interrupt` and reports exhaustion, so the drive returns normally and the
+/// caller re-raises — `Iterator::next` has nowhere to put an error, and this
+/// keeps the core loop free of any Python awareness.
+///
+/// Without it a long `run()` was **uninterruptible**: the GIL is held for the
+/// whole call and nothing ever polls, so Ctrl-C in a notebook did nothing until
+/// the run finished on its own.
+pub(crate) fn interruptible<'py, T>(
+    py: Python<'py>,
+    items: impl IntoIterator<Item = T> + 'py,
+    interrupt: &'py std::cell::Cell<Option<PyErr>>,
+) -> impl Iterator<Item = T> + 'py {
+    let mut seen = 0usize;
+    items.into_iter().map_while(move |item| {
+        if seen.is_multiple_of(SIGNAL_CHECK_STRIDE)
+            && let Err(e) = py.check_signals()
+        {
+            interrupt.set(Some(e));
+            return None;
+        }
+        seen += 1;
+        Some(item)
+    })
+}
+
+/// Re-raise whatever [`interruptible`] parked, if anything.
+///
+/// Call immediately after a drive that used it: a stopped run's partial report
+/// is meaningless, so the error wins over the value.
+pub(crate) fn raise_if_interrupted<T>(
+    interrupt: &std::cell::Cell<Option<PyErr>>,
+    value: T,
+) -> PyResult<T> {
+    match interrupt.take() {
+        Some(e) => Err(e),
+        None => Ok(value),
+    }
+}

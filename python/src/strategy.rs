@@ -13,6 +13,9 @@ use crate::sources::*;
 use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::spec::*;
+// Aliased: the prelude glob already binds `fugazi_core::wallet::WalletError`,
+// which `wrap_ack` names in its signature. This is the Python exception type.
+use crate::errors::WalletError as PyWalletError;
 
 // ---------------------------------------------------------------------------
 // Wallet-preparation seam — the one place the "external positions" concern lives.
@@ -75,13 +78,17 @@ macro_rules! over_any_wallet {
             cell.borrow_mut()
                 .inner
                 .refresh_account()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                // Fully qualified: this macro also expands inside `spec.rs`,
+                // which has no `PyWalletError` alias in scope.
+                .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
             over_prepared_wallet!(cell, OkxWallet::demo("", "", ""), $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyCoinbaseWallet>() {
             cell.borrow_mut()
                 .inner
                 .refresh_account()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                // Fully qualified: this macro also expands inside `spec.rs`,
+                // which has no `PyWalletError` alias in scope.
+                .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
             over_prepared_wallet!(cell, CoinbaseWallet::placeholder(), $seed, $w => $body)
         } else {
             Err(PyTypeError::new_err(
@@ -97,8 +104,16 @@ macro_rules! run_over_wallet {
     ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {
         over_any_wallet!($wallet, $py, $seed, wallet => {
             let mut strat = $strat;
-            let report = fugazi_core::backtest::run(&mut strat, wallet, $snaps);
-            Ok(PyRunReport { inner: report })
+            // Feed the snapshots through `interruptible` so Ctrl-C ends the run.
+            // The core loop stays Python-unaware: it just gets an iterator that
+            // reports exhaustion early, and the parked error is re-raised here.
+            let interrupt = std::cell::Cell::new(None);
+            let report = fugazi_core::backtest::run(
+                &mut strat,
+                wallet,
+                crate::classes::interruptible($py, $snaps, &interrupt),
+            );
+            crate::classes::raise_if_interrupted(&interrupt, PyRunReport { inner: report })
         })
     };
 }
@@ -113,7 +128,7 @@ macro_rules! run_over_wallet {
 // ---------------------------------------------------------------------------
 
 /// How much to trade: a bare number is units, or use the relative constructors.
-#[pyclass(name = "Size", frozen, from_py_object)]
+#[pyclass(name = "Size", module = "fugazi", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PySize {
     pub(crate) inner: Size,
@@ -150,6 +165,46 @@ impl PySize {
             inner: Size::PositionFraction(fraction),
         }
     }
+
+    /// Which of the four constructors made this — `"units"`, `"funds_frac"`,
+    /// `"value_frac"` or `"position_frac"`.
+    ///
+    /// A `Size` was write-only before: four static constructors in, and no way
+    /// to ask an existing one what it meant. `kind` + `value` close that, and
+    /// are what `__reduce__` reconstructs from.
+    #[getter]
+    pub(crate) fn kind(&self) -> &'static str {
+        match self.inner {
+            Size::Units(_) => "units",
+            Size::FundsFraction(_) => "funds_frac",
+            Size::ValueFraction(_) => "value_frac",
+            Size::PositionFraction(_) => "position_frac",
+        }
+    }
+
+    /// The number the constructor was handed — a unit count for `"units"`, a
+    /// fraction otherwise.
+    #[getter]
+    pub(crate) fn value(&self) -> f64 {
+        match self.inner {
+            Size::Units(v)
+            | Size::FundsFraction(v)
+            | Size::ValueFraction(v)
+            | Size::PositionFraction(v) => v,
+        }
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(
+            py,
+            py.import("fugazi")?.getattr("_rebuild_size")?,
+            (self.kind(), self.value()),
+        )
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!("Size.{}({})", self.kind(), self.value())
+    }
 }
 
 /// A filled order: `symbol`, `side` ("buy"/"sell"), and a positive `units`.
@@ -167,7 +222,7 @@ impl PySize {
 ///
 /// Only `symbol`, `side`, `units` and `price` are required; `kind` defaults to
 /// `"market"`, and `id` / `commission` to `0`.
-#[pyclass(name = "Order", frozen, skip_from_py_object)]
+#[pyclass(name = "Order", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyOrder {
     pub(crate) inner: Order<Symbol>,
@@ -177,7 +232,7 @@ pub(crate) struct PyOrder {
 impl PyOrder {
     /// A `side` order for `units` units of `symbol`, filled at `price`.
     #[new]
-    #[pyo3(signature = (symbol, side, units, price, kind = "market", id = 0, commission = 0.0))]
+    #[pyo3(signature = (symbol, side, units, price, *, kind = "market", id = 0, commission = 0.0))]
     pub(crate) fn new(
         symbol: String,
         side: &str,
@@ -236,6 +291,22 @@ impl PyOrder {
         self.inner.commission
     }
     /// `+units` for a buy, `-units` for a sell.
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(
+            py,
+            py.import("fugazi")?.getattr("_rebuild_order")?,
+            (
+                self.symbol(),
+                self.side(),
+                self.units(),
+                self.price(),
+                self.kind(),
+                self.id(),
+                self.commission(),
+            ),
+        )
+    }
+
     #[getter]
     pub(crate) fn signed_units(&self) -> f64 {
         self.inner.signed_units()
@@ -279,7 +350,7 @@ impl PyOrder {
 /// the wallet triggers and prices itself — filling at the level, or the bar's
 /// `open` on a gap — and `cancel_protective(symbol)` drops both legs. Each `Order`
 /// carries a `kind` of `"market"`, `"stop"`, or `"take_profit"`.
-#[pyclass(name = "PaperWallet")]
+#[pyclass(name = "PaperWallet", module = "fugazi")]
 pub(crate) struct PyWallet {
     pub(crate) inner: PaperWallet<Symbol>,
 }
@@ -415,7 +486,7 @@ impl PyWallet {
         let resolved = config.resolve(symbol, freq);
         self.inner
             .set_costs_for(intern(symbol), resolved)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
 
     /// Restore the wallet to its freshly-constructed state — the seed funds it
@@ -524,7 +595,7 @@ impl PyWallet {
     pub(crate) fn adjust_funds(&mut self, delta: f64) -> PyResult<()> {
         self.inner
             .adjust_funds(delta)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
 
 
@@ -607,7 +678,7 @@ impl PyWallet {
 /// It owns a private async runtime and blocks on each request, so it must be
 /// driven from synchronous Python. The higher-level `Strategy.run(...)` builders
 /// take a `PaperWallet`; an `OkxWallet` is driven manually, one bar at a time.
-#[pyclass(name = "OkxWallet")]
+#[pyclass(name = "OkxWallet", module = "fugazi")]
 pub(crate) struct PyOkxWallet {
     pub(crate) inner: OkxWallet,
 }
@@ -694,7 +765,7 @@ impl PyOkxWallet {
     pub(crate) fn refresh_account(&mut self) -> PyResult<()> {
         self.inner
             .refresh_account()
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
 
     /// The live errors this wallet has recorded, in order — every REST failure
@@ -853,7 +924,7 @@ impl PyOkxWallet {
 ///
 /// It owns a private async runtime and blocks on each request, so it must be
 /// driven from synchronous Python, one bar at a time.
-#[pyclass(name = "CoinbaseWallet")]
+#[pyclass(name = "CoinbaseWallet", module = "fugazi")]
 pub(crate) struct PyCoinbaseWallet {
     pub(crate) inner: CoinbaseWallet,
 }
@@ -873,7 +944,7 @@ impl PyCoinbaseWallet {
         quote_ccy: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = CoinbaseWallet::mainnet(key_name, &private_key_pem)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(|e| PyWalletError::new_err(e.to_string()))?;
         if let Some(ccy) = quote_ccy {
             inner = inner.with_quote_ccy(ccy);
         }
@@ -928,7 +999,7 @@ impl PyCoinbaseWallet {
     pub(crate) fn refresh_account(&mut self) -> PyResult<()> {
         self.inner
             .refresh_account()
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
 
     /// The live errors this wallet has recorded, in order — every REST failure
@@ -1072,7 +1143,7 @@ pub(crate) fn wrap_ack(result: Result<Ack<Symbol>, WalletError>) -> PyResult<Opt
     match result {
         Ok(Ack::Filled(inner)) => Ok(Some(PyOrder { inner })),
         Ok(Ack::Working(_)) => Ok(None),
-        Err(error) => Err(PyValueError::new_err(error.to_string())),
+        Err(error) => Err(PyWalletError::new_err(error.to_string())),
     }
 }
 
@@ -1314,7 +1385,7 @@ impl PresetSpec {
 /// strategy carries its catalogue recipe; builder methods (`long_on`,
 /// `short_on`, `position_sizing`) raise `ValueError` on it — build from
 /// scratch or use the preset as-is.
-#[pyclass(name = "Strategy", skip_from_py_object)]
+#[pyclass(name = "Strategy", module = "fugazi", skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyStrategy {
     /// Interned once at construction, so the per-bar `Snapshot::single` in
@@ -1422,7 +1493,7 @@ impl PyStrategy {
     ) -> PyResult<PyRunReport> {
         let snaps = single_snapshots_from_frame(candles, &self.symbol)?;
 
-        run_over_wallet!(wallet, _py, snaps, seed => self.materialize(seed))
+        run_over_wallet!(wallet, py, snaps, seed => self.materialize(seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1505,7 +1576,7 @@ impl PyStrategy {
 /// level, since that is its adverse direction. Mirrors
 /// `fugazi::strategies::PairsStrategy`. Signals and levels are snapshot-rooted
 /// (built from `pick(...)` sources); `run` consumes a sequence of snapshots.
-#[pyclass(name = "PairsStrategy", skip_from_py_object)]
+#[pyclass(name = "PairsStrategy", module = "fugazi", skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyPairsStrategy {
     pub(crate) left: String,
@@ -1648,7 +1719,7 @@ impl PyPairsStrategy {
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        run_over_wallet!(wallet, _py, snaps, seed => self.materialize(seed))
+        run_over_wallet!(wallet, py, snaps, seed => self.materialize(seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1714,7 +1785,7 @@ pub(crate) struct DeclaredUniverse {
 /// `sym -> Signal` (built once per symbol on first sight, its leaves rooted on
 /// that symbol via `pick(...)`); sizing is `sym -> Indicator`. Position-anchored
 /// protective levels are not exposed (they require a per-leg `Position`).
-#[pyclass(name = "MultiAssetStrategy", skip_from_py_object)]
+#[pyclass(name = "MultiAssetStrategy", module = "fugazi", skip_from_py_object)]
 pub(crate) struct PyMultiAssetStrategy {
     pub(crate) long_enter: Option<Py<PyAny>>,
     pub(crate) long_exit: Option<Py<PyAny>>,
@@ -2015,7 +2086,7 @@ pub(crate) fn quantile(long_q: Real, short_q: Real, of: Option<PySelection>) -> 
 /// (e.g. `strat.top_bottom(2, 2, of=ta.threshold(0.5, -0.5))`, or the general
 /// `strat.selection(...)` seam). The `.selection(closure)` escape hatch and
 /// per-leg protective levels are not exposed.
-#[pyclass(name = "BasketStrategy", skip_from_py_object)]
+#[pyclass(name = "BasketStrategy", module = "fugazi", skip_from_py_object)]
 pub(crate) struct PyBasketStrategy {
     pub(crate) score: Option<Py<PyAny>>,
     pub(crate) sizing: Option<Py<PyAny>>,
@@ -2544,7 +2615,7 @@ pub(crate) fn build_preset_or_bare(
 /// non-empty `RunReport.rejections` means the run did not trade the way the
 /// strategy intended, so the metrics describe something other than what was
 /// specified.
-#[pyclass(name = "Rejected", frozen)]
+#[pyclass(name = "Rejected", module = "fugazi", frozen)]
 pub(crate) struct PyRejected {
     pub(crate) inner: Rejected<Symbol>,
 }
@@ -2612,7 +2683,7 @@ impl PyRejected {
 /// Pass `fills` too (see [`Order`](PyOrder)) to get the trade-statistics section
 /// populated; without them `trades.*` reads as a run that never traded, and
 /// `rejections` is always empty on a hand-built report.
-#[pyclass(name = "RunReport", frozen)]
+#[pyclass(name = "RunReport", module = "fugazi", frozen)]
 pub(crate) struct PyRunReport {
     pub(crate) inner: RunReport<Symbol>,
 }
@@ -2626,7 +2697,7 @@ impl PyRunReport {
     /// name. A hand-built report leaves it `None` unless you are reconstructing
     /// one that was.
     #[new]
-    #[pyo3(signature = (equity_curve, initial_equity, fills = None, ruin_bar = None))]
+    #[pyo3(signature = (equity_curve, initial_equity, *, fills = None, ruin_bar = None))]
     pub(crate) fn new(
         equity_curve: Vec<f64>,
         initial_equity: f64,
@@ -2651,13 +2722,44 @@ impl PyRunReport {
         }
     }
 
-    /// One marked-to-market equity value per input bar.
+    /// One marked-to-market equity value per input bar, as a `list[float]`.
+    ///
+    /// **Rebuilt on every access** — it is a property, so it looks free, and on a
+    /// million-bar run each read allocates a million-element list. Bind it once
+    /// (`curve = report.equity_curve`) rather than touching it in a loop, or use
+    /// [`equity_array`](Self::equity_array), which skips the list entirely.
+    ///
+    /// Stays a `list` rather than becoming an `ndarray`: `+` concatenates two
+    /// lists and *adds* two arrays, and chunked-run examples in the docs rely on
+    /// the former. `equity_array` is the opt-in.
     #[getter]
     pub(crate) fn equity_curve(&self) -> Vec<f64> {
         self.inner.equity_curve.clone()
     }
 
+    /// The same curve as a NumPy `float64` `ndarray`.
+    ///
+    /// Written straight into the array's buffer, so it costs one allocation and
+    /// no per-element Python `float` — unlike `equity_curve`, which boxes every
+    /// value. It is also the form the metrics want: `Series` takes a fast
+    /// `memcpy` path out of a contiguous buffer and falls back to
+    /// element-by-element extraction for a `list`, so
+    /// `per_bar_returns(report.equity_array, report.initial_equity)` avoids both
+    /// costs.
+    ///
+    /// Raises `ImportError` if NumPy isn't installed — the wheel has no required
+    /// dependencies, so `equity_curve` remains the one that always works.
+    #[getter]
+    pub(crate) fn equity_array<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let curve = &self.inner.equity_curve;
+        crate::constructors::numpy_filled(py, curve.len(), |out| out.copy_from_slice(curve))
+    }
+
     /// Every booked fill (a [`Fill`](PyFill)), in fill order.
+    ///
+    /// Rebuilt on every access, and more expensively than
+    /// [`equity_curve`](Self::equity_curve) — one fresh `Fill` *object* per
+    /// entry, not one float. Bind it once.
     #[getter]
     pub(crate) fn fills(&self) -> Vec<PyFill> {
         self.inner
@@ -2670,6 +2772,8 @@ impl PyRunReport {
 
     /// Every refused order (a [`Rejected`](PyRejected)), in refusal order. Empty
     /// on a clean run — check it before trusting the metrics.
+    ///
+    /// Rebuilt on every access; see [`fills`](Self::fills).
     #[getter]
     pub(crate) fn rejections(&self) -> Vec<PyRejected> {
         self.inner
@@ -2693,10 +2797,35 @@ impl PyRunReport {
     /// On that bar the book is liquidated and nothing trades afterwards, and
     /// the equity curve is pinned at `0.0` from there to the end. So a report
     /// with a `ruin_bar` reduces to exactly `-100%` total return and a `100%`
-    /// max drawdown, and `metrics["run.ruin_bar"]` carries the same index.
+    /// max drawdown, and `metrics["run"]["ruin_bar"]` carries the same index.
+    ///
+    /// Note the **nested** spelling. `run.ruin_bar` is the *flat* key — what
+    /// `metrics::flatten`, the CSV columns and the CLI use; the Python metrics
+    /// document is a nested `dict`, and the key is absent entirely on a solvent
+    /// run rather than present as `None`.
     #[getter]
     pub(crate) fn ruin_bar(&self) -> Option<usize> {
         self.inner.ruin_bar
+    }
+
+    /// Rebuild through [`_rebuild_run_report`].
+    ///
+    /// **Lossy in one place, deliberately:** `rejections` do not survive. A
+    /// `Rejected` carries a live `WalletError`, which only a wallet can raise
+    /// and `RunReport.__new__` therefore cannot accept — the same reason a
+    /// hand-built report is documented as a clean one. Every other field round
+    /// trips exactly, and `metrics` reads none of the dropped one.
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(
+            py,
+            py.import("fugazi")?.getattr("_rebuild_run_report")?,
+            (
+                self.equity_curve(),
+                self.initial_equity(),
+                self.fills(),
+                self.ruin_bar(),
+            ),
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -2735,7 +2864,7 @@ impl PyRunReport {
 /// Because children share a book, opposing flow between them crosses
 /// internally (and pays no costs), and a child's stop takes off only its own
 /// share. See the Rust `fugazi::portfolio` docs for the full set.
-#[pyclass(name = "Portfolio")]
+#[pyclass(name = "Portfolio", module = "fugazi")]
 #[derive(Default)]
 pub(crate) struct PyPortfolio {
     children: Vec<(String, Py<PyAny>)>,
@@ -2923,4 +3052,137 @@ impl PyPortfolio {
         }
         Ok(builder.build())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unpickling entry points — see the note in `classes.rs`.
+//
+// These three exist because their public constructors take keyword-only
+// arguments (`Order`'s `kind`/`id`/`commission`, `RunReport`'s `fills`/
+// `ruin_bar`) or none at all (`Size`, which is built by four static methods).
+// `__reduce__` can only hand pickle a positional tuple, so it hands it one of
+// these instead of the class.
+// ---------------------------------------------------------------------------
+
+/// Rebuild a [`Size`](PySize) from `kind` + `value` — the inverse of the
+/// getters of the same names.
+#[pyfunction]
+pub(crate) fn _rebuild_size(kind: &str, value: f64) -> PyResult<PySize> {
+    match kind {
+        "units" => Ok(PySize::units(value)),
+        "funds_frac" => Ok(PySize::funds_frac(value)),
+        "value_frac" => Ok(PySize::value_frac(value)),
+        "position_frac" => Ok(PySize::position_frac(value)),
+        other => Err(PyValueError::new_err(format!(
+            "_rebuild_size: unknown kind {other:?}"
+        ))),
+    }
+}
+
+/// Rebuild an [`Order`](PyOrder) with every field positional.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn _rebuild_order(
+    symbol: String,
+    side: &str,
+    units: f64,
+    price: f64,
+    kind: &str,
+    id: u64,
+    commission: f64,
+) -> PyResult<PyOrder> {
+    PyOrder::new(symbol, side, units, price, kind, id, commission)
+}
+
+/// Rebuild a [`RunReport`](PyRunReport) with every field positional.
+#[pyfunction]
+pub(crate) fn _rebuild_run_report(
+    equity_curve: Vec<f64>,
+    initial_equity: f64,
+    fills: Option<Vec<PyFill>>,
+    ruin_bar: Option<usize>,
+) -> PyRunReport {
+    PyRunReport::new(equity_curve, initial_equity, fills, ruin_bar)
+}
+
+// ---------------------------------------------------------------------------
+// `fugazi.Wallet` — the classification the three concrete wallets lacked
+// ---------------------------------------------------------------------------
+
+/// The methods every wallet answers, whatever it is trading against.
+///
+/// Mirrors the Rust `Wallet` trait's core, minus the paper-only conveniences
+/// (`orders`, `reset`, `set_costs_for`, `retention`, `adjust_funds`) that a live
+/// venue documents as unbound — see the per-wallet ledgers in
+/// `python/tests/test_parity.py`.
+const WALLET_SURFACE: &[&str] = &[
+    "position",
+    "price",
+    "equity",
+    "funds",
+    "can_short",
+    "quote_ccy",
+    "update",
+    "set",
+    "set_position",
+    "close",
+    "set_stop",
+    "set_take_profit",
+    "set_limit",
+    "cancel",
+    "cancel_limit",
+    "cancel_protective",
+    "poll_fills",
+];
+
+/// Register `fugazi.Wallet`: an [`abc.ABCMeta`] class with the three concrete
+/// wallets recorded as virtual subclasses.
+///
+/// Rust has a `Wallet` trait; Python had three unrelated classes reimplementing
+/// the same twenty methods, so there was no `isinstance(w, Wallet)`, no way to
+/// annotate "any wallet", and `test_parity.py` carried three near-identical
+/// surface tests to compensate.
+///
+/// `register()` rather than real inheritance on purpose. Making the three
+/// `#[pyclass(extends = ...)]` would put a shared base in the MRO for no gain —
+/// there is no shared *implementation* to inherit, each one bridges a different
+/// Rust type — while `register` gives `isinstance` and `issubclass` exactly what
+/// they should say and touches none of them.
+///
+/// **Not an extension point.** Subclassing this in Python produces something
+/// `Strategy.run` will refuse: the wallet argument resolves to one of the three
+/// concrete pyclasses (see `over_any_wallet!`) because the run is generic over
+/// the Rust trait and monomorphises per arm. Hence no `@abstractmethod`s — they
+/// would advertise a contract that implementing gets you nothing. This is a
+/// classification, and `WALLET_SURFACE` is the doc of what it classifies.
+pub(crate) fn register_wallet_protocol(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let namespace = PyDict::new(py);
+    namespace.set_item("__module__", "fugazi")?;
+    namespace.set_item(
+        "__doc__",
+        format!(
+            "Anything `Strategy.run` / `StrategySpec.run` will trade into.\n\n\
+             `PaperWallet`, `OkxWallet` and `CoinbaseWallet` are registered as \
+             virtual subclasses, so `isinstance(w, fugazi.Wallet)` is the way to \
+             ask. Mirrors the Rust `Wallet` trait.\n\n\
+             Common surface: {}.\n\n\
+             This is a classification, not a base class to extend: a Python \
+             subclass is not one of the three concrete wallets and `run` will \
+             refuse it.",
+            WALLET_SURFACE.join(", ")
+        ),
+    )?;
+    let wallet = py
+        .import("abc")?
+        .getattr("ABCMeta")?
+        .call1(("Wallet", pyo3::types::PyTuple::empty(py), namespace))?;
+    for ty in [
+        py.get_type::<PyWallet>(),
+        py.get_type::<PyOkxWallet>(),
+        py.get_type::<PyCoinbaseWallet>(),
+    ] {
+        wallet.call_method1("register", (ty,))?;
+    }
+    m.add("Wallet", wallet)
 }

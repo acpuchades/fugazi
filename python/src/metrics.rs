@@ -36,7 +36,7 @@ use crate::spec::*;
 ///     for order in wallet.update("BTC", candle):
 ///         fills.append(fugazi.Fill(bar=i, order=order))
 /// ```
-#[pyclass(name = "Fill", frozen, from_py_object)]
+#[pyclass(name = "Fill", module = "fugazi", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyFill {
     pub(crate) inner: Fill<Symbol>,
@@ -68,6 +68,10 @@ impl PyFill {
         }
     }
 
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(py, py.get_type::<PyFill>(), (self.bar(), self.order()))
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "Fill(bar={}, order=Order(symbol='{}', side='{}', units={}, price={}, kind='{}'))",
@@ -84,7 +88,7 @@ impl PyFill {
 /// A closed round-trip trade reconstructed from the fill blotter by
 /// [`reconstruct_trades`](core_metrics::reconstruct_trades). Frozen; all fields
 /// are read-only.
-#[pyclass(name = "Trade", frozen, from_py_object)]
+#[pyclass(name = "Trade", module = "fugazi.metrics", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyTrade {
     pub(crate) inner: Trade,
@@ -138,6 +142,23 @@ impl PyTrade {
         self.inner.bars_held()
     }
 
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(
+            py,
+            py.import("fugazi.metrics")?.getattr("_rebuild_trade")?,
+            (
+                self.entry_bar(),
+                self.exit_bar(),
+                self.side(),
+                self.units(),
+                self.entry_price(),
+                self.exit_price(),
+                self.pnl(),
+                self.return_ratio(),
+            ),
+        )
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "Trade(entry_bar={}, exit_bar={}, side='{}', units={}, entry_price={}, \
@@ -157,7 +178,7 @@ impl PyTrade {
 /// One drawdown segment: a peak → trough → recovery-or-end stretch where the
 /// equity curve was below a prior peak. Built by
 /// [`drawdown_segments`](core_metrics::drawdown_segments). Frozen.
-#[pyclass(name = "DrawdownSegment", frozen, from_py_object)]
+#[pyclass(name = "DrawdownSegment", module = "fugazi.metrics", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyDrawdownSegment {
     pub(crate) inner: DrawdownSegment,
@@ -189,6 +210,20 @@ impl PyDrawdownSegment {
     #[getter]
     pub(crate) fn underwater_bars(&self) -> usize {
         self.inner.underwater_bars
+    }
+
+    pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::reduce_with(
+            py,
+            py.import("fugazi.metrics")?.getattr("_rebuild_drawdown_segment")?,
+            (
+                self.peak_bar(),
+                self.trough_bar(),
+                self.depth_ratio(),
+                self.duration_bars(),
+                self.underwater_bars(),
+            ),
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -685,6 +720,62 @@ pub(crate) fn exposure_ratio(fills: Vec<PyFill>, total_bars: usize) -> Real {
     core_metrics::exposure_ratio(&native, total_bars)
 }
 
+// ---------------------------------------------------------------------------
+// Unpickling entry points — see the note in `classes.rs`.
+//
+// `Trade` and `DrawdownSegment` are pure results: the library computes them and
+// Python has no constructor for either. These give pickle something importable
+// to call, without opening a public constructor for a type nobody should be
+// hand-building.
+// ---------------------------------------------------------------------------
+
+/// Rebuild a [`Trade`](PyTrade) from its eight fields.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn _rebuild_trade(
+    entry_bar: usize,
+    exit_bar: usize,
+    side: &str,
+    units: f64,
+    entry_price: f64,
+    exit_price: f64,
+    pnl: f64,
+    return_ratio: f64,
+) -> PyResult<PyTrade> {
+    Ok(PyTrade {
+        inner: Trade {
+            entry_bar,
+            exit_bar,
+            side: parse_side(side)?,
+            units,
+            entry_price,
+            exit_price,
+            pnl,
+            return_ratio,
+        },
+    })
+}
+
+/// Rebuild a [`DrawdownSegment`](PyDrawdownSegment) from its five fields.
+#[pyfunction]
+pub(crate) fn _rebuild_drawdown_segment(
+    peak_bar: usize,
+    trough_bar: usize,
+    depth_ratio: f64,
+    duration_bars: usize,
+    underwater_bars: usize,
+) -> PyDrawdownSegment {
+    PyDrawdownSegment {
+        inner: DrawdownSegment {
+            peak_bar,
+            trough_bar,
+            depth_ratio,
+            duration_bars,
+            underwater_bars,
+        },
+    }
+}
+
 /// Register every metric function on the `fugazi.metrics` submodule.
 pub(crate) fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Mirrors the *Closed system* note on the Rust `metrics` module — the one
@@ -713,6 +804,8 @@ pub(crate) fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
     }
     reg!(
+        _rebuild_trade,
+        _rebuild_drawdown_segment,
         per_bar_returns,
         reconstruct_trades,
         drawdown_segments,

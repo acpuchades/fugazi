@@ -13,6 +13,10 @@ use crate::constructors::*;
 use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
+// See `errors.rs`: a document that will not load or build is a `SpecError`,
+// which subclasses `ValueError`. Argument validation of this module's own
+// kwargs (`grid=`, `smooth=`, `windowed=`) stays a bare `ValueError`.
+use crate::errors::SpecError;
 
 // ---------------------------------------------------------------------------
 // Spec-driven surface: YAML strategies, evaluate, optimize.
@@ -171,12 +175,12 @@ pub(crate) struct PyCostConfig {
 impl PyCostConfig {
     pub(crate) fn build(&self) -> PyResult<CostConfig> {
         serde_json::from_value(self.tree.clone())
-            .map_err(|e| PyValueError::new_err(format!("invalid TradingCostsConfig: {e}")))
+            .map_err(|e| SpecError::new_err(format!("invalid TradingCostsConfig: {e}")))
     }
 
     pub(crate) fn build_view(tree: &JsonValue) -> PyResult<CostConfig> {
         serde_json::from_value(tree.clone())
-            .map_err(|e| PyValueError::new_err(format!("invalid TradingCostsConfig: {e}")))
+            .map_err(|e| SpecError::new_err(format!("invalid TradingCostsConfig: {e}")))
     }
 }
 
@@ -196,7 +200,11 @@ pub(crate) struct PyMonteCarloConfig {
 #[pymethods]
 impl PyMonteCarloConfig {
     #[new]
+    // Seven independent knobs with no natural order — keyword-only, so
+    // `MonteCarloConfig(1000, "iid", 10.0, 7)` can never become the spelling
+    // anyone has to keep working.
     #[pyo3(signature = (
+        *,
         permutations = 1000,
         scheme = "stationary",
         block = 10.0,
@@ -362,7 +370,7 @@ pub(crate) fn coerce_cost_config(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Cos
     let value = py_to_json(o)?;
     let normalized = normalize_cost_dict(value)?;
     serde_json::from_value(normalized)
-        .map_err(|e| PyValueError::new_err(format!("invalid `costs=` dict: {e}")))
+        .map_err(|e| SpecError::new_err(format!("invalid `costs=` dict: {e}")))
 }
 
 /// A zero-cost `CostConfig` — parsed from `{}` (deserialization sets every
@@ -421,12 +429,12 @@ pub(crate) fn load_loaded_spec(
     kind: &str,
 ) -> PyResult<CoreStrategySpec> {
     let value = fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
-        .map_err(|e| PyValueError::new_err(format!("loading strategy: {e:#}")))?;
+        .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
     let kind = if kind == "auto" { detect_kind(&value) } else { kind };
     macro_rules! parse {
         ($variant:ident, $ty:ty, $label:literal) => {{
             let s: $ty = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing {} strategy: {e}", $label)))?;
+                .map_err(|e| SpecError::new_err(format!("parsing {} strategy: {e}", $label)))?;
             Ok(CoreStrategySpec::$variant(Box::new(s)))
         }};
     }
@@ -460,6 +468,7 @@ pub(crate) struct PyStrategySpec {
 /// wallet it is handed, portfolio included: a portfolio is an ordinary
 /// `Strategy` that nets its children onto one account.
 pub(crate) fn run_spec<W: Wallet<Symbol>>(
+    py: Python<'_>,
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
@@ -470,11 +479,15 @@ pub(crate) fn run_spec<W: Wallet<Symbol>>(
     // `&mut *built` rather than `&mut built`: `run` takes `S: Strategy + ?Sized`,
     // and it is `dyn RunnableStrategy` that carries the `Strategy` supertrait,
     // not the `Box` around it.
-    Ok(fugazi_core::backtest::run(
+    //
+    // Fed through `interruptible` so Ctrl-C ends a long run; see there.
+    let interrupt = std::cell::Cell::new(None);
+    let report = fugazi_core::backtest::run(
         &mut *built,
         wallet,
-        snapshots.iter().cloned(),
-    ))
+        crate::classes::interruptible(py, snapshots.iter().cloned(), &interrupt),
+    );
+    crate::classes::raise_if_interrupted(&interrupt, report)
 }
 
 /// The resumable superset of [`run_spec`]: optionally restore `resume` state
@@ -554,15 +567,15 @@ pub(crate) fn spec_from_value(value: JsonValue, kind: &str) -> anyhow::Result<Co
     })
 }
 
-/// Map a spec-build failure to a Python `ValueError`, splitting the crate's
+/// Map a spec-build failure to a Python [`SpecError`], splitting the crate's
 /// `!tag > ` breadcrumb onto its own line so the message reads the way the
 /// CLI renders it.
 pub(crate) fn build_err(e: String) -> PyErr {
     let (trail, message) = fugazi_core::spec::diagnostics::split_trail(&e);
     if trail.is_empty() {
-        PyValueError::new_err(message.to_string())
+        SpecError::new_err(message.to_string())
     } else {
-        PyValueError::new_err(format!("{message}\n  at: {}", trail.join(" > ")))
+        SpecError::new_err(format!("{message}\n  at: {}", trail.join(" > ")))
     }
 }
 
@@ -599,7 +612,7 @@ pub(crate) fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAn
 ///
 /// Metrics assume a **closed system** — see the note on `fugazi.metrics`.
 #[pyfunction]
-#[pyo3(signature = (report, bars_per_year = 252.0, risk_free_rate = 0.0, seconds_per_bar = None))]
+#[pyo3(signature = (report, *, bars_per_year = 252.0, risk_free_rate = 0.0, seconds_per_bar = None))]
 pub(crate) fn evaluate_report(
     py: Python<'_>,
     report: &PyRunReport,
@@ -690,8 +703,8 @@ impl PyStrategySpec {
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        over_any_wallet!(wallet, _py, _seed, w => {
-            let report = run_spec(&self.inner, &snaps, w)?;
+        over_any_wallet!(wallet, py, _seed, w => {
+            let report = run_spec(py, &self.inner, &snaps, w)?;
             Ok(PyRunReport { inner: report })
         })
     }
@@ -709,7 +722,7 @@ impl PyStrategySpec {
     /// wallet the returned state's `wallet` field is `null`: the venue owns the
     /// positions and cash, so only the strategy's own state is carried and the
     /// account is re-read on resume.
-    #[pyo3(signature = (wallet, snapshots, resume = None, flatten = false))]
+    #[pyo3(signature = (wallet, snapshots, *, resume = None, flatten = false))]
     pub(crate) fn run_resumable(
         &self,
         wallet: &Bound<'_, PyAny>,
@@ -786,6 +799,8 @@ impl PyStrategySpec {
     #[pyo3(signature = (
         wallet,
         snapshots,
+        // Evaluation knobs, not data — keyword-only, as on `optimize`.
+        *,
         bars_per_year = 252.0,
         risk_free_rate = 0.0,
         seconds_per_bar = None,
@@ -805,7 +820,7 @@ impl PyStrategySpec {
     ) -> PyResult<Py<PyAny>> {
         let snaps = snapshots_from_sequence(snapshots)?;
         // Drive once for the observed report, reduce to metrics.
-        let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
+        let report = run_spec(py, &self.inner, &snaps, &mut wallet.inner)?;
         let mut metrics =
             spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar);
         if let Some(0) = windowed {
@@ -817,7 +832,7 @@ impl PyStrategySpec {
             // `CostConfig`, so the re-run null's synthetic re-drives are
             // frictionless; the observed run (and its CIs) still reflects them.
             let empty_costs: CostConfig = serde_json::from_str("{}")
-                .map_err(|e| PyValueError::new_err(format!("cost config: {e}")))?;
+                .map_err(|e| SpecError::new_err(format!("cost config: {e}")))?;
             let ctx = spec_backtest::EvalContext {
                 cash: report.initial_equity,
                 bars_per_year,
@@ -1091,7 +1106,7 @@ pub(crate) fn slot_demands(py: Python<'_>, tag: &str) -> PyResult<Py<PyAny>> {
 /// `!import` paths resolve against. Auto-detects the strategy kind unless
 /// `kind` is one of `single`/`pairs`/`basket`/`multi`/`portfolio`.
 #[pyfunction]
-#[pyo3(signature = (text, params = None, base_dir = None, kind = "auto"))]
+#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto"))]
 pub(crate) fn load_spec(
     text: &str,
     params: Option<&Bound<'_, PyAny>>,
@@ -1250,6 +1265,30 @@ impl PySweep {
         self.best_idx.map(|i| self.rows[i].clone_ref(py))
     }
 
+    /// The number of grid points evaluated — `len(sweep)` == `len(sweep.rows)`.
+    pub(crate) fn __len__(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Iterate the rows, so `for row in sweep` needs no `.rows` detour.
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::iter_over(py, self.rows(py))
+    }
+
+    /// Index or slice the rows — `sweep[0]`, `sweep[-1]`, `sweep[:10]`.
+    ///
+    /// Delegating the whole thing to the materialised `list` is what makes
+    /// slices, negative indices and the `IndexError` message come out exactly as
+    /// a caller expects, rather than three hand-rolled approximations of them.
+    pub(crate) fn __getitem__(
+        &self,
+        py: Python<'_>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let list = pyo3::types::PyList::new(py, self.rows(py))?;
+        Ok(list.as_any().get_item(index)?.unbind())
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!("Sweep(rows={}, columns={})", self.rows.len(), self.columns.len())
     }
@@ -1304,6 +1343,11 @@ pub(crate) fn build_subgrids(
 #[pyo3(signature = (
     text,
     snapshots,
+    // Everything below is configuration, not data: the order is an
+    // implementation detail and no caller means `optimize(doc, snaps, 1.0, None,
+    // None, "auto", ...)`. Keyword-only pins that down before the order becomes
+    // API by accident.
+    *,
     cash = 1.0,
     params = None,
     grid = None,
@@ -1391,9 +1435,9 @@ pub(crate) fn optimize(
     // Load and !import-splice the base value once — every grid point substitutes
     // over this same value.
     let base_value = fugazi_core::spec::input::parse_value_at(text, "(inline)")
-        .map_err(|e| PyValueError::new_err(format!("parsing strategy YAML: {e:#}")))?;
+        .map_err(|e| SpecError::new_err(format!("parsing strategy YAML: {e:#}")))?;
     let base_value = fugazi_core::spec::imports::resolve(base_value, &base)
-        .map_err(|e| PyValueError::new_err(format!("resolving imports: {e:#}")))?;
+        .map_err(|e| SpecError::new_err(format!("resolving imports: {e:#}")))?;
     // Detect the kind from the raw (pre-`!param`) base value. Kind is fixed by
     // top-level shape, not by any parameter — running `!param` here would fail
     // for grid-only names.
@@ -1477,7 +1521,7 @@ pub(crate) fn optimize(
             evaluate_row,
         )
     })
-    .map_err(|e| PyValueError::new_err(format!("optimize: {e:#}")))?;
+    .map_err(|e| SpecError::new_err(format!("optimize: {e:#}")))?;
 
     // Turn the kernel's Sweep into pyclass-facing rows. We serialize windowed
     // per-window metrics on demand only when `windowed` is set, matching the
@@ -1678,6 +1722,26 @@ impl PyWalkForwardResult {
     pub(crate) fn folds(&self, py: Python<'_>) -> Vec<Py<PyWalkForwardFold>> {
         self.folds.iter().map(|f| f.clone_ref(py)).collect()
     }
+
+    /// The number of folds — `len(result)` == `len(result.folds)`.
+    pub(crate) fn __len__(&self) -> usize {
+        self.folds.len()
+    }
+
+    /// Iterate the folds, so `for fold in result` needs no `.folds` detour.
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::iter_over(py, self.folds(py))
+    }
+
+    /// Index or slice the folds — `result[0]`, `result[-1]`, `result[:2]`.
+    pub(crate) fn __getitem__(
+        &self,
+        py: Python<'_>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let list = pyo3::types::PyList::new(py, self.folds(py))?;
+        Ok(list.as_any().get_item(index)?.unbind())
+    }
     #[getter]
     pub(crate) fn composite_equity(&self) -> Vec<Real> {
         self.composite_equity.clone()
@@ -1803,7 +1867,7 @@ pub(crate) fn run_walkforward(
                 cash,
             )
         })
-        .map_err(|e| PyValueError::new_err(format!("walkforward: {e:#}")))?;
+        .map_err(|e| SpecError::new_err(format!("walkforward: {e:#}")))?;
 
     // Convert into pyclass objects.
     let columns = result.union_columns.clone();

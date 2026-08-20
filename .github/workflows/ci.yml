@@ -165,9 +165,11 @@ jobs:
       # Mirrors the `test` extra in python/pyproject.toml. `jsonschema` and
       # `pyyaml` are load-bearing: the two schema test files `importorskip`
       # them, so leaving them out makes those files skip silently rather than
-      # fail — the schema tests then pass by not running.
+      # fail — the schema tests then pass by not running. `mypy` is the same
+      # kind of load-bearing for `test_stubs.py`, which type-checks the shipped
+      # `.pyi` files.
       - name: Install test deps
-        run: pip install pytest numpy pandas polars jsonschema pyyaml
+        run: pip install pytest numpy pandas polars jsonschema pyyaml mypy
       - name: pytest
         working-directory: python
         run: pytest

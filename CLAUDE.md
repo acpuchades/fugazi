@@ -319,6 +319,15 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
   `sources.rs` / `macros.rs`). Two tests catch the common cases; the `Wallet`
   trait and the per-tag ledger are hand-maintained (`python/tests/test_parity.py`). See the
   Python section of ARCHITECTURE.
+- **Touched the Python surface? Regenerate the stubs** — `python
+  tools/gen_python_stubs.py`, then commit `python/fugazi/*.pyi`.
+  `python/tests/test_stubs.py` regenerates and diffs, so a stale stub fails the
+  suite; a *new* binding the generator can't type fails the generator itself until
+  it's classified in `RETURNS` / `MEMBER_RETURNS` / `MEMBER_RULES`. Two rules that
+  bite silently otherwise: a new pyclass needs `module = "fugazi"` (without it it
+  reports `builtins` and cannot be pickled), and a defaulted parameter that is
+  *configuration* rather than a domain value goes after a `*` — see
+  `test_configuration_arguments_are_keyword_only`.
 
 ## Existing helpers — grep before writing new code
 

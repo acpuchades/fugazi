@@ -618,11 +618,22 @@ ta.close().rolling_max(20)   # also: rolling_min
 ...or into **signals** (booleans):
 
 ```python
-fast.gt(slow)                        # also: lt, ge, le, eq, ne
+fast > slow                          # also: < >= <=  — or the gt/lt/ge/le methods
 fast.gt(slow, epsilon=0.5)           # absolute deadband; omit for the scale-aware default
 ta.rsi(ta.close(), 14).above(70.0)   # also: below(level)
 fast.crosses_above(slow)             # also: crosses_below
+fast.eq(slow)                        # also: ne  — see the note on `==` below
 ```
+
+A number lifts to a constant on either side, so `ta.close() > 100.0` and
+`100.0 < ta.close()` both work.
+
+> **`==` is the one operator that is not elementwise.** `a == b` is Python's
+> ordinary identity comparison, so two separately-built chains over the same
+> source compare `False`. Overloading it would return a `Signal` — always truthy,
+> and unhashable — which would silently break `in`, `dict` and `set` for every
+> indicator. Use `a.eq(b)` / `a.ne(b)` instead; they take `epsilon=` too, which
+> is why the named `gt`/`lt`/`ge`/`le` twins exist alongside the operators.
 
 Signals compose with each other and update to a `bool`:
 
@@ -639,6 +650,12 @@ for anything else, the **wallet** is a market-agnostic venue you trade into with
 your own per-bar Python — no class to subclass. `PaperWallet` is the built-in,
 in-memory book (funds + positions + a trade blotter); live execution belongs in
 your own code, not here.
+
+The three concrete wallets — `PaperWallet`, `OkxWallet`, `CoinbaseWallet` — are
+registered on **`ta.Wallet`**, the mirror of Rust's `Wallet` trait, so
+`isinstance(w, ta.Wallet)` is how you ask and `w: ta.Wallet` is how you annotate.
+It is a classification, not a base class to extend: a Python subclass of it is
+not one of the three, and `run` will refuse it.
 
 ```python
 import fugazi as ta
@@ -756,11 +773,19 @@ ohlcv = {
 wallet = ta.PaperWallet(10_000.0)
 report = strat.run(wallet, ohlcv)      # a pandas/polars DataFrame or an OHLCV dict
 
-report.equity_curve                    # one marked-to-market value per bar
+report.equity_curve                    # one marked-to-market value per bar (list)
+report.equity_array                    # ...the same, as a NumPy float64 ndarray
 report.fills                           # list[Fill] — the blotter, in fill order
-rets = per_bar_returns(report.equity_curve, report.initial_equity)
+rets = per_bar_returns(report.equity_array, report.initial_equity)
 sharpe(rets, 0.0, 252.0)
 ```
+
+> Every one of those is a **property that rebuilds on access** — `equity_curve`
+> allocates a fresh list of a million floats on a million-bar run, and `fills` a
+> fresh `Fill` object per entry. Bind once (`curve = report.equity_curve`) rather
+> than reading in a loop. `equity_array` avoids the boxing entirely and is what
+> the metrics want: `Series` memcpys out of a contiguous buffer and falls back to
+> element-by-element extraction for a list.
 
 The builder mirrors Rust's `SingleAssetStrategy`: `long_on` / `short_on` (a
 missing `exit` never fires — right for an always-in reversal), `position_sizing`
@@ -1583,6 +1608,78 @@ in a live loop pays that crossing once per bar with nothing to amortise it
 against.
 
 ---
+
+## Types
+
+The wheel ships **`py.typed`** and generated stubs, so `mypy` and `pyright` see
+the whole surface — parameter names, defaults, which arguments are keyword-only,
+and what each call returns.
+
+```python
+fast: ta.Indicator = ta.ema(ta.close(), 12)
+entries: ta.Signal = fast > ta.ema(ta.close(), 26)     # `>` yields a Signal
+wallet: ta.Wallet = ta.PaperWallet(10_000.0)           # any of the three
+report: ta.RunReport = ta.Strategy("BTC").long_on(entries).run(wallet, df)
+curve: list[float] = report.equity_curve
+```
+
+...and the mistakes get caught where you make them:
+
+```text
+ta.ema(ta.close(), "twelve")   # Argument 2 to "ema" has incompatible type "str"
+ta.optimize(doc, snaps, 1.0)   # Too many positional arguments for "optimize"
+x: int = ta.sma(src, 3).value()  # expression has type "float | None"
+```
+
+`ta.Wallet` is a `Protocol` to a type checker and an `abc` with the three
+concrete wallets registered at run time, so both `w: ta.Wallet` and
+`isinstance(w, ta.Wallet)` do what you'd expect.
+
+The stubs are generated from the built module by `tools/gen_python_stubs.py`, so
+signatures cannot drift from it; `python/tests/test_stubs.py` regenerates and
+diffs on every test run, and type-checks the result. A new binding the generator
+can't classify fails that generation rather than shipping as `Any`.
+
+## Errors
+
+Everything fugazi refuses raises a subclass of **`ValueError`**, so an existing
+`except ValueError` keeps catching exactly what it caught before. The hierarchy
+only adds resolution:
+
+```text
+ValueError
+└── fugazi.FugaziError
+    ├── fugazi.SpecError     — a document that won't load or build
+    ├── fugazi.WalletError   — an order the account refused
+    └── fugazi.FetchError    — a provider that wouldn't serve the request
+```
+
+The distinction that matters in a live loop: a `SpecError` is a property of your
+strategy and will fail identically on the next bar; a `WalletError` is a property
+of the account *right now* and may well succeed on the next one.
+
+```python
+spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
+snaps = [ta.Snapshot({"BTC": c}) for c in stream]
+
+try:
+    report = spec.run(ta.PaperWallet(10_000.0), snaps)
+except ta.SpecError:
+    raise                              # the document is wrong — `at:` says where
+except ta.WalletError as e:
+    print("skipped this bar:", e)      # margin, spot-short, a venue hiccup
+except ta.FetchError as e:
+    print("retry later:", e)
+```
+
+`SpecError` messages carry the spec layer's `!tag > ` breadcrumb on an `at:` line,
+so a failure four levels down names its path.
+
+**`TypeError` is not in this tree.** Passing a `Candle` where a `float` belongs is
+an ordinary Python call error, and rehoming it under `FugaziError` would make a
+broad `except` swallow real bugs. Argument validation fugazi can answer on its own
+— `period must be greater than 0`, a malformed `since=` — stays a bare `ValueError`
+for the same reason: it isn't a spec error just because a spec might contain it.
 
 ## Documentation
 

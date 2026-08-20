@@ -13,6 +13,9 @@ use crate::constructors::*;
 use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::spec::*;
+// Not glob-imported from the prelude: `errors::WalletError` would shadow
+// `fugazi_core::wallet::WalletError`, so the exception types are named where used.
+use crate::errors::FetchError;
 
 // ---------------------------------------------------------------------------
 // Remote candle sources
@@ -39,13 +42,19 @@ pub(crate) fn sources_runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// Map a fugazi [`SourceError`] to an appropriate Python exception type.
+///
+/// Everything the *provider* decides is a [`FetchError`] — including an unknown
+/// symbol or an unpublished cadence, which look like argument errors but are
+/// only knowable once the venue has answered. Argument validation fugazi can do
+/// on its own (a malformed `since=`, an unparseable interval token) stays a bare
+/// `ValueError`, raised before any request goes out.
 pub(crate) fn source_error_to_py(e: SourceError) -> PyErr {
     match e {
-        SourceError::UnknownSymbol(msg) => PyValueError::new_err(format!("unknown symbol: {msg}")),
+        SourceError::UnknownSymbol(msg) => FetchError::new_err(format!("unknown symbol: {msg}")),
         SourceError::UnsupportedInterval(i) => {
-            PyValueError::new_err(format!("unsupported interval: {i:?}"))
+            FetchError::new_err(format!("unsupported interval: {i:?}"))
         }
-        other => PyValueError::new_err(other.to_string()),
+        other => FetchError::new_err(other.to_string()),
     }
 }
 
@@ -394,7 +403,7 @@ where
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
 /// symbols or frequencies by looping in Python.
-#[pyclass(name = "Binance", frozen)]
+#[pyclass(name = "Binance", module = "fugazi", frozen)]
 pub(crate) struct PyBinance {
     pub(crate) inner: Binance,
 }
@@ -426,7 +435,7 @@ impl PyBinance {
     /// `low`, `close`, `volume`, plus the Binance kline extras
     /// `quote_volume`, `n_trades`, `taker_buy_base_volume`,
     /// `taker_buy_quote_volume` (all f64).
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
@@ -453,7 +462,7 @@ impl PyBinance {
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
 /// symbols or frequencies by looping in Python.
-#[pyclass(name = "Okx", frozen)]
+#[pyclass(name = "Okx", module = "fugazi", frozen)]
 pub(crate) struct PyOkx {
     pub(crate) inner: Okx,
 }
@@ -486,7 +495,7 @@ impl PyOkx {
     /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
     /// `low`, `close`, `volume`, plus the OKX extras `vol_ccy` and
     /// `quote_volume` (both f64).
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
@@ -522,7 +531,7 @@ impl PyOkx {
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
 /// symbols or frequencies by looping in Python.
-#[pyclass(name = "Coinbase", frozen)]
+#[pyclass(name = "Coinbase", module = "fugazi", frozen)]
 pub(crate) struct PyCoinbase {
     pub(crate) inner: Coinbase,
 }
@@ -555,7 +564,7 @@ impl PyCoinbase {
     ///
     /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
     /// `low`, `close`, `volume`. Coinbase candles carry no overlay extras.
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
@@ -591,7 +600,7 @@ impl PyCoinbase {
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
 /// symbols or frequencies by looping in Python.
-#[pyclass(name = "Yahoo", frozen)]
+#[pyclass(name = "Yahoo", module = "fugazi", frozen)]
 pub(crate) struct PyYahoo {
     pub(crate) inner: Yahoo,
 }
@@ -607,7 +616,7 @@ impl PyYahoo {
     /// useful for local test servers; `user_agent` overrides the default
     /// `User-Agent` header Yahoo's chart endpoint requires.
     #[new]
-    #[pyo3(signature = (adjusted = true, base_url = None, user_agent = None))]
+    #[pyo3(signature = (*, adjusted = true, base_url = None, user_agent = None))]
     pub(crate) fn new(adjusted: bool, base_url: Option<String>, user_agent: Option<String>) -> Self {
         let mut inner = Yahoo::new().with_adjusted(adjusted);
         if let Some(url) = base_url {
@@ -633,7 +642,7 @@ impl PyYahoo {
     /// default `adjusted=True` the OHLCV are split/dividend-adjusted and the
     /// extra is `raw_close` (the untouched close); with `adjusted=False` the
     /// OHLCV are raw and the extra is `adj_close` (the adjusted close).
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
@@ -672,7 +681,7 @@ impl PyYahoo {
 /// days** (a wider `since` raises `ValueError`), and CoinGecko picks the
 /// sampling granularity from the window length, so sub-hourly `freq` values are
 /// rejected. Set `COINGECKO_API_KEY` (or pass `api_key=`) for a demo key.
-#[pyclass(name = "CoinGecko", frozen)]
+#[pyclass(name = "CoinGecko", module = "fugazi", frozen)]
 pub(crate) struct PyCoinGecko {
     pub(crate) inner: CoinGecko,
 }
@@ -685,7 +694,7 @@ impl PyCoinGecko {
     /// useful for local test servers; `user_agent` overrides the descriptive
     /// `User-Agent` CoinGecko requires (it rejects requests without one).
     #[new]
-    #[pyo3(signature = (api_key = None, vs_currency = None, base_url = None, user_agent = None))]
+    #[pyo3(signature = (*, api_key = None, vs_currency = None, base_url = None, user_agent = None))]
     pub(crate) fn new(
         api_key: Option<String>,
         vs_currency: Option<String>,
@@ -723,7 +732,7 @@ impl PyCoinGecko {
     /// `market_cap`, `total_volume`, `circulating_supply` (all f64). The last is
     /// derived as `market_cap / price`, and is `NaN` on any bar where either
     /// input is missing. **No OHLCV columns** — see the class docs.
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
@@ -785,7 +794,7 @@ impl PyCoinGecko {
 /// `symbol` is a contract symbol (`"BTCUSDT"`), which mostly coincides with the
 /// spot vocabulary but is not the same list. `.symbols()` enumerates it — read
 /// from the live exchange, since the archive has no index endpoint.
-#[pyclass(name = "BinanceVision", frozen)]
+#[pyclass(name = "BinanceVision", module = "fugazi", frozen)]
 pub(crate) struct PyBinanceVision {
     pub(crate) inner: BinanceVision,
 }
@@ -797,7 +806,7 @@ impl PyBinanceVision {
     /// positioning columns a derivative has and a cash market does not.
     /// `base_url` overrides the archive host, useful for local test servers.
     #[new]
-    #[pyo3(signature = (market = "spot", base_url = None))]
+    #[pyo3(signature = (market = "spot", *, base_url = None))]
     pub(crate) fn new(market: &str, base_url: Option<String>) -> PyResult<Self> {
         let market = match market.to_ascii_lowercase().as_str() {
             "spot" => fugazi_core::sources::binance_vision::Market::Spot,
@@ -828,7 +837,7 @@ impl PyBinanceVision {
     ///
     /// Returned columns: `time` (ISO 8601 UTC), the OHLCV block, then the
     /// market's own columns — see the class docs for the two sets.
-    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
     pub(crate) fn fetch(
         &self,
         py: Python<'_>,
