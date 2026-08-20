@@ -178,6 +178,29 @@ fn workload(name: &str) {
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
+        // A `BasketStrategy` over the same 64 symbols. It keys nine maps by
+        // symbol and touches at least three of them per symbol per bar (the
+        // discovery `contains_key`, plus `latest_score` / `latest_size`), so it
+        // is the shape most exposed to the hasher those maps use.
+        "drive_basket" => {
+            use fugazi::indicators::sizing::equal_weight;
+            use fugazi::strategies::BasketStrategy;
+            let names: Vec<String> = (0..N).map(|i| format!("S{i:03}")).collect();
+            let snaps = drive_snapshots(&names, 300);
+            let mut strat: BasketStrategy<Symbol> = BasketStrategy::with_initial_equity(100_000.0)
+                .scored_by(|sym: &Symbol| {
+                    fugazi::indicators::Sma::new(
+                        fugazi::indicators::Close::of(fugazi::indicators::Pick::matching(
+                            Selector::by_symbol(sym.clone()),
+                        )),
+                        10,
+                    )
+                })
+                .sized_by(|_: &Symbol| equal_weight::<Symbol>(8))
+                .top_bottom(4, 4);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(100_000.0);
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
+        }
         "drive_equal" | "drive_ragged" => {
             use fugazi::strategies::MultiAssetStrategy;
             let names: Vec<String> = if name == "drive_equal" {

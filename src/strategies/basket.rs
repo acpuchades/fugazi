@@ -30,6 +30,8 @@
 //! [`BasketStrategy::selection`].
 
 use std::collections::HashMap;
+
+use crate::hash::SymMap;
 use std::hash::Hash;
 
 use crate::indicators::{Book, Every, Position, Value};
@@ -186,17 +188,27 @@ pub struct BasketStrategy<Sym> {
     long_target_factory: Option<LevelFactory<Sym>>,
     short_stop_factory: Option<LevelFactory<Sym>>,
     short_target_factory: Option<LevelFactory<Sym>>,
-    scores: HashMap<Sym, Chain<Sym>>,
-    sizes: HashMap<Sym, Chain<Sym>>,
+    /// Symbol-keyed, so FxHash rather than SipHash — see `src/hash.rs`. The
+    /// discovery filter in [`update`](Strategy::update) does a `contains_key`
+    /// on `scores` **once per symbol per bar**, and `latest_size` is written
+    /// just as often.
+    scores: SymMap<Sym, Chain<Sym>>,
+    sizes: SymMap<Sym, Chain<Sym>>,
     /// Per-symbol protective-level chains built lazily on first sight
     /// (mirrors [`scores`](Self::scores) / [`sizes`](Self::sizes)).
-    long_stops: HashMap<Sym, Chain<Sym>>,
-    long_targets: HashMap<Sym, Chain<Sym>>,
-    short_stops: HashMap<Sym, Chain<Sym>>,
-    short_targets: HashMap<Sym, Chain<Sym>>,
-    positions: HashMap<Sym, Position>,
+    long_stops: SymMap<Sym, Chain<Sym>>,
+    long_targets: SymMap<Sym, Chain<Sym>>,
+    short_stops: SymMap<Sym, Chain<Sym>>,
+    short_targets: SymMap<Sym, Chain<Sym>>,
+    positions: SymMap<Sym, Position>,
+    /// **Deliberately a std `HashMap`, not a [`SymMap`]**, unlike every other
+    /// map here. It is handed straight to `Selection::select`, whose signature
+    /// is `&HashMap<Sym, Real>` — a public trait, so narrowing the hasher would
+    /// break every caller-written `Selection` impl. Materialising a std-hashed
+    /// view per bar to feed the trait would cost the `N` hashes it saves, so it
+    /// stays as it is. See docs/PERFORMANCE.md, Phase 13.
     latest_score: HashMap<Sym, Real>,
-    latest_size: HashMap<Sym, Real>,
+    latest_size: SymMap<Sym, Real>,
     selection: Box<dyn Selection<Sym>>,
     /// The **rebalance gate**: on each bar `trade()` runs the selection
     /// and issues resize orders only when this signal reads `true`.
@@ -249,15 +261,15 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             long_target_factory: None,
             short_stop_factory: None,
             short_target_factory: None,
-            scores: HashMap::new(),
-            sizes: HashMap::new(),
-            long_stops: HashMap::new(),
-            long_targets: HashMap::new(),
-            short_stops: HashMap::new(),
-            short_targets: HashMap::new(),
-            positions: HashMap::new(),
+            scores: SymMap::default(),
+            sizes: SymMap::default(),
+            long_stops: SymMap::default(),
+            long_targets: SymMap::default(),
+            short_stops: SymMap::default(),
+            short_targets: SymMap::default(),
+            positions: SymMap::default(),
             latest_score: HashMap::new(),
-            latest_size: HashMap::new(),
+            latest_size: SymMap::default(),
             selection: Box::new(|_scores: &HashMap<Sym, Real>| HashMap::new()),
             rebalance: Box::new(Every::<Snapshot<Sym>>::new(1)),
             universe: Box::new(Floating),
