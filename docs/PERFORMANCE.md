@@ -1850,6 +1850,39 @@ person spends the machine time on something else:
   defined. It is one indicator, already only ~3× an `Sma`, and this file already
   warns that green tests are not evidence for a change of this class.
 
+### The single-asset path, and one more rejected change
+
+The multi-asset and basket workloads above are wide universes; the commonest
+shape is one symbol and one chain, so `snapshot_scan -- drive_single` covers it
+too. Its profile is unremarkable — `Sma::update` 19.2%, `backtest::drive` 12.4%,
+`PaperWallet::update` 6.7% — with two things worth writing down.
+
+**The 12.1% in `_int_malloc`/`_int_free_chunk` is the harness, not the library.**
+`drive_snapshots` builds 20 000 snapshots up front, two allocations each. The
+library's per-bar path allocates a constant number of times regardless of bar
+count, and that is not an inference — `tests/perf_guard.rs` asserts allocation
+*scaling* directly, and passes.
+
+**`BookState::remark` is 3.7% for a book with one leg**, which looked like the
+canonical-order sort. It is not. Two variants, measured against baseline
+(callgrind, net of control):
+
+| | `drive_single` | `drive_equal` | `drive_basket` |
+|---|---:|---:|---:|
+| skip the sort when `len <= 1` | −0.34% | **+0.90%** | −0.06% |
+| …and `sort_unstable_by` as well | −0.34% | **+0.45%** | −1.51% |
+
+**Both rejected.** The guard adds a branch on a path where it is never taken for
+a wide universe, and `drive_equal` got *worse* — inlining moved. The best result
+anywhere is −1.5% on one of three workloads with a regression on another, which
+is not a reason to make the code longer.
+
+The useful part is what it rules out: `remark`'s cost is not the sort. It is the
+`[Real; 32]` zero-init paid every bar regardless of leg count, plus the map
+iteration. Shrinking `INLINE` trades against a basket spilling to the heap, and
+avoiding the zero-init means `MaybeUninit`. Neither is worth it for 3.7% of the
+cheapest workload.
+
 **What is left all breaks compatibility**, which is why this phase stops here:
 
 | lever | what it would cost |

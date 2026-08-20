@@ -201,6 +201,24 @@ fn workload(name: &str) {
             let mut w: PaperWallet<Symbol> = PaperWallet::new(100_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
+        // The commonest shape of all, and the one the multi-asset and basket
+        // workloads above do not cover: one symbol, one chain, no per-symbol
+        // map traffic. Included so "nothing left to optimise" is a claim about
+        // the single-asset path too, not only about wide universes.
+        "drive_single" => {
+            use fugazi::strategies::SingleAssetStrategy;
+            let sym = intern("BTCUSDT");
+            let snaps = drive_snapshots(&["BTCUSDT".to_string()], 20_000);
+            let close = || fugazi::indicators::Close::of(fugazi::indicators::Pick::new());
+            let mut strat = SingleAssetStrategy::with_initial_equity(sym, 10_000.0).long_on(
+                fugazi::indicators::Sma::new(close(), 5)
+                    .crosses_above(fugazi::indicators::Sma::new(close(), 20)),
+                fugazi::indicators::Sma::new(close(), 5)
+                    .crosses_below(fugazi::indicators::Sma::new(close(), 20)),
+            );
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
+        }
         "drive_equal" | "drive_ragged" => {
             use fugazi::strategies::MultiAssetStrategy;
             let names: Vec<String> = if name == "drive_equal" {
