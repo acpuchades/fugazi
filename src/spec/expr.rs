@@ -4660,7 +4660,7 @@ fn build_pick(
         // A bare `!pick {}` naming neither symbol nor freq, with no root to
         // borrow one from: the same unanswerable question `pick_root` refuses.
         // (A freq-only selector is fine — `Pick::rooted` falls back through
-        // `lone_atom` and reads `None` rather than panicking.)
+        // `sole_atom_or_none` and reads `None` rather than panicking.)
         any(pick_root(root)?)
     } else if named {
         any(Pick::<Symbol>::matching(selector))

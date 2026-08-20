@@ -417,7 +417,7 @@ assert_eq!(spread.update(snap), Some(40.0));
 `by_freq(Frequency::Hour(1))` matches every hourly entry regardless of symbol, and
 `exact("BTC", Frequency::Hour(1))` matches a single tagged entry. The empty
 selector (`Selector::default()`) is the "no query" sentinel — `Pick::new()` uses it
-to trigger `Snapshot::sole_atom`, so a strategy authored around cross-asset
+to trigger `Snapshot::sole_atom_or_panic`, so a strategy authored around cross-asset
 primitives still runs cleanly on a single-series driver feeding size-1 snapshots.
 
 ### Overlays — non-price columns

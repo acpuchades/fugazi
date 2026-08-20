@@ -182,9 +182,12 @@ runners carry `traded ∪ !pick`-named and nothing else; a named symbol absent f
 input is a hard error, since `Pick::matching` would otherwise read `None` on every bar
 and the run would report a plausible zero-fill backtest. See `spec::reads`.
 **`pick_any_root` ignores the root** (calendar leaves read only `atom.time`, shared by
-every entry). **`Pick::rooted` falls back through `lone_atom`, not `sole_atom`** — in a
-rooted context a 2+ snapshot is ordinary (the blessed leg is absent this bar), so it reads
-`None`; `sole_atom` there would panic on every basket with a listing gap.
+every entry). **`Pick::rooted` falls back through `sole_atom_or_none`, not
+`sole_atom_or_panic`** — in a rooted context a 2+ snapshot is ordinary (the blessed leg is absent this bar), so it
+reads `None`; the panicking spelling there would abort on every basket with a listing
+gap. The three `sole_atom_or_*` spellings differ **only** in how 2+ is answered (panic /
+`None` / `Err(count)`); there is deliberately no bare `sole_atom` left to bind by
+accident.
 
 ### One handle per shape
 

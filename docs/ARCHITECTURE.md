@@ -51,16 +51,20 @@ custom source.
 - **`Selector { symbol: Option<String>, freq: Option<Frequency> }`** — partial
   key. `None` = wildcard; shorthands `by_symbol`/`by_freq`/`exact`.
 - **`Snapshot<K>`** — newtype `HashMap<K, Atom>` with `get`/`insert`/`iter`/
-  `FromIterator` + `sole_atom(&self)` (unique in size-1, **panics on 2+**, `None`
-  on empty) + `lone_atom(&self)` (the **non-panicking** twin — `None` unless
-  exactly one priceable entry; backs `Pick::rooted`'s fallback, where a 2+
-  snapshot means "the blessed leg is absent this bar", not "mis-wired").
+  `FromIterator` + the **sole-atom trio**, three spellings of one decision that
+  differ only in how a 2+ priceable snapshot is answered (all three read `None`
+  on empty and `Some` on exactly one): `sole_atom_or_panic` (**panics** — the
+  unrooted guard, where nothing named an asset), `sole_atom_or_none` (`None` —
+  backs `Pick::rooted`'s and `extract_self_atom`'s fallback, where a 2+ snapshot
+  means "the blessed leg is absent this bar", not "mis-wired"), and
+  `sole_atom_or_err` (`Err(count)` — the FFI boundary, which turns it into a
+  `ValueError` rather than an unwinding `PanicException`).
   `impl Snapshot<Selector>` adds `find(query)`.
 - **`Pick<S = Identity<Snapshot<Selector>>>`** projects one asset: `Output =
   Atom`. Three modes: `Pick::new()` (empty selector → sole-atom, **panics** on
   2+); `Pick::matching(selector)` (strict structural match → `None` when absent —
   the explicit cross-asset form); **`Pick::rooted(selector)`** (match, else fall
-  back to `lone_atom` — the *blessed-series* root a context installs for
+  back to `sole_atom_or_none` — the *blessed-series* root a context installs for
   `source:`-omitted leaves; the fallback keeps untagged size-1 snapshots, i.e.
   `Vec<Candle>` drivers, resolving). `Pick::of(selector, source)` re-roots any of
   them. **`Atom` equality is by `time`**; `Ord` sorts chronologically with `None`
