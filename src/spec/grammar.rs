@@ -67,6 +67,10 @@ use serde::Serialize;
 ///   also accepts. This is a breaking record-shape change: a consumer reading
 ///   `tag["shape"]` must move to `tag["forms"][0]["shape"]` and, if it validates
 ///   or completes, iterate all of `forms`.
+/// - v6 (unreleased): added [`GrammarTag::host_affecting`] — `true` only for
+///   `import`, `false` on every other tag. Every record now carries it (not
+///   omitted when `false`), so a v5 consumer reading a fixed field set sees a
+///   new key rather than a missing one.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
@@ -74,7 +78,7 @@ use serde::Serialize;
 /// — a bump would trip downstream version guards for no shape change. A consumer
 /// with an exhaustive `group` / `kind` / `scope` switch should treat unknown
 /// values as inert, not as an error.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The `since` stamped on every tag that shipped at or before this release —
 /// the baseline. Tags added afterwards carry their own real `since` via
@@ -235,6 +239,15 @@ pub struct GrammarTag {
     /// The release the tag first shipped in. [`SINCE_BASELINE`] for everything
     /// present at that baseline; a real version for anything added since.
     pub since: String,
+    /// `true` when *resolving* this tag touches something outside the
+    /// document itself — today, only `import` (a filesystem read). A purely
+    /// descriptive fact, not an enforcement mechanism: fugazi has no
+    /// deployment-policy concept, and nothing here changes what a caller can
+    /// author. An embedder that hosts user-authored documents and wants to
+    /// deny this class of tag (or generate matching editor tooling) can read
+    /// this instead of hand-maintaining its own table pinned to fugazi's tag
+    /// list. `false` for every other tag.
+    pub host_affecting: bool,
 }
 
 impl GrammarTag {
@@ -523,6 +536,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             category: String::new(),
             doc: Some(doc.to_owned()),
             since: SINCE_BASELINE.to_owned(),
+            // Only `import` reads the filesystem; every other hand-authored
+            // row is a pure `Value`-tree rewrite. Flipped below for `import`.
+            host_affecting: false,
         }
     }
     // The `{ key, default }` body `!param` and `!arg` share verbatim —
@@ -594,43 +610,47 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
              Resolved before the typed parse.",
         ),
         // --- document: load-time composition / substitution -----------------
-        tag(
-            "import", "document", "document",
-            vec![
-                newtype("str", None, None),
-                map(
-                    &[
-                        (
-                            "path",
-                            "str",
-                            true,
-                            "The document to splice in, resolved against the \
-                             importing document's own directory.",
+        GrammarTag {
+            host_affecting: true,
+            ..tag(
+                "import", "document", "document",
+                vec![
+                    newtype("str", None, None),
+                    map(
+                        &[
+                            (
+                                "path",
+                                "str",
+                                true,
+                                "The document to splice in, resolved against the \
+                                 importing document's own directory.",
+                            ),
+                            (
+                                "params",
+                                "other",
+                                false,
+                                "A `NAME: value` mapping the imported subtree's own \
+                                 `!param` placeholders resolve against **first**. A \
+                                 key not listed here falls through to the outer \
+                                 document's `--params` pass, so one fragment can be \
+                                 imported N times with N parameterizations.",
+                            ),
+                        ],
+                        None,
+                        Some(
+                            "The only spelling that can carry inline `params:` — the \
+                             shape a portfolio-of-strategies document needs, where the \
+                             same fragment is imported once per child with different \
+                             values.",
                         ),
-                        (
-                            "params",
-                            "other",
-                            false,
-                            "A `NAME: value` mapping the imported subtree's own \
-                             `!param` placeholders resolve against **first**. A \
-                             key not listed here falls through to the outer \
-                             document's `--params` pass, so one fragment can be \
-                             imported N times with N parameterizations.",
-                        ),
-                    ],
-                    None,
-                    Some(
-                        "The only spelling that can carry inline `params:` — the \
-                         shape a portfolio-of-strategies document needs, where the \
-                         same fragment is imported once per child with different \
-                         values.",
                     ),
-                ),
-            ],
-            "Document composition. `!import <path>` splices another YAML spec at \
-             load time (the `!import { path, params }` form passes inline params); \
-             resolved by `imports::resolve` before parse.",
-        ),
+                ],
+                "Document composition. `!import <path>` splices another YAML spec at \
+                 load time (the `!import { path, params }` form passes inline params); \
+                 resolved by `imports::resolve` before parse, confined to the loader's \
+                 `base_dir` — or refused outright by a caller that disables imports.",
+            )
+        },
         tag(
             "param", "document", "document",
             vec![

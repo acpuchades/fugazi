@@ -1181,7 +1181,8 @@ fugazi schema --document   # JSON Schema for a whole strategy document (five sha
 `grammar` prints one record per YAML tag — `name`, `group` (`node` / `selection`
 / `universe` / `weighting` / `document`), `kind`, `forms`, `output`, `category`
 (the fine conceptual sub-group — `moving averages`, `oscillators`, … — that
-`list indicators` groups by), and `since` — all reflected off the serde
+`list indicators` groups by), `since`, and `host_affecting` (`true` only for
+`import`, whose resolution reads the filesystem) — all reflected off the serde
 definitions, so it never drifts from what the parser accepts. It's what
 downstream tooling generates docs, editor autocomplete, and conformance checks
 from (`list indicators` itself is one such consumer). Guard on `schema_version`

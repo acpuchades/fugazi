@@ -1251,6 +1251,15 @@ On the `weighting` side, `!fixed` and bare `!equal_weight` are `scope: "portfoli
 while `!equal_weight <N>` is unscoped. Absent `scope` means unrestricted, which is every
 expression tag.
 
+**`host_affecting` (v6) is a fact, not a policy.** `true` on exactly one tag — `import`,
+because resolving it is a filesystem read; `false` on every other tag, reflected or
+hand-authored. Fugazi itself has no deployment-policy layer to attach to this — it exists so an
+embedder that hosts user-authored documents (see [`spec::imports`](../src/spec/imports.rs) for
+why that's a real threat, not a hypothetical one) can derive its own allow/deny table and editor
+completions from the descriptor instead of hand-maintaining a table pinned to fugazi's tag list.
+Present on every record (not omitted when `false`), so this is a shape change — the field-count
+change, not a new group or legend value, is what earns the bump.
+
 Records carry one datum that is **not** reflected off serde: **`node_output`** (v4, 0.61), on
 every field whose `type` is `node` / `node_list` / `match_cases`, plus **`payload_output`** for
 a newtype/seq tag's positional payload. `type: "node"` says a slot holds a nested expression;

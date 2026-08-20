@@ -78,6 +78,18 @@ pub fn picked_symbols_of(
     Ok(picked_symbols(&super::load_value(text, params, base, label)?))
 }
 
+/// [`picked_symbols_of`] for a caller that disables `!import` (see
+/// [`load_value_no_imports`](super::load_value_no_imports)).
+pub fn picked_symbols_of_no_imports(
+    text: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    label: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    Ok(picked_symbols(&super::load_value_no_imports(
+        text, params, label,
+    )?))
+}
+
 /// Recurse structurally, recording the `symbol:` of every `!pick` on the way
 /// down. A `!pick` node is descended into as well — its `symbol:` is a scalar,
 /// but nesting is the tree's business, not this walk's.

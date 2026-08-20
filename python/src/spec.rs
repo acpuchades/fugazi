@@ -422,14 +422,24 @@ pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
 
 /// Load a strategy YAML doc from text, auto-detecting kind (or using the
 /// caller's `kind` override). Returns the typed `CoreStrategySpec`.
+///
+/// `imports = false` disables `!import` entirely (see
+/// [`fugazi_core::spec::load_value_no_imports`]) rather than merely confining
+/// it to `base_dir` — the right choice for a caller that wants zero
+/// filesystem coupling to a user-authored document.
 pub(crate) fn load_loaded_spec(
     text: &str,
     params: &std::collections::HashMap<String, JsonValue>,
     base_dir: &std::path::Path,
     kind: &str,
+    imports: bool,
 ) -> PyResult<CoreStrategySpec> {
-    let value = fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
-        .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
+    let value = if imports {
+        fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
+    } else {
+        fugazi_core::spec::load_value_no_imports(text, params, "(inline)")
+    }
+    .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
     let kind = if kind == "auto" { detect_kind(&value) } else { kind };
     macro_rules! parse {
         ($variant:ident, $ty:ty, $label:literal) => {{
@@ -936,6 +946,8 @@ impl PyStrategySpec {
 ///              "bands", …) — one rung finer than kind, for curated grouping
 /// doc          the variant's `///`, as clean presentation prose
 /// since        release it first shipped in
+/// host_affecting  true only for tags whose resolution touches the host
+///              (today, only "import" — a filesystem read); false otherwise
 /// ```
 ///
 /// Each entry of `forms`:
@@ -1005,12 +1017,12 @@ impl PyStrategySpec {
 /// Python constructors, editor tooling, docs, external grammar tables) generate
 /// from one artifact rather than re-encoding by hand. Guard on `schema_version`
 /// for *shape* changes: `payload` + its `"literal"` field type landed in v2,
-/// `category` in v3 (0.51), `node_output` / `payload_output` in v4 (0.61), and
+/// `category` in v3 (0.51), `node_output` / `payload_output` in v4 (0.61),
 /// v5 (0.67) moved `shape` / `fields` / `payload` / `payload_output` off the tag
-/// and onto `forms`. The 0.50 group additions did **not** bump it — new groups
-/// and legend values leave the record shape unchanged, only a new *field* does.
-/// v5 is the one breaking change so far: `tag["shape"]` becomes
-/// `tag["forms"][0]["shape"]`.
+/// and onto `forms`, and v6 added `host_affecting`. The 0.50 group additions did
+/// **not** bump it — new groups and legend values leave the record shape
+/// unchanged, only a new *field* does. v5 is the one breaking change so far:
+/// `tag["shape"]` becomes `tag["forms"][0]["shape"]`.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();
@@ -1172,25 +1184,47 @@ pub(crate) fn slot_demands(py: Python<'_>, tag: &str) -> PyResult<Py<PyAny>> {
 
 /// Load a strategy YAML doc from text into a `StrategySpec`.
 ///
-/// `params` is a dict of `!param` substitutions; `base_dir` is the directory
-/// `!import` paths resolve against. Auto-detects the strategy kind unless
-/// `kind` is one of `single`/`pairs`/`basket`/`multi`/`portfolio`.
+/// `params` is a dict of `!param` substitutions. `base_dir` is the directory
+/// `!import` paths resolve against — it defaults to the **process's current
+/// working directory**, not the caller's own location, so an embedder that
+/// doesn't set it explicitly is granting whatever `!import` access that
+/// directory allows. Imports resolve **before** the typed parse (`parse ->
+/// !import -> !param -> typed parse`), so a malformed or unreachable import is
+/// reported as an ordinary load error, not a later build error. Every import,
+/// however deeply nested, is confined to `base_dir` — an absolute path or a
+/// `..` that walks past it is refused, not followed.
+///
+/// `imports = False` disables `!import` entirely: any use of the tag anywhere
+/// in the document (including inside a deferred template body such as a
+/// basket's `score:` or a portfolio's `weights:`) is a load error, and
+/// `base_dir` is not touched. Use this when `text` is authored by someone
+/// other than the process owner and no filesystem access should be granted
+/// at all — `base_dir`'s confinement narrows *where* an import can read from,
+/// but only `imports=False` removes read access altogether.
+///
+/// Auto-detects the strategy kind unless `kind` is one of
+/// `single`/`pairs`/`basket`/`multi`/`portfolio`.
 #[pyfunction]
-#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto"))]
+#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto", imports = true))]
 pub(crate) fn load_spec(
     text: &str,
     params: Option<&Bound<'_, PyAny>>,
     base_dir: Option<&str>,
     kind: &str,
+    imports: bool,
 ) -> PyResult<PyStrategySpec> {
     let params = extract_params(params)?;
     let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
-    let inner = load_loaded_spec(text, &params, &base, kind)?;
+    let inner = load_loaded_spec(text, &params, &base, kind, imports)?;
     // Collected from the same document `load_loaded_spec` parses, so a caller
     // assembling snapshots by hand can see which series the spec will need.
-    let reads = fugazi_core::spec::reads::picked_symbols_of(text, &params, &base, "(python)")
-        .map(|s| s.into_iter().collect())
-        .unwrap_or_default();
+    let reads = if imports {
+        fugazi_core::spec::reads::picked_symbols_of(text, &params, &base, "(python)")
+    } else {
+        fugazi_core::spec::reads::picked_symbols_of_no_imports(text, &params, "(python)")
+    }
+    .map(|s| s.into_iter().collect())
+    .unwrap_or_default();
     Ok(PyStrategySpec { inner, reads })
 }
 
@@ -1409,6 +1443,10 @@ pub(crate) fn build_subgrids(
 /// walk-forward validation instead — mutually exclusive with `windowed=`;
 /// returns a [`WalkForwardResult`] with per-fold IS/OOS metrics and the
 /// stitched composite OOS equity curve.
+///
+/// `base_dir` and `imports` behave exactly as on [`load_spec`]: `base_dir`
+/// confines (and defaults to the process cwd), `imports = False` disables
+/// `!import` outright.
 #[pyfunction]
 #[pyo3(signature = (
     text,
@@ -1436,6 +1474,7 @@ pub(crate) fn build_subgrids(
     costs = None,
     seconds_per_bar = None,
     base_dir = None,
+    imports = true,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn optimize(
@@ -1460,6 +1499,7 @@ pub(crate) fn optimize(
     costs: Option<&Bound<'_, PyAny>>,
     seconds_per_bar: Option<Real>,
     base_dir: Option<&str>,
+    imports: bool,
 ) -> PyResult<Py<PyAny>> {
     // Walkforward and windowed are mutually exclusive (same as the CLI).
     let walkforward_tuple = extract_walkforward(walkforward)?;
@@ -1506,8 +1546,14 @@ pub(crate) fn optimize(
     // over this same value.
     let base_value = fugazi_core::spec::input::parse_value_at(text, "(inline)")
         .map_err(|e| SpecError::new_err(format!("parsing strategy YAML: {e:#}")))?;
-    let base_value = fugazi_core::spec::imports::resolve(base_value, &base)
-        .map_err(|e| SpecError::new_err(format!("resolving imports: {e:#}")))?;
+    let base_value = if imports {
+        fugazi_core::spec::imports::resolve(base_value, &base)
+            .map_err(|e| SpecError::new_err(format!("resolving imports: {e:#}")))?
+    } else {
+        fugazi_core::spec::imports::refuse(&base_value)
+            .map_err(|e| SpecError::new_err(format!("resolving imports: {e:#}")))?;
+        base_value
+    };
     // Detect the kind from the raw (pre-`!param`) base value. Kind is fixed by
     // top-level shape, not by any parameter — running `!param` here would fail
     // for grid-only names.

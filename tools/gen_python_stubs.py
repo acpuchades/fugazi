@@ -83,6 +83,7 @@ BY_PARAM = {
     "smooth": "str | None",
     "smooth_scale": "str | None",
     "base_dir": "str | None",
+    "imports": "bool",
     "metric_names": "list[str] | None",
     "params": "Mapping[str, Any] | None",
     "grid": "Sequence[Mapping[str, Any]] | None",

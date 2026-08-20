@@ -935,7 +935,7 @@ def latch(source: Indicator) -> Indicator:
     between boundaries.
     """
     ...
-def load_spec(text: str, *, params: Mapping[str, Any] | None = ..., base_dir: str | None = ..., kind: str = ...) -> StrategySpec:
+def load_spec(text: str, *, params: Mapping[str, Any] | None = ..., base_dir: str | None = ..., kind: str = ..., imports: bool = ...) -> StrategySpec:
     """Load a strategy YAML doc from text into a `StrategySpec`."""
     ...
 def log(source: Indicator, base: float = ...) -> Indicator:
@@ -978,7 +978,7 @@ def obv() -> Indicator:
 def open(source: AtomSource | None = ...) -> Indicator:
     """Source: the bar's open price."""
     ...
-def optimize(text: str, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]], *, cash: float = ..., params: Mapping[str, Any] | None = ..., grid: Sequence[Mapping[str, Any]] | None = ..., kind: str = ..., metric_names: list[str] | None = ..., best_by: str | None = ..., windowed: int | None = ..., walkforward: tuple[int, int] | tuple[int, int, int] | None = ..., risk_aversion: float = ..., smooth: str | None = ..., smooth_min_support: float = ..., smooth_scale: str | None = ..., jobs: int | None = ..., bars_per_year: float = ..., risk_free_rate: float = ..., costs: TradingCostsConfig | Mapping[str, Any] | None = ..., seconds_per_bar: float | None = ..., base_dir: str | None = ...) -> Sweep | WalkForwardResult:
+def optimize(text: str, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]], *, cash: float = ..., params: Mapping[str, Any] | None = ..., grid: Sequence[Mapping[str, Any]] | None = ..., kind: str = ..., metric_names: list[str] | None = ..., best_by: str | None = ..., windowed: int | None = ..., walkforward: tuple[int, int] | tuple[int, int, int] | None = ..., risk_aversion: float = ..., smooth: str | None = ..., smooth_min_support: float = ..., smooth_scale: str | None = ..., jobs: int | None = ..., bars_per_year: float = ..., risk_free_rate: float = ..., costs: TradingCostsConfig | Mapping[str, Any] | None = ..., seconds_per_bar: float | None = ..., base_dir: str | None = ..., imports: bool = ...) -> Sweep | WalkForwardResult:
     """Run a parameter-grid sweep over a strategy YAML document. Returns a `Sweep` with
     one row per grid point, ranked by `best_by` when set.
     """

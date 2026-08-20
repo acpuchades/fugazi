@@ -58,6 +58,17 @@
 //! `fugazi` was invoked from. Inline strategy text (no `@file`) has no
 //! directory of its own, so its imports resolve against the working directory.
 //!
+//! **Every import is confined to the top-level document's own directory** —
+//! the `base` [`resolve`] is called with, not the per-file directory a nested
+//! import resolves relative to. An absolute path, or a `..` that walks past
+//! `base`, is refused rather than followed: `!import /etc/hostname` and
+//! `!import ../../../../etc/passwd` are both hard errors, not filesystem
+//! reads. This matters for an embedder driving [`crate::spec::load_value`]
+//! (or the Python `load_spec`/`optimize` bindings) against user-authored
+//! documents, where `base` is the only thing standing between an author's
+//! `enter:` field and the host's filesystem — see [`refuse`] for a caller
+//! that wants no filesystem access at all.
+//!
 //! Import cycles are a hard error naming the chain, rather than a stack
 //! overflow.
 
@@ -69,6 +80,13 @@ use serde_json::{Map, Value};
 
 /// The singleton key a `!import` tag normalizes to (see [`crate::spec::convert`]).
 const IMPORT: &str = "import";
+
+/// Whether `map` has the single-key shape a `!import` node normalizes to —
+/// shared by [`import_directive`] (which also validates the body) and
+/// [`refuse`] (which only needs to know whether to bail).
+fn looks_like_import(map: &Map<String, Value>) -> bool {
+    map.len() == 1 && map.contains_key(IMPORT)
+}
 
 /// One resolved `!import` directive: the path to load and the inline
 /// `params:` (if any) to apply to the loaded document's own `!param`
@@ -83,29 +101,57 @@ struct ImportDirective {
 
 /// Resolve every `!import` node in `value`, splicing in the document each one
 /// names. `base` is the directory relative import paths resolve against — the
-/// importing document's own directory (see [`crate::spec::input::Source::base_dir`]).
+/// importing document's own directory (see [`crate::spec::input::Source::base_dir`]) —
+/// and also the confinement root: no import, however deeply nested, may resolve
+/// to a path outside it (see the module docs).
 pub fn resolve(value: Value, base: &Path) -> Result<Value> {
-    walk(value, base, &mut Vec::new())
+    walk(value, base, base, &mut Vec::new())
+}
+
+/// Structural check for a caller that disables `!import` entirely: walks
+/// `value` exactly like [`resolve`] would, but bails on the first `!import`
+/// node instead of loading it. No filesystem access — unlike `resolve`
+/// confined to a root that happens to be empty or unreadable, this never
+/// touches `std::fs` at all, so it's the right choice for a caller that wants
+/// zero coupling between a document and the host filesystem rather than a
+/// scoped one.
+pub fn refuse(value: &Value) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            if looks_like_import(map) {
+                bail!(
+                    "!import is disabled for this caller (no `base_dir`/filesystem \
+                     access was granted)"
+                );
+            }
+            map.values().try_for_each(refuse)
+        }
+        Value::Array(items) => items.iter().try_for_each(refuse),
+        _ => Ok(()),
+    }
 }
 
 /// Recurse the tree, replacing each `!import` node with the imported document.
-/// `stack` carries the canonical paths of the documents currently being
-/// resolved — the cycle tripwire.
-fn walk(value: Value, base: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+/// `base` is the directory the *next* relative import resolves against (the
+/// current file's own directory); `root` is the fixed confinement boundary —
+/// the original top-level `base` [`resolve`] was called with, unchanged
+/// across nested imports. `stack` carries the canonical paths of the
+/// documents currently being resolved — the cycle tripwire.
+fn walk(value: Value, base: &Path, root: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
     match value {
         Value::Object(map) => {
             if let Some(directive) = import_directive(&map)? {
-                return load(&directive, base, stack);
+                return load(&directive, base, root, stack);
             }
             let mut out = Map::with_capacity(map.len());
             for (key, v) in map {
-                out.insert(key, walk(v, base, stack)?);
+                out.insert(key, walk(v, base, root, stack)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(items) => items
             .into_iter()
-            .map(|v| walk(v, base, stack))
+            .map(|v| walk(v, base, root, stack))
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         scalar => Ok(scalar),
@@ -127,12 +173,10 @@ fn walk(value: Value, base: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
 /// it in place would be mistaken for a spec fragment and fail much later
 /// with a confusing type error.
 fn import_directive(map: &Map<String, Value>) -> Result<Option<ImportDirective>> {
-    if map.len() != 1 {
+    if !looks_like_import(map) {
         return Ok(None);
     }
-    let Some(body) = map.get(IMPORT) else {
-        return Ok(None);
-    };
+    let body = &map[IMPORT];
     match body {
         Value::String(path) => Ok(Some(ImportDirective {
             path: path.clone(),
@@ -183,11 +227,33 @@ fn import_directive(map: &Map<String, Value>) -> Result<Option<ImportDirective>>
 /// nested imports against *its own* directory, and — if the directive
 /// carried inline `params:` — apply those against the loaded tree via
 /// [`crate::spec::params::substitute_partial`] before returning.
-fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+fn load(
+    directive: &ImportDirective,
+    base: &Path,
+    root: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Value> {
     let joined = base.join(&directive.path);
     let canonical = std::fs::canonicalize(&joined).with_context(|| {
         format!("!import {}: reading `{}`", directive.path, joined.display())
     })?;
+
+    // Confine to `root` regardless of how the escape was spelled — an
+    // absolute `directive.path` (which makes `join` discard `base` entirely),
+    // a `..` that walks past it, or a symlink that resolves outside it are
+    // all caught here, because `canonicalize` has already resolved every
+    // symlink and `..` component on both sides.
+    let canonical_root = std::fs::canonicalize(root).with_context(|| {
+        format!("!import {}: resolving import root `{}`", directive.path, root.display())
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        bail!(
+            "!import {}: `{}` is outside the import root `{}`",
+            directive.path,
+            canonical.display(),
+            canonical_root.display()
+        );
+    }
 
     if let Some(start) = stack.iter().position(|seen| *seen == canonical) {
         let chain: Vec<String> = stack[start..]
@@ -219,7 +285,7 @@ fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> R
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     stack.push(canonical);
-    let resolved = walk(value, &dir, stack);
+    let resolved = walk(value, &dir, root, stack);
     stack.pop();
     let resolved = resolved?;
 
@@ -234,7 +300,7 @@ fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> R
     // document) or `!param` placeholders (left as-is for the outer pass).
     let mut inline_resolved: HashMap<String, Value> = HashMap::with_capacity(inline.len());
     for (key, value) in inline {
-        inline_resolved.insert(key.clone(), walk(value.clone(), base, stack)?);
+        inline_resolved.insert(key.clone(), walk(value.clone(), base, root, stack)?);
     }
     crate::spec::params::substitute_partial(resolved, &inline_resolved)
 }
@@ -549,5 +615,99 @@ mod tests {
             resolve_text(text, &dir).unwrap(),
             crate::spec::input::parse_value(text).unwrap(),
         );
+    }
+
+    #[test]
+    fn an_absolute_path_is_refused_even_when_the_file_exists() {
+        // Regression: `PathBuf::join` discards `base` entirely when the
+        // joinee is absolute, so `!import /etc/hostname` used to read
+        // straight off the host filesystem instead of erroring.
+        let dir = tmp_dir("absolute");
+        let outside = tmp_dir("absolute_target");
+        write(&outside, "secret.yml", "!value 1\n");
+        let absolute = outside.join("secret.yml");
+
+        let err = resolve_text(
+            &format!("enter: !import {}\n", absolute.display()),
+            &dir,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside the import root"), "{err}");
+    }
+
+    #[test]
+    fn a_relative_escape_via_dotdot_is_refused() {
+        let dir = tmp_dir("dotdot_root");
+        let sub = dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let outside = tmp_dir("dotdot_outside");
+        write(&outside, "secret.yml", "!value 1\n");
+        let escape = format!("../../{}/secret.yml", outside.file_name().unwrap().to_str().unwrap());
+
+        let err = resolve_text(&format!("enter: !import {escape}\n"), &sub)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the import root"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_import_may_not_escape_the_top_level_root_either() {
+        // The per-file directory a nested import resolves relative to keeps
+        // moving (see `a_nested_import_resolves_against_the_importing_files_directory`),
+        // but the confinement root stays pinned to the *original* `base` —
+        // a file two levels deep can't walk back out past it.
+        let dir = tmp_dir("nested_escape_root");
+        let outside = tmp_dir("nested_escape_outside");
+        write(&outside, "secret.yml", "!value 1\n");
+        // `parts/side.yml` sits two levels under `/tmp`, so `../..` from
+        // there reaches `/tmp` — outside `dir`, the confinement root.
+        let escape = format!("../../{}/secret.yml", outside.file_name().unwrap().to_str().unwrap());
+        write(&dir, "parts/side.yml", &format!("enter: !import {escape}\n"));
+
+        let err = resolve_text("long: !import parts/side.yml\n", &dir)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the import root"), "{err}");
+    }
+
+    #[test]
+    fn a_relative_import_that_stays_within_root_still_works() {
+        // Confinement shouldn't break the ordinary case: a subdirectory
+        // import, reached via a `..` that never actually leaves `base`.
+        let dir = tmp_dir("within_root");
+        write(&dir, "shared/exit.yml", "!value 1\n");
+        write(&dir, "strategies/enter.yml", "enter: !import ../shared/exit.yml\n");
+
+        let value = resolve_text("long: !import strategies/enter.yml\n", &dir).unwrap();
+        let expected = crate::spec::input::parse_value("long:\n  enter: !value 1\n").unwrap();
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn refuse_bails_on_a_bare_string_import() {
+        // No filesystem involved at all — `enter.yml` need not even exist for
+        // this to be caught, unlike `resolve`.
+        let value = crate::spec::input::parse_value("enter: !import enter.yml\n").unwrap();
+        let err = refuse(&value).unwrap_err().to_string();
+        assert!(err.contains("disabled"), "{err}");
+    }
+
+    #[test]
+    fn refuse_bails_on_an_import_nested_inside_a_template_body() {
+        let value = crate::spec::input::parse_value(
+            "score: !mul { lhs: !import a.yml, rhs: !value 2 }\n",
+        )
+        .unwrap();
+        let err = refuse(&value).unwrap_err().to_string();
+        assert!(err.contains("disabled"), "{err}");
+    }
+
+    #[test]
+    fn refuse_accepts_a_document_with_no_import_at_all() {
+        let value =
+            crate::spec::input::parse_value("symbol: BTC\nlong:\n  enter: !gt { lhs: close, rhs: !value 10 }\n")
+                .unwrap();
+        assert!(refuse(&value).is_ok());
     }
 }

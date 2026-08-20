@@ -122,6 +122,23 @@ pub fn load_value_pre_params(
     crate::spec::imports::resolve(value, base)
 }
 
+/// [`load_value`] for a caller that disables `!import` entirely — no
+/// filesystem access, so no `base` to confine against. Any `!import` node
+/// anywhere in `text` (including inside a deferred template body) is a hard
+/// error via [`imports::refuse`], not a splice. The right choice for an
+/// embedder that wants zero coupling between a user-authored document and its
+/// own filesystem — see [`imports`] for why `resolve`'s `base`-confinement
+/// alone doesn't cover that case.
+pub fn load_value_no_imports(
+    text: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    label: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let value = crate::spec::input::parse_value_at(text, label)?;
+    crate::spec::imports::refuse(&value)?;
+    crate::spec::params::substitute(value, params)
+}
+
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::NodeSpec;
 pub use expr::Root;

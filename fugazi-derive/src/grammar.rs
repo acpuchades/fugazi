@@ -137,6 +137,9 @@ fn variant_tag(
             category: ::std::string::String::new(),
             doc: #doc_expr,
             since: #since.to_owned(),
+            // Every reflected tag is a pure expression node — filesystem
+            // access is confined to the hand-authored `import` row.
+            host_affecting: false,
         }
     })
 }
