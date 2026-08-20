@@ -111,3 +111,56 @@ sizing: !value 1.0
     let out = Cmd::new("check").arg("strategy").arg(&spec).ok();
     assert!(out.stdout.contains("ok"), "{}", out.stdout);
 }
+
+/// A portfolio's `weights:` expression is read only inside a rebalance cycle.
+/// Omit `rebalance_on:` and the expression is built, updated every bar, and
+/// consulted on none — the portfolio silently runs its equal-split seed. The
+/// document parses fine (every field is well-typed), so the build is the only
+/// place this can be caught, which is exactly what `check` reaches for here.
+const PORTFOLIO_INERT_WEIGHTS: &str = "\
+weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+children:
+  - strategy: !buy_and_hold { symbol: BTCUSDT }
+  - strategy: !buy_and_hold { symbol: ETHUSDT }
+";
+
+/// The same document with a cadence, so the weights actually get applied.
+const PORTFOLIO_LIVE_WEIGHTS: &str = "\
+weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+rebalance_on: !every 28
+children:
+  - strategy: !buy_and_hold { symbol: BTCUSDT }
+  - strategy: !buy_and_hold { symbol: ETHUSDT }
+";
+
+#[test]
+fn check_rejects_a_portfolio_whose_weights_can_never_be_read() {
+    let (_, spec) = scratch_file("portfolio_inert_weights.yml", PORTFOLIO_INERT_WEIGHTS);
+    let out = Cmd::new("check")
+        .arg("strategy")
+        .arg(&format!("portfolio:{spec}"))
+        .fails();
+
+    assert!(
+        out.stderr.contains("weights:"),
+        "expected the inert-weights error:\n{}",
+        out.stderr
+    );
+    // Without this the user is told the document is wrong but not which field
+    // makes it right again.
+    assert!(
+        out.stderr.contains("rebalance_on:"),
+        "error did not name the field that fixes it:\n{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn check_accepts_the_same_portfolio_once_it_says_when_to_rebalance() {
+    let (_, spec) = scratch_file("portfolio_live_weights.yml", PORTFOLIO_LIVE_WEIGHTS);
+    let out = Cmd::new("check")
+        .arg("strategy")
+        .arg(&format!("portfolio:{spec}"))
+        .ok();
+    assert!(out.stdout.contains("ok"), "{}", out.stdout);
+}

@@ -145,6 +145,16 @@ pub struct PortfolioSpec {
     ///
     /// Weights are magnitudes and needn't sum to `1.0`; the portfolio
     /// normalizes on use.
+    ///
+    /// **A non-constant expression requires a
+    /// [`rebalance_on`](Self::rebalance_on).** Weight shares are read only
+    /// inside a rebalance cycle, so an omitted gate would build the chains,
+    /// update them every bar, and consult them on none — the portfolio would
+    /// run the equal-split seed and drift with P&L, its weighting rule inert.
+    /// That is a build error (see [`try_build`](Self::try_build)); the named
+    /// opt-out is writing `rebalance_on: !never`. Both constant forms are
+    /// exempt, since the build-time seed already *is* their answer: `!value
+    /// <list>` seeds the ratio, `!value <scalar>` seeds `1/N`.
     #[serde(default, deserialize_with = "deserialize_weights")]
     pub weights: Option<SpecTemplate<NodeSpec>>,
 
@@ -161,6 +171,10 @@ pub struct PortfolioSpec {
     /// A `None` reading (from a still-warming user signal) is treated as
     /// `false` — the safe default; the portfolio sits between rebalances
     /// rather than trading through unsettled data.
+    ///
+    /// Omitting this field is refused when [`weights`](Self::weights) is a
+    /// non-constant expression — nothing would ever read it. Write `!never`
+    /// to state that the drift is intended.
     ///
     /// Each fire runs the same two-phase rebalance: cash phase first
     /// (contributors donate free cash, receivers split the pot), then a
@@ -429,6 +443,31 @@ fn extract_top_level_value_list(tree: &Value) -> Option<Vec<Real>> {
         .collect::<Option<Vec<Real>>>()
 }
 
+/// Whether a `weights:` tree is a **constant** the build-time seed already
+/// captures — a top-level `!value` literal, either a per-child indexed list
+/// (`!value [0.7, 0.3]`, also reached via the `!fixed` sugar) or a scalar
+/// every child reads identically (`!value 1.0`, the `!equal_weight` sugar).
+///
+/// This is the discriminator behind the `weights:` / `rebalance_on:`
+/// consistency check in [`PortfolioSpec::try_build`]. Weight-share chains are
+/// only read inside a rebalance cycle, so a portfolio that never fires its
+/// gate applies nothing but the seed. For a constant that is harmless — the
+/// seed *is* the expression's answer, on every bar, forever. For anything
+/// else the expression would be built, updated every bar, and never consulted.
+fn weights_are_constant(tree: &Value) -> bool {
+    let Some(m) = tree.as_object() else {
+        return false;
+    };
+    if m.len() != 1 {
+        return false;
+    }
+    match m.get("value") {
+        Some(Value::Number(_)) => true,
+        Some(Value::Array(list)) => list.iter().all(Value::is_number),
+        _ => false,
+    }
+}
+
 /// Resolve every child's internal display name — using its declared
 /// `name:` when set, else defaulting to `child_<index>` — and enforce
 /// that the resulting vector has no duplicates. This is the string
@@ -503,6 +542,11 @@ impl PortfolioSpec {
     /// (matches the zero-cost paper-wallet default the other specs use for
     /// gross twins).
     ///
+    /// A non-constant `weights:` with no `rebalance_on:` is refused: the
+    /// expression would never be read (weight shares are consulted only on a
+    /// rebalance-fire), so the portfolio would silently run the equal-split
+    /// seed. `rebalance_on: !never` is the named opt-out.
+    ///
     /// # Panics
     /// Panics if the spec declares no children (a zero-child portfolio has
     /// no meaning) or if a `weights: !value <list>` (or sugar `!fixed
@@ -532,6 +576,30 @@ impl PortfolioSpec {
         if self.children.is_empty() {
             return Err(
                 "PortfolioSpec::build: `children:` must have at least one entry".to_string(),
+            );
+        }
+        // A dynamic `weights:` with no `rebalance_on:` is a written
+        // instruction that can never run. The weight-share chains are read
+        // only inside `Portfolio::rebalance_now`, so an omitted gate means
+        // they are built, updated on every bar, and consulted on none — the
+        // portfolio silently runs the equal-split seed and drifts with P&L.
+        // Refusing beats reporting a backtest whose weighting rule was inert
+        // (the same reasoning that keeps `deny_unknown_fields` on every
+        // document). Constants are exempt: the seed already *is* their answer.
+        // `rebalance_on: !never` is the named opt-out — written down, it says
+        // the drift is intended.
+        if let Some(template) = &self.weights
+            && self.rebalance_on.is_none()
+            && !weights_are_constant(template.tree())
+        {
+            return Err(
+                "PortfolioSpec::build: `weights:` is a non-constant expression but \
+                 `rebalance_on:` is omitted, so it would never be read — weight \
+                 expressions are consulted only on a rebalance-fire, and the \
+                 portfolio would run the equal-split seed and drift with P&L. Give \
+                 it a cadence (`rebalance_on: !every 28`), or write `rebalance_on: \
+                 !never` to state that the drift is intended"
+                    .to_string(),
             );
         }
         let n = self.children.len();
@@ -1001,6 +1069,84 @@ mod tests {
         assert_eq!(allocations, vec![500.0, 500.0]);
     }
 
+    /// A `weights:` expression is read only inside a rebalance cycle, so a
+    /// document that never fires its gate would compute one every bar and
+    /// apply none of them — the portfolio would silently run the equal-split
+    /// seed. That is a written instruction quietly ignored, so it is refused.
+    #[test]
+    fn dynamic_weights_without_a_rebalance_gate_are_refused() {
+        let yaml = r#"
+            weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let Err(err) = spec.try_build(1_000.0, &Schema::empty(), None) else {
+            panic!("a weight expression that can never be read must not build");
+        };
+        assert!(err.contains("weights:"), "{err}");
+        assert!(
+            err.contains("rebalance_on:"),
+            "the error must name the field that fixes it:\n{err}"
+        );
+    }
+
+    /// The same document builds once it says when to act. `!every 1` is the
+    /// eager end of the range; any signal at all satisfies the check, since
+    /// what is refused is the *omitted* field, not an infrequent cadence.
+    #[test]
+    fn dynamic_weights_with_a_cadence_build() {
+        let yaml = r#"
+            weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+            rebalance_on: !every 28
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.try_build(1_000.0, &Schema::empty(), None).is_ok());
+    }
+
+    /// `rebalance_on: !never` is the named opt-out. Written down it says the
+    /// drift is intended, which is a different statement from forgetting the
+    /// field — so it builds, and the weights stay inert by request.
+    #[test]
+    fn dynamic_weights_with_an_explicit_never_are_allowed() {
+        let yaml = r#"
+            weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+            rebalance_on: !never
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.try_build(1_000.0, &Schema::empty(), None).is_ok());
+    }
+
+    /// Constants are exempt in both spellings: the build-time seed already
+    /// *is* their answer, on every bar, forever. `!fixed` lowers to `!value
+    /// <list>` (which seeds the ratio) and `!equal_weight` to `!value 1.0`
+    /// (which seeds `1/N`), so neither needs a gate to take effect.
+    #[test]
+    fn constant_weights_need_no_rebalance_gate() {
+        for weights in ["!fixed [0.75, 0.25]", "!equal_weight", "!value [0.6, 0.4]"] {
+            let yaml = format!(
+                r#"
+                weights: {weights}
+                children:
+                  - strategy: !buy_and_hold {{ symbol: A }}
+                  - strategy: !buy_and_hold {{ symbol: B }}
+            "#
+            );
+            let spec = PortfolioSpec::from_text_with_params(&yaml, &HashMap::new()).unwrap();
+            assert!(
+                spec.try_build(1_000.0, &Schema::empty(), None).is_ok(),
+                "constant weights `{weights}` must build without a gate"
+            );
+        }
+    }
+
     #[test]
     fn fixed_weights_split_cash_proportionally() {
         let yaml = r#"
@@ -1242,6 +1388,7 @@ mod tests {
                 source:
                   pick:
                     symbol: !arg SYM
+            rebalance_on: !every 1
             children:
               - strategy: !buy_and_hold { symbol: A }
               - strategy: !buy_and_hold { symbol: B }
@@ -1582,6 +1729,7 @@ mod tests {
         // (`strategy_book = child_books[i]`, `portfolio_book = agg`).
         let yaml = r#"
             weights: !drawdown
+            rebalance_on: !every 1
             children:
               - strategy: !buy_and_hold { symbol: A }
               - strategy: !buy_and_hold { symbol: B }
@@ -1606,6 +1754,7 @@ mod tests {
         // portfolio-side default.
         let yaml = r#"
             weights: !drawdown { source: !portfolio_book }
+            rebalance_on: !every 1
             children:
               - strategy: !buy_and_hold { symbol: A }
               - strategy: !buy_and_hold { symbol: B }
@@ -1706,6 +1855,7 @@ mod tests {
         // fallback for identity args).
         let yaml = r#"
             weights: !arg CHILD_GROUP
+            rebalance_on: !every 1
             children:
               - name: named_but_ungrouped
                 strategy: !buy_and_hold { symbol: A }
@@ -1723,6 +1873,7 @@ mod tests {
         // injected as the arg.
         let yaml = r#"
             weights: !arg CHILD_NAME
+            rebalance_on: !every 1
             children:
               - strategy: !buy_and_hold { symbol: A }
         "#;

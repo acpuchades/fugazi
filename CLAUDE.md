@@ -228,8 +228,9 @@ at that chunk's save rather than carried.
 
 A spec that parses but can't be *built* — an unknown `!get` column, a malformed `!pick {
 freq }`, a slot handed the wrong type, `!portfolio_book` outside a portfolio, a `!value
-<list>` outside a weight template — is bad **input**, not a broken invariant. Report it,
-never abort.
+<list>` outside a weight template, a **non-constant portfolio `weights:` with no
+`rebalance_on:`** (nothing would ever read it — `!never` is the named opt-out) — is bad
+**input**, not a broken invariant. Report it, never abort.
 
 - **`NodeSpec::try_build`** (and each shape's `*Spec::try_build`) return `Result<_,
   String>`. `build` remains as an unwrapping shim; prefer `try_build` in new code.

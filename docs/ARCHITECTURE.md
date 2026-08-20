@@ -478,10 +478,16 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   `children:` is an ordered list of `{ name, strategy }` slots; `strategy:` accepts
   any of the four shapes routed by distinctive top-level key (`left`+`right` →
   pairs, `selection` → basket, `symbol` / preset tag → single, else multi).
-  `rebalance_on:` optional (any boolean `NodeSpec`, default `!never`); the
-  signal-anchor and `Book` handed to `NodeSpec::build` at the portfolio level are
-  dummies, so `!entry`/`!drawdown` read empty — use snapshot / calendar / cadence
-  signals. `rebalance_policy:` optional (`!proportional` | `!largest_first`, default
+  `rebalance_on:` optional (any boolean `NodeSpec`, default `!never`) **except
+  when `weights:` is non-constant, where omitting it is a build error** — weight
+  shares are read only inside a rebalance cycle, so an ungated dynamic
+  expression would be updated every bar and consulted on none, leaving the
+  portfolio on its equal-split seed with the weighting rule inert
+  (`weights_are_constant` is the exemption test: a top-level `!value` scalar or
+  list, both of which the build-time seed already captures; `!never` is the
+  named opt-out). The signal-anchor and `Book` handed to `NodeSpec::build` at
+  the portfolio level are dummies, so `!entry`/`!drawdown` read empty — use
+  snapshot / calendar / cadence signals. `rebalance_policy:` optional (`!proportional` | `!largest_first`, default
   `!proportional`). Reuse one child spec N times via `!import { path, params }`.
   Wired into `run.rs` (`run_portfolio`) and `optimize.rs`.
 - **Reset** reseeds every ledger and clears bar-to-bar state. No substrate to

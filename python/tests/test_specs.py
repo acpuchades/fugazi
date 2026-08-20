@@ -176,6 +176,46 @@ def test_load_portfolio_and_run():
     assert len(rep.fills) >= 2
 
 
+def test_portfolio_weights_without_a_rebalance_gate_are_refused():
+    """A `weights:` expression is only read on a rebalance-fire, so a portfolio
+    that never fires its gate computes one every bar and applies none of them.
+    The document parses (every field is well-typed) — the build is the only
+    place it can be caught, and Python reaches it through the same `try_build`
+    the CLI does."""
+    yaml = """
+    weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+    children:
+      - strategy: !buy_and_hold { symbol: BTC }
+      - strategy: !buy_and_hold { symbol: ETH }
+    """
+    spec = ta.load_spec(yaml)
+    snaps = _snaps_multi({"BTC": [100, 101, 102], "ETH": [200, 201, 202]})
+    with pytest.raises(ta.SpecError, match="rebalance_on:"):
+        spec.run(ta.PaperWallet(1000.0), snaps)
+
+
+@pytest.mark.parametrize(
+    "gate",
+    ["!every 2", "!never"],
+    ids=["cadence", "explicit-never"],
+)
+def test_portfolio_weights_build_once_the_document_says_when(gate):
+    """Any stated gate satisfies the check — what is refused is the *omitted*
+    field, not an infrequent cadence. `!never` is the named opt-out: written
+    down it says the drift is intended."""
+    yaml = f"""
+    weights: !drawdown_throttle {{ source: !portfolio_book, max_drawdown: 0.15 }}
+    rebalance_on: {gate}
+    children:
+      - strategy: !buy_and_hold {{ symbol: BTC }}
+      - strategy: !buy_and_hold {{ symbol: ETH }}
+    """
+    spec = ta.load_spec(yaml)
+    snaps = _snaps_multi({"BTC": [100, 101, 102], "ETH": [200, 201, 202]})
+    rep = spec.run(ta.PaperWallet(1000.0), snaps)
+    assert len(rep.equity_curve) == len(snaps)
+
+
 def test_load_spec_with_params():
     """`!param` placeholders resolve from the `params=` dict."""
     yaml = """

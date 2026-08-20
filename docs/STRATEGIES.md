@@ -861,6 +861,16 @@ Per-child instantiation injects `!arg CHILD_INDEX` always, `!arg CHILD_NAME` /
 `!arg CHILD_GROUP` when the child declared them, and `!arg SYM` for single-asset
 children. Referencing an arg the child didn't declare is a build error.
 
+**A non-constant `weights:` requires a `rebalance_on:`.** The expression is read
+only inside a rebalance cycle, so a portfolio that never fires its gate would
+build the chains, update them on every bar, and consult them on none — running
+the equal-split seed and drifting with P&L, its weighting rule inert. That is
+refused at build rather than reported as a backtest. Give it a cadence
+(`rebalance_on: !every 28`), or write `rebalance_on: !never` to say the drift is
+intended. The two constant forms are exempt: `!value [0.6, 0.4]` (and its
+`!fixed` sugar) seeds the ratio at build, and `!value 1.0` (`!equal_weight`)
+seeds `1/N`, so for those the seed already *is* the expression's answer.
+
 ### How capital moves
 
 The portfolio trades **one account**. Each child owns a *ledger* rather than a
@@ -943,8 +953,8 @@ position of its own.
 
 ## Rebalance
 
-Every strategy shape (`single:`, `pairs:`, `basket:`, `multi:`) exposes an
-optional top-level `rebalance_on:` field: a **boolean signal** that
+Every strategy shape (`single:`, `pairs:`, `basket:`, `multi:`, `portfolio:`)
+exposes an optional top-level `rebalance_on:` field: a **boolean signal** that
 decides, on each bar, whether the strategy re-runs its sizing/selection
 step. `sizing:` answers "what size?"; `rebalance_on:` answers "act on
 that size *right now*?".
@@ -957,6 +967,7 @@ What "rebalance" means depends on the strategy shape:
 | `pairs:` | resize both legs to the current sizing target | enter / exit spread signals fire, spread levels rest |
 | `multi:` | resize every held per-symbol position to its sizing target | per-symbol entry / exit signals fire |
 | `basket:` | re-run selection **and** resize | (nothing else — basket has no per-symbol entry / exit) |
+| `portfolio:` | pull each child's cash slice back to its weight target (cash phase, then a position phase for anyone too invested to cover it) | every child trades its own slice |
 
 Basket is the odd one because a cross-sectional ranker's *target set* is
 itself the sizing decision — so gating selection and gating resize are
@@ -967,8 +978,10 @@ signals) from sizing (rebalance-driven).
 
 | Strategy | Default `rebalance_on` | Rationale |
 | --- | --- | --- |
-| `single:` / `pairs:` / `multi:` | `!never` | sizing only reads on transitions (pre-refactor behavior) |
-| `basket:` | `!every 1` (every bar) | re-rank every bar (pre-refactor behavior) |
+| `single:` / `multi:` | `!never` | the gate reaches only the *resize* branch — entries, exits and protective levels fire regardless. Firing by default would make every strategy a constant-fraction rebalancer, paying turnover nobody asked for |
+| `pairs:` | `!never` | the gate re-hedges both legs to equal notional. As a spread widens that adds to the losing leg, and equal notional isn't the right hedge ratio anyway — maintaining the wrong ratio continuously is worse than visible drift |
+| `basket:` | `!every 1` (every bar) | the gate wraps *selection*, not just resize, so `!never` is a basket that never trades. Every periodic alternative is arbitrary — a bar count means a different horizon per cadence. "Rank and hold the top N" with no schedule stated means re-rank every bar |
+| `portfolio:` | `!never` | the cash split drifts with per-child P&L, which is usually what you want; a rebalance is a real trading decision. A non-constant `weights:` must state a cadence — see [Weights](#weights) |
 
 Omit the field to get the default. Set `!never` to opt out of
 rebalancing entirely; set `!every N` for a periodic pulse (`!every 5`

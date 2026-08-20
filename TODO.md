@@ -307,6 +307,54 @@ placeholder. Excluding `meta` would mean teaching the untyped tree-walkers
 (`params::substitute`, `imports::resolve`) about document structure, which they
 are specifically built not to know.
 
+### The default rebalance cadences are per-shape, and each was checked once
+
+Reviewed across all five shapes. The verdict is *keep every default* — recorded
+here so it isn't re-derived from "basket fires and the others don't looks
+inconsistent". It isn't: the gate denotes a different act per shape.
+
+- **`single:` / `multi:`** — `!never`. The gate reaches only the resize branch of
+  `strategies::trade_leg`; entries, exits, reversals and protective levels fire
+  regardless. Firing by default would make every strategy a constant-fraction
+  rebalancer, paying turnover against a live cost model nobody wrote down. The
+  two must agree with each other besides — a `multi:` is N `single:`s sharing a
+  book, so a differing default would change behavior on conversion for no reason.
+- **`pairs:`** — `!never`, the closest call. The gate re-hedges both legs to equal
+  notional, and there is a real argument that a spread trade should maintain its
+  hedge. Two things kill it as a *default*: as the spread widens, re-hedging adds
+  to the losing leg (a martingale — an opinion a library shouldn't hold
+  uninvited), and equal notional isn't the correct hedge ratio anyway (beta /
+  cointegration weights are). Continuously maintaining the wrong ratio is worse
+  than drift, which is at least visible.
+- **`basket:`** — `!every 1`, and effectively forced. The gate wraps *selection*,
+  not just resize, so `!never` is a basket that never trades (pinned by
+  `rebalance_on_never_freezes_the_basket`). Every periodic alternative is
+  arbitrary: a bar count means a different horizon per cadence, which isn't known
+  at build. "Rank and hold the top N" with no schedule stated means every bar.
+- **`portfolio:`** — `!never`. Drift-with-P&L is the right default; a rebalance is
+  a real trading decision, and flipping it would silently convert every existing
+  portfolio into a daily rebalancer.
+
+What the review *did* find was not a wrong default but a combination the default
+voided: **a non-constant `weights:` with no `rebalance_on:`**. Weight shares are
+read only inside `Portfolio::rebalance_now`, so an ungated dynamic expression was
+built, updated every bar, and consulted on none — the portfolio ran its
+equal-split seed and reported a plausible backtest whose weighting rule had never
+executed. Constants were never affected (`!value <list>` / `!value <scalar>` are
+pre-resolved into the build-time seed), so this bit exactly the adaptive case,
+the one where the user most clearly wrote an instruction.
+
+Fixed as a **build error**, not a changed default — the same reasoning that keeps
+`deny_unknown_fields` on every document: a strategy that quietly ignores a field
+you wrote is a worse failure than one that refuses to load. `rebalance_on: !never`
+is the named opt-out, so the escape hatch is a statement of intent rather than
+deleting the weights.
+
+What would change any of this: a shape whose gate semantics change. If `pairs:`
+ever grows a real hedge-ratio slot (beta, cointegration weights) rather than
+splitting notional evenly, its default is worth re-opening — maintaining a
+*correct* ratio is a different proposition from maintaining an arbitrary one.
+
 ## Datasets
 
 ### A fragmented universe is diagnosed, never repaired
