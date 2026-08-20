@@ -53,11 +53,25 @@ if [[ $job == all || $job == rust ]]; then
         cargo doc --no-deps -p fugazi
     # What `cargo publish` would upload. See the workflow for why this is
     # `--workspace --exclude fugazi-python` and not `-p fugazi`.
+    #
+    # The workflow hardcodes `target/`; this cannot. A caller may run the script
+    # under `CARGO_TARGET_DIR` — verifying a change in a throwaway worktree is
+    # the usual reason — and the crate then lands somewhere `target/package`
+    # isn't. That used to leave `bytes` empty, and an empty `bytes` fails the
+    # comparison below, so the check reported an over-size crate when the real
+    # problem was that it never found one. `cargo metadata` is the only answer
+    # that also covers `build.target-dir` set in a config file; the `||` chain
+    # falls back if it can't run. Finding no crate at all is now its own error.
     run "rust / Package size" bash -c '
         cargo package --workspace --exclude fugazi-python --no-verify --allow-dirty || exit 1
-        crate=$(find target/package -maxdepth 1 -name "fugazi-*.crate" \
+        target=$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
+                 sed -n "s/.*\"target_directory\":\"\([^\"]*\)\".*/\1/p")
+        target=${target:-${CARGO_TARGET_DIR:-target}}
+        crate=$(find "$target/package" -maxdepth 1 -name "fugazi-*.crate" \
                   ! -name "fugazi-derive-*" -printf "%s %p\n" |
                 sort -rn | head -1)
+        [ -n "$crate" ] ||
+            { echo "no fugazi-*.crate under $target/package"; exit 1; }
         bytes=${crate%% *}
         budget=$((5 * 1024 * 1024))
         printf "packaged at %s bytes (budget %s)\n" "$bytes" "$budget"
