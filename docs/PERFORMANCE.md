@@ -76,16 +76,17 @@ the baseline and the current tree built from **identical codegen settings**
 (`CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`) so the
 comparison isolates the code change rather than the profile.
 
-Throughout this document the **baseline** is commit `da252ff` — the version bump
+Throughout this document the **baseline** is commit `33e09df` — the version bump
 that set the manifests to 0.58.0, *before* any of the work below. Note that the
 released `v0.58.0` tag is not that commit: the perf work landed on top of
-`da252ff` and shipped inside 0.58.0, so the tag points past the baseline. Compare
-against the SHA, never the tag.
+`33e09df` and shipped inside 0.58.0, so the tag points past the baseline. Compare
+against the SHA, never the tag. (A 2026-08-20 history rewrite re-hashed every
+commit from 2026-08-05 on; in clones predating it this baseline is `da252ff`.)
 
 Method, if you need to reproduce it:
 
 ```
-git worktree add ../fugazi-base da252ff
+git worktree add ../fugazi-base 33e09df
 cp -r benches ../fugazi-base/            # add the [[bench]] entries too
 # then, with the same CARGO_PROFILE_BENCH_* on both sides:
 cargo bench --bench tree --bench driver --bench metrics --bench multi_asset
@@ -122,14 +123,15 @@ a replacement for timing — instruction count ignores cache, branch prediction
 and ILP — but it answers "is this change doing more work?" exactly, and that is
 usually the question.
 
-## Baseline — `da252ff`
+## Baseline — `33e09df`
 
 The pre-optimisation numbers (indicator cores, tree depth, driver, universe
 scaling, wallet, metrics, footprint) are **not reproduced here** — every one has
 been superseded by a later table, and keeping both invites quoting the wrong
-one. They are in git at `da252ff`:
+one. They are in git in the first version of this file, which `18048a9` added
+one commit later:
 
-    git show da252ff:docs/PERFORMANCE.md
+    git show 18048a9:docs/PERFORMANCE.md
 
 What still matters from that commit is the *method*, above: identical codegen on
 both sides (`CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`),
