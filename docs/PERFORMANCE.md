@@ -703,21 +703,47 @@ Two things came out of that:
   is strictly one-sided — it can only make a run slower — so the minimum is the
   least-polluted observation, where a median folds the contended passes back in.
 
-### Results
+### Results — re-measured on 0.66.0
+
+Converged run, 18 passes, 200 000 samples, 7 reps per pass, reporting the
+minimum; sampling stopped when no cell improved by more than 1% over three
+consecutive passes. `docs/assets/performance.svg` is this table as a chart
+(`tools/plot_performance.py`), normalised to the C column.
 
 | | TA-Lib C | TA-Lib py | fugazi rs | fugazi py | **rs vs C** | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|
-| `sma` | 1.37 | 1.46 | 1.37 | 4.97 | **1.00×** | 3.4× |
-| `ema` | 2.06 | 2.16 | 1.36 | 4.86 | **0.66×** | 2.3× |
-| `rsi` | 4.79 | 4.98 | 4.69 | 8.47 | **0.98×** | 1.7× |
-| `atr` | 4.77 | 5.52 | 4.54 | 36.56 | **0.95×** | 6.6× |
-| `stddev` | 3.33 | 3.56 | 10.61 | 12.77 | 3.19× | 3.6× |
+| `macd` | 12.53 | 22.16 | 1.46 | 6.04 | **0.12×** | **0.27×** |
+| `dmi` | 9.81 | 16.76 | 5.89 | 12.72 | **0.60×** | **0.76×** |
+| `adx` | 14.49 | 21.77 | 9.39 | 24.00 | **0.65×** | 1.10× |
+| `ema` | 2.04 | 2.19 | 1.35 | 1.66 | **0.66×** | **0.76×** |
+| `atr` | 4.76 | 12.49 | 4.32 | 6.00 | **0.91×** | **0.48×** |
+| `aroon` | 8.75 | 14.97 | 8.45 | 19.99 | **0.97×** | 1.33× |
+| `sma` | 1.37 | 1.52 | 1.35 | 1.77 | **0.99×** | 1.17× |
+| `rsi` | 4.71 | 5.09 | 4.65 | 5.17 | **0.99×** | 1.02× |
+| `stddev` | 3.31 | 3.57 | 10.89 | 12.53 | 3.29× | 3.51× |
+| `bbands` | 3.98 | 11.37 | 13.56 | 21.05 | 3.41× | 1.85× |
 
-ns/sample, 200 000 samples, median of 7, best of 3 passes. `docs/assets/performance.svg`
-is this table as a chart (`tools/plot_performance.py`), normalised to the C column.
+**The engine is at or better than the C library on eight of ten**, while staying
+incremental — the same `update()` that drives a live stream. The two losses are
+the deliberate one: `stddev` and the `bbands` built on it pay O(period) per query
+for a centred variance that does not cancel at market scale (see the module docs
+and `benches/stddev_tradeoff`).
 
-The **Rust** engine is at parity or better on `sma`/`ema`/`rsi`/`atr` against the
-C library itself, while staying incremental. `stddev` is the deliberate loss.
+**Phases 13 and 14 did not move this table, and were not expected to.** Every row
+here feeds one indicator a raw scalar or candle stream; the wins in those phases
+were `Snapshot::find`, `Symbol` comparison, the symbol-keyed hashers and basket
+ranking — all driver- and universe-level, none of which a single-indicator
+benchmark touches. Against the previous recorded run the `py vs py` column moves
+by at most 0.05 in either direction, and `rs vs C` likewise.
+
+**A caution, freshly earned.** `cargo bench --bench three_tier` on the same tree
+reported `sma` at 1.73 ns and `atr` at 5.30 — 24% above these figures, uniformly
+across every row. That is not a regression and not this table's numbers: it is a
+*single-pass median* against a *converged minimum*. Callgrind settled it —
+`atr_candle` is 1 820 842 instructions at 0.66.0 against 1 820 666 at 0.64.0,
+unchanged to 0.01%, for a 17% wall-clock move. Same rule as everywhere else here:
+a figure from a single pass is a hypothesis, and only the converged run is a
+result.
 
 ### Phase 8 — the input columns were being copied, and that was most of the cost
 
@@ -1956,18 +1982,29 @@ in the binding, not a property of the design.
 
 From the converged run above:
 
-| | `py vs py` | this morning | |
+| | 0.66.0 | previously | |
 |---|---:|---:|---|
-| `macd` | **0.27×** | 1.05× | passes — ~4× faster than `talib` |
-| `atr` | 0.47× | 0.46× | passes |
-| `ema` | 0.74× | 0.97× | passes |
-| `dmi` | **0.78×** | 1.68× | passes — faster than `talib` |
-| `rsi` | 1.05× | 1.15× | passes |
-| `adx` | **1.12×** | 2.00× | passes |
-| `sma` | **1.17×** | 1.59× | passes |
-| `aroon` | 1.38× | 2.51× | **over** — the only one, and structural |
-| `bbands` | 1.89× | 3.90× | **exempt** |
-| `stddev` | 3.39× | 3.72× | **exempt** |
+| `macd` | **0.27×** | 0.27× | passes — ~4× faster than `talib` |
+| `atr` | **0.48×** | 0.47× | passes |
+| `ema` | **0.76×** | 0.74× | passes |
+| `dmi` | **0.76×** | 0.78× | passes — faster than `talib` |
+| `rsi` | 1.02× | 1.05× | passes |
+| `adx` | 1.10× | 1.12× | passes |
+| `sma` | 1.17× | 1.17× | passes |
+| `aroon` | 1.33× | 1.38× | **over** — the only one, and structural |
+| `bbands` | 1.85× | 1.89× | **exempt** |
+| `stddev` | 3.51× | 3.39× | **exempt** |
+
+Nine of ten inside the budget, unchanged through 0.65.0 and 0.66.0 — which is the
+expected result, since neither release touched a single-indicator path. `aroon`
+is still the one over, still for the structural reason below.
+
+**The previous run was measured against the wrong binary.** The bench
+environment had `fugazi 0.63.0` installed *from a different checkout*
+(`fugazi-multi`), which is trap 3 in this document happening to this document.
+`tools/bench_three_tier.py`'s staleness guard is what caught it — it refuses to
+run when the extension is older than any `.rs` file, and it printed the exact
+reinstall command. The guard earns its keep.
 
 **The `was` column is not comparable and is kept only to show direction.** It
 predates the harness fix below, which found that the two Python tiers were
