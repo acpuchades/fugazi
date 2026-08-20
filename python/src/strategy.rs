@@ -1263,6 +1263,11 @@ pub(crate) fn kind_str(kind: OrderKind) -> &'static str {
 /// one by projecting the single-entry snapshot's sole atom. `SingleAssetStrategy`
 /// is snapshot-rooted, but `ta.close()` & friends are candle-rooted; this bridges
 /// them, the same size-1 unpack a CLI `Pick` performs.
+///
+/// The unpack panics on a 2+ entry bar, and `update` has no channel to return
+/// through, so the shapes that *can* be handed a multi-entry snapshot refuse a
+/// candle-rooted leaf at wiring time instead — see [`pairs_signal`]. The lift
+/// itself is therefore only reached where the snapshot is a single series.
 #[derive(Clone)]
 pub(crate) struct AtomLift<S>(pub(crate) S);
 
@@ -1320,11 +1325,44 @@ pub(crate) fn const_false_signal() -> SignalBox<Snapshot<Symbol>> {
     SignalBox::new(ValueBool::<Snapshot<Symbol>>::new(false))
 }
 
+/// Refuse anything but a callable, at **build** time.
+///
+/// The per-symbol factories are invoked inside `Strategy::update`, which has no
+/// error channel, so every failure there is a `panic!` that pyo3 re-raises as a
+/// `PanicException` — a `BaseException` that `except Exception` does not catch.
+/// Passing an `Indicator` where a factory belongs is the overwhelmingly common
+/// way to reach that, and it is decidable the moment the builder is called, so
+/// it earns an ordinary `TypeError` here instead.
+///
+/// This does not (and cannot) probe the callable: a factory keyed on the real
+/// universe would raise for a synthetic probe symbol, so a factory that raises
+/// for a *genuine* symbol still surfaces as a panic at run time.
+fn require_factory(obj: &Py<PyAny>, method: &str, kind: &str) -> PyResult<()> {
+    Python::attach(|py| {
+        let bound = obj.bind(py);
+        if bound.is_callable() {
+            return Ok(());
+        }
+        let got = bound.get_type().name()?;
+        Err(PyTypeError::new_err(format!(
+            "{method}() takes a per-symbol factory — a callable `sym -> {kind}` — but got \
+             {got}. Each symbol needs its own chain, rooted on that symbol, so the \
+             argument has to be a function of the symbol: \
+             `.{method}(lambda sym: rsi(close(pick(sym)), 14))`."
+        )))
+    })
+}
+
 /// Turn a Python callable `sym -> Signal` into the per-symbol signal factory a
 /// [`MultiAssetStrategy`] / [`BasketStrategy`] consumes. The callable is invoked
 /// once per symbol on first sight (during `run`, GIL held); it must return a
-/// candle- or snapshot-rooted `Signal`. Errors surface as a Python exception via
-/// pyo3's panic bridge, since the factory boundary has no `Result` channel.
+/// candle- or snapshot-rooted `Signal`.
+///
+/// The factory boundary has no `Result` channel, so a failure *there* is a
+/// `panic!` that pyo3 re-raises as a `PanicException` — a `BaseException`, which
+/// `except Exception` does not catch. [`require_factory`] takes the decidable
+/// half of that away at wiring time; what is left is a callable that genuinely
+/// raises, or returns the wrong type, for a real symbol.
 pub(crate) fn signal_factory_from_callable(
     cb: Py<PyAny>,
 ) -> impl Fn(&Symbol) -> SignalBox<Snapshot<Symbol>> + Send + Sync + 'static {
@@ -1361,6 +1399,50 @@ pub(crate) fn source_factory_from_callable(
             snapshot_source(&ind.borrow())
                 .unwrap_or_else(|e| panic!("source factory for symbol '{sym}': {e}"))
         })
+    }
+}
+
+/// The error a leaf that named no asset earns inside a **two-legged** strategy.
+///
+/// The Python mirror of `spec::expr::Root::ambiguous("pairs")`, which refuses
+/// the same document on the YAML side. A pairs strategy blesses neither leg,
+/// so a candle- or atom-rooted leaf reaches `AtomLift` and unpacks the sole
+/// atom — and the bar carries two. That used to panic on the first bar, which
+/// crosses the FFI boundary as a `PanicException`: a `BaseException`, so
+/// `except Exception` walked straight past it and the caller could not handle
+/// it at all.
+///
+/// Nothing expressible is lost. Every leaf takes an optional `source`, so the
+/// rooted spelling is always available — including the calendar leaves, which
+/// only read the bar's timestamp and are therefore happy rooted on *either*
+/// leg.
+fn unrooted_pairs_leaf(slot: &str) -> PyErr {
+    PyValueError::new_err(format!(
+        "a pairs strategy privileges neither leg, so this {slot} has no series to \
+         read: it is candle-rooted and the bar carries both legs. Name the series \
+         on each leaf — `close(pick(\"BTC\"))` rather than `close()`. Calendar \
+         leaves need it too, even though they only read the bar's timestamp: \
+         `day_of_week(pick(\"BTC\"))` (either leg will do — they share the time)."
+    ))
+}
+
+/// [`snapshot_signal`] for the two-legged shapes: same projection, but a
+/// candle- or atom-rooted signal is refused up front rather than panicking on
+/// the first two-entry bar. See [`unrooted_pairs_leaf`].
+pub(crate) fn pairs_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<Symbol>>> {
+    match &sig.sig {
+        AnySignal::Candle(_) | AnySignal::Atom(_) => Err(unrooted_pairs_leaf("signal")),
+        _ => snapshot_signal(sig),
+    }
+}
+
+/// [`snapshot_source`] for the two-legged shapes. A constant is still fine — it
+/// reads no series at all — so only the candle- and atom-rooted arms are
+/// refused. See [`unrooted_pairs_leaf`].
+pub(crate) fn pairs_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<Symbol>>> {
+    match &ind.src {
+        AnySource::Candle(_) | AnySource::Atom(_) => Err(unrooted_pairs_leaf("source")),
+        _ => snapshot_source(ind),
     }
 }
 
@@ -1663,8 +1745,8 @@ impl PyPairsStrategy {
     #[pyo3(signature = (enter, exit=None))]
     pub(crate) fn long_spread_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.enter = Some(snapshot_signal(enter)?);
-        s.exit = exit.map(snapshot_signal).transpose()?;
+        s.enter = Some(pairs_signal(enter)?);
+        s.exit = exit.map(pairs_signal).transpose()?;
         Ok(s)
     }
 
@@ -1678,8 +1760,8 @@ impl PyPairsStrategy {
         exit: Option<&PySignal>,
     ) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.short_enter = Some(snapshot_signal(enter)?);
-        s.short_exit = exit.map(snapshot_signal).transpose()?;
+        s.short_enter = Some(pairs_signal(enter)?);
+        s.short_exit = exit.map(pairs_signal).transpose()?;
         Ok(s)
     }
 
@@ -1694,7 +1776,7 @@ impl PyPairsStrategy {
     /// close(right)` reads at or below `level` (its adverse direction).
     pub(crate) fn long_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.stop = Some(snapshot_source(level)?);
+        s.stop = Some(pairs_source(level)?);
         Ok(s)
     }
 
@@ -1702,7 +1784,7 @@ impl PyPairsStrategy {
     /// reads at or above `level`.
     pub(crate) fn long_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.target = Some(snapshot_source(level)?);
+        s.target = Some(pairs_source(level)?);
         Ok(s)
     }
 
@@ -1711,7 +1793,7 @@ impl PyPairsStrategy {
     /// spread falls.
     pub(crate) fn short_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.short_stop = Some(snapshot_source(level)?);
+        s.short_stop = Some(pairs_source(level)?);
         Ok(s)
     }
 
@@ -1719,7 +1801,7 @@ impl PyPairsStrategy {
     /// reads at or **below** `level`.
     pub(crate) fn short_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.short_target = Some(snapshot_source(level)?);
+        s.short_target = Some(pairs_source(level)?);
         Ok(s)
     }
 
@@ -1738,7 +1820,7 @@ impl PyPairsStrategy {
     /// bar's trade (safe default).
     pub(crate) fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.sizing = Some(snapshot_source(source)?);
+        s.sizing = Some(pairs_source(source)?);
         Ok(s)
     }
 
@@ -1746,7 +1828,7 @@ impl PyPairsStrategy {
     /// resized to the current sizing target. Defaults to never.
     pub(crate) fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
-        s.rebalance = Some(snapshot_signal(signal)?);
+        s.rebalance = Some(pairs_signal(signal)?);
         Ok(s)
     }
 
@@ -1874,30 +1956,47 @@ impl PyMultiAssetStrategy {
     /// symbol, `exit(sym)` flattens it. Both are callables `sym -> Signal`; a
     /// missing `exit` never fires.
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn long_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+    pub(crate) fn long_on(
+        &self,
+        enter: Py<PyAny>,
+        exit: Option<Py<PyAny>>,
+    ) -> PyResult<PyMultiAssetStrategy> {
+        require_factory(&enter, "long_on", "Signal")?;
+        if let Some(x) = &exit {
+            require_factory(x, "long_on", "Signal")?;
+        }
         let mut s = self.clone();
         s.long_enter = Some(enter);
         s.long_exit = exit;
-        s
+        Ok(s)
     }
 
     /// Wire the short side: `enter(sym)` opens (or reverses into) a short,
     /// `exit(sym)` flattens it. Same factory shape as [`long_on`](Self::long_on).
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn short_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+    pub(crate) fn short_on(
+        &self,
+        enter: Py<PyAny>,
+        exit: Option<Py<PyAny>>,
+    ) -> PyResult<PyMultiAssetStrategy> {
+        require_factory(&enter, "short_on", "Signal")?;
+        if let Some(x) = &exit {
+            require_factory(x, "short_on", "Signal")?;
+        }
         let mut s = self.clone();
         s.short_enter = Some(enter);
         s.short_exit = exit;
-        s
+        Ok(s)
     }
 
     /// Wire the per-symbol sizing factory `sym -> Indicator` — the
     /// value-fraction magnitude every entry on that symbol is sized against.
     /// Defaults to all-in (`1.0`).
-    pub(crate) fn position_sizing(&self, factory: Py<PyAny>) -> PyMultiAssetStrategy {
+    pub(crate) fn position_sizing(&self, factory: Py<PyAny>) -> PyResult<PyMultiAssetStrategy> {
+        require_factory(&factory, "position_sizing", "Indicator")?;
         let mut s = self.clone();
         s.sizing = Some(factory);
-        s
+        Ok(s)
     }
 
     /// Install the rebalance gate (a snapshot-rooted signal). On fire, every
@@ -2170,18 +2269,20 @@ impl PyBasketStrategy {
 
     /// Wire the per-symbol score factory `sym -> Indicator`; the selection rule
     /// ranks symbols by this value each rebalance.
-    pub(crate) fn scored_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+    pub(crate) fn scored_by(&self, factory: Py<PyAny>) -> PyResult<PyBasketStrategy> {
+        require_factory(&factory, "scored_by", "Indicator")?;
         let mut s = self.clone();
         s.score = Some(factory);
-        s
+        Ok(s)
     }
 
     /// Wire the per-symbol sizing factory `sym -> Indicator` — each selected
     /// leg's value-fraction. Use an equal-weight source for a normalized gross.
-    pub(crate) fn sized_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+    pub(crate) fn sized_by(&self, factory: Py<PyAny>) -> PyResult<PyBasketStrategy> {
+        require_factory(&factory, "sized_by", "Indicator")?;
         let mut s = self.clone();
         s.sizing = Some(factory);
-        s
+        Ok(s)
     }
 
     /// Select the top `longs` and bottom `shorts` symbols by score, ranked

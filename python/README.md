@@ -881,6 +881,22 @@ siblings and drive over a sequence of snapshots (`.run(wallet, snapshots)`).
 Their signals are snapshot-rooted, so atom leaves are rooted per symbol with
 `ta.pick(sym)`.
 
+**`PairsStrategy` requires it.** A pair privileges neither leg, so a leaf that
+named no asset — a bare `ta.close()` — has no series to read on a bar that
+carries both, and the builder raises `ValueError` rather than failing on the
+first bar. That includes the calendar leaves: `ta.day_of_week()` reads only the
+bar's timestamp, but it still has to say whose bar, and since both legs share
+the time, rooting it on either one gives the same answer
+(`ta.day_of_week(ta.pick("BTC"))`). Constants (`ta.value(0.5)`) read no series
+and stay legal. The YAML side refuses the same document for the same reason.
+
+`MultiAssetStrategy` and `BasketStrategy` take **per-symbol factories** instead
+— `sym -> Signal` / `sym -> Indicator` callables, so each symbol gets its own
+chain rooted on itself. Passing the indicator directly is the common slip and
+raises `TypeError` at wiring time; a factory that *runs* and then fails does so
+inside the driver, which has no error channel, and still surfaces as a
+`PanicException`.
+
 `PairsStrategy` trades the **spread** `close(left) − close(right)`, long / flat
 / short on it. `long_spread_on` goes long `left` / short `right` (profiting as
 the spread rises); `short_spread_on` is the mirror. A mean-reverting spread

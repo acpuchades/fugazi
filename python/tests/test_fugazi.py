@@ -1506,6 +1506,84 @@ def test_basket_selection_install_via_seam_and_everything_leaf():
     assert "BBB" not in {f.order.symbol for f in rep.fills}
 
 
+# ---------------------------------------------------------------------------
+# Unrooted leaves and per-symbol factories: what the builders refuse.
+#
+# Every case below used to raise `PanicException` — a Rust panic bridged across
+# the FFI boundary. `PanicException` derives from `BaseException`, so
+# `except Exception` walked straight past it and a caller could not handle any
+# of this without also swallowing their own `KeyboardInterrupt`. Each is now an
+# ordinary exception raised by the builder, before the run starts.
+# ---------------------------------------------------------------------------
+
+
+def test_pairs_refuses_a_leaf_that_named_no_asset():
+    # A pairs strategy blesses neither leg, so `close()` has no series to read
+    # and the bar carries both. The YAML side refuses the same document at
+    # build time (`Root::ambiguous("pairs")`); this is the Python mirror.
+    with pytest.raises(ValueError, match="privileges neither leg"):
+        ta.PairsStrategy("BTC", "ETH").long_spread_on(
+            ta.close() > ta.sma(ta.close(), 20)
+        )
+
+
+def test_pairs_refuses_an_unrooted_level_source():
+    # Same rule on the source slots, not just the signal ones.
+    with pytest.raises(ValueError, match="privileges neither leg"):
+        ta.PairsStrategy("BTC", "ETH").long_spread_stop_loss(ta.close())
+
+
+def test_pairs_refuses_an_unrooted_calendar_leaf_but_takes_a_rooted_one():
+    # A calendar leaf reads only the bar's timestamp, so *semantically* it does
+    # not care which leg it rides — but it still has to say. Rooting it on
+    # either leg is the spelling, and both legs share the time, so the answer
+    # is the same one.
+    with pytest.raises(ValueError, match="privileges neither leg"):
+        ta.PairsStrategy("BTC", "ETH").rebalance_on(ta.day_of_week() > 3)
+
+    strat = (
+        ta.PairsStrategy("BTC", "ETH")
+        .long_spread_on(ta.close(ta.pick("BTC")) > ta.close(ta.pick("ETH")))
+        .rebalance_on(ta.day_of_week(ta.pick("BTC")) > 3)
+    )
+    rep = strat.run(ta.PaperWallet(10_000.0), _msnaps({
+        "BTC": [10, 11, 12, 11, 10, 9, 10, 12],
+        "ETH": [10, 10, 10, 10, 10, 10, 10, 10],
+    }))
+    assert len(rep.equity_curve) == 8
+
+
+def test_pairs_still_accepts_a_constant_sizing_multiplier():
+    # A constant reads no series at all, so it is not ambiguous and must keep
+    # working — the refusal is scoped to candle- and atom-rooted leaves.
+    strat = ta.PairsStrategy("BTC", "ETH").position_sizing(ta.value(0.5))
+    assert isinstance(strat, ta.PairsStrategy)
+
+
+@pytest.mark.parametrize("wire", [
+    lambda arg: ta.BasketStrategy().scored_by(arg),
+    lambda arg: ta.BasketStrategy().sized_by(arg),
+    lambda arg: ta.MultiAssetStrategy().long_on(arg),
+    lambda arg: ta.MultiAssetStrategy().short_on(arg),
+    lambda arg: ta.MultiAssetStrategy().position_sizing(arg),
+])
+def test_per_symbol_slots_reject_a_non_callable(wire):
+    # Passing the indicator itself, rather than a `sym -> Indicator` factory,
+    # is the common slip: each symbol needs its own chain rooted on that
+    # symbol, so the slot takes a function of the symbol.
+    with pytest.raises(TypeError, match="per-symbol factory"):
+        wire(ta.rsi(ta.close(), 14))
+
+
+def test_per_symbol_slots_reject_a_non_callable_exit_too():
+    # The optional second argument is a factory on the same terms as the first.
+    with pytest.raises(TypeError, match="per-symbol factory"):
+        ta.MultiAssetStrategy().long_on(
+            lambda sym: ta.close(ta.pick(sym)) > ta.value(1.0),
+            ta.close() < ta.value(1.0),
+        )
+
+
 def test_wallet_rejects_bad_side():
     w = ta.PaperWallet(100.0)
     w.update("X", 10.0)
