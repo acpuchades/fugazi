@@ -168,7 +168,7 @@ fn workload(name: &str) {
                     },
                 );
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
-            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps.into_iter()));
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
         other => panic!("unknown workload `{other}`"),
     }
