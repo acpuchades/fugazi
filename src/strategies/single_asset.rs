@@ -30,14 +30,25 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// [`Position`] tracker. Prefers a symbol-matching entry (any frequency); if
 /// none match — the common single-series case where the driver pushes an
 /// untagged size-1 snapshot via [`Snapshot::of_atom`] — falls back to the
-/// [`Snapshot::sole_atom`] unpack. Returns `None` on an empty snapshot; the
-/// caller (`SingleAssetStrategy::update`) then simply skips the position
-/// fold for that bar.
+/// [`Snapshot::sole_atom_or_none`] unpack. Returns `None` on an empty
+/// snapshot, and on a bar this strategy's symbol simply did not quote; the
+/// caller (`SingleAssetStrategy::update`) then skips the position fold,
+/// leaving the [`Book`]'s `prev_close` to mark equity at the last price it saw.
 ///
-/// Panics with the [`Snapshot::sole_atom`] message if the fallback is
-/// triggered on a multi-entry untagged snapshot — that's the same loud
-/// failure the empty-selector [`Pick`](crate::indicators::Pick) uses,
-/// preserved end-to-end.
+/// **`sole_atom_or_none`, not `sole_atom_or_panic`** — this is a *rooted*
+/// context, and the same rule [`Pick::rooted`](crate::indicators::Pick::rooted)
+/// already follows applies: a 2+ entry snapshot here is ordinary, not a wiring
+/// bug. It means the declared symbol is absent from *this bar* — a shorter
+/// history, a delisting, a holiday, a half-day — which must read `None` and let
+/// the run continue, exactly as an absent basket leg does. Falling back through
+/// the panicking spelling aborted on every one of those, and did so from the
+/// *router* rather than a leaf, so its "add `!pick` to each leaf" advice could
+/// not fix it: a document with fully explicit `!pick` leaves failed
+/// identically.
+///
+/// A declared symbol absent from the *whole* stream is a different failure and
+/// is caught by name, up front — see
+/// [`backtest::validate_universe`](crate::spec::backtest::validate_universe).
 ///
 /// Borrows rather than clones: the caller only reads `atom.candle` (a `Copy`
 /// 40-byte struct), so cloning the whole 88-byte `Atom` — plus an `Arc` bump on
@@ -51,7 +62,7 @@ fn extract_self_atom<'a, Sym: PartialEq>(
     snap.iter()
         .find(|(s, _, _)| *s == Some(symbol))
         .map(|(_, _, a)| a)
-        .or_else(|| snap.sole_atom())
+        .or_else(|| snap.sole_atom_or_none())
 }
 
 /// A single-asset, all-in strategy driven by boolean [`Signal`]s — one per state

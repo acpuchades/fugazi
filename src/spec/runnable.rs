@@ -603,4 +603,52 @@ impl StrategySpec {
             }
         }
     }
+
+    /// The symbols this document **declares that it trades** — the ones that
+    /// have to be in the input for the run to mean anything.
+    ///
+    /// Distinct from [`universe`](Self::universe) in what it does about the
+    /// N-symbol shapes: those *discover* their universe from the stream, so
+    /// they declare nothing and contribute no entries here. `universe` answers
+    /// "which symbols do I resolve costs for", which is a question about the
+    /// data; this answers "which symbols did the author name", which is a
+    /// question about the document — and only the second can be checked
+    /// against the data and found wrong.
+    ///
+    /// A portfolio recurses into its children, so a typo in one child of nine
+    /// is named rather than hidden behind the aggregate.
+    ///
+    /// Consumed by [`backtest::validate_universe`](super::backtest::validate_universe).
+    pub fn declared_symbols(&self) -> Vec<String> {
+        fn from_child(child: &super::portfolio::PortfolioChildStrategy, out: &mut Vec<String>) {
+            use super::portfolio::PortfolioChildStrategy as C;
+            match child {
+                C::Single(s) => out.push(s.symbol().to_string()),
+                C::Pairs(s) => {
+                    out.push(s.left.clone());
+                    out.push(s.right.clone());
+                }
+                // Discovered from the stream — nothing was declared.
+                C::Basket(_) | C::Multi(_) => {}
+            }
+        }
+
+        let mut out = Vec::new();
+        match self {
+            StrategySpec::Single(s) => out.push(s.symbol().to_string()),
+            StrategySpec::Pairs(s) => {
+                out.push(s.left.clone());
+                out.push(s.right.clone());
+            }
+            StrategySpec::Basket(_) | StrategySpec::Multi(_) => {}
+            StrategySpec::Portfolio(p) => {
+                for child in &p.children {
+                    from_child(&child.strategy, &mut out);
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }

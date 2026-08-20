@@ -1270,7 +1270,7 @@ impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
     type Input = Snapshot<Symbol>;
     type Output = S::Output;
     fn update(&mut self, snap: Snapshot<Symbol>) -> Option<S::Output> {
-        snap.sole_atom().cloned().and_then(|a| self.0.update(a))
+        snap.sole_atom_or_panic().cloned().and_then(|a| self.0.update(a))
     }
     fn value(&self) -> Option<S::Output> {
         self.0.value()

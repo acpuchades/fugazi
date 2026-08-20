@@ -303,7 +303,7 @@ fn run_spec(yaml: &str) -> Vec<fugazi::Fill<Symbol>> {
 #[test]
 fn single_strategy_bare_leaf_reads_its_declared_symbol_in_a_multi_symbol_frame() {
     // `symbol: A` with a bare `!close`. Before the blessed root this tripped
-    // `sole_atom`'s panic, because the frame carries two symbols; now the
+    // `sole_atom_or_panic`'s panic, because the frame carries two symbols; now the
     // declared symbol means the same thing for signals as it does for trading.
     //
     // A's closes are 10,20,30,40,50,60 — `!close > 35` first holds on bar 3

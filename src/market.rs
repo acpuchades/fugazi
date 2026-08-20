@@ -413,7 +413,7 @@ pub struct Atom {
     /// curve.
     ///
     /// Everything that prices a bar must therefore skip these atoms — the
-    /// wallet's mark-to-market, `sole_atom`'s implicit unpack — while
+    /// wallet's mark-to-market, `sole_atom_or_panic`'s implicit unpack — while
     /// everything that reads the side channel treats them as ordinary.
     pub candle: Option<Candle>,
     /// The bar's open time as a UTC millisecond epoch, if known. `None` for

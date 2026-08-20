@@ -365,7 +365,7 @@ fn bar_timestamps_pass_through_untouched() {
         .collect();
     let seen: Vec<Option<Timestamp>> = snaps
         .iter()
-        .map(|s| s.sole_atom().and_then(|a| a.time))
+        .map(|s| s.sole_atom_or_panic().and_then(|a| a.time))
         .collect();
     backtest::run(&mut strat, &mut wallet, snaps);
 

@@ -147,7 +147,7 @@ fn empty_selector_unpacks_a_single_entry_snapshot() {
 }
 
 #[test]
-#[should_panic(expected = "Snapshot::sole_atom: expected a single-entry snapshot")]
+#[should_panic(expected = "Snapshot::sole_atom_or_panic: no leaf named an asset")]
 fn empty_selector_panics_on_multi_entry_snapshot() {
     // The loud-failure guard: a no-query Pick fed a multi-asset snapshot is
     // almost always a wiring bug — panic rather than silently pick.

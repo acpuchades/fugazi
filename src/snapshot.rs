@@ -285,7 +285,7 @@ pub fn symbol(name: impl AsRef<str>) -> Symbol {
 /// entry regardless of symbol, `Selector::exact(sym, freq)` matches a single
 /// tagged entry. A fully-empty selector (both fields `None`, the [`Default`])
 /// is legal — it stands for "no query at all" and drives [`Pick`](crate::indicators::Pick) onto the
-/// [`Snapshot::sole_atom`] path (see [`Selector::is_empty`]) rather than a
+/// [`Snapshot::sole_atom_or_panic`] path (see [`Selector::is_empty`]) rather than a
 /// structural match.
 ///
 /// # Matching semantics ([`Selector::matches`])
@@ -358,7 +358,7 @@ impl<Sym> Selector<Sym> {
     }
 
     /// True when both fields are `None` — the "no query" case that [`Pick`](crate::indicators::Pick)
-    /// treats as a single-entry unpack ([`Snapshot::sole_atom`]) rather than
+    /// treats as a single-entry unpack ([`Snapshot::sole_atom_or_panic`]) rather than
     /// a structural match.
     pub fn is_empty(&self) -> bool {
         self.symbol.is_none() && self.freq.is_none()
@@ -547,6 +547,39 @@ impl<Sym: Hash> Entries<Sym> {
 /// both tags optional. Named so the shared storage type stays readable.
 pub type Entry<Sym> = (Option<Sym>, Option<Frequency>, Atom);
 
+/// The panic text for an ambiguous [`Snapshot::sole_atom_or_panic`] unpack.
+///
+/// Deliberately does **not** advise adding `!pick { symbol }` to every leaf.
+/// That advice was measured to be wrong. The message was overwhelmingly
+/// reached from `strategies::single_asset::extract_self_atom`, which fires
+/// when a strategy's own *declared* symbol is absent from the bar — and a
+/// document whose leaves already named their asset explicitly failed
+/// identically, because the router, not the leaf, was the caller. That path
+/// now falls back through [`Snapshot::sole_atom_or_none`] and reads `None`, so what
+/// remains here is only the genuine case: a leaf in an **unrooted** context
+/// that named no asset at all.
+fn ambiguous_sole_atom(n: usize) -> String {
+    format!(
+        "Snapshot::sole_atom_or_panic: no leaf named an asset, and this bar carries {n} priceable \
+         series — there is no single one to unpack.\n\
+         \n\
+         This is an *unrooted* context: one that blesses no series of its own, so every \
+         leaf under it has to name its asset. Those are a pairs document (two legs, \
+         neither privileged), a portfolio's `weights:` / `rebalance_on:`, and a \
+         `!sharpe`-style embedded `strategy:`. A single-asset, basket or multi-asset \
+         document blesses its own symbol and does not reach this.\n\
+         \n\
+         To fix, name the asset on the leaf:\n\
+         \n\
+         - YAML — `!close {{ source: !pick {{ symbol: BTCUSDT }} }}`\n\
+         - Rust — `Pick::matching(Selector::by_symbol(..))` in place of `Pick::new()`\n\
+         \n\
+         Note this is *not* how an absent series is reported. A strategy whose declared \
+         symbol does not quote on a given bar reads `None` and does not advance; a \
+         declared symbol absent from the entire stream is refused up front, by name."
+    )
+}
+
 impl<Sym> Snapshot<Sym> {
     /// An empty snapshot with no assets.
     pub fn new() -> Self {
@@ -623,26 +656,52 @@ impl<Sym> Snapshot<Sym> {
     /// only inspect [`Atom::time`], which every entry in a well-formed
     /// snapshot shares, so "any one" is defined and stable).
     ///
-    /// Contrast with [`sole_atom`](Self::sole_atom), which is the
+    /// Contrast with [`sole_atom_or_panic`](Self::sole_atom_or_panic), the
     /// single-series safety net: it panics on 2+ entries because most price
     /// leaves (`!close`, `!high`, …) genuinely depend on *which* asset.
     pub fn any_atom(&self) -> Option<&Atom> {
         self.entries.rows.first().map(|(_, _, a)| a)
     }
 
-    /// The sole atom in a single-entry snapshot, if there is exactly one.
-    /// Returns `None` for empty snapshots; **panics** with a diagnostic
-    /// message when the snapshot has 2+ entries. This is the primitive
-    /// [`Pick::new`](crate::indicators::Pick::new) uses for its "no query —
-    /// this is a single-series run" path: a single-series driver always
-    /// feeds a size-1 snapshot, so a 2+ read means the run was accidentally
-    /// hooked up to multi-asset input and the loud failure is preferable to
-    /// silently returning an arbitrary asset.
+    /// The sole priceable atom — **panicking** when the snapshot is
+    /// ambiguous.
     ///
-    /// For sources that are symbol-agnostic (calendar accessors that only
-    /// read `atom.time`), see [`any_atom`](Self::any_atom); for the
-    /// non-panicking twin, [`lone_atom`](Self::lone_atom).
-    pub fn sole_atom(&self) -> Option<&Atom> {
+    /// One of three spellings of a single decision, differing *only* in how a
+    /// 2+ entry snapshot is answered: this one panics,
+    /// [`sole_atom_or_none`](Self::sole_atom_or_none) reads `None`, and
+    /// [`sole_atom_or_err`](Self::sole_atom_or_err) returns `Err(count)`. All
+    /// three agree on the other two cases — `None` when nothing priceable
+    /// quoted, `Some` when exactly one did.
+    ///
+    /// This is the primitive [`Pick::new`](crate::indicators::Pick::new) uses
+    /// for its "no query — this leaf named no asset" path, which is reached
+    /// only from an *unrooted* context: one that blessed no series of its own,
+    /// so every leaf under it has to name what it reads. A 2+ read there means
+    /// the leaf cannot choose, and the loud failure beats silently returning an
+    /// arbitrary asset.
+    ///
+    /// For sources that are symbol-agnostic (calendar accessors that only read
+    /// `atom.time`), see [`any_atom`](Self::any_atom).
+    pub fn sole_atom_or_panic(&self) -> Option<&Atom> {
+        match self.sole_atom_or_err() {
+            Ok(atom) => atom,
+            Err(n) => panic!("{}", ambiguous_sole_atom(n)),
+        }
+    }
+
+    /// The sole priceable atom, or `Err(count)` on ambiguity — the
+    /// **fallible** spelling, and the one implementation all three share.
+    ///
+    /// Exists so a caller that has an error channel can use one — the FFI
+    /// boundary in particular, where an unwinding panic becomes a
+    /// `PanicException` that Python's `except Exception` does not catch.
+    /// `sole_atom_or_panic` is the same call with the count rendered into a
+    /// panic, for the `Indicator::update` path that has nowhere to return a
+    /// `Result`.
+    ///
+    /// `Ok(None)` is an empty (or overlay-only) snapshot, which is not an
+    /// error: it is the ordinary "nothing quoted this bar" reading.
+    pub fn sole_atom_or_err(&self) -> Result<Option<&Atom>, usize> {
         // Only priceable entries count. An overlay-only series — a funding
         // rate, an open interest — is stacked into the snapshot beside the
         // price series and is reached deliberately, with `!pick`; it must stay
@@ -651,39 +710,25 @@ impl<Sym> Snapshot<Sym> {
         let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
         let first = priceable.next();
         match (first, priceable.count()) {
-            (None, _) => None,
-            (Some(entry), 0) => Some(&entry.2),
-            (Some(_), extra) => {
-                let n = extra + 1;
-                panic!(
-                "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries. \
-                 This usually means a strategy authored for single-series input was fed a \
-                 multi-asset snapshot, and the implicit no-arg `Pick::new()` on one of its \
-                 leaves could not choose an asset. \n\
-                 \n\
-                 To fix: pick which asset each leaf reads.\n\
-                 \n\
-                 - In YAML, add a `!pick {{ symbol, freq }}` source to each affected \
-                 leaf — e.g. `!close {{ source: !pick {{ symbol: BTC }} }}`. \n\
-                 - In Rust, replace `Pick::new()` with `Pick::matching(Selector::by_symbol(...))` \
-                 (or `by_freq(...)` / `exact(...)`)."
-                )
-            }
+            (None, _) => Ok(None),
+            (Some(entry), 0) => Ok(Some(&entry.2)),
+            (Some(_), extra) => Err(extra + 1),
         }
     }
 
-    /// The sole priceable atom, or `None` when there isn't exactly one — the
-    /// **non-panicking** twin of [`sole_atom`](Self::sole_atom).
+    /// The sole priceable atom, or `None` on ambiguity — the
+    /// **non-panicking** spelling.
     ///
-    /// [`Pick::rooted`](crate::indicators::Pick::rooted) uses this as its
-    /// fallback when the blessed symbol doesn't match. The distinction from
-    /// `sole_atom` is the whole point: in a rooted context a 2+ entry snapshot
-    /// is *normal* — it just means the blessed leg is absent this bar (a
-    /// listing gap, a different exchange calendar), which should read `None`
-    /// and let the caller roll the symbol off, not abort the run. The panic in
-    /// `sole_atom` is for the genuinely mis-wired case, where nothing named an
-    /// asset at all.
-    pub fn lone_atom(&self) -> Option<&Atom> {
+    /// [`Pick::rooted`](crate::indicators::Pick::rooted) and
+    /// `strategies::single_asset::extract_self_atom` use this as their fallback
+    /// when the blessed symbol matches nothing on a bar. The distinction from
+    /// [`sole_atom_or_panic`](Self::sole_atom_or_panic) is the whole point: in
+    /// a *rooted* context a 2+ entry snapshot is ordinary — it just means the
+    /// blessed leg is absent this bar (a listing gap, a different exchange
+    /// calendar), which must read `None` and let the caller roll the symbol
+    /// off, not abort the run. The panic is for the genuinely mis-wired case,
+    /// where nothing named an asset at all.
+    pub fn sole_atom_or_none(&self) -> Option<&Atom> {
         let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
         match (priceable.next(), priceable.next()) {
             (Some(entry), None) => Some(&entry.2),
@@ -798,7 +843,7 @@ mod overlay_only_tests {
     }
 
     #[test]
-    fn sole_atom_ignores_an_overlay_only_entry() {
+    fn sole_atom_or_panic_ignores_an_overlay_only_entry() {
         // The point of the whole change: stacking a funding series next to a
         // price series must not break a single-asset strategy's bare `!close`,
         // which reaches its bar through the implicit no-arg unpack.
@@ -806,25 +851,51 @@ mod overlay_only_tests {
         snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
 
-        let sole = snap.sole_atom().expect("the one priceable entry");
+        let sole = snap.sole_atom_or_panic().expect("the one priceable entry");
         assert_eq!(sole.candle.unwrap().close, 1.5);
     }
 
     #[test]
-    fn sole_atom_still_panics_on_two_real_bars() {
+    fn sole_atom_or_panic_still_panics_on_two_real_bars() {
         // The ambiguity it exists to catch is unchanged: two *priceable*
         // entries remain a programming error, not a silent arbitrary pick.
         let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
         snap.push(Some("ETH".into()), None, Atom::new(Candle::new(2.0, 3.0, 1.5, 2.5, 20.0)));
-        assert!(std::panic::catch_unwind(|| snap.sole_atom()).is_err());
+        assert!(std::panic::catch_unwind(|| snap.sole_atom_or_panic()).is_err());
     }
 
     #[test]
-    fn an_all_overlay_snapshot_has_no_sole_atom() {
+    fn sole_atom_or_err_reports_the_count_instead_of_panicking() {
+        // The fallible twin the FFI boundary goes through: same decision, an
+        // error value instead of an unwind. `Ok(None)` stays reserved for
+        // "nothing quoted", which is not an error.
+        let bar = |c: f64| Atom::new(Candle::new(c, c, c, c, 1.0));
+        let mut three: Snapshot<Symbol> = Snapshot::new();
+        three.push(Some("BTC".into()), None, bar(1.5));
+        three.push(Some("ETH".into()), None, bar(2.5));
+        three.push(Some("SOL".into()), None, bar(3.5));
+        assert_eq!(three.sole_atom_or_err().err(), Some(3));
+
+        let mut one: Snapshot<Symbol> = Snapshot::new();
+        one.push(Some("BTC".into()), None, bar(1.5));
+        assert_eq!(
+            one.sole_atom_or_err().ok().flatten().and_then(|a| a.candle).map(|c| c.close),
+            Some(1.5)
+        );
+
+        // An overlay-only entry is not priceable, so this is `Ok(None)` — the
+        // "nothing quoted" reading, never an ambiguity.
+        let mut overlay: Snapshot<Symbol> = Snapshot::new();
+        overlay.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
+        assert!(matches!(overlay.sole_atom_or_err(), Ok(None)));
+    }
+
+    #[test]
+    fn an_all_overlay_snapshot_has_no_sole_atom_or_panic() {
         let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
-        assert!(snap.sole_atom().is_none());
+        assert!(snap.sole_atom_or_panic().is_none());
     }
 }
 

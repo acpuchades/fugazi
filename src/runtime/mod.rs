@@ -775,7 +775,7 @@ pub type AsCandle = As<Candle>;
 /// atom-input leaf (`Close::of(source)`, `Year::of(source)`,
 /// `Atr::new(CurrentBar::of(source), period)`, …) uses. The typical concrete
 /// source is `Pick::<Symbol>::new()` — the empty selector's
-/// `Snapshot::sole_atom` unpack — but any snapshot-rooted atom-emitting
+/// `Snapshot::sole_atom_or_panic` unpack — but any snapshot-rooted atom-emitting
 /// chain works.
 ///
 /// Not currently constructed by the CLI spec builder — every leaf that would

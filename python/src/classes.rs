@@ -542,7 +542,7 @@ impl PyAtom {
     /// that is not a price — a funding rate, an open interest, a market
     /// capitalisation. Such an atom is stacked into a `Snapshot` beside the
     /// price series and read with `pick()` + `get()`; it never reaches
-    /// mark-to-market, and `sole_atom` skips it, so attaching one cannot
+    /// mark-to-market, and the sole-atom unpack skips it, so attaching one cannot
     /// disturb a strategy that never asked for it. An overlay-only atom with
     /// no overlays at all is rejected — it would carry nothing.
     #[new]
@@ -1051,11 +1051,28 @@ impl PySnapshot {
     }
 
     /// The sole atom in a single-entry snapshot, if there is exactly one.
-    /// Returns `None` on an empty snapshot; raises `RuntimeError` (translated
-    /// from a Rust panic) on 2+ entries — the same loud failure the no-query
-    /// `pick()` uses.
-    pub(crate) fn sole_atom(&self) -> Option<PyAtom> {
-        self.inner.sole_atom().cloned().map(|inner| PyAtom { inner })
+    /// Returns `None` on an empty snapshot; raises `ValueError` on 2+ entries —
+    /// the same ambiguity the no-query `pick()` refuses.
+    ///
+    /// `ValueError`, not the `PanicException` this used to raise by letting a
+    /// Rust panic unwind across the FFI boundary. `PanicException` derives from
+    /// `BaseException`, so `except Exception` walked straight past it and a
+    /// caller could not handle this at all without knowing to catch
+    /// `BaseException` — which would also swallow their own `KeyboardInterrupt`.
+    /// The Rust `Snapshot::sole_atom_or_panic` still panics, because it is
+    /// called from `Indicator::update`, which has no error channel to return
+    /// through; this binding goes through the fallible spelling,
+    /// `Snapshot::sole_atom_or_err`.
+    pub(crate) fn sole_atom(&self) -> PyResult<Option<PyAtom>> {
+        match self.inner.sole_atom_or_err() {
+            Ok(atom) => Ok(atom.cloned().map(|inner| PyAtom { inner })),
+            Err(n) => Err(PyValueError::new_err(format!(
+                "sole_atom: this snapshot carries {n} priceable series, so there is no \
+                 single one to unpack. Name the one you want with `pick(symbol)`, or use \
+                 `any_atom()` if any entry will do (calendar reads, which only touch the \
+                 shared timestamp)."
+            ))),
+        }
     }
 
     pub(crate) fn __repr__(&self) -> String {

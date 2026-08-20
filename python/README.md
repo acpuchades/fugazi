@@ -537,12 +537,20 @@ ratio     = ta.close(ta.pick("BTC")) / ta.close(ta.pick("ETH"))
 ```
 
 **The zero-arg `pick()` is the single-series shortcut.** With no query it
-runs `Snapshot.sole_atom` on every bar: the snapshot must contain exactly one
-entry (its atom is what the pick emits), otherwise the call **panics loudly**
-(a Python `RuntimeError` translated from the Rust panic). That's the
-"strategy authored for one asset but fed a `Snapshot`-shaped driver" case —
-the loud failure catches multi-asset input that would otherwise silently pick
-whichever entry the HashMap iterator happened to hand back.
+takes the sole-atom unpack on every bar: the snapshot must contain exactly one
+priceable entry (its atom is what the pick emits), otherwise the call **fails
+loudly** rather than silently picking whichever entry came first. That's the
+"strategy authored for one asset but fed a `Snapshot`-shaped driver" case.
+
+Calling `Snapshot.sole_atom` yourself raises a plain **`ValueError`** on an
+ambiguous snapshot. It used to surface the Rust panic as a `PanicException`,
+which derives from `BaseException` — so `except Exception` walked straight
+past it, and catching it at all also meant swallowing your own
+`KeyboardInterrupt`. Inside a *strategy*, though, this is not the error you
+will meet: a document's declared symbol is a blessed root, so a bar it does
+not quote on reads `None` and the strategy simply does not advance, and a
+declared symbol missing from the whole stream is refused by `run()` before the
+first bar, naming the symbol and what the stream does carry.
 
 ```python
 # Single-series strategy, snapshot-shaped input:

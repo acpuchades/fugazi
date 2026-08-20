@@ -123,6 +123,83 @@ pub fn universe_from_snapshots(snapshots: &[crate::types::Snapshot<Symbol>]) -> 
     v
 }
 
+/// Refuse a run whose document names a symbol the snapshot stream never
+/// carries — the typo / wrong-dataset / case-mismatch case.
+///
+/// **Why this is not left to the bars.** A leaf that resolves nothing reads
+/// `None`, which is the right answer for a listing gap and exactly the wrong
+/// one for a symbol that was never supplied: no signal ever fires, no order is
+/// ever sized, and the run completes with zero fills and a full set of
+/// metrics. That reads as "the strategy didn't like this period" rather than
+/// "the strategy never saw its asset" — the most expensive way for a backtest
+/// to be wrong. This is the same argument, and the same disposition, as
+/// `cli::run::read_only_series` applies to a `!pick`-named series; the CLI has
+/// refused that since it existed. This closes the twin hole for the symbol the
+/// document *trades*, on the entry points where the caller builds the
+/// snapshots themselves.
+///
+/// **Absent from the stream, not absent from a bar.** The check is over the
+/// whole stream, so a symbol that quotes on even one bar passes. A shorter
+/// history, a delisting, a holiday or a half-day is ordinary and must not fail
+/// — that case is handled one layer down, where the strategy reads `None` and
+/// does not advance (see `strategies::single_asset::extract_self_atom`).
+///
+/// **What is not checked.** Basket and multi-asset *discover* their universe
+/// from the stream, so they declare nothing and cannot disagree with it; see
+/// [`StrategySpec::declared_symbols`]. Callers must also skip this on a
+/// **resumed** run — a chunk in which a symbol never quotes is legitimate when
+/// the state carrying it came from an earlier chunk — and on a **live** feed,
+/// where there is no stream to scan. Both are the caller's call because only
+/// the caller knows; the batch entry points here make it for them.
+pub fn validate_universe(
+    spec: &StrategySpec,
+    snapshots: &[crate::types::Snapshot<Symbol>],
+) -> Result<(), String> {
+    let declared = spec.declared_symbols();
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let present = universe_from_snapshots(snapshots);
+    let missing: Vec<&String> = declared
+        .iter()
+        .filter(|d| !present.iter().any(|p| p.as_ref() == d.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let names = missing
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let carried = if present.is_empty() {
+        "no symbols at all".to_string()
+    } else {
+        present
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (subject, verb) = if missing.len() == 1 {
+        ("symbol", "is")
+    } else {
+        ("symbols", "are")
+    };
+    Err(format!(
+        "the document trades {subject} {names}, which {verb} not in the input at all — \
+         the stream carries {carried}.\n\
+         \n\
+         Nothing would ever resolve for {names}, so the run would report a full set of \
+         metrics over zero fills rather than an error. Check for a typo or a case \
+         mismatch against the series you passed, and note the match is exact.\n\
+         \n\
+         A symbol that is merely absent from *some* bars — a shorter history, a \
+         delisting, a holiday — is fine and does not reach this: the strategy reads \
+         `None` on those bars and does not advance."
+    ))
+}
+
 /// Everything one iteration of a backtest produces — consumed by
 /// `crate::run::run`. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
@@ -359,6 +436,13 @@ pub fn run_iteration_resumable(
             resume.map(|r| r.kind.as_str()).unwrap_or(""),
             spec.kind()
         ));
+    }
+    // Refuse a declared symbol the stream never carries, once, before any bar
+    // is driven — see `validate_universe`. Cold starts only: on a resume, a
+    // chunk in which a symbol never quotes is legitimate, because the state
+    // that carries it was restored from an earlier one.
+    if resume.is_none() {
+        validate_universe(spec, snapshots)?;
     }
     // The warm-up prefix is fed to the strategy but not measured, so it is
     // charged against `bars` here — everything downstream (the equity curve,

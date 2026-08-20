@@ -904,7 +904,7 @@ mod tests {
         fn reset(&mut self) {}
     }
 
-    /// A 2-entry snapshot tagging both legs — the shape the old `sole_atom`
+    /// A 2-entry snapshot tagging both legs — the shape the old `sole_atom_or_panic`
     /// path would panic on.
     fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();

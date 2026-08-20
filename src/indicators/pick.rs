@@ -9,7 +9,7 @@
 //!   is returned. This is the single-series ergonomic shortcut for strategies
 //!   fed a multi-asset-shaped input by a driver that only ever populates one
 //!   entry; a snapshot of size 2+ **panics** rather than silently picking an
-//!   arbitrary asset (see [`Snapshot::sole_atom`]).
+//!   arbitrary asset (see [`Snapshot::sole_atom_or_panic`]).
 //! - **Non-empty selector** ([`Pick::matching`]) — the *structural-match*
 //!   path: forwards to [`Snapshot::find`], which returns the first stored atom
 //!   whose tag matches the query (`None` fields on the query are wildcards).
@@ -41,7 +41,7 @@ use crate::types::{Atom, Selector, Snapshot};
 
 /// Projects one asset's [`Atom`] out of a [`Snapshot<Sym>`], either by a
 /// wildcard-aware structural [`Selector`] match or, when the selector is
-/// empty, by the [`Snapshot::sole_atom`] single-entry unpack.
+/// empty, by the [`Snapshot::sole_atom_or_panic`] single-entry unpack.
 ///
 /// `Input = S::Input`, `Output = Atom`. The default source
 /// `Identity<Snapshot<Sym>>` makes `Pick::new()` a leaf that consumes a
@@ -55,9 +55,9 @@ use crate::types::{Atom, Selector, Snapshot};
 pub struct Pick<Sym, S = Identity<Snapshot<Sym>>> {
     selector: Selector<Sym>,
     /// When the selector matches nothing on a bar, fall back to
-    /// [`Snapshot::sole_atom`] instead of reading `None`. Set only by
+    /// [`Snapshot::sole_atom_or_panic`] instead of reading `None`. Set only by
     /// [`Pick::rooted`] — see its docs for why the fallback is load-bearing.
-    sole_atom_fallback: bool,
+    rooted_fallback: bool,
     source: S,
     /// The last atom projected out; `None` before the first bar or if the last
     /// snapshot had no matching entry.
@@ -68,7 +68,7 @@ pub struct Pick<Sym, S = Identity<Snapshot<Sym>>> {
 impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
     /// A [`Pick`] with an *empty* selector (both fields `None`) rooted on the
     /// raw [`Snapshot`] input stream. Every `update` runs the
-    /// [`Snapshot::sole_atom`] single-entry unpack: the snapshot must contain
+    /// [`Snapshot::sole_atom_or_panic`] single-entry unpack: the snapshot must contain
     /// exactly one atom, otherwise the call **panics**.
     pub fn new() -> Self {
         Self::of(Selector::default(), Identity::new())
@@ -84,7 +84,7 @@ impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
     }
 
     /// The **blessed root**: match `selector`, falling back to the
-    /// [`Snapshot::sole_atom`] unpack when nothing matches.
+    /// [`Snapshot::sole_atom_or_panic`] unpack when nothing matches.
     ///
     /// This is what a context that knows which series is "its own" installs as
     /// the implicit root of every `source:`-omitted leaf — a
@@ -102,8 +102,8 @@ impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
     /// `strategies::single_asset::extract_self_atom` already uses to route a
     /// strategy's own atom to its `Position`.
     ///
-    /// It falls back through [`Snapshot::lone_atom`], **not**
-    /// [`Snapshot::sole_atom`]: a 2+ entry snapshot in a rooted context is
+    /// It falls back through [`Snapshot::sole_atom_or_none`], **not**
+    /// [`Snapshot::sole_atom_or_panic`]: a 2+ entry snapshot in a rooted context is
     /// ordinary — it means the blessed leg is simply absent on this bar — and
     /// must read `None` so the caller can roll that symbol off, rather than
     /// tripping the mis-wiring panic.
@@ -113,7 +113,7 @@ impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
     /// keeps the sole-atom panic as its guard.
     pub fn rooted(selector: Selector<Sym>) -> Self {
         let mut pick = Self::of(selector, Identity::new());
-        pick.sole_atom_fallback = true;
+        pick.rooted_fallback = true;
         pick
     }
 }
@@ -121,11 +121,11 @@ impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
 impl<Sym, S> Pick<Sym, S> {
     /// A [`Pick`] with the given [`Selector`] rooted on a custom
     /// snapshot-emitting source. Empty selector still dispatches to
-    /// [`Snapshot::sole_atom`].
+    /// [`Snapshot::sole_atom_or_panic`].
     pub fn of(selector: Selector<Sym>, source: S) -> Self {
         Self {
             selector,
-            sole_atom_fallback: false,
+            rooted_fallback: false,
             source,
             value: None,
             _phantom: PhantomData,
@@ -156,15 +156,16 @@ where
     fn update(&mut self, input: S::Input) -> Option<Atom> {
         self.value = self.source.update(input).and_then(|snap| {
             if self.selector.is_empty() {
-                snap.sole_atom().cloned()
-            } else if self.sole_atom_fallback {
+                snap.sole_atom_or_panic().cloned()
+            } else if self.rooted_fallback {
                 // Blessed root: name wins, but an untagged single-entry
-                // snapshot still resolves. `lone_atom`, not `sole_atom` —
-                // a 2+ entry snapshot here means the blessed leg is absent
-                // this bar, which reads `None`. See `Pick::rooted`.
+                // snapshot still resolves. `sole_atom_or_none`, not the
+                // panicking spelling — a 2+ entry snapshot here means the
+                // blessed leg is absent this bar, which reads `None`. See
+                // `Pick::rooted`.
                 snap.find(&self.selector)
                     .cloned()
-                    .or_else(|| snap.lone_atom().cloned())
+                    .or_else(|| snap.sole_atom_or_none().cloned())
             } else {
                 snap.find(&self.selector).cloned()
             }
@@ -342,7 +343,7 @@ mod tests {
     fn new_no_query_unpacks_untagged_single_entry_snapshot() {
         // The single-series driver hot path: `Snapshot::of_atom(atom)` has no
         // symbol / freq tag, yet the empty-selector `Pick::new()` still
-        // unpacks it via sole_atom().
+        // unpacks it via sole_atom_or_panic().
         let mut p = Pick::<String>::new();
         let atom = Atom::new(Candle::new(1.0, 1.0, 1.0, 7.0, 1.0));
         let out = p.update(Snapshot::of_atom(atom));
@@ -357,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Snapshot::sole_atom: expected a single-entry snapshot")]
+    #[should_panic(expected = "Snapshot::sole_atom_or_panic: no leaf named an asset")]
     fn new_no_query_panics_on_multi_entry_snapshot() {
         let mut p = Pick::<String>::new();
         p.update(snap([

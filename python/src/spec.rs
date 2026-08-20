@@ -478,6 +478,10 @@ pub(crate) fn run_spec<W: Wallet<Symbol> + Send>(
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
 ) -> PyResult<RunReport<Symbol>> {
+    // Refuse a declared symbol the stream never carries, before any bar is
+    // driven. The CLI gets this from the frame; here the snapshots are the
+    // caller's to construct, so this is where it lands.
+    spec_backtest::validate_universe(loaded, snapshots).map_err(build_err)?;
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
@@ -528,6 +532,11 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
     resume: Option<&fugazi_core::spec::RunState>,
     flatten: bool,
 ) -> PyResult<(RunReport<Symbol>, fugazi_core::spec::RunState)> {
+    // Cold starts only: on a resume, a chunk in which a symbol never quotes is
+    // legitimate — the state carrying it came from an earlier chunk.
+    if resume.is_none() {
+        spec_backtest::validate_universe(loaded, snapshots).map_err(build_err)?;
+    }
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     // Built with the GIL held — per-symbol factories may be Python callables.
