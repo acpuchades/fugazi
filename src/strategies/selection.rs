@@ -217,7 +217,7 @@ fn ranked_take<Sym: Clone + Hash + Eq + Ord>(
         .iter()
         .filter_map(|sym| scores.get(sym).map(|&v| (sym, v)))
         .collect();
-    ranked.sort_by(|a, b| {
+    let order = |a: &(&Sym, Real), b: &(&Sym, Real)| {
         let (x, y) = (a.1, b.1);
         let by_score = match (x.is_nan(), y.is_nan()) {
             (true, true) => Ordering::Equal,
@@ -231,10 +231,25 @@ fn ranked_take<Sym: Clone + Hash + Eq + Ord>(
             }
         };
         by_score.then_with(|| a.0.cmp(b.0))
-    });
-    ranked
+    };
+    let k = count.min(ranked.len());
+    // Only the first `k` of the pool are wanted, so partition rather than sort:
+    // O(n) instead of O(n log n), and no scratch allocation (the stable sort
+    // takes one). A basket ranks its whole universe on every rebalance bar, so
+    // at 64 symbols taking 4 this was most of the ordering work.
+    //
+    // **This is result-identical, not merely equivalent-up-to-ties**, and the
+    // comment above is why: `order` breaks score ties on the symbol, so it is a
+    // *total* order over a pool that cannot contain a symbol twice. No two
+    // elements compare `Equal`, so "the `k` smallest" is a uniquely determined
+    // set — which is what an unstable partition is allowed to disturb, and here
+    // there is nothing to disturb. The result then collects into a `HashSet`,
+    // so the order *within* the prefix is not observable either.
+    if k < ranked.len() {
+        ranked.select_nth_unstable_by(k, order);
+    }
+    ranked[..k]
         .iter()
-        .take(count.min(ranked.len()))
         .map(|(sym, _)| (*sym).clone())
         .collect()
 }
