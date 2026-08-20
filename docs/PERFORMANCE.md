@@ -1714,6 +1714,66 @@ So this buys cheap **equality**, not cheap hashing. The remaining
 `symbol → index` side table is still open and now clearly second: after this,
 what is left of `find` is the 6.24 instr/entry of pure scan.
 
+### What the 64-symbol profile looks like now
+
+Re-profiled after the above, because removing 47% of a run reorders everything
+under it. `cargo bench --bench snapshot_scan -- drive_index0` is `drive_equal`
+in every respect — same 64 symbols, same four `Pick` leaves per symbol-bar, same
+arithmetic — except every leaf reads the symbol at index 0, so each `find` stops
+after one entry instead of scanning 32.5. The gap is the scan, priced exactly:
+
+| | instructions | per symbol-bar |
+|---|---:|---:|
+| `drive_equal` | 67 322 725 | 3 506 |
+| `drive_index0` | 47 097 064 | 2 453 |
+| **the scan** | **20 225 661** | **1 053 — 30% of the run** |
+
+So the `symbol → index` side table is worth **1.43×** on top of 0.65.0, and
+**2.91× cumulative** against 0.64.0. It is now the largest identified item, and
+it still needs the design decision breaking-candidate #2 always needed.
+
+Underneath it (`drive_index0`, callgrind with `--separate-callers=1`):
+
+| | share |
+|---|---:|
+| `backtest::drive` | 30.2% |
+| `Sma::update` — the whole inlined leaf chain, `Pick` + `Close` + window | 28.5% |
+| `HashMap::insert'drive` | 5.0% |
+| `hash_one'drive` | 3.9% |
+| `memcmp'drive` | 3.1% |
+| `memcmp'Sma::update` | 3.1% |
+| `sip::Hasher::write'hash_one` | **2.6%** |
+| `HashMap::get'drive` | 1.7% |
+
+**SipHash should not appear in this profile at all**, and finding out where it
+came from is the next item on the list:
+
+### `Book::update` re-hashes and re-clones every leg, every bar
+
+`Book`'s `legs` is a `HashMap<Sym, LegState>` on the default `RandomState`, and
+[`Book::update`] does `s.legs.entry(sym).or_insert_with(LegState::flat)` **once
+per symbol per bar**. At 64 symbols over 300 bars that is 19 200 `entry` calls,
+which is what the `insert` / `hash_one` / `sip` rows above are.
+
+It has **two** of this document's own tricks un-applied, in one function:
+
+* **Trick #6** — it is a symbol-keyed map on SipHash, which is the exact case
+  `src/hash.rs` exists for. `SymMap` is the FxHash alias next door.
+* **Trick #9** — `entry()` takes an **owned** key, so it clones the symbol every
+  bar for a key that is present after the first. `get_mut`-then-insert is the
+  documented shape.
+
+`Book::update_one`, twelve lines above it, already does both correctly — it
+`get_mut`s first and only builds an entry on a miss. So this is a divergence
+between two neighbouring methods rather than a decision.
+
+The one thing to preserve: `remark` sums in a **canonical sorted order** and the
+comment above it explains why (`legs`' iteration order varies per instance, and
+a ULP either side of a threshold is a different trade). FxHash is *unseeded*, so
+iteration order would become stable — but the sort must stay regardless. As
+`src/hash.rs` puts it, "the iteration order happens to be stable" is a much
+weaker guarantee than "the sum has a canonical order".
+
 ## The Python binding budget — 1.25×, with one exemption
 
 **A fugazi indicator through the Python bindings must cost no more than 1.25×

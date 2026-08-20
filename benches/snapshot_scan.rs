@@ -143,6 +143,41 @@ fn workload(name: &str) {
         // entry; ragged ones are rejected by the length check first. Neither
         // needs a library change, so the gap is a clean ceiling on what making
         // the symbol comparison cheap can be worth to a whole run.
+        // Prices the *scan* specifically. Identical to `drive_equal` in every
+        // way — same 64 symbols, same 4 `Pick` leaves per symbol-bar, same SMA
+        // arithmetic — except that every leaf reads the symbol at index 0, so
+        // each `find` stops after one entry instead of scanning 32.5 on
+        // average. The gap is what a `symbol -> index` side table could remove.
+        "drive_index0" => {
+            use fugazi::strategies::MultiAssetStrategy;
+            let names: Vec<String> = (0..N).map(|i| format!("S{i:03}")).collect();
+            let snaps = drive_snapshots(&names, 300);
+            let first = intern(&names[0]);
+            let close = {
+                let first = first.clone();
+                move || {
+                    fugazi::indicators::Close::of(fugazi::indicators::Pick::matching(
+                        Selector::by_symbol(first.clone()),
+                    ))
+                }
+            };
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
+                .long_on(
+                    {
+                        let close = close.clone();
+                        move |_: &Symbol| {
+                            fugazi::indicators::Sma::new(close(), 5)
+                                .crosses_above(fugazi::indicators::Sma::new(close(), 20))
+                        }
+                    },
+                    move |_: &Symbol| {
+                        fugazi::indicators::Sma::new(close(), 5)
+                            .crosses_below(fugazi::indicators::Sma::new(close(), 20))
+                    },
+                );
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
+        }
         "drive_equal" | "drive_ragged" => {
             use fugazi::strategies::MultiAssetStrategy;
             let names: Vec<String> = if name == "drive_equal" {
