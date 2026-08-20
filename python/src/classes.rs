@@ -2241,3 +2241,107 @@ pub(crate) fn raise_if_interrupted<T>(
         None => Ok(value),
     }
 }
+
+/// Signal polling for a **parallel** detached region — the grid sweep and the
+/// walk-forward pass.
+///
+/// [`interruptible`] cannot serve here: those run rows across a rayon pool, so
+/// there is no single iterator to wrap.
+///
+/// # Why the work moves off the main thread
+///
+/// The obvious design — poll from inside the per-row closure — does not work,
+/// and fails *silently*:
+///
+/// * CPython runs signal handlers on the **main thread only**; `check_signals`
+///   returns 0 immediately anywhere else. A worker could poll every row and
+///   never see a `KeyboardInterrupt`.
+/// * The main thread is not available to poll either, because
+///   `rayon::ThreadPool::install` **blocks** the caller on a custom pool rather
+///   than letting it steal work. (`par_iter` on the *global* pool does let the
+///   caller participate; the sweep does not use the global pool.) So the main
+///   thread evaluates no rows and reaches no poll.
+///
+/// Measured: with per-row polling and no inversion, a 600-row sweep took the
+/// interrupt at 3.00 s against a 2.93 s uninterrupted run — i.e. not at all.
+///
+/// So [`run_watched`] inverts it. The sweep runs on a scoped thread and the main
+/// thread becomes a watchdog, polling Python every [`WATCHDOG_INTERVAL`]. Workers
+/// only ever read an `AtomicBool` — never the GIL, which would serialise
+/// `jobs=N` back down to one.
+pub(crate) struct SweepInterrupt {
+    stop: std::sync::atomic::AtomicBool,
+    parked: std::sync::Mutex<Option<PyErr>>,
+}
+
+/// How often the watchdog asks Python whether a signal is pending.
+///
+/// Small enough that Ctrl-C feels immediate, long enough that the GIL
+/// acquisition is irrelevant beside the rows running in parallel underneath.
+const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+impl SweepInterrupt {
+    pub(crate) fn new() -> Self {
+        Self {
+            stop: std::sync::atomic::AtomicBool::new(false),
+            parked: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// True once an interrupt is pending — call at the top of each row.
+    ///
+    /// A relaxed atomic load and nothing else: this runs on rayon workers, and
+    /// anything touching the GIL here would undo the parallelism.
+    pub(crate) fn should_stop(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Ask Python whether a signal is pending. **Main thread only** — see the
+    /// type docs for why that is not a suggestion.
+    fn poll(&self) {
+        if let Err(e) = Python::attach(|py| py.check_signals()) {
+            *self.parked.lock().expect("interrupt slot poisoned") = Some(e);
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Re-raise the parked interrupt, if any, in preference to `value`.
+    ///
+    /// The rows abort the sweep with an ordinary error once the flag is set, so
+    /// without this the caller would see "sweep failed" rather than the
+    /// `KeyboardInterrupt` they asked for.
+    pub(crate) fn raise_over<T>(&self, value: PyResult<T>) -> PyResult<T> {
+        match self.parked.lock().expect("interrupt slot poisoned").take() {
+            Some(e) => Err(e),
+            None => value,
+        }
+    }
+}
+
+/// Run `work` with the GIL released, on a thread that is *not* this one, while
+/// this thread watches for `KeyboardInterrupt`.
+///
+/// The inversion is the point: see [`SweepInterrupt`]. `work` gets a borrowed
+/// environment (`std::thread::scope`, not `spawn`), so nothing has to become
+/// `'static` to be swept.
+pub(crate) fn run_watched<T: Send>(
+    py: Python<'_>,
+    interrupt: &SweepInterrupt,
+    work: impl FnOnce() -> T + Send,
+) -> T {
+    py.detach(|| {
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(work);
+            while !handle.is_finished() {
+                interrupt.poll();
+                std::thread::sleep(WATCHDOG_INTERVAL);
+            }
+            // Propagate a panic from the sweep rather than swallowing it into a
+            // join error — the caller's `catch_unwind` boundary is pyo3's.
+            match handle.join() {
+                Ok(value) => value,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        })
+    })
+}

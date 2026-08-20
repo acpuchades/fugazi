@@ -6,20 +6,6 @@ not a task nobody got to.
 
 ## Python bindings
 
-### A whole-wallet default cost bundle
-
-`PaperWallet.set_costs_for(symbol, costs, freq=None)` (0.52.0) covers per-symbol
-costs, which is what the driver layer itself installs and what `by_symbol`
-scoping expects. Rust also has `PaperWallet::with_costs(funds, costs)` for a
-single bundle applied to every symbol, and that has no Python twin.
-
-Deferred because resolving a `CostConfig` into one bundle needs a symbol to
-resolve *against*, so a whole-wallet form would have to pick a placeholder and
-silently take the config's `default:` leg — quietly wrong for any config using
-`by_symbol`. Worth doing if a caller hits the N-symbol boilerplate; the honest
-shape is probably `set_costs_for_all(symbols, costs, freq=None)` looping the
-existing call, not a `with_costs` mirror.
-
 ### No async surface — `fetch` and the live wallets are blocking
 
 Every network call on the Python side is synchronous: `Binance.fetch(...)` and
@@ -50,6 +36,30 @@ one thread per stream is the actual bottleneck. The honest first step then is an
 async **`SeriesSource`** — the fetch path, which is genuinely IO-bound and has no
 per-bar state — and leaving the wallets blocking behind `to_thread`. Binding the
 whole surface async is not the increment.
+
+### Monte Carlo is not interruptible
+
+Every other long call on the Python surface now takes Ctrl-C: `run` polls through
+`interruptible`, and the grid sweep and walk-forward run under `run_watched` — the
+work on a scoped thread, the main thread as watchdog, because CPython runs signal
+handlers on the main thread only and `rayon::ThreadPool::install` blocks the
+caller rather than letting it steal.
+
+`run_montecarlo` is the one that stays uninterruptible. It releases the GIL, so it
+blocks no other thread; it just cannot be cancelled, and `permutations=1000`
+re-drives the whole strategy a thousand times.
+
+Not done because the seam is not there and the cheap way to add one is bad. It
+takes no closure, and its `indices.par_iter().map(...)` produces the rows that
+become the p-values — so cancellation means either a breaking signature change or
+an additive `run_montecarlo_polled` *plus* restructuring that `par_iter` to
+short-circuit through `Result`. That is statistically load-bearing code with
+committed fixtures behind it, and the payoff is convenience on a path that
+already releases the GIL. Wrong trade today.
+
+What would change it: someone actually waiting on a sweep they cannot cancel, or
+that `par_iter` needing to grow a `Result` for its own reasons — at which point
+the hook is nearly free and should go in with it.
 
 ### `Wallet.take_rejections`
 
@@ -359,13 +369,28 @@ bar grid, so "absent" means absent and there is nothing to forward-fill. The
 
 ## Repo hygiene
 
-### `python/uv.lock` does not lock the `test` extra
+### `python/uv.lock` is not enforced by anything, and `uv sync` prunes `maturin`
 
-The checked-in lock covers only the base dependencies, so `uv sync --extra test`
-— the documented way to run the Python suite locally — rewrites it every time
-and leaves a dirty tree. Locking the extra would fix that, but it is churn
-unrelated to any release, so it wants its own commit.
+The lock now covers the `test` extra — `mypy` included — so it matches
+`python/pyproject.toml` rather than trailing it.
 
-Note that CI does not use `uv` at all (`maturin build` + `pip install`), so
-nothing depends on this file being right. Nothing enforces its version either,
-which is why the release checklist lists it explicitly.
+Two things a reader should know before reaching for `uv`:
+
+**Nothing depends on this file being right.** CI installs via `maturin build` +
+`pip install` and never invokes `uv`; no check compares the lock against
+`pyproject.toml`. A dependency added to the extra and not re-locked drifts
+silently, exactly as `mypy` did the moment it was added — the lock still
+resolved, it just did not contain it.
+
+**`uv sync --extra test` breaks the build step.** It prunes the venv to the lock,
+and `maturin` is a *build* tool that has no business in a `test` extra — so the
+sync removes it and the next `scripts/ci-local.sh` fails at "Build + install"
+with `Failed to spawn: maturin`. The supported path is `scripts/ci-local.sh`,
+which creates the venv with an explicit list and is what CI mirrors; an earlier
+version of this entry called `uv sync` "the documented way to run the suite",
+which nothing in the repo has ever said.
+
+If `uv` becomes a first-class workflow rather than a lockfile that rides along,
+the shape is a `dev` extra (`fugazi[test]` plus `maturin`) and a CI
+`uv lock --check`. Neither earns its keep while the failure mode is a local venv
+losing a tool the script would reinstall.

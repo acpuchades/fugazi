@@ -494,6 +494,44 @@ impl PyWallet {
             .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
 
+    /// [`set_costs_for`](Self::set_costs_for) over a whole universe — the same
+    /// `costs` resolved **separately per symbol**, in one call.
+    ///
+    /// ```python
+    /// wallet.set_costs_for_all(["BTC", "ETH", "SOL"], config)
+    /// ```
+    ///
+    /// This is a loop, deliberately, and not a mirror of Rust's
+    /// `PaperWallet::with_costs(funds, costs)`. That form installs *one*
+    /// pre-resolved bundle on every symbol, which cannot be built here: resolving
+    /// a `CostConfig` needs a symbol to resolve against, so a whole-wallet
+    /// version would have to pick a placeholder and silently take the config's
+    /// `default:` leg — quietly wrong for any config using `by_symbol`. Looping
+    /// gives each symbol its own resolution, which is what the scoping is for.
+    ///
+    /// Rejects a duplicate symbol rather than installing twice: in a call whose
+    /// whole purpose is a universe, a repeat is a typo in the list.
+    #[pyo3(signature = (symbols, costs, freq = None))]
+    pub(crate) fn set_costs_for_all(
+        &mut self,
+        symbols: Vec<String>,
+        costs: &Bound<'_, PyAny>,
+        freq: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut seen = std::collections::HashSet::with_capacity(symbols.len());
+        for symbol in &symbols {
+            if !seen.insert(symbol.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "set_costs_for_all: symbol {symbol:?} appears more than once"
+                )));
+            }
+        }
+        for symbol in &symbols {
+            self.set_costs_for(symbol, costs, freq)?;
+        }
+        Ok(())
+    }
+
     /// Restore the wallet to its freshly-constructed state — the seed funds it
     /// was built with, no positions, no fed prices, no pending or resting
     /// orders, and an empty blotter.

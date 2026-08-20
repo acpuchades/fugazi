@@ -3479,3 +3479,59 @@ def test_shared_multi_is_a_named_collection():
     bands = ta.bollinger(ta.close(), 3, 2.0).shared()
     assert list(bands) == ["upper", "middle", "lower"]
     assert "macd" not in bands
+
+
+def test_set_costs_for_all_resolves_per_symbol():
+    """The point of the loop: `by_symbol` scoping still gives each symbol its own
+    bundle. A single pre-resolved bundle — Rust's `with_costs` shape — could not,
+    because resolving needs a symbol to resolve *against*, so it would have to
+    pick a placeholder and silently take the `default:` leg."""
+    # Scoping is per *leg*, not top-level — see docs/COSTS.md.
+    config = {
+        "commission": {
+            "default": {"percentage": {"rate": 0.001}},
+            "by_symbol": {"ETH": {"percentage": {"rate": 0.05}}},
+        }
+    }
+    wallet = ta.PaperWallet(100_000.0)
+    wallet.set_costs_for_all(["BTC", "ETH"], config)
+
+    paid = {}
+    for symbol in ("BTC", "ETH"):
+        wallet.update(symbol, ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0))
+        wallet.set_position(symbol, 1.0)
+        fills = wallet.update(symbol, ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0))
+        paid[symbol] = fills[0].commission
+
+    assert paid["BTC"] == pytest.approx(0.1)  # default leg: 0.1% of 100
+    assert paid["ETH"] == pytest.approx(5.0)  # by_symbol leg: 5% of 100
+
+
+def test_set_costs_for_all_matches_the_per_symbol_loop():
+    """It *is* the loop, so it had better agree with it."""
+    config = {"commission": {"percentage": {"rate": 0.002}}}
+    symbols = ["BTC", "ETH", "SOL"]
+
+    bulk = ta.PaperWallet(100_000.0)
+    bulk.set_costs_for_all(symbols, config)
+    one_by_one = ta.PaperWallet(100_000.0)
+    for symbol in symbols:
+        one_by_one.set_costs_for(symbol, config)
+
+    for wallet in (bulk, one_by_one):
+        for symbol in symbols:
+            wallet.update(symbol, ta.Candle(50.0, 50.0, 50.0, 50.0, 1.0))
+            wallet.set_position(symbol, 2.0)
+            wallet.update(symbol, ta.Candle(50.0, 50.0, 50.0, 50.0, 1.0))
+    assert [o.commission for o in bulk.orders()] == [
+        o.commission for o in one_by_one.orders()
+    ]
+
+
+def test_set_costs_for_all_refuses_a_repeated_symbol():
+    """In a call whose whole argument is a universe, a repeat is a typo."""
+    wallet = ta.PaperWallet(1000.0)
+    with pytest.raises(ValueError, match="more than once"):
+        wallet.set_costs_for_all(
+            ["BTC", "ETH", "BTC"], {"commission": {"percentage": {"rate": 0.1}}}
+        )

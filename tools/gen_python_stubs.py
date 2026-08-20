@@ -56,6 +56,7 @@ BY_PARAM = {
     "stoch_period": "int",
     "lag": "int",
     "symbol": "str",
+    "symbols": "Sequence[str]",
     "freq": "str | Frequency | None",
     "key": "str",
     "name": "str",
@@ -291,6 +292,7 @@ MEMBER_RULES = {
     "set_retention": "None",
     "retention": "int | None",
     "set_costs_for": "None",
+    "set_costs_for_all": "None",
     "cancel": "None",
     "cancel_limit": "None",
     "cancel_protective": "None",
@@ -446,7 +448,7 @@ def param_type(owner: str, func: str, name: str) -> str:
         return "OverlayInfo | None"
     if name == "time":
         return "int | None"
-    if name in ("values", "mapping", "symbols", "children"):
+    if name in ("values", "mapping", "children"):
         return "Any"
     if name == "order":
         return "Order"

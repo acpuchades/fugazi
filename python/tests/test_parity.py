@@ -285,6 +285,9 @@ WALLET_BOUND = {
     "adjust_funds", "poll_fills", "set_costs_for",
     # Inherent PaperWallet extras, not trait methods.
     "orders", "reset", "retention",
+    # A loop over `set_costs_for`, not a mirror of Rust's `with_costs` — see the
+    # method docs for why a single pre-resolved bundle cannot be built here.
+    "set_costs_for_all",
 }
 
 WALLET_NOT_BOUND = {

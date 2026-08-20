@@ -1308,6 +1308,10 @@ filled[0].commission          # 0.1 — what that fill actually paid
 
 Resolution honours the config's `by_symbol` / `by_interval` scoping, so the same
 config object can be installed on every leg and still give each its own bundle.
+For a whole universe, `wallet.set_costs_for_all(["BTC", "ETH", "SOL"], config)` is
+that same call in a loop — each symbol resolved separately, which is the point:
+one pre-resolved bundle shared across symbols would have to pick a placeholder to
+resolve against and would quietly take the `default:` leg for all of them.
 Pass `freq="1d"` (or a `Frequency`) as the third argument for cadence-dependent
 models such as funding rates; omit it otherwise. **A wallet with no costs
 installed is frictionless**, which flatters every backtest run through it.
@@ -1639,11 +1643,15 @@ with ProcessPoolExecutor() as pool:
 and a `Snapshot` carrying one symbol at two cadences survives as two entries
 rather than collapsing to one.
 
-**Threads work too.** A run releases the GIL for its duration, so a websocket
-reader, a heartbeat or a UI keeps running while a long backfill grinds — measured
-at ~87% of a companion thread's expected wakeups, against ~0% before. It stays
-interruptible: Ctrl-C ends a run within milliseconds, because the drive re-attaches
-every few thousand bars to poll signal handlers.
+**Threads work too.** Every way of driving a spec — `run`, `run_resumable`,
+`warm_up` — releases the GIL for its duration, so a websocket reader, a heartbeat
+or a UI keeps running while a long backfill grinds. Measured at ~87% of a
+companion thread's expected wakeups on all three, against ~0% before.
+
+`run` also stays interruptible: Ctrl-C ends it within milliseconds, because the
+drive re-attaches every few thousand bars to poll signal handlers. The resumable
+pair is chunked by *you* — that's what it is for — so its interrupt point is
+between chunks, where you already stand.
 
 Processes are still the better answer for *throughput*, since threads share one
 interpreter's CPU for anything Python-side; use threads for **concurrency** —

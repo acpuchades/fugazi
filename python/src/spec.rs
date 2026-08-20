@@ -508,7 +508,20 @@ pub(crate) fn run_spec<W: Wallet<Symbol> + Send>(
 /// implementation of it — the version and kind checks, the flatten path and the
 /// state capture all live in one place, so the Python and CLI surfaces cannot
 /// drift apart.
-pub(crate) fn run_spec_resumable<W: Wallet<Symbol>>(
+///
+/// # Interruptible?
+///
+/// No, and deliberately: unlike [`run_spec`] this **does not** thread the
+/// snapshots through `interruptible`. `drive_over` needs the slice itself — for
+/// `flatten`, for `last_bar`, for `bars_seen` — so there is no iterator seam to
+/// wrap without handing it the same data twice and hoping the two agree.
+///
+/// It costs nothing here, because a resumable run is *already chunked by the
+/// caller*: that is the whole point of it. The interrupt point is between
+/// chunks, where the caller already stands. The GIL is still released for each
+/// chunk, which is the part that a long warm-up actually needs.
+pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
+    py: Python<'_>,
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
@@ -517,8 +530,9 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol>>(
 ) -> PyResult<(RunReport<Symbol>, fugazi_core::spec::RunState)> {
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
+    // Built with the GIL held — per-symbol factories may be Python callables.
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
-    fugazi_core::spec::drive_over(&mut *built, snapshots, wallet, resume, flatten)
+    py.detach(|| fugazi_core::spec::drive_over(&mut *built, snapshots, wallet, resume, flatten))
         .map_err(build_err)
 }
 
@@ -540,7 +554,8 @@ fn state_json(state: &fugazi_core::spec::RunState) -> PyResult<String> {
 
 /// Advance a spec over `snapshots` without trading, returning the state to
 /// resume from. See `StrategySpec.warm_up` for what it is for.
-pub(crate) fn warm_up_spec<W: Wallet<Symbol>>(
+pub(crate) fn warm_up_spec<W: Wallet<Symbol> + Send>(
+    py: Python<'_>,
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
@@ -550,8 +565,9 @@ pub(crate) fn warm_up_spec<W: Wallet<Symbol>>(
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
-    built
-        .warm_up_over(snapshots, wallet, resume)
+    // Priming over months of history is the longest-blocking call on the
+    // surface, so this is the one that most wanted the GIL dropped.
+    py.detach(|| built.warm_up_over(snapshots, wallet, resume))
         .map_err(build_err)
 }
 
@@ -741,9 +757,9 @@ impl PyStrategySpec {
     ) -> PyResult<(PyRunReport, String)> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = parse_resume(resume)?;
-        over_any_wallet!(wallet, _py, _seed, w => {
+        over_any_wallet!(wallet, py, _seed, w => {
             let (report, state) =
-                run_spec_resumable(&self.inner, &snaps, w, resume_state.as_ref(), flatten)?;
+                run_spec_resumable(py, &self.inner, &snaps, w, resume_state.as_ref(), flatten)?;
             Ok((PyRunReport { inner: report }, state_json(&state)?))
         })
     }
@@ -773,8 +789,8 @@ impl PyStrategySpec {
     ) -> PyResult<String> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = parse_resume(resume)?;
-        over_any_wallet!(wallet, _py, _seed, w => {
-            let state = warm_up_spec(&self.inner, &snaps, w, resume_state.as_ref())?;
+        over_any_wallet!(wallet, py, _seed, w => {
+            let state = warm_up_spec(py, &self.inner, &snaps, w, resume_state.as_ref())?;
             state_json(&state)
         })
     }
@@ -1487,7 +1503,10 @@ pub(crate) fn optimize(
         );
     }
 
-    let sweep = py.detach(|| -> anyhow::Result<spec_optimize::Sweep> {
+    // Polled once per row so Ctrl-C ends a long grid. See `SweepInterrupt` for
+    // why only the main thread asks Python and the workers read an atomic.
+    let interrupt = crate::classes::SweepInterrupt::new();
+    let sweep = crate::classes::run_watched(py, &interrupt, || -> anyhow::Result<spec_optimize::Sweep> {
         let ctx = spec_backtest::EvalContext {
             cash,
             bars_per_year,
@@ -1505,6 +1524,9 @@ pub(crate) fn optimize(
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
+            if interrupt.should_stop() {
+                anyhow::bail!("interrupted");
+            }
             let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
             let spec = spec_from_value(value, detected)?;
             Ok(match windowed {
@@ -1530,7 +1552,10 @@ pub(crate) fn optimize(
             evaluate_row,
         )
     })
-    .map_err(|e| SpecError::new_err(format!("optimize: {e:#}")))?;
+    .map_err(|e| SpecError::new_err(format!("optimize: {e:#}")));
+    // A row that saw the signal aborts the sweep with an ordinary error; the
+    // parked `KeyboardInterrupt` is the one the caller asked for.
+    let sweep = interrupt.raise_over(sweep)?;
 
     // Turn the kernel's Sweep into pyclass-facing rows. We serialize windowed
     // per-window metrics on demand only when `windowed` is set, matching the
@@ -1813,8 +1838,13 @@ pub(crate) fn run_walkforward(
         _ => snaps.len(),
     };
 
-    let result = py
-        .detach(|| -> anyhow::Result<spec_optimize::WalkForwardResult> {
+    // Same per-row polling as the grid sweep — a walk-forward runs the whole
+    // grid once per fold, so it is the *longer* of the two.
+    let interrupt = crate::classes::SweepInterrupt::new();
+    let result = crate::classes::run_watched(
+        py,
+        &interrupt,
+        || -> anyhow::Result<spec_optimize::WalkForwardResult> {
             // Basket and multi build their per-symbol chains lazily, so their
             // periods only read true once a snapshot has gone through. The
             // eager shapes must not be fed one — a pairs leaf that didn't name
@@ -1852,6 +1882,9 @@ pub(crate) fn run_walkforward(
             let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|
                 -> anyhow::Result<fugazi_core::RunReport<Symbol>>
             {
+                if interrupt.should_stop() {
+                    anyhow::bail!("interrupted");
+                }
                 let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
                 let spec = spec_from_value(value, detected)?;
                 spec_backtest::measured_report_any(&spec, snaps, wf_ctx_ref)
@@ -1876,7 +1909,8 @@ pub(crate) fn run_walkforward(
                 cash,
             )
         })
-        .map_err(|e| SpecError::new_err(format!("walkforward: {e:#}")))?;
+        .map_err(|e| SpecError::new_err(format!("walkforward: {e:#}")));
+    let result = interrupt.raise_over(result)?;
 
     // Convert into pyclass objects.
     let columns = result.union_columns.clone();

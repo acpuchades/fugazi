@@ -1,5 +1,7 @@
 """Tests for the YAML-driven strategy surface: load_spec, evaluate, optimize."""
 
+import os
+
 import pytest
 
 import fugazi as ta
@@ -1555,22 +1557,14 @@ def test_call_errors_stay_type_errors():
 # ---------------------------------------------------------------------------
 
 
-def test_a_run_does_not_block_other_python_threads():
-    """A run used to hold the GIL start to finish, so every other thread in the
-    process starved for its duration — a websocket reader, a heartbeat, a UI.
+def _gil_share(fn):
+    """Fraction of its ceiling a 1 ms-sleep companion thread reaches during `fn`.
 
-    The drive is now wrapped in `py.detach`, which is what the `Send` supertrait
-    on `RunnableStrategy` exists to permit. This measures the effect directly: a
-    companion thread ticking on a 1 ms sleep should get most of its wakeups. Held
-    GIL gave it approximately none — the first version of the Ctrl-C test below
-    could not even fire its own `threading.Timer`.
+    ~1.0 means the GIL was available throughout; a held GIL starves it to single
+    digits. Returns `(share, elapsed)`.
     """
     import threading
     import time
-
-    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
-    snaps = _snaps_single("BTC", bars * 30_000)
-    spec = ta.load_spec(_trend_yaml(), params={"FAST": 3, "SLOW": 8})
 
     ticks = 0
     stop = threading.Event()
@@ -1585,20 +1579,123 @@ def test_a_run_does_not_block_other_python_threads():
     companion.start()
     try:
         started = time.monotonic()
-        spec.run(ta.PaperWallet(1000.0), snaps)
+        fn()
         elapsed = time.monotonic() - started
     finally:
         stop.set()
         companion.join()
+    return ticks / (elapsed * 1000), elapsed
 
+
+@pytest.mark.parametrize("path", ["run", "run_resumable", "warm_up"])
+def test_no_drive_path_blocks_other_python_threads(path):
+    """Every way of driving a spec releases the GIL, not just `run`.
+
+    `run_resumable` and `warm_up` were left holding it when `run` was fixed, and
+    `warm_up` is the worst case: priming over months of history is the longest
+    single call on the surface, and it is exactly what a live process does at
+    startup while a websocket reader wants to drain.
+    """
+    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+    snaps = _snaps_single("BTC", bars * 30_000)
+    spec = ta.load_spec(_trend_yaml(), params={"FAST": 3, "SLOW": 8})
+    call = {
+        "run": lambda: spec.run(ta.PaperWallet(1000.0), snaps),
+        "run_resumable": lambda: spec.run_resumable(ta.PaperWallet(1000.0), snaps),
+        "warm_up": lambda: spec.warm_up(ta.PaperWallet(1000.0), snaps),
+    }[path]
+
+    share, elapsed = _gil_share(call)
     if elapsed < 0.5:
-        pytest.skip(f"machine too fast to measure ({elapsed:.2f}s run)")
-    # A 1 ms sleep loop can tick at most ~1000/s. Anything near that share means
-    # the GIL was available; holding it produced single digits.
-    ceiling = elapsed * 1000
-    assert ticks > ceiling * 0.25, (
-        f"companion thread got {ticks} ticks in {elapsed:.2f}s (ceiling ~{ceiling:.0f}) "
-        "— the run is still holding the GIL"
+        pytest.skip(f"machine too fast to measure ({elapsed:.2f}s)")
+    assert share > 0.25, (
+        f"`{path}` gave a companion thread {share:.0%} of its ceiling in "
+        f"{elapsed:.2f}s — it is still holding the GIL"
+    )
+
+
+def test_a_long_sweep_can_be_interrupted():
+    """A grid sweep is the longest thing on the surface and could not be Ctrl-C'd.
+
+    The obvious fix — poll inside the per-row closure — fails *silently*, and
+    this test is what caught it: CPython runs signal handlers on the main thread
+    only, and `rayon::ThreadPool::install` blocks the caller rather than letting
+    it steal, so the main thread evaluates no rows and reaches no poll. Measured
+    that way, the interrupt landed at 3.00s against a 2.93s sweep — i.e. never.
+
+    The sweep now runs on a scoped thread with the main thread as watchdog. Only
+    the default `jobs` is timed here — a single-job sweep goes through the same
+    pool and the same watchdog, and sizing it to run long enough would cost the
+    suite ~8x the wall clock to exercise identical code.
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+    snaps = _snaps_single("BTC", bars * 400)
+    grid = [{"FAST": list(range(2, 22)), "SLOW": list(range(25, 55))}]  # 600 rows
+
+    def sweep():
+        return ta.optimize(
+            _trend_yaml(), snaps, grid=grid, best_by="risk_adjusted.sharpe",
+        )
+
+    started = time.monotonic()
+    sweep()
+    uninterrupted = time.monotonic() - started
+    if uninterrupted < 1.0:
+        pytest.skip(f"machine too fast to time a sweep interrupt ({uninterrupted:.2f}s)")
+
+    fire_at = uninterrupted / 4
+    killer = subprocess.Popen([
+        sys.executable, "-c",
+        f"import os,signal,time; time.sleep({fire_at}); "
+        f"os.kill({os.getpid()}, signal.SIGINT)",
+    ])
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            sweep()
+        elapsed = time.monotonic() - started
+    finally:
+        killer.wait()
+
+    assert elapsed < uninterrupted / 2, (
+        f"ran {elapsed:.2f}s after a signal at {fire_at:.2f}s; an "
+        f"uninterrupted sweep takes {uninterrupted:.2f}s — it did not stop early"
+    )
+
+
+def test_a_sweep_still_parallelises_after_the_watchdog():
+    """The watchdog must not cost the parallelism it sits beside: if workers had
+    to touch the GIL to poll, `jobs=N` would serialise back to one."""
+    import time
+
+    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+    snaps = _snaps_single("BTC", bars * 200)
+    grid = [{"FAST": list(range(2, 12)), "SLOW": list(range(25, 45))}]
+
+    def timed(jobs):
+        started = time.monotonic()
+        rows = ta.optimize(
+            _trend_yaml(), snaps, grid=grid,
+            best_by="risk_adjusted.sharpe", jobs=jobs,
+        )
+        return time.monotonic() - started, rows
+
+    serial, serial_rows = timed(1)
+    parallel, parallel_rows = timed(None)
+    if serial < 1.0 or os.cpu_count() in (None, 1):
+        pytest.skip("not enough work or cores to observe a speedup")
+
+    # Same answers, whichever way they were computed.
+    assert [r.values for r in serial_rows] == [r.values for r in parallel_rows]
+    assert serial > parallel * 1.5, (
+        f"jobs=1 took {serial:.2f}s and jobs=all {parallel:.2f}s — the sweep is "
+        "no longer parallel"
     )
 
 
