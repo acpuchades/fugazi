@@ -97,7 +97,15 @@ use crate::types::Symbol;
 /// Object-safe: the associated types of [`Strategy`] are pinned to the
 /// `String`-keyed snapshot space every spec-driven strategy runs in, so
 /// `Box<dyn RunnableStrategy>` is a usable handle.
-pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> {
+///
+/// **`Send` is a supertrait** so that handle can cross a thread boundary — which
+/// is what lets the Python bindings drop the GIL for the duration of a run
+/// instead of blocking every other thread in the process. It costs the five
+/// implementors nothing: each is already `Send`, since every shared handle in
+/// the crate is an `Arc<Mutex<…>>` and [`DynIndicator`](crate::runtime::DynIndicator)
+/// is declared `Send + Sync`. Declaring it here is what makes the compiler
+/// *check* that, rather than the bindings assuming it.
+pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> + Send {
     /// Samples before every wired chain is both warmed and settled — what
     /// `optimize --walkforward` skips at the head of the series.
     fn stable_bars(&self) -> usize;

@@ -1748,31 +1748,60 @@ Underneath it (`drive_index0`, callgrind with `--separate-callers=1`):
 **SipHash should not appear in this profile at all**, and finding out where it
 came from is the next item on the list:
 
-### `Book::update` re-hashes and re-clones every leg, every bar
+### The SipHash in the driver — and a wrong attribution, corrected
 
-`Book`'s `legs` is a `HashMap<Sym, LegState>` on the default `RandomState`, and
-[`Book::update`] does `s.legs.entry(sym).or_insert_with(LegState::flat)` **once
-per symbol per bar**. At 64 symbols over 300 bars that is 19 200 `entry` calls,
-which is what the `insert` / `hash_one` / `sip` rows above are.
+SipHash has no business in this profile: the crate carries its own FxHash for
+symbol-keyed maps (`src/hash.rs`, trick #6) precisely because a symbol map is
+touched several times per bar per symbol. Two maps had been missed.
 
-It has **two** of this document's own tricks un-applied, in one function:
+**The first attribution was wrong, and is left here rather than quietly fixed.**
+`--separate-callers=1` put `hash_one` inside `backtest::drive`, and the obvious
+candidate was `Book::update`, which does
+`s.legs.entry(sym).or_insert_with(LegState::flat)` once per symbol per bar on a
+default-`RandomState` map. That is a genuine defect — two of this document's own
+tricks un-applied in one function, #6 (SipHash on a symbol map) and #9 (`entry`
+takes the key **by value**, so it cloned a symbol per symbol per bar for a slot
+present after the first) — and `Book::update_one` twelve lines above already did
+both correctly. Fixing it was worth **−2.4% / −3.4%**.
 
-* **Trick #6** — it is a symbol-keyed map on SipHash, which is the exact case
-  `src/hash.rs` exists for. `SymMap` is the FxHash alias next door.
-* **Trick #9** — `entry()` takes an **owned** key, so it clones the symbol every
-  bar for a key that is present after the first. `get_mut`-then-insert is the
-  documented shape.
+It was not the SipHash. The profile still read 2.61% after the fix, essentially
+unmoved. Everything above `drive` is inlined, so deeper `--separate-callers`
+buys nothing: the chain just reads `hash_one'drive'main`. The lesson is narrow
+and repeatable — **caller attribution stops at the inlining boundary, and a
+plausible callee inside that boundary is a hypothesis, not a result.** The check
+that settled it cost one run: make the change, and see whether the symbol
+actually leaves the profile.
 
-`Book::update_one`, twelve lines above it, already does both correctly — it
-`get_mut`s first and only builds an entry on a miss. So this is a divergence
-between two neighbouring methods rather than a decision.
+The real source was `MultiAssetStrategy`'s `states: HashMap<Sym,
+PerAssetState<Sym>>`, whose per-bar discovery filter does
+`!self.states.contains_key(s)` **once per symbol per bar** — and which sits three
+lines above `bar_candles: SymMap<Sym, Candle>`, correctly on FxHash, in the same
+struct.
 
-The one thing to preserve: `remark` sums in a **canonical sorted order** and the
-comment above it explains why (`legs`' iteration order varies per instance, and
-a ULP either side of a threshold is a different trade). FxHash is *unseeded*, so
-iteration order would become stable — but the sort must stay regardless. As
-`src/hash.rs` puts it, "the iteration order happens to be stable" is a much
-weaker guarantee than "the sum has a canonical order".
+| stage | `drive_equal` | `drive_index0` |
+|---|---:|---:|
+| 0.65.0 | 67 322 725 | 47 097 064 |
+| `Book::update` — FxHash + trick #9 | 65 702 574 (−2.4%) | 45 509 816 (−3.4%) |
+| `MultiAssetStrategy::states` — FxHash | **63 046 899 (−6.4%)** | **42 862 706 (−9.0%)** |
+
+SipHash no longer appears in the profile at all, which is the check that the
+first fix lacked. Per symbol-bar: 3 506 → 3 284. Cumulative against the 0.64.0
+baseline: **2.17×**.
+
+**Two things to preserve.** `Book::remark` still sums in a canonical sorted
+order, and must: FxHash is unseeded, so iteration order becomes *incidentally*
+stable, and `src/hash.rs` is explicit that "the iteration order happens to be
+stable" is a much weaker guarantee than "the sum has a canonical order". Do not
+delete the sort on the strength of the hasher. And `states` is iterated to
+advance each symbol's chains — that order was already arbitrary under
+`RandomState`, so nothing could have depended on it; FxHash only makes the
+arbitrary choice repeatable.
+
+**Worth a grep, not a guess:** the remaining default-hasher maps are
+`Schema::indexes` (`HashMap<String, usize>`, overlay column lookup) and
+`BasketStrategy`'s five `HashMap<Sym, Chain<Sym>>`. Neither is exercised by this
+workload, so neither is measured here — which is the reason to check rather than
+assume they are fine.
 
 ## The Python binding budget — 1.25×, with one exemption
 

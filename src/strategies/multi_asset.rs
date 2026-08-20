@@ -281,7 +281,12 @@ pub struct MultiAssetStrategy<Sym> {
     short_stop_factory: Option<LevelFactory<Sym>>,
     short_target_factory: Option<LevelFactory<Sym>>,
     sizing_factory: SizingFactory<Sym>,
-    states: HashMap<Sym, PerAssetState<Sym>>,
+    /// Symbol-keyed, so it uses the crate's FxHash like `bar_candles` below —
+    /// see `src/hash.rs`. The discovery filter in `update` does a
+    /// `contains_key` here **once per symbol per bar**, which was the largest
+    /// SipHash consumer in a multi-asset profile (docs/PERFORMANCE.md,
+    /// Phase 13).
+    states: SymMap<Sym, PerAssetState<Sym>>,
     /// The rebalance gate: on bars where it fires, `trade` resizes every
     /// held per-symbol position to its current sizing target. Default is
     /// `ValueBool::new(false)` — never rebalance — so a strategy that
@@ -355,7 +360,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
                 let s: Chain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(1.0));
                 s
             }),
-            states: HashMap::new(),
+            states: SymMap::default(),
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),

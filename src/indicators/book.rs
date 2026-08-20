@@ -63,10 +63,11 @@
 //!
 //! [`PairsStrategy`]: crate::strategies::PairsStrategy
 
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+
+use crate::hash::SymMap;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -125,7 +126,10 @@ struct TradeClose {
 struct BookState<Sym> {
     initial_equity: Real,
     cash: Real,
-    legs: HashMap<Sym, LegState>,
+    /// Symbol-keyed, so it uses the crate's FxHash rather than SipHash — see
+    /// `src/hash.rs`. [`Book::update`] touches this once per symbol per bar,
+    /// which made it the largest SipHash consumer in a multi-asset profile.
+    legs: SymMap<Sym, LegState>,
     equity: Real,
     equity_peak: Real,
     /// Equity at the moment the currently-open trade opened, `None` while
@@ -147,7 +151,7 @@ impl<Sym: Hash + Eq> BookState<Sym> {
         Self {
             initial_equity,
             cash: initial_equity,
-            legs: HashMap::new(),
+            legs: SymMap::default(),
             equity: initial_equity,
             equity_peak: initial_equity,
             trade_open_equity: None,
@@ -168,10 +172,14 @@ impl<Sym: Hash + Eq> BookState<Sym> {
     /// Mark every registered leg to market: recompute total equity, update the
     /// running peak, and derive the per-bar return.
     ///
-    /// Summed in a **canonical order** rather than `legs`' iteration order:
-    /// `legs` is a `HashMap` with a per-instance `RandomState`, so two books
-    /// holding the same legs would otherwise add them in different orders and
-    /// land a ULP apart. That is not academic — `equity` feeds `!equity` /
+    /// Summed in a **canonical order** rather than `legs`' iteration order, and
+    /// that stays true now `legs` hashes with the crate's unseeded FxHash. It
+    /// used to be a `HashMap` on a per-instance `RandomState`, where two books
+    /// holding the same legs demonstrably added them in different orders and
+    /// landed a ULP apart. FxHash makes the order *incidentally* stable, which
+    /// is a much weaker guarantee than the sum having a canonical order — the
+    /// same distinction `src/hash.rs` draws — so **do not delete the sort on the
+    /// strength of the hasher**. That is not academic: `equity` feeds `!equity` /
     /// `!drawdown` / `!return_per_bar` and the book-anchored sizing recipes, so
     /// a ULP either side of a threshold is a different trade, and it would make
     /// a resumed run's bit-identity a coin flip.
@@ -438,10 +446,19 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         // `book.trade_return` read Some this bar.
         s.active_trade_close = s.pending_trade_close.take();
 
-        // Apply the per-leg marks.
+        // Apply the per-leg marks. `get_mut` first, `entry` only on a miss:
+        // after the first bar every symbol is already present, and `entry`
+        // takes the key **by value**, so the bare form cloned a symbol per
+        // symbol per bar for a slot that already existed. Same shape as
+        // `update_one` above. See docs/PERFORMANCE.md, trick #9.
         for (sym, candle) in marks {
-            let leg = s.legs.entry(sym).or_insert_with(LegState::flat);
-            leg.prev_close = Some(candle.close);
+            match s.legs.get_mut(&sym) {
+                Some(leg) => leg.prev_close = Some(candle.close),
+                None => {
+                    let leg = s.legs.entry(sym).or_insert_with(LegState::flat);
+                    leg.prev_close = Some(candle.close);
+                }
+            }
         }
 
         s.remark();
