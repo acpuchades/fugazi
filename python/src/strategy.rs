@@ -103,16 +103,21 @@ macro_rules! over_any_wallet {
 macro_rules! run_over_wallet {
     ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {
         over_any_wallet!($wallet, $py, $seed, wallet => {
+            // Built with the GIL held — a basket's per-symbol factories are
+            // Python callables, and this is where they run.
             let mut strat = $strat;
-            // Feed the snapshots through `interruptible` so Ctrl-C ends the run.
-            // The core loop stays Python-unaware: it just gets an iterator that
-            // reports exhaustion early, and the parked error is re-raised here.
-            let interrupt = std::cell::Cell::new(None);
-            let report = fugazi_core::backtest::run(
-                &mut strat,
-                wallet,
-                crate::classes::interruptible($py, $snaps, &interrupt),
-            );
+            // Then dropped for the drive itself, so a long run stops blocking
+            // every other thread in the process. `interruptible` re-attaches
+            // every few thousand bars to poll for Ctrl-C; the parked error is
+            // re-raised here. The core loop stays Python-unaware throughout.
+            let interrupt = std::sync::Mutex::new(None);
+            let report = $py.detach(|| {
+                fugazi_core::backtest::run(
+                    &mut strat,
+                    wallet,
+                    crate::classes::interruptible($snaps, &interrupt),
+                )
+            });
             crate::classes::raise_if_interrupted(&interrupt, PyRunReport { inner: report })
         })
     };

@@ -467,7 +467,12 @@ pub(crate) struct PyStrategySpec {
 /// `wallet.set_costs_for(sym, ...)` apply naturally. Every shape trades the
 /// wallet it is handed, portfolio included: a portfolio is an ordinary
 /// `Strategy` that nets its children onto one account.
-pub(crate) fn run_spec<W: Wallet<Symbol>>(
+// `+ Send` is required only because the drive below is detached, and it is
+// asked for **here** rather than on the `Wallet` trait: a third-party wallet
+// impl that never crosses a thread stays unconstrained. All three concrete
+// pyclass wallets satisfy it, and `over_any_wallet!` monomorphises per arm, so
+// the compiler checks each one.
+pub(crate) fn run_spec<W: Wallet<Symbol> + Send>(
     py: Python<'_>,
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<Symbol>],
@@ -480,13 +485,17 @@ pub(crate) fn run_spec<W: Wallet<Symbol>>(
     // and it is `dyn RunnableStrategy` that carries the `Strategy` supertrait,
     // not the `Box` around it.
     //
-    // Fed through `interruptible` so Ctrl-C ends a long run; see there.
-    let interrupt = std::cell::Cell::new(None);
-    let report = fugazi_core::backtest::run(
-        &mut *built,
-        wallet,
-        crate::classes::interruptible(py, snapshots.iter().cloned(), &interrupt),
-    );
+    // The build above needs the GIL (a per-symbol factory may be a Python
+    // callable); the drive does not, so it runs detached. `interruptible`
+    // re-attaches every few thousand bars to poll for Ctrl-C.
+    let interrupt = std::sync::Mutex::new(None);
+    let report = py.detach(|| {
+        fugazi_core::backtest::run(
+            &mut *built,
+            wallet,
+            crate::classes::interruptible(snapshots.iter().cloned(), &interrupt),
+        )
+    });
     crate::classes::raise_if_interrupted(&interrupt, report)
 }
 

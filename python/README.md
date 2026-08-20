@@ -1639,9 +1639,15 @@ with ProcessPoolExecutor() as pool:
 and a `Snapshot` carrying one symbol at two cadences survives as two entries
 rather than collapsing to one.
 
-Threads are the one thing that won't help: a run holds the GIL start to finish.
-It is *interruptible* — Ctrl-C ends it within a few milliseconds — but it will not
-overlap with other Python threads. Reach for processes, or `jobs=`.
+**Threads work too.** A run releases the GIL for its duration, so a websocket
+reader, a heartbeat or a UI keeps running while a long backfill grinds — measured
+at ~87% of a companion thread's expected wakeups, against ~0% before. It stays
+interruptible: Ctrl-C ends a run within milliseconds, because the drive re-attaches
+every few thousand bars to poll signal handlers.
+
+Processes are still the better answer for *throughput*, since threads share one
+interpreter's CPU for anything Python-side; use threads for **concurrency** —
+keeping the rest of a live process responsive.
 
 **Indicators, signals and strategies do not pickle**, by design: they own live
 incremental state, and half a warmed-up EMA is not a thing to ship between

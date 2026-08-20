@@ -2184,37 +2184,43 @@ pub(crate) fn _rebuild_schema(keys: Vec<String>, types: Vec<String>) -> PyResult
 
 /// How many samples pass between signal polls.
 ///
-/// `check_signals` is not free (it re-enters the interpreter to run pending
-/// handlers), and a backtest's inner loop is 1-13 ns/bar — polling every bar
-/// would be visible. At 4096 the amortised cost is far below measurement noise
-/// and the worst-case latency between Ctrl-C and the run stopping is well under
-/// a millisecond on any series big enough to want interrupting.
+/// The run is *detached*, so each poll is a GIL reacquire plus a `check_signals`,
+/// and a backtest's inner loop is 1-13 ns/bar — polling every bar would dominate
+/// it. At 4096 an 800 k-bar run pays ~195 acquisitions total, below the
+/// run-to-run variance of the drive itself, while the worst-case latency between
+/// Ctrl-C and the run stopping stays well under a millisecond.
+///
+/// It is also the granularity at which other Python threads get a turn, which is
+/// the *other* reason not to raise it much.
 const SIGNAL_CHECK_STRIDE: usize = 4096;
 
 /// Wrap a snapshot/sample iterator so a pending `KeyboardInterrupt` ends the
-/// drive.
+/// drive, **without** holding the GIL between checks.
 ///
 /// `backtest::drive` takes an `IntoIterator`, which is the only seam the Python
-/// side needs: this yields the same items and polls Python's signal handlers
-/// every [`SIGNAL_CHECK_STRIDE`] of them. On a pending signal it parks the error
-/// in `interrupt` and reports exhaustion, so the drive returns normally and the
-/// caller re-raises — `Iterator::next` has nowhere to put an error, and this
-/// keeps the core loop free of any Python awareness.
+/// side needs: this yields the same items and, every [`SIGNAL_CHECK_STRIDE`] of
+/// them, re-attaches just long enough to run Python's signal handlers. On a
+/// pending signal it parks the error and reports exhaustion, so the drive
+/// returns normally and the caller re-raises — `Iterator::next` has nowhere to
+/// put an error, and this keeps the core loop free of any Python awareness.
 ///
-/// Without it a long `run()` was **uninterruptible**: the GIL is held for the
-/// whole call and nothing ever polls, so Ctrl-C in a notebook did nothing until
-/// the run finished on its own.
-pub(crate) fn interruptible<'py, T>(
-    py: Python<'py>,
-    items: impl IntoIterator<Item = T> + 'py,
-    interrupt: &'py std::cell::Cell<Option<PyErr>>,
-) -> impl Iterator<Item = T> + 'py {
+/// # Why a `Mutex` and not a `Cell`
+///
+/// The whole iterator is handed to a [`Python::detach`] closure, which demands
+/// `Send`. A `&Cell<_>` is not `Send` (`Cell` is not `Sync`), so the obvious
+/// single-threaded parking slot is exactly the thing that will not compile here.
+/// `PyErr` is `Send + Sync`, so a `Mutex` is; it is uncontended by construction —
+/// one writer, read once after the run — and touched at most once per stride.
+pub(crate) fn interruptible<'a, T: 'a>(
+    items: impl IntoIterator<Item = T> + 'a,
+    interrupt: &'a std::sync::Mutex<Option<PyErr>>,
+) -> impl Iterator<Item = T> + 'a {
     let mut seen = 0usize;
     items.into_iter().map_while(move |item| {
         if seen.is_multiple_of(SIGNAL_CHECK_STRIDE)
-            && let Err(e) = py.check_signals()
+            && let Err(e) = Python::attach(|py| py.check_signals())
         {
-            interrupt.set(Some(e));
+            *interrupt.lock().expect("interrupt slot poisoned") = Some(e);
             return None;
         }
         seen += 1;
@@ -2227,10 +2233,10 @@ pub(crate) fn interruptible<'py, T>(
 /// Call immediately after a drive that used it: a stopped run's partial report
 /// is meaningless, so the error wins over the value.
 pub(crate) fn raise_if_interrupted<T>(
-    interrupt: &std::cell::Cell<Option<PyErr>>,
+    interrupt: &std::sync::Mutex<Option<PyErr>>,
     value: T,
 ) -> PyResult<T> {
-    match interrupt.take() {
+    match interrupt.lock().expect("interrupt slot poisoned").take() {
         Some(e) => Err(e),
         None => Ok(value),
     }

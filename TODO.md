@@ -20,56 +20,6 @@ silently take the config's `default:` leg — quietly wrong for any config using
 shape is probably `set_costs_for_all(symbols, costs, freq=None)` looping the
 existing call, not a `with_costs` mirror.
 
-### The GIL is held for the whole of `run()`
-
-`Strategy.run` / `StrategySpec.run` are now **interruptible** — the snapshots go
-through `classes::interruptible`, which polls Python's signal handlers every 4096
-bars, so Ctrl-C ends a run within ~50 ms of a 3.2 s / 800 k-bar backtest instead
-of doing nothing until it finished. That was the half that actually bit people in
-a notebook, and it needed no core change: `backtest::drive` takes an
-`IntoIterator`, which is the whole seam.
-
-What is *not* done is releasing the GIL for the duration, so a long run still
-blocks every other Python thread. It was tried and does not compile:
-
-```
-error[E0277]: `dyn RunnableStrategy` cannot be sent between threads safely
-error[E0277]: `W` cannot be sent between threads safely
-```
-
-`py.detach` demands a `Send` closure. The interesting part is *what* is missing:
-a compile-time probe says `PaperWallet`, `SingleAssetStrategy`, `BasketStrategy`,
-`Portfolio` and `Snapshot<Symbol>` are **all already `Send`** — every shared
-handle is an `Arc<Mutex<…>>` and `DynIndicator` is declared `Send + Sync`. Only
-`dyn RunnableStrategy` fails, and only because the *trait declaration* omits the
-bound, not because any implementation misses it.
-
-So the shape of the fix is known and small:
-
-1. `try_build` returns `Box<dyn RunnableStrategy + Send>` — that coerces to the
-   plain trait object, so Rust consumers are unaffected, and only the five
-   in-crate shapes have to satisfy it.
-2. Bound `W: Wallet<Symbol> + Send` **at the Python call sites**, not on the
-   `Wallet` trait, so a third-party wallet impl stays unconstrained.
-3. `interruptible` swaps its held GIL for `Python::attach(|py| py.check_signals())`
-   per stride — ~200 acquisitions on an 800 k-bar run.
-4. `py.detach` around `backtest::run`.
-
-The hazard that looks fatal and isn't: a basket calling a Python `scored_by`
-factory from a detached thread. `source_factory_from_callable` already returns
-`impl Fn + Send + Sync` and re-enters via `Python::attach` itself.
-
-Note the two goals are also in mild tension: `check_signals` needs the GIL, so a
-detached run has to re-attach at each stride anyway. The shape that would give
-both is `detach` per chunk with an `attach` between — which is what the resumable
-API already does at a coarser grain.
-
-What would change it: someone actually blocked by thread-parallel runs from one
-process. Process parallelism is the better answer today and now works — every
-value type pickles, so `ProcessPoolExecutor` fan-out is a `RunReport` round trip —
-and `ta.optimize(jobs=N)` already parallelises the sweep case inside Rust, where
-the `Send` question is answered locally rather than in the public trait bounds.
-
 ### No async surface — `fetch` and the live wallets are blocking
 
 Every network call on the Python side is synchronous: `Binance.fetch(...)` and
@@ -86,8 +36,9 @@ Deferred, not overlooked. Three reasons:
    shape people mean by "async-washing" — and would buy latency nowhere.
 2. **The IO is at the edges, and the edges are already the caller's.** A live loop
    is *their* `while True`. Someone on asyncio can put the blocking call in
-   `asyncio.to_thread(...)` today and lose nothing, because the GIL is released
-   across the request.
+   `asyncio.to_thread(...)` today and lose nothing: the GIL is released across the
+   request, and — since the `Send` supertrait on `RunnableStrategy` — across a
+   whole `run()` too. A thread parked in fugazi blocks nothing else.
 3. **`async fn` in a pyclass means committing to an executor.** pyo3-async-runtimes
    binds the extension to a specific one, and getting it wrong is worse than not
    offering it — an `OkxWallet` that only works under `asyncio` and not `trio`, or

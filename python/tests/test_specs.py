@@ -1555,6 +1555,53 @@ def test_call_errors_stay_type_errors():
 # ---------------------------------------------------------------------------
 
 
+def test_a_run_does_not_block_other_python_threads():
+    """A run used to hold the GIL start to finish, so every other thread in the
+    process starved for its duration — a websocket reader, a heartbeat, a UI.
+
+    The drive is now wrapped in `py.detach`, which is what the `Send` supertrait
+    on `RunnableStrategy` exists to permit. This measures the effect directly: a
+    companion thread ticking on a 1 ms sleep should get most of its wakeups. Held
+    GIL gave it approximately none — the first version of the Ctrl-C test below
+    could not even fire its own `threading.Timer`.
+    """
+    import threading
+    import time
+
+    bars = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+    snaps = _snaps_single("BTC", bars * 30_000)
+    spec = ta.load_spec(_trend_yaml(), params={"FAST": 3, "SLOW": 8})
+
+    ticks = 0
+    stop = threading.Event()
+
+    def ticker():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            time.sleep(0.001)
+
+    companion = threading.Thread(target=ticker)
+    companion.start()
+    try:
+        started = time.monotonic()
+        spec.run(ta.PaperWallet(1000.0), snaps)
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        companion.join()
+
+    if elapsed < 0.5:
+        pytest.skip(f"machine too fast to measure ({elapsed:.2f}s run)")
+    # A 1 ms sleep loop can tick at most ~1000/s. Anything near that share means
+    # the GIL was available; holding it produced single digits.
+    ceiling = elapsed * 1000
+    assert ticks > ceiling * 0.25, (
+        f"companion thread got {ticks} ticks in {elapsed:.2f}s (ceiling ~{ceiling:.0f}) "
+        "— the run is still holding the GIL"
+    )
+
+
 def test_a_long_run_can_be_interrupted():
     """A run used to hold the GIL and poll nothing, so Ctrl-C in a notebook did
     nothing until the run finished on its own. The snapshots now go through
