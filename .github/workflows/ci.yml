@@ -53,6 +53,35 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      # What `cargo publish` would actually upload. 0.66.0 reached PyPI and
+      # never reached crates.io because a `git add -A` swept 15.5 MiB of scratch
+      # screenshots into the tree, putting the tarball at 17.11 MiB against
+      # crates.io's 10 MiB cap — and an over-size upload comes back as a bare
+      # 503 from the CDN with an empty body, which reads exactly like an outage.
+      # It cost four retries and a wrong diagnosis. Catch it at push time, where
+      # the error can say what it is.
+      #
+      # `--workspace --exclude fugazi-python` rather than `-p fugazi`: the root
+      # pins `fugazi-derive` by *registry version*, so `-p fugazi` resolves that
+      # against crates.io and fails on every release commit — the bumped derive
+      # is not published yet. Packaging both members together resolves it by
+      # path. `fugazi-python` is excluded because it is not published as a crate.
+      - name: Package size
+        run: |
+          cargo package --workspace --exclude fugazi-python --no-verify --allow-dirty
+          crate=$(find target/package -maxdepth 1 -name 'fugazi-*.crate' \
+                    ! -name 'fugazi-derive-*' -printf '%s %p\n' |
+                  sort -rn | head -1)
+          bytes=${crate% *}
+          path=${crate#* }
+          budget=$((5 * 1024 * 1024))
+          printf 'packaged %s at %.2f MiB (budget %d MiB, crates.io cap 10 MiB)\n' \
+            "$path" "$(echo "$bytes/1048576" | bc -l)" "$((budget / 1024 / 1024))"
+          if [ "$bytes" -gt "$budget" ]; then
+            echo "::error::packaged crate is over the budget — check for files that should be in Cargo.toml's exclude"
+            exit 1
+          fi
+
   # The seven places a version bump has to touch (CLAUDE.md lists them). `cargo`
   # enforces exactly one pair — the root's `fugazi-derive` pin against the
   # derive crate's own version. The rest were hand-maintained, which is how

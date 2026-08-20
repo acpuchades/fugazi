@@ -51,6 +51,19 @@ if [[ $job == all || $job == rust ]]; then
         cargo clippy -p fugazi-derive --all-targets -- -D warnings
     RUSTDOCFLAGS="-D warnings" run "rust / Docs" \
         cargo doc --no-deps -p fugazi
+    # What `cargo publish` would upload. See the workflow for why this is
+    # `--workspace --exclude fugazi-python` and not `-p fugazi`.
+    run "rust / Package size" bash -c '
+        cargo package --workspace --exclude fugazi-python --no-verify --allow-dirty || exit 1
+        crate=$(find target/package -maxdepth 1 -name "fugazi-*.crate" \
+                  ! -name "fugazi-derive-*" -printf "%s %p\n" |
+                sort -rn | head -1)
+        bytes=${crate%% *}
+        budget=$((5 * 1024 * 1024))
+        printf "packaged at %s bytes (budget %s)\n" "$bytes" "$budget"
+        [ "$bytes" -le "$budget" ] ||
+            { echo "over budget — check Cargo.toml exclude"; exit 1; }
+    '
 fi
 
 # --- version-sync ------------------------------------------------------------
