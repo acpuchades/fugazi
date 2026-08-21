@@ -287,7 +287,17 @@ Foo { source, period } => dyn_indicator::wrap(
   spelling of every unary-shaped tag and fails if one parses undeclared. The descriptor's `default` for a scalar field is read
   from its `#[serde(default = "…")]`, so a canonical numeric default belongs in
   a const-backed default fn (see `MACD_FAST` & co. in `expr.rs`), not hard-coded
-  in the Python signature — the parity test pins the two together.
+  in the Python signature — the parity test pins the two together. A **node**
+  default (a `source:` falling back to `!close` / `!current`) is read the same
+  way and reported as `default_expr`, the YAML fragment omitting the key writes:
+  give it a `#[serde(default = "…")]` fn returning the leaf and the descriptor
+  spells it for you. Two tests then hold you to it —
+  `a_default_expr_is_equivalent_to_omitting_the_field` parses the tag both ways
+  and demands the same tree, and `defaulted_expression_slots_name_their_default`
+  fails if a defaulted expression slot reports nothing (teach
+  `grammar::default_expr_of` the spelling; don't leave the fact in the `///`).
+  An `Option<Box<NodeSpec>>` slot is the deliberate exception: its default is
+  `None`, "the key is absent", which names no node.
   `spec_json_schema()` is a further projection of the descriptor, so a
   correctly-annotated tag flows into the JSON Schema for free (a brand-new
   *field type* is the one exception — it lands as `"other"` until you add its

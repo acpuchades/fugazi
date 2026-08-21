@@ -1181,7 +1181,7 @@ tag is bound, or listed with a reason) and
 **The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
 (the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` / `UniverseSpec` into one
 JSON-serializable record per tag — names, `forms` (each with a shape, fields with types /
-required-ness / defaults, or a payload), prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
+required-ness / defaults / default expressions, or a payload), prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
 spec's *presentation* metadata, the way `known_*_tags` is for its *names*: `spec_tags()` is
 now a projection of it, `test_parity.py` pins each Python constructor's defaults against it,
 and external tooling (docs, editor LSP, the web grammar table) generates from it rather than
@@ -1259,6 +1259,38 @@ why that's a real threat, not a hypothetical one) can derive its own allow/deny 
 completions from the descriptor instead of hand-maintaining a table pinned to fugazi's tag list.
 Present on every record (not omitted when `false`), so this is a shape change — the field-count
 change, not a new group or legend value, is what earns the bump.
+
+**`default_expr` (v7) — a default that is a node, not a literal.** A field's `default` could
+only ever carry a JSON literal, so the 69 slots whose default is an *expression* reported
+`null` and left the fact in English: 37 `source:` keys said "defaults to the bar's `!close`
+when omitted", 23 "the current bar", six `!high`/`!low`, three `!everything`. That prose is
+the same failure mode `node_output` fixed one field over — a downstream table derived by
+regexing doc strings, which nothing pins and which silently stops matching the day a `///` is
+reworded. `default_expr` reports the YAML fragment instead: `!ema`'s `source` is `!close`,
+`!atr`'s `!current`, a selection rule's `of` `!everything`. It parses in the slot it
+describes, so an editor can both render it (`!macd_line · source=!close, fast=12`) and insert
+it, where before it could only write `source?`.
+
+It is **reflected off the default's own value**, not off prose: `grammar::default_expr_of`
+reads the `Debug` of what the `#[serde(default = "…")]` fn returns, the same trick
+`typecheck::tag_name` uses to name a variant without a parallel table — change `default_source`
+and the fragment changes with it. And the equivalence is *settled against the parser*:
+`a_default_expr_is_equivalent_to_omitting_the_field` parses each tag twice, with the key
+omitted and with the key set to the fragment, and requires the same tree.
+
+**The fragment is a root floor.** Every one is a bare leaf, and a bare leaf reads the blessed
+series its enclosing document confers — so a fragment never nests (`!close`, not
+`!close { source: … }`) and is always one token. That is also what lets the *other* 33 slots
+stay honest rather than being flattened into the same field: a candle leaf's own `source:`
+defaults to "the strategy's own series", which no tag spells, so it reports `default: null` +
+`default_expr: null` — the pair that now unambiguously means **no default**, where `default:
+null` alone used to mean either that or "there is one, and it isn't a literal". Nothing is
+lost by stopping a rung above it: the floor already says it. Two shapes were rejected getting
+here — putting `"!close"` in `default` itself (indistinguishable from a string-literal
+default) and retagging it as `{literal:…} | {expr:…}` (cleaner, but breaks every existing
+consumer for a field that mostly works). The derive's rule is structural, not editorial: a
+non-`Option` field with a serde default gets its value spelled; an `Option` field's default is
+Rust `None`, which names no node.
 
 Records carry one datum that is **not** reflected off serde: **`node_output`** (v4, 0.61), on
 every field whose `type` is `node` / `node_list` / `match_cases`, plus **`payload_output`** for

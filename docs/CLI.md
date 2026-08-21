@@ -1188,6 +1188,23 @@ downstream tooling generates docs, editor autocomplete, and conformance checks
 from (`list indicators` itself is one such consumer). Guard on `schema_version`
 for record-*shape* changes.
 
+**A field says what omitting it gets you.** `default` is the JSON literal a
+scalar key falls back to (`!macd_line`'s `fast` is `12`); `default_expr` is the
+YAML fragment a key whose default is a *node* falls back to — `!ema`'s `source`
+reports `!close`, `!atr`'s `!current`, a selection rule's `of` `!everything`. It
+parses in the slot it describes, so it can be displayed *and* inserted:
+
+```sh
+fugazi grammar | jq -r '.tags[] | .name as $t | .forms[].fields[]
+  | select(.default_expr) | "!\($t).\(.name) defaults to \(.default_expr)"'
+```
+
+The fragment is a **root floor** — always a bare leaf, which reads the series
+its document blesses, so it never nests (`!close`, not `!close { source: … }`).
+A *leaf's own* `source:` therefore reports both keys as `null`, which means "no
+expressible default", not "unknown": omitting it means the strategy's own
+series, which no tag names and the floor already implies.
+
 **`forms` is a list, and a tag can have more than one.** Each entry is one
 spelling: `shape` (`unit` / `newtype` / `seq` / `map`), `fields` (with types,
 required-ness, defaults, prose) for a `map`, `payload` for a `newtype`/`seq`.

@@ -280,7 +280,37 @@ fn reflects_fields_and_defaults() {
     let src = sma.canonical().fields.iter().find(|f| f.name == "source").unwrap();
     assert_eq!(src.ty, "node");
     assert!(!src.required, "sma.source has a default -> optional");
-    assert!(src.default.is_none(), "node default is null, not a literal");
+    assert!(src.default.is_none(), "a node default is not a JSON literal");
+    assert_eq!(
+        src.default_expr.as_deref(),
+        Some("!close"),
+        "omitting !sma's source is writing !close, and the descriptor has to say so",
+    );
+
+    // The other three node defaults, one per shape of fallback.
+    let field = |tag: &str, name: &str| {
+        by_name(tag)
+            .canonical()
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("!{tag}.{name}"))
+            .clone()
+    };
+    assert_eq!(field("atr", "source").default_expr.as_deref(), Some("!current"));
+    assert_eq!(field("donchian_upper", "high").default_expr.as_deref(), Some("!high"));
+    assert_eq!(field("donchian_upper", "low").default_expr.as_deref(), Some("!low"));
+    assert_eq!(field("top_bottom", "of").default_expr.as_deref(), Some("!everything"));
+
+    // ... and the case that must stay silent: a candle leaf's `source:` defaults
+    // to the strategy's own series, which no tag spells. `null` + `null` is the
+    // honest answer, and inventing one here would be worse than prose.
+    let own_series = field("close", "source");
+    assert!(!own_series.required);
+    assert!(
+        own_series.default.is_none() && own_series.default_expr.is_none(),
+        "!close.source has no expressible default — reporting one would be a lie",
+    );
     let period = sma.canonical().fields.iter().find(|f| f.name == "period").unwrap();
     // A period is a `NonZeroUsize`, which the descriptor reports as
     // `positive_uint` so the generated JSON schema can say `minimum: 1`.
@@ -295,6 +325,8 @@ fn reflects_fields_and_defaults() {
     let bb = by_name("bb_upper");
     let k = bb.canonical().fields.iter().find(|f| f.name == "k").unwrap();
     assert_eq!(k.default, Some(serde_json::json!(2.0)));
+    // A literal default carries no fragment: `default` already answered.
+    assert!(fast.default_expr.is_none() && k.default_expr.is_none());
 
     // A bool predicate and its optional epsilon.
     let gt = by_name("gt");
@@ -302,6 +334,160 @@ fn reflects_fields_and_defaults() {
     assert_eq!(gt.output, "bool");
     let eps = gt.canonical().fields.iter().find(|f| f.name == "epsilon").unwrap();
     assert!(!eps.required, "Option field is optional even without serde default");
+}
+
+/// **A `default_expr` must be equivalent to omitting the field.** The claim the
+/// descriptor makes for 69 slots — that `!ema { period: 10 }` and
+/// `!ema { source: !close, period: 10 }` are the same expression — settled
+/// against the parser rather than asserted in prose.
+///
+/// Both spellings are parsed and their trees compared, so this catches the
+/// three ways the claim could go wrong: a fragment that doesn't parse at all, a
+/// fragment that parses to a *different* node than the default (a renamed leaf,
+/// a `default_source` that stops returning `!close`), and a slot that isn't
+/// actually omissible. It is the reason `default_expr` is reflected off the
+/// default's own value instead of scraped out of the field's prose — prose is a
+/// claim nothing can check, and this is the check.
+#[test]
+fn a_default_expr_is_equivalent_to_omitting_the_field() {
+    let mut checked = 0;
+    let mut broken = Vec::new();
+    for tag in spec_grammar() {
+        for form in &tag.forms {
+            let Some(base) = minimal_body(form) else {
+                continue;
+            };
+            for f in form.fields.iter().filter(|f| f.default_expr.is_some()) {
+                let expr = f.default_expr.as_deref().expect("filtered");
+                let at = format!("!{}.{}", tag.name, f.name);
+                // The fragment is YAML the way a document writes it, so it goes
+                // through the loader's own YAML → JSON-bridge normalisation.
+                let fragment = match fugazi::spec::input::parse_value(expr) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        broken.push(format!("{at}: default_expr {expr:?} is not YAML: {e}"));
+                        continue;
+                    }
+                };
+                let mut written = base.clone();
+                written.insert(f.name.clone(), fragment);
+                let omitted = tagged(&tag.name, base.clone());
+                let written = tagged(&tag.name, written);
+                match (parse_tree(&tag.group, &omitted), parse_tree(&tag.group, &written)) {
+                    (Ok(a), Ok(b)) if a == b => checked += 1,
+                    (Ok(a), Ok(b)) => broken.push(format!(
+                        "{at}: omitting the field is not `{expr}`\n      omitted: {a}\n      \
+                         written: {b}"
+                    )),
+                    (Err(e), _) => {
+                        broken.push(format!("{at}: the field is not omissible: {omitted} — {e}"))
+                    }
+                    (_, Err(e)) => {
+                        broken.push(format!("{at}: {expr} does not parse in the slot: {e}"))
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "the descriptor claims these defaults, and the parser disagrees:\n  {}",
+        broken.join("\n  "),
+    );
+    // A floor, not a count: the point is that the walk reached the slots at all.
+    // Every wrapped indicator's `source` is one, so this cannot thin out
+    // quietly.
+    assert!(checked >= 60, "only {checked} default_expr claims were reachable to check");
+}
+
+/// **A defaulted expression slot must name what it defaults to.** The converse
+/// guard: a slot whose default is a node has to report the fragment, not leave
+/// it in English.
+///
+/// The derive fills `default_expr` for every non-`Option` defaulted node field,
+/// so the way this fails is `grammar::default_expr_of` meeting a default it
+/// cannot spell (a `!value 0`, a list) and answering `None` — which would ship
+/// as an indistinguishable `null`. Teach it the spelling; don't demote the fact
+/// to prose.
+///
+/// Two exemptions, both structural rather than editorial:
+///
+/// - a slot demanding `["atom"]` is a **blessed-series re-root** (`!close`'s
+///   `source:`), whose absence means "the strategy's own series" — no tag says
+///   that, so there is nothing to report;
+/// - a slot with **no** demand is not a free expression at all (a *book
+///   selector* like `!drawdown`'s `source:`), same story.
+///
+/// Both would also cover a future defaulted node slot in those positions, which
+/// is the limit of what a walk over the descriptor can prove; anything else has
+/// to say what it defaults to.
+#[test]
+fn defaulted_expression_slots_name_their_default() {
+    let mut silent = Vec::new();
+    for tag in spec_grammar() {
+        for form in &tag.forms {
+            for f in &form.fields {
+                let is_expression = matches!(f.ty.as_str(), "node" | "node_list" | "selection");
+                if f.required || f.default.is_some() || f.default_expr.is_some() || !is_expression {
+                    continue;
+                }
+                let demand: Option<Vec<&str>> = f
+                    .node_output
+                    .as_ref()
+                    .map(|d| d.iter().map(String::as_str).collect());
+                match demand.as_deref() {
+                    // A blessed-series re-root, or a build-time selector.
+                    Some(["atom"]) | None => {}
+                    _ => silent.push(format!("!{}.{} ({:?})", tag.name, f.name, f.node_output)),
+                }
+            }
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "these expression slots are optional and report no default at all — if omitting \
+         one is equivalent to writing a node, `grammar::default_expr_of` has to spell \
+         it:\n  {}",
+        silent.join("\n  "),
+    );
+}
+
+/// The **minimal** JSON-bridge body for a `map` form: required fields filled
+/// with a probe, every optional one omitted. `None` for a non-`map` form, or
+/// when a required field holds something no probe can fabricate.
+///
+/// Distinct from [`probe`], which fills expression slots whether or not they're
+/// required — here the omitted ones are the subject.
+fn minimal_body(
+    form: &fugazi::spec::grammar::GrammarForm,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if form.shape != "map" {
+        return None;
+    }
+    let mut body = serde_json::Map::new();
+    for f in form.fields.iter().filter(|f| f.required) {
+        body.insert(f.name.clone(), filler(&f.ty)?);
+    }
+    Some(body)
+}
+
+/// `{ "<tag>": { <body> } }` — the JSON bridge encoding of a `map` spelling.
+fn tagged(name: &str, body: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({ name: serde_json::Value::Object(body) })
+}
+
+/// Parse a JSON-bridge document in its group's vocabulary, rendering the tree
+/// as its `Debug` — structural equality without needing `PartialEq` on either
+/// spec enum.
+fn parse_tree(group: &str, doc: &serde_json::Value) -> Result<String, String> {
+    match group {
+        "selection" => serde_json::from_value::<fugazi::spec::SelectionRuleSpec>(doc.clone())
+            .map(|v| format!("{v:?}"))
+            .map_err(|e| e.to_string()),
+        _ => serde_json::from_value::<fugazi::spec::NodeSpec>(doc.clone())
+            .map(|v| format!("{v:?}"))
+            .map_err(|e| e.to_string()),
+    }
 }
 
 /// Every tag in the vocabulary must appear in `docs/STRATEGIES.md`, the
@@ -352,20 +538,6 @@ fn every_tag_appears_in_the_strategies_reference() {
 /// *parse*, not to typecheck.
 fn probe(name: &str, form: &fugazi::spec::grammar::GrammarForm) -> Option<serde_json::Value> {
     use serde_json::json;
-    fn filler(ty: &str) -> Option<serde_json::Value> {
-        Some(match ty {
-            "node" => json!({ "get": { "key": "probe" } }),
-            "node_list" => json!([{ "get": { "key": "probe" } }]),
-            "match_cases" => json!([{ "when": 1, "value": { "get": { "key": "probe" } } }]),
-            "positive_uint" | "uint" | "number" | "literal" => json!(1),
-            "str" | "str_operand" => json!("probe"),
-            "str_list" => json!(["PROBE"]),
-            "number_list" => json!([1.0]),
-            "bool" => json!(true),
-            // `strategy` — a whole embedded document, out of reach here.
-            _ => return None,
-        })
-    }
     let body = match form.shape.as_str() {
         "unit" => serde_json::Value::Null,
         "newtype" | "seq" => filler(form.payload.as_deref()?)?,
@@ -385,6 +557,27 @@ fn probe(name: &str, form: &fugazi::spec::grammar::GrammarForm) -> Option<serde_
         other => panic!("!{name}: unknown shape {other}"),
     };
     Some(json!({ name: body }))
+}
+
+/// A stand-in value of grammar type `ty`, in the JSON bridge encoding.
+///
+/// Expression slots get `!get { key: probe }`, whose output type is
+/// schema-dependent and therefore admitted everywhere — a probe has to *parse*,
+/// not to typecheck. `None` for `strategy`, a whole embedded document.
+fn filler(ty: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    Some(match ty {
+        "node" => json!({ "get": { "key": "probe" } }),
+        "node_list" => json!([{ "get": { "key": "probe" } }]),
+        "match_cases" => json!([{ "when": 1, "value": { "get": { "key": "probe" } } }]),
+        "positive_uint" | "uint" | "number" | "literal" => json!(1),
+        "str" | "str_operand" => json!("probe"),
+        "str_list" => json!(["PROBE"]),
+        "number_list" => json!([1.0]),
+        "bool" => json!(true),
+        // `strategy` — a whole embedded document, out of reach here.
+        _ => return None,
+    })
 }
 
 /// Whether a JSON-bridge document parses as an expression.

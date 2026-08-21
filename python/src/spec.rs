@@ -954,8 +954,8 @@ impl PyStrategySpec {
 ///
 /// ```text
 /// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
-/// fields       [ {name, type, required, default, node_output?, doc} ]
-///              (map forms only)
+/// fields       [ {name, type, required, default, default_expr, node_output?,
+///              doc} ]  (map forms only)
 /// payload      positional payload type of a newtype/seq form ("node" |
 ///              "literal" | "node_list" | "str_list" | "number_list"); null for
 ///              unit/map forms
@@ -984,6 +984,24 @@ impl PyStrategySpec {
 /// `enter:`, a portfolio's `weights:`), and one written anywhere else is a hard
 /// parse error, `check` included. `!undefined` is `scope: "internal"` and
 /// should never be offered at all.
+///
+/// **`default` and `default_expr` — what omitting a key gets you.** `default` is
+/// the JSON literal a scalar key falls back to (`!macd_line`'s `fast` is `12`).
+/// `default_expr` is the YAML fragment a key whose default is a *node* falls
+/// back to: `!ema`'s `source` reports `"!close"`, `!atr`'s `"!current"`,
+/// `!donchian_upper`'s `high` / `low` `"!high"` / `"!low"`, a selection rule's
+/// `of` `"!everything"`. It parses in the slot it describes, so a completion
+/// menu can both show it (`!macd_line · source=!close, fast=12, …`) and insert
+/// it. `!ema {period: 10}` and `!ema {source: !close, period: 10}` are the same
+/// expression, and a test settles that against the parser rather than leaving
+/// it to prose.
+///
+/// The fragment is a **root floor**: always a bare leaf, which reads the series
+/// its enclosing document blesses — so it never nests (`!close`, not
+/// `!close {source: …}`), and a *leaf's own* `source:` reports **both** keys
+/// `null`. That pair means "no expressible default", not "unknown": omitting
+/// `!close`'s `source:` means the strategy's own series, which no tag names —
+/// and which the floor already implies. Don't scrape the `doc` for it.
 ///
 /// **`node_output` — what a slot must be filled *with*.** `type: "node"` says a
 /// field holds a nested expression; `node_output` says which expressions are
@@ -1019,7 +1037,8 @@ impl PyStrategySpec {
 /// for *shape* changes: `payload` + its `"literal"` field type landed in v2,
 /// `category` in v3 (0.51), `node_output` / `payload_output` in v4 (0.61),
 /// v5 (0.67) moved `shape` / `fields` / `payload` / `payload_output` off the tag
-/// and onto `forms`, and v6 added `host_affecting`. The 0.50 group additions did
+/// and onto `forms`, v6 (0.68) added `host_affecting`, and v7 added a field's
+/// `default_expr`. The 0.50 group additions did
 /// **not** bump it — new groups and legend values leave the record shape
 /// unchanged, only a new *field* does. v5 is the one breaking change so far:
 /// `tag["shape"]` becomes `tag["forms"][0]["shape"]`.

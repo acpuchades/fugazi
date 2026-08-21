@@ -67,10 +67,21 @@ use serde::Serialize;
 ///   also accepts. This is a breaking record-shape change: a consumer reading
 ///   `tag["shape"]` must move to `tag["forms"][0]["shape"]` and, if it validates
 ///   or completes, iterate all of `forms`.
-/// - v6 (unreleased): added [`GrammarTag::host_affecting`] — `true` only for
+/// - v6 (0.68): added [`GrammarTag::host_affecting`] — `true` only for
 ///   `import`, `false` on every other tag. Every record now carries it (not
 ///   omitted when `false`), so a v5 consumer reading a fixed field set sees a
 ///   new key rather than a missing one.
+/// - v7 (unreleased): added [`GrammarField::default_expr`] — the YAML fragment
+///   a defaulted slot's absence is *equivalent to writing*, for the 69 fields
+///   whose default is a node rather than a JSON literal (`!ema`'s `source` →
+///   `!close`, `!atr`'s → `!current`, a selection rule's `of` → `!everything`).
+///   Always a bare leaf — the *root floor*, which carries its own series root
+///   implicitly, so a leaf's own `source:` stays `null` and no fragment nests.
+///   [`default`](GrammarField::default) keeps its meaning, so the fields that
+///   already reported a literal are unchanged; the pair
+///   `default: null` + `default_expr: null` now means **no default**, where
+///   `default: null` alone used to mean either that or "there is one, but it
+///   isn't a JSON literal". Always present, like `default`.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
@@ -78,7 +89,7 @@ use serde::Serialize;
 /// — a bump would trip downstream version guards for no shape change. A consumer
 /// with an exhaustive `group` / `kind` / `scope` switch should treat unknown
 /// values as inert, not as an error.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The `since` stamped on every tag that shipped at or before this release —
 /// the baseline. Tags added afterwards carry their own real `since` via
@@ -102,10 +113,35 @@ pub struct GrammarField {
     /// `Option`, or it carries a serde `default`.
     pub required: bool,
     /// The default value when omitted, for scalar fields with a serde
-    /// `default` (e.g. `macd`'s `fast: 12`). `null` for required fields and
-    /// for node-typed fields (whose default is a blessed-series fallback, not
-    /// a literal).
+    /// `default` (e.g. `macd`'s `fast: 12`). `null` for required fields, and
+    /// for a field whose default is a *node* rather than a literal — that one
+    /// is reported by [`default_expr`](Self::default_expr).
     pub default: Option<serde_json::Value>,
+    /// The YAML fragment that omitting the field is **equivalent to writing**,
+    /// when its default is a node rather than a JSON literal: `!ema`'s `source`
+    /// reports `!close`, `!atr`'s `!current`, `!donchian_upper`'s `high` / `low`
+    /// report `!high` / `!low`, a selection rule's `of` reports `!everything`.
+    /// A consumer can both *display* it (`!macd_line · source=!close, fast=12`)
+    /// and *insert* it, since it parses in the slot it describes.
+    ///
+    /// **The fragment is a root floor.** Every one of them is a leaf written
+    /// bare, and a bare leaf reads the blessed series its enclosing document
+    /// confers — so the fragment bottoms out there and the recursion stops:
+    /// `!ema`'s `source` is `!close`, never `!close { source: … }`. That is also
+    /// why a leaf's *own* `source:` reports nothing here. Omitting it means "the
+    /// strategy's own series", which is not a node any document can name (see
+    /// the blessed-series table in `CLAUDE.md`, and
+    /// [`Pick::rooted`](crate::indicators::Pick::rooted)) — but it is exactly
+    /// what the floor already says, so nothing is lost by stopping one rung
+    /// above it. `null` here together with a `null` [`default`](Self::default)
+    /// is therefore a real answer, "no expressible default", not a gap.
+    ///
+    /// Reflected off the default's own value (`grammar::default_expr_of`),
+    /// never off the field's prose, and settled against the parser:
+    /// `tests/spec_grammar.rs` parses the tag with the field omitted and with
+    /// the field set to this fragment, and requires the two to build the same
+    /// node.
+    pub default_expr: Option<String>,
     /// For an expression-holding field (`ty` = `node` / `node_list` /
     /// `match_cases`), what the nested expression must **produce** — the
     /// `output` legend value(s) a filler is allowed to have. `!and`'s `lhs` is
@@ -344,6 +380,66 @@ fn stamp_node_outputs(tag: &mut GrammarTag) {
     }
 }
 
+/// The YAML fragment a **defaulted slot's value** is written as — the
+/// [`GrammarField::default_expr`] the derive reports for a field whose serde
+/// default is a node rather than a JSON literal.
+///
+/// Read off the default's own `Debug`, the same reflection
+/// [`tag_name`](crate::spec::typecheck::tag_name) uses to name a variant
+/// without a parallel table: change what `default_source` returns and the
+/// fragment changes with it. That is the whole point — the equivalence
+/// "`!ema { period: 10 }` is `!ema { source: !close, period: 10 }`" is exact and
+/// machine-checkable, and it should not have to be recovered by regexing English
+/// out of a doc string.
+///
+/// Only the **bare spelling** is claimed, and only for a value sitting entirely
+/// at its own defaults: `Close { source: None }` → `!close`, `Everything` →
+/// `!everything`. That bare leaf is the *root floor* the descriptor reports —
+/// it carries its own blessed-series root implicitly, so there is never a
+/// deeper `{ source: … }` to spell, and a fragment is always one token. A
+/// default carrying a real field value (`!value 0`, a list) has a fragment this
+/// does not know how to spell, so it answers `None` — the descriptor reports
+/// "no expressible default" rather than a wrong one. It does
+/// not stay silent, though: `defaulted_expression_slots_name_their_default` in
+/// `tests/spec_grammar.rs` fails on such a slot, because the fix is to teach
+/// this function the spelling, not to leave the fact in prose.
+///
+/// Takes the default **by value** so a `Box<NodeSpec>` default fn's return can
+/// be handed over directly (`Box` forwards `Debug` to its contents).
+pub(crate) fn default_expr_of<T: std::fmt::Debug>(value: T) -> Option<String> {
+    let debug = format!("{value:?}");
+    let ident: String = debug
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if ident.is_empty() || !all_fields_defaulted(debug[ident.len()..].trim()) {
+        return None;
+    }
+    Some(crate::spec::typecheck::snake_tag(&debug))
+}
+
+/// Whether a variant's `Debug` *body* shows every field at its own default —
+/// `""` for a unit variant, `{ a: None, b: None }` for a struct one. Those are
+/// exactly the values the bare `!tag` spelling parses back to.
+///
+/// Deliberately strict: a newtype payload (`(1)`), or any field holding a real
+/// value, answers `false`. A false negative costs a `default_expr`; a false
+/// positive would ship a fragment that means something else.
+fn all_fields_defaulted(body: &str) -> bool {
+    let Some(inner) = body.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return body.is_empty();
+    };
+    inner.split(',').all(|field| match field.split_once(':') {
+        Some((name, value)) => {
+            let name = name.trim();
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && value.trim() == "None"
+        }
+        None => false,
+    })
+}
+
 /// A runtime type spelled in the descriptor's own [`GrammarTag::output`]
 /// vocabulary, so a slot's demand can be compared against a candidate tag's
 /// `output` by string equality.
@@ -508,6 +604,11 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
                     ty: (*ty).to_owned(),
                     required: *required,
                     default: None,
+                    // None of the load-time tags default a slot to a node:
+                    // `!param`/`!arg`'s `default:` is an arbitrary value tree
+                    // the *author* supplies, and `!import`'s `params:` is a
+                    // table, not an expression.
+                    default_expr: None,
                     node_output: None,
                     doc: Some((*doc).to_owned()),
                 })

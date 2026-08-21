@@ -307,6 +307,36 @@ placeholder. Excluding `meta` would mean teaching the untyped tree-walkers
 (`params::substitute`, `imports::resolve`) about document structure, which they
 are specifically built not to know.
 
+### A grammar field reports one default in two keys, and stops at the root floor
+
+`GrammarField` carries both `default` (a JSON literal, 34 fields) and, since v7,
+`default_expr` (a YAML fragment, 69 fields). One key would be tidier. Two shapes
+that would have given it were considered and rejected:
+
+- **Put `"!close"` in `default`.** Indistinguishable from a field whose default
+  really is the *string* `"close"`. No field carries a string default today, but
+  the vocabulary has `str` and `str_operand` field types, so that is luck rather
+  than a guarantee — and a consumer would be left inferring which it had from
+  the field's `type`, exactly the guessing this change removes.
+- **Retag it as `{"literal": 20} | {"expr": "!close"}`.** Cleaner, and the shape
+  to reach for on a green field. It breaks every existing consumer of `default`,
+  which works correctly today for the fields that have one, in exchange for
+  tidiness — a bad trade for a v7 additive bump.
+
+What would change it: a v8 that is already breaking for another reason. The
+tagged form is the better shape and the migration is mechanical; it just isn't
+worth a break of its own.
+
+**The fragment stops at a root floor, deliberately.** Every `default_expr` is a
+bare leaf — `!close`, never `!close { source: … }` — because a bare leaf already
+reads the series its document blesses. The 33 slots left reporting `null` are
+the leaves' *own* `source:` keys, where omission means "the strategy's own
+series": there is no tag for that, and flattening it into `default_expr` would
+mean inventing one. `null` + `null` is the honest answer, and the floor is what
+makes it a cheap one — the unspellable thing sits one rung below every fragment
+we actually emit, so nothing a consumer needs is lost. What would change it: a
+tag that names the blessed series (`!self`, say), which nothing has needed.
+
 ### The default rebalance cadences are per-shape, and each was checked once
 
 Reviewed across all five shapes. The verdict is *keep every default* — recorded

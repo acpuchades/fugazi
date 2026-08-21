@@ -545,7 +545,11 @@ fn variants_from_error(message: &str) -> Vec<String> {
 }
 
 /// `"MacdLine { .. }"` → `"!macd_line"`.
-fn snake_tag(debug: &str) -> String {
+///
+/// Shared with [`grammar::default_expr_of`](crate::spec::grammar::default_expr_of),
+/// which spells a defaulted slot's value the same way — off its `Debug`, so
+/// neither has a table to go stale.
+pub(super) fn snake_tag(debug: &str) -> String {
     let ident: String = debug
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())

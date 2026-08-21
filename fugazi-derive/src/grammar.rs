@@ -8,9 +8,12 @@
 //!   the ident in `snake_case` (matching serde's `rename_all = "snake_case"`).
 //! - **shape** — from the variant's field form (unit / newtype / seq / map).
 //! - **fields** — for a `map` variant, each named field's `type`, `required`,
-//!   `default`, and `///` doc. `required` is false for `Option` fields and for
-//!   fields with a serde `default`; `default` is emitted (as a runtime
-//!   `serde_json::to_value(...)`) only for scalar fields with a serde default.
+//!   `default`, `default_expr`, and `///` doc. `required` is false for `Option`
+//!   fields and for fields with a serde `default`; `default` is emitted (as a
+//!   runtime `serde_json::to_value(...)`) only for scalar fields with a serde
+//!   default, and `default_expr` (the YAML fragment the default writes as) only
+//!   for **non-`Option`** fields whose default is a node — an `Option`'s default
+//!   is `None`, which names no node a document could write.
 //! - **doc** — the variant's `///`.
 //!
 //! The four things serde cannot know come from `#[grammar(...)]`:
@@ -211,6 +214,9 @@ fn alt_form(
                         ty: "node".to_owned(),
                         required: true,
                         default: ::std::option::Option::None,
+                        // The keyed spelling of a `newtype` wrapper: its lone
+                        // slot is the tag's payload, which is required.
+                        default_expr: ::std::option::Option::None,
                         node_output: ::std::option::Option::None,
                         doc: ::std::option::Option::Some(#SOURCE_FIELD_DOC.to_owned()),
                     }],
@@ -286,11 +292,9 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
     let required = !is_option && matches!(default_kind, SerdeDefault::None);
 
     // Emit a literal default value only for scalar fields with a serde default.
-    // Node-typed defaults are blessed-series fallbacks, not literals -> null.
-    let default_expr = match (&default_kind, is_scalar) {
+    let default_value = match (&default_kind, is_scalar) {
         (SerdeDefault::Fn(path), true) => {
-            let path: syn::Path = syn::parse_str(path)
-                .map_err(|e| syn::Error::new_spanned(field, format!("bad serde default path: {e}")))?;
+            let path = default_path(field, path)?;
             quote! { ::serde_json::to_value(#path()).ok() }
         }
         (SerdeDefault::Bare, true) => {
@@ -300,17 +304,52 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
         _ => quote! { ::std::option::Option::None },
     };
 
+    // A non-scalar default is a *node* (`!ema`'s `source` is a `!close` leaf,
+    // a selection rule's `of` an `!everything`), which no JSON literal can
+    // carry — so it goes to `default_expr` as the YAML fragment writing it
+    // would produce. The value is spelled by `grammar::default_expr_of` at run
+    // time, off the default's own `Debug`, so this cannot drift from what the
+    // default fn returns.
+    //
+    // An `Option` field is excluded deliberately, and this is the whole split
+    // the field exists to make: its default is Rust `None` — "the key is
+    // absent" — which names no node. That is the honest answer for the
+    // blessed-series `source:` on a candle leaf, where omission means "the
+    // strategy's own series" and no tag says that.
+    let default_expr = match (&default_kind, is_scalar, is_option) {
+        (SerdeDefault::Fn(path), false, false) => {
+            let path = default_path(field, path)?;
+            quote! { crate::spec::grammar::default_expr_of(#path()) }
+        }
+        (SerdeDefault::Bare, false, false) => {
+            let ty = &field.ty;
+            quote! {
+                crate::spec::grammar::default_expr_of(
+                    <#ty as ::std::default::Default>::default()
+                )
+            }
+        }
+        _ => quote! { ::std::option::Option::None },
+    };
+
     Ok(quote! {
         crate::spec::grammar::GrammarField {
             name: #name.to_owned(),
             ty: #grammar_ty.to_owned(),
             required: #required,
-            default: #default_expr,
+            default: #default_value,
+            default_expr: #default_expr,
             // Stamped after reflection — see `payload_output` above.
             node_output: ::std::option::Option::None,
             doc: #doc_expr,
         }
     })
+}
+
+/// Parse a `#[serde(default = "path")]` payload into the path to call.
+fn default_path(field: &syn::Field, path: &str) -> Result<syn::Path, syn::Error> {
+    syn::parse_str(path)
+        .map_err(|e| syn::Error::new_spanned(field, format!("bad serde default path: {e}")))
 }
 
 /// Map a Rust field type onto the grammar's closed type vocabulary.
