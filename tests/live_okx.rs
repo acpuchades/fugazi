@@ -19,7 +19,7 @@ use common::net::serve;
 use fugazi::Candle;
 use fugazi::live::OkxWallet;
 use fugazi::types::{Symbol, symbol as intern};
-use fugazi::wallet::{Ack, Reference, Side, Size, Units, Wallet};
+use fugazi::wallet::{Reference, Side, Size, Units, Wallet};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
 
@@ -82,370 +82,121 @@ fn a_swap_account_reports_the_currency_its_funds_are_in() {
     );
 }
 
+/// The one real translation this backend does: OKX sizes a swap in
+/// **contracts**, the trait speaks base units. `ctVal = 0.01`, so a `0.03 BTC`
+/// target must reach the wire as `3.0`.
+///
+/// The round trip — order accepted, fill reported back in base units — is
+/// covered for every venue by `market_order_round_trips_and_reports_the_fill`
+/// below. What is OKX's alone, and what a shared assertion could only express
+/// as an `if`, is the payload.
 #[test]
-fn set_position_places_a_market_order_and_update_reports_the_fill_in_base_units() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn a_market_order_sizes_in_contracts_on_the_wire() {
+    use common::live::{Account, MockPlan};
 
-    // The fills endpoint is stateful: the first poll (the cursor seed during
-    // submission) is empty, and every later poll returns the fill. One
-    // responder makes this deterministic regardless of mock-overlap ordering.
-    let fill_calls = Arc::new(AtomicUsize::new(0));
-    let counter = fill_calls.clone();
+    let mock = common::live::mount::<OkxWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.0,
+    }));
+    let mut w = wallet(mock.uri());
+    w.set_position(Units {
+        symbol: intern(SYMBOL),
+        amount: 0.03,
+    })
+    .expect("submission accepted");
 
-    let mock = serve(move |server| {
-        let counter = counter.clone();
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v5/public/instruments"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(instruments()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/balance"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(balance()))
-                .mount(server)
-                .await;
-            // The account reports the filled position (3 contracts = 0.03 BTC).
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/positions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(positions("3")))
-                .mount(server)
-                .await;
-            // First poll (the cursor seed) is empty; later polls return the fill.
-            Mock::given(method("GET"))
-                .and(path("/api/v5/trade/fills"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    let n = counter.fetch_add(1, Ordering::SeqCst);
-                    let data = if n == 0 {
-                        serde_json::json!([])
-                    } else {
-                        serde_json::json!([{
-                            "billId": "88", "ordId": "ORD1", "side": "buy",
-                            "fillSz": "3", "fillPx": "27000", "fee": "-0.08"
-                        }])
-                    };
-                    ResponseTemplate::new(200)
-                        .set_body_json(serde_json::json!({ "code": "0", "data": data }))
-                })
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/order"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "code": "0", "data": [{ "ordId": "ORD1", "clOrdId": "fugazi0", "sCode": "0" }]
-                })))
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-
-    // Target 0.03 BTC — the venue should see 3 contracts.
-    let ack = w
-        .set_position(Units {
-            symbol: intern(SYMBOL),
-            amount: 0.03,
-        })
-        .expect("submission accepted");
-    assert!(
-        matches!(ack, Ack::Working(_)),
-        "market order returns Working"
-    );
-
-    // Next bar: account refresh shows the position, poll returns the fill.
-    let fills = w.update(
-        intern(SYMBOL),
-        Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0),
-    );
+    let body = sent_order(&mock);
+    assert_eq!(body["instId"], SYMBOL);
+    assert_eq!(body["ordType"], "market");
+    assert_eq!(body["side"], "buy");
+    assert_eq!(body["sz"], "3.0", "0.03 BTC at ctVal 0.01 is 3 contracts");
+    assert_eq!(body["tdMode"], "cross");
     assert_eq!(
-        fills.len(),
-        1,
-        "expected one fill; errors: {:?}",
-        w.errors()
+        body["clOrdId"], "fugazi0",
+        "the client id correlates the later fill"
     );
-    let fill = &fills[0];
-    assert_eq!(fill.side, Side::Buy);
-    assert!(
-        (fill.units - 0.03).abs() < 1e-9,
-        "3 contracts -> 0.03 BTC, got {}",
-        fill.units
-    );
-    assert!((fill.price - 27000.0).abs() < 1e-9);
-    assert!((fill.commission - 0.08).abs() < 1e-9);
-
-    // Reads reflect the refreshed account state (contracts converted to units).
-    assert!((w.position(&intern(SYMBOL)).amount - 0.03).abs() < 1e-9);
-    assert!((w.funds().0 - 10000.0).abs() < 1e-9);
-    assert!((w.equity().0 - 10000.0).abs() < 1e-9);
-    assert!((w.price(&intern(SYMBOL)).unwrap().0 - 27050.0).abs() < 1e-9);
-
-    // Polling again is idempotent: the cursor advanced past the fill.
-    assert!(w.poll_fills().is_empty(), "fill must not be re-reported");
 }
 
+/// A stop rests as a `conditional` algo order with the **stop** trigger field
+/// set and `slOrdPx = -1` (fill at market once triggered), reduce-only.
+///
+/// Which of the two trigger field pairs is set is how OKX encodes the
+/// direction — there is no `stop_direction` here, unlike Coinbase — so it is
+/// the assertion worth pinning.
 #[test]
-fn a_protective_stop_dedups_an_unchanged_trigger() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn a_protective_stop_posts_a_reduce_only_conditional_algo() {
+    use common::live::{Account, MockPlan};
 
-    let algo_posts = Arc::new(AtomicUsize::new(0));
-    let counter = algo_posts.clone();
-
-    let mock = serve(move |server| {
-        let counter = counter.clone();
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v5/public/instruments"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(instruments()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/balance"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(balance()))
-                .mount(server)
-                .await;
-            // A held long (3 contracts), so a stop rests on the SELL side.
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/positions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(positions("3")))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/trade/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_positions()))
-                .mount(server)
-                .await;
-            // Count algo submissions; each returns a distinct algoId.
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/order-algo"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    let n = counter.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "code": "0", "data": [{ "algoId": format!("ALGO{n}"), "sCode": "0" }]
-                    }))
-                })
-                .mount(server)
-                .await;
-            // The cancel for the moved-trigger replace.
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/cancel-algos"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "code": "0", "data": [{ "algoId": "ALGO0", "sCode": "0" }]
-                })))
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-    // Prime the position cache (account refresh) so the stop knows the side.
+    let mock = common::live::mount::<OkxWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.03,
+    }));
+    let mut w = wallet(mock.uri());
     w.update(
         intern(SYMBOL),
         Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
     );
 
-    // Rest the same stop three bars running — only the first should hit the venue.
-    for _ in 0..3 {
-        w.set_stop(intern(SYMBOL), Reference(26000.0), Size::position_frac(1.0))
-            .expect("stop accepted");
-    }
-    assert_eq!(
-        algo_posts.load(Ordering::SeqCst),
-        1,
-        "an unchanged stop trigger must not re-submit each bar"
+    w.set_stop(intern(SYMBOL), Reference(26000.0), Size::units(0.03))
+        .unwrap_or_else(|e| panic!("stop rested: {e:?} {:?}", w.errors()));
+
+    let body = sent_order(&mock);
+    assert_eq!(body["ordType"], "conditional");
+    assert_eq!(body["reduceOnly"], "true");
+    assert_eq!(body["side"], "sell", "a long's protective exit sells");
+    assert_eq!(body["sz"], "3.0");
+    assert_eq!(body["slTriggerPx"], "26000.0");
+    assert_eq!(body["slOrdPx"], "-1", "fill at market once triggered");
+    assert!(
+        body.get("tpTriggerPx").is_none(),
+        "a stop must not set the take-profit trigger"
     );
 
-    // Moving the trigger cancels + replaces: one more algo POST.
-    w.set_stop(intern(SYMBOL), Reference(26500.0), Size::position_frac(1.0))
-        .expect("moved stop accepted");
-    assert_eq!(
-        algo_posts.load(Ordering::SeqCst),
-        2,
-        "a moved trigger re-submits"
-    );
+    // The take-profit leg is the same order with the other field pair.
+    w.set_take_profit(intern(SYMBOL), Reference(28000.0), Size::units(0.03))
+        .unwrap_or_else(|e| panic!("take-profit rested: {e:?} {:?}", w.errors()));
+    let body = sent_order(&mock);
+    assert_eq!(body["tpTriggerPx"], "28000.0");
+    assert_eq!(body["tpOrdPx"], "-1");
+    assert!(body.get("slTriggerPx").is_none());
 }
 
+/// A resting entry posts `ordType: limit` with the price rounded onto the
+/// instrument's tick.
 #[test]
-fn a_limit_order_places_a_limit_and_dedups_an_unchanged_resubmit() {
-    use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn a_limit_order_posts_its_price_on_the_instrument_tick() {
+    use common::live::{Account, MockPlan};
 
-    let posts = Arc::new(AtomicUsize::new(0));
-    let cancels = Arc::new(AtomicUsize::new(0));
-    // OKX carries the order payload in the JSON *body*; capture the last one so
-    // we can assert the venue really got a limit rather than something that
-    // merely returned a 200.
-    let last_body = Arc::new(Mutex::new(String::new()));
-    let (c_posts, c_cancels, c_body) = (posts.clone(), cancels.clone(), last_body.clone());
-
-    let mock = serve(move |server| {
-        let (c_posts, c_cancels, c_body) = (c_posts.clone(), c_cancels.clone(), c_body.clone());
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v5/public/instruments"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(instruments()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/balance"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(balance()))
-                .mount(server)
-                .await;
-            // Flat, so a buy target is a plain buy of the whole size.
-            Mock::given(method("GET"))
-                .and(path("/api/v5/account/positions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_positions()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/trade/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_positions()))
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/order"))
-                .respond_with(move |req: &wiremock::Request| {
-                    *c_body.lock().unwrap() = String::from_utf8_lossy(&req.body).to_string();
-                    let n = c_posts.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "code": "0", "data": [{ "ordId": format!("ORD{n}"), "sCode": "0" }]
-                    }))
-                })
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/cancel-order"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    c_cancels.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "code": "0", "data": [{ "ordId": "ORD0", "sCode": "0" }]
-                    }))
-                })
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
+    let mock = common::live::mount::<OkxWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.0,
+    }));
+    let mut w = wallet(mock.uri());
     w.update(
         intern(SYMBOL),
         Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
     );
 
-    // 0.05 BTC at 26000 → 5 contracts.
+    // `tickSz` is 0.1, so 26000.04 rounds to 26000.0.
     w.set_limit(
         intern(SYMBOL),
         Side::Buy,
-        Size::units(0.05),
-        Reference(26000.0),
+        Size::units(0.03),
+        Reference(26000.04),
     )
-    .expect("limit accepted");
+    .unwrap_or_else(|e| panic!("limit rested: {e:?} {:?}", w.errors()));
 
-    let body = last_body.lock().unwrap().clone();
-    assert!(
-        body.contains("\"ordType\":\"limit\""),
-        "not a limit order: {body}"
-    );
-    assert!(body.contains("\"side\":\"buy\""), "wrong side: {body}");
-    assert!(
-        body.contains("\"px\":\"26000.0\""),
-        "limit price not sent: {body}"
-    );
-    assert!(
-        body.contains("\"sz\":\"5.0\""),
-        "size not in contracts: {body}"
-    );
-
-    // Re-submitting the same order every bar must not pile up venue orders.
-    for _ in 0..3 {
-        w.set_limit(
-            intern(SYMBOL),
-            Side::Buy,
-            Size::units(0.05),
-            Reference(26000.0),
-        )
-        .expect("unchanged limit accepted");
-    }
-    assert_eq!(
-        posts.load(Ordering::SeqCst),
-        1,
-        "an unchanged limit must not re-submit each bar"
-    );
-
-    // Moving the price cancels and replaces.
-    w.set_limit(
-        intern(SYMBOL),
-        Side::Buy,
-        Size::units(0.05),
-        Reference(26500.0),
-    )
-    .expect("moved limit accepted");
-    assert_eq!(posts.load(Ordering::SeqCst), 2, "a moved limit re-submits");
-    assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old one");
-
-    // And an explicit cancel withdraws it.
-    w.cancel_limit(&intern(SYMBOL)).expect("cancel ok");
-    assert_eq!(cancels.load(Ordering::SeqCst), 2);
+    let body = sent_order(&mock);
+    assert_eq!(body["ordType"], "limit");
+    assert_eq!(body["side"], "buy");
+    assert_eq!(body["sz"], "3.0");
+    assert_eq!(body["px"], "26000.0", "the price lands on the 0.1 tick");
 }
 
-#[test]
-fn a_venue_rejected_order_surfaces_through_take_rejections() {
-    let mock = serve(|server| {
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v5/public/instruments"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(instruments()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v5/trade/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_positions()))
-                .mount(server)
-                .await;
-            // OKX returns HTTP 200 with a non-zero sCode for a business rejection.
-            Mock::given(method("POST"))
-                .and(path("/api/v5/trade/order"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "code": "1",
-                    "data": [{ "ordId": "", "sCode": "51008", "sMsg": "Insufficient balance." }]
-                })))
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-
-    // The submission fails synchronously with the Venue category …
-    let err = w
-        .set_position(Units {
-            symbol: intern(SYMBOL),
-            amount: 0.03,
-        })
-        .expect_err("venue refuses the order");
-    assert_eq!(err, fugazi::wallet::WalletError::Venue);
-
-    // … and — the point of this test — the refusal is drained through the
-    // failure stream so a driver can route it to `Strategy::on_reject`.
-    let refused = w.take_rejections();
-    assert_eq!(
-        refused.len(),
-        1,
-        "one refused order; errors: {:?}",
-        w.errors()
-    );
-    assert_eq!(refused[0].symbol.as_ref(), SYMBOL);
-    assert_eq!(refused[0].kind, fugazi::wallet::OrderKind::Market);
-    assert_eq!(refused[0].error, fugazi::wallet::WalletError::Venue);
-    // Draining is destructive: a second call yields nothing.
-    assert!(w.take_rejections().is_empty(), "already drained");
+/// The body of the most recent order POST, parsed.
+fn sent_order(mock: &common::live::VenueMock) -> serde_json::Value {
+    let raw = mock.last_order.lock().expect("uncontended").clone();
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("order body is JSON: {e} in {raw:?}"))
 }
 
 /// Opt-in end-to-end test against OKX **demo trading**.
@@ -622,3 +373,117 @@ fn a_portfolio_spec_runs_against_a_live_wallet() {
         "the strategy's own state must still be captured"
     );
 }
+
+// --- the shared conformance suite ------------------------------------------
+//
+// Everything above this line is OKX-specific: the payload shapes, the
+// contracts↔units translation, the `x-simulated-trading` header. Everything
+// below is behaviour every venue owes, driven from `common::live` so a fix in
+// one venue is a fix in both. See that module for the split.
+
+impl common::live::LiveVenue for OkxWallet {
+    fn fixture() -> common::live::VenueFixture {
+        use common::live::{Account, FillRow, VenueFixture};
+        VenueFixture {
+            name: "okx",
+            symbol: SYMBOL,
+            // `ctVal = 0.01`: the one real unit translation in this backend.
+            contract_multiplier: 0.01,
+            grid_path: "/api/v5/public/instruments".into(),
+            fills_path: "/api/v5/trade/fills".into(),
+            place_order_path: "/api/v5/trade/order".into(),
+            place_protective_path: "/api/v5/trade/order-algo".into(),
+            cancel_entry_path: "/api/v5/trade/cancel-order".into(),
+            cancel_protective_path: "/api/v5/trade/cancel-algos".into(),
+            grid_body: instruments(),
+            account_bodies: Box::new(|a: Account| {
+                let contracts = format!("{}", a.base_units / 0.01);
+                vec![
+                    (
+                        "/api/v5/account/balance".into(),
+                        serde_json::json!({
+                            "code": "0",
+                            "data": [{
+                                "totalEq": a.quote.to_string(),
+                                "details": [{
+                                    "ccy": "USDT",
+                                    "availBal": a.quote.to_string(),
+                                    "eq": a.quote.to_string(),
+                                }],
+                            }],
+                        }),
+                    ),
+                    (
+                        "/api/v5/account/positions".into(),
+                        if a.base_units == 0.0 {
+                            no_positions()
+                        } else {
+                            positions(&contracts)
+                        },
+                    ),
+                ]
+            }),
+            fills_body: Box::new(|rows: &[FillRow]| {
+                let data: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            // `billId` is the monotone ordinal; the suite's
+                            // `sequence` is what orders the rows.
+                            "billId": r.sequence.to_string(),
+                            "ordId": r.order_id,
+                            "side": match r.side { Side::Buy => "buy", Side::Sell => "sell" },
+                            "fillSz": r.size.to_string(),
+                            "fillPx": r.price.to_string(),
+                            // OKX reports the fee negative-as-charged.
+                            "fee": (-r.fee).to_string(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "code": "0", "data": data })
+            }),
+            order_ok: Box::new(|id: &str| {
+                serde_json::json!({
+                    "code": "0",
+                    "data": [{ "ordId": id, "algoId": id, "sCode": "0" }],
+                })
+            }),
+            order_refused: serde_json::json!({
+                "code": "1",
+                "data": [{ "sCode": "51008", "sMsg": "insufficient balance" }],
+            }),
+            cancel_ok: serde_json::json!({
+                "code": "0",
+                "data": [{ "sCode": "0" }],
+            }),
+        }
+    }
+
+    fn build(base_url: String) -> Self {
+        wallet(base_url)
+    }
+
+    fn error_log(&self) -> Vec<String> {
+        self.errors().iter().map(|e| e.to_string()).collect()
+    }
+}
+
+macro_rules! conformance {
+    ($($name:ident),* $(,)?) => {
+        $(#[test] fn $name() { common::live::$name::<OkxWallet>() })*
+    };
+}
+
+conformance!(
+    market_order_round_trips_and_reports_the_fill,
+    a_repeated_fill_is_reported_only_once,
+    partial_fills_arrive_oldest_first,
+    a_venue_refusal_surfaces_through_take_rejections,
+    a_non_2xx_status_is_refused_and_logged,
+    a_malformed_body_is_refused_and_logged,
+    a_network_failure_is_logged_not_panicked,
+    a_protective_leg_dedups_an_unchanged_trigger,
+    a_limit_dedups_an_unchanged_resubmit,
+    cancel_by_id_withdraws_a_resting_limit,
+    flatten_cancels_the_resting_orders_and_closes_the_position,
+);

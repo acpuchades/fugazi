@@ -85,358 +85,6 @@ fn a_spot_account_reports_the_quote_currency_it_was_built_against() {
 }
 
 #[test]
-fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // The fills endpoint is stateful: the cursor-seed poll during submission is
-    // empty, and every later poll returns the fill.
-    let fill_calls = Arc::new(AtomicUsize::new(0));
-    let counter = fill_calls.clone();
-
-    let mock = serve(move |server| {
-        let counter = counter.clone();
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/market/products/BTC-USD"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(product()))
-                .mount(server)
-                .await;
-            // After the fill the account holds 0.03 BTC and 10000 USD.
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/accounts"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(accounts("0.03", "10000")))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/orders/historical/fills"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    let n = counter.fetch_add(1, Ordering::SeqCst);
-                    let fills = if n == 0 {
-                        serde_json::json!([])
-                    } else {
-                        serde_json::json!([{
-                            "trade_id": "111", "order_id": "ORD1", "side": "BUY",
-                            "size": "0.03", "price": "27000", "commission": "0.08",
-                            "sequence_timestamp": "2024-01-01T00:00:00Z"
-                        }])
-                    };
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "fills": fills }))
-                })
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": true, "success_response": { "order_id": "ORD1" }
-                })))
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-
-    // From flat, target 0.03 BTC → a market buy of 0.03.
-    let ack = w
-        .set_position(Units {
-            symbol: intern(SYMBOL),
-            amount: 0.03,
-        })
-        .expect("submission accepted");
-    assert!(
-        matches!(ack, Ack::Working(_)),
-        "market order returns Working"
-    );
-
-    // Next bar: account refresh shows the balance, poll returns the fill.
-    let fills = w.update(
-        intern(SYMBOL),
-        Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0),
-    );
-    assert_eq!(
-        fills.len(),
-        1,
-        "expected one fill; errors: {:?}",
-        w.errors()
-    );
-    let fill = &fills[0];
-    assert_eq!(fill.side, Side::Buy);
-    assert!(
-        (fill.units - 0.03).abs() < 1e-9,
-        "fill in base units, got {}",
-        fill.units
-    );
-    assert!((fill.price - 27000.0).abs() < 1e-9);
-    assert!((fill.commission - 0.08).abs() < 1e-9);
-
-    // Reads reflect the refreshed account state (spot balances).
-    assert!((w.position(&intern(SYMBOL)).amount - 0.03).abs() < 1e-9);
-    assert!(
-        (w.funds().0 - 10000.0).abs() < 1e-9,
-        "funds = quote balance"
-    );
-    // Equity = quote + base marked at the last close (10000 + 0.03 * 27050).
-    assert!(
-        (w.equity().0 - 10811.5).abs() < 1e-6,
-        "equity = {}",
-        w.equity().0
-    );
-    assert!((w.price(&intern(SYMBOL)).unwrap().0 - 27050.0).abs() < 1e-9);
-
-    // Polling again is idempotent: the trade id is already seen.
-    assert!(w.poll_fills().is_empty(), "fill must not be re-reported");
-}
-
-#[test]
-fn a_protective_stop_dedups_an_unchanged_trigger() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let order_posts = Arc::new(AtomicUsize::new(0));
-    let cancels = Arc::new(AtomicUsize::new(0));
-    let (c_posts, c_cancels) = (order_posts.clone(), cancels.clone());
-
-    let mock = serve(move |server| {
-        let (c_posts, c_cancels) = (c_posts.clone(), c_cancels.clone());
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/market/products/BTC-USD"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(product()))
-                .mount(server)
-                .await;
-            // A held 0.03 BTC long, so a stop rests reduce-only on the SELL side.
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/accounts"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(accounts("0.03", "10000")))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/orders/historical/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_fills()))
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    let n = c_posts.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "success": true, "success_response": { "order_id": format!("ORD{n}") }
-                    }))
-                })
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders/batch_cancel"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    c_cancels.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "results": [{ "success": true, "order_id": "ORD0" }]
-                    }))
-                })
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-    // Prime the balance cache so the stop knows what it is protecting.
-    w.update(
-        intern(SYMBOL),
-        Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
-    );
-
-    // Rest the same stop three bars running — only the first hits the venue.
-    for _ in 0..3 {
-        w.set_stop(intern(SYMBOL), Reference(26000.0), Size::position_frac(1.0))
-            .expect("stop accepted");
-    }
-    assert_eq!(
-        order_posts.load(Ordering::SeqCst),
-        1,
-        "an unchanged stop trigger must not re-submit each bar"
-    );
-
-    // Moving the trigger cancels + replaces: one more POST, one cancel.
-    w.set_stop(intern(SYMBOL), Reference(26500.0), Size::position_frac(1.0))
-        .expect("moved stop accepted");
-    assert_eq!(
-        order_posts.load(Ordering::SeqCst),
-        2,
-        "a moved trigger re-submits"
-    );
-    assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old leg");
-}
-
-#[test]
-fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
-    use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let posts = Arc::new(AtomicUsize::new(0));
-    let cancels = Arc::new(AtomicUsize::new(0));
-    let last_body = Arc::new(Mutex::new(String::new()));
-    let (c_posts, c_cancels, c_body) = (posts.clone(), cancels.clone(), last_body.clone());
-
-    let mock = serve(move |server| {
-        let (c_posts, c_cancels, c_body) = (c_posts.clone(), c_cancels.clone(), c_body.clone());
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/market/products/BTC-USD"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(product()))
-                .mount(server)
-                .await;
-            // Flat, so a buy target is a plain buy of the whole size.
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/accounts"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(accounts("0", "10000")))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/orders/historical/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_fills()))
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders"))
-                .respond_with(move |req: &wiremock::Request| {
-                    *c_body.lock().unwrap() = String::from_utf8_lossy(&req.body).to_string();
-                    let n = c_posts.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "success": true, "success_response": { "order_id": format!("ORD{n}") }
-                    }))
-                })
-                .mount(server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders/batch_cancel"))
-                .respond_with(move |_req: &wiremock::Request| {
-                    c_cancels.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "results": [{ "success": true, "order_id": "ORD0" }]
-                    }))
-                })
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-    w.update(
-        intern(SYMBOL),
-        Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
-    );
-
-    w.set_limit(
-        intern(SYMBOL),
-        Side::Buy,
-        Size::units(0.05),
-        Reference(26000.0),
-    )
-    .expect("limit accepted");
-
-    let body = last_body.lock().unwrap().clone();
-    assert!(
-        body.contains("limit_limit_gtc"),
-        "not a limit order: {body}"
-    );
-    assert!(body.contains("\"side\":\"BUY\""), "wrong side: {body}");
-    assert!(
-        body.contains("\"limit_price\":\"26000.00\""),
-        "limit price not sent: {body}"
-    );
-    assert!(
-        body.contains("\"base_size\":\"0.05000000\""),
-        "base size not sent: {body}"
-    );
-
-    // Re-submitting the same order every bar must not pile up venue orders.
-    for _ in 0..3 {
-        w.set_limit(
-            intern(SYMBOL),
-            Side::Buy,
-            Size::units(0.05),
-            Reference(26000.0),
-        )
-        .expect("unchanged limit accepted");
-    }
-    assert_eq!(
-        posts.load(Ordering::SeqCst),
-        1,
-        "an unchanged limit must not re-submit each bar"
-    );
-
-    // Moving the price cancels and replaces.
-    w.set_limit(
-        intern(SYMBOL),
-        Side::Buy,
-        Size::units(0.05),
-        Reference(26500.0),
-    )
-    .expect("moved limit accepted");
-    assert_eq!(posts.load(Ordering::SeqCst), 2, "a moved limit re-submits");
-    assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old one");
-
-    // And an explicit cancel withdraws it.
-    w.cancel_limit(&intern(SYMBOL)).expect("cancel ok");
-    assert_eq!(cancels.load(Ordering::SeqCst), 2);
-}
-
-#[test]
-fn a_venue_rejected_order_surfaces_through_take_rejections() {
-    let mock = serve(|server| {
-        Box::pin(async move {
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/market/products/BTC-USD"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(product()))
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v3/brokerage/orders/historical/fills"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(no_fills()))
-                .mount(server)
-                .await;
-            // Coinbase returns 200 with `success: false` for a business rejection.
-            Mock::given(method("POST"))
-                .and(path("/api/v3/brokerage/orders"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": false,
-                    "error_response": { "message": "Insufficient balance" }
-                })))
-                .mount(server)
-                .await;
-        })
-    });
-    let uri = mock.uri.clone();
-
-    let mut w = wallet(uri);
-
-    let err = w
-        .set_position(Units {
-            symbol: intern(SYMBOL),
-            amount: 0.03,
-        })
-        .expect_err("venue refuses the order");
-    assert_eq!(err, fugazi::wallet::WalletError::Venue);
-
-    let refused = w.take_rejections();
-    assert_eq!(
-        refused.len(),
-        1,
-        "one refused order; errors: {:?}",
-        w.errors()
-    );
-    assert_eq!(refused[0].symbol.as_ref(), SYMBOL);
-    assert_eq!(refused[0].kind, fugazi::wallet::OrderKind::Market);
-    assert_eq!(refused[0].error, fugazi::wallet::WalletError::Venue);
-    assert!(w.take_rejections().is_empty(), "already drained");
-}
-
-#[test]
 fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
     let mock = serve(|server| {
         Box::pin(async move {
@@ -493,6 +141,120 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
         refused[0].error,
         fugazi::wallet::WalletError::UnsupportedOperation
     );
+}
+
+/// A market order posts a `market_market_ioc` configuration sized in base
+/// units — spot has no contract wrapper, so the number on the wire is the
+/// number the strategy asked for.
+///
+/// The round trip is covered for every venue by
+/// `market_order_round_trips_and_reports_the_fill` below. The payload is
+/// Coinbase's alone.
+#[test]
+fn a_market_order_posts_a_market_ioc_configuration() {
+    use common::live::{Account, MockPlan};
+
+    let mock = common::live::mount::<CoinbaseWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.0,
+    }));
+    let mut w = wallet(mock.uri());
+    w.set_position(Units {
+        symbol: intern(SYMBOL),
+        amount: 0.03,
+    })
+    .expect("submission accepted");
+
+    let body = sent_order(&mock);
+    assert_eq!(body["product_id"], SYMBOL);
+    assert_eq!(body["side"], "BUY");
+    assert_eq!(body["client_order_id"], "fugazi0");
+    assert_eq!(
+        body["order_configuration"]["market_market_ioc"]["base_size"], "0.03000000",
+        "sized in base units, at the product's 8-decimal increment"
+    );
+}
+
+/// A protective leg posts a reduce-only `stop_limit_stop_limit_gtc` **sell**
+/// with `limit_price == stop_price`, and encodes the direction in
+/// `stop_direction` — where OKX encodes it by which trigger field it sets.
+///
+/// A spot account can only exit by selling what it holds, so both legs are
+/// sells; the direction is the only thing separating a stop from a
+/// take-profit.
+#[test]
+fn a_protective_leg_posts_a_stop_limit_with_its_direction() {
+    use common::live::{Account, MockPlan};
+
+    let mock = common::live::mount::<CoinbaseWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.03,
+    }));
+    let mut w = wallet(mock.uri());
+    w.update(
+        intern(SYMBOL),
+        Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
+    );
+
+    w.set_stop(intern(SYMBOL), Reference(26000.0), Size::units(0.03))
+        .unwrap_or_else(|e| panic!("stop rested: {e:?} {:?}", w.errors()));
+    let body = sent_order(&mock);
+    let cfg = &body["order_configuration"]["stop_limit_stop_limit_gtc"];
+    assert_eq!(body["side"], "SELL", "spot exits by selling what it holds");
+    assert_eq!(cfg["base_size"], "0.03000000");
+    assert_eq!(cfg["stop_price"], "26000.00");
+    assert_eq!(
+        cfg["limit_price"], cfg["stop_price"],
+        "limit == stop keeps the triggered order marketable"
+    );
+    assert_eq!(cfg["stop_direction"], "STOP_DIRECTION_STOP_DOWN");
+
+    // A take-profit is the same order pointing the other way.
+    w.set_take_profit(intern(SYMBOL), Reference(28000.0), Size::units(0.03))
+        .unwrap_or_else(|e| panic!("take-profit rested: {e:?} {:?}", w.errors()));
+    let body = sent_order(&mock);
+    let cfg = &body["order_configuration"]["stop_limit_stop_limit_gtc"];
+    assert_eq!(body["side"], "SELL");
+    assert_eq!(cfg["stop_price"], "28000.00");
+    assert_eq!(cfg["stop_direction"], "STOP_DIRECTION_STOP_UP");
+}
+
+/// A resting entry posts a `limit_limit_gtc` configuration with the price
+/// rounded onto the product's quote increment.
+#[test]
+fn a_limit_order_posts_a_limit_gtc_configuration() {
+    use common::live::{Account, MockPlan};
+
+    let mock = common::live::mount::<CoinbaseWallet>(MockPlan::new(Account {
+        quote: 10000.0,
+        base_units: 0.0,
+    }));
+    let mut w = wallet(mock.uri());
+    w.update(
+        intern(SYMBOL),
+        Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
+    );
+
+    // `quote_increment` is 0.01, so 26000.004 rounds to 26000.00.
+    w.set_limit(
+        intern(SYMBOL),
+        Side::Buy,
+        Size::units(0.03),
+        Reference(26000.004),
+    )
+    .unwrap_or_else(|e| panic!("limit rested: {e:?} {:?}", w.errors()));
+
+    let body = sent_order(&mock);
+    let cfg = &body["order_configuration"]["limit_limit_gtc"];
+    assert_eq!(body["side"], "BUY");
+    assert_eq!(cfg["base_size"], "0.03000000");
+    assert_eq!(cfg["limit_price"], "26000.00");
+}
+
+/// The body of the most recent order POST, parsed.
+fn sent_order(mock: &common::live::VenueMock) -> serde_json::Value {
+    let raw = mock.last_order.lock().expect("uncontended").clone();
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("order body is JSON: {e} in {raw:?}"))
 }
 
 /// Equity must sum the marked base balances in **ascending value order**, not
@@ -646,3 +408,97 @@ fn live_account_reachable() {
         w.errors()
     );
 }
+
+// --- the shared conformance suite ------------------------------------------
+//
+// Everything above this line is Coinbase-specific: the JWT, the spot-balance
+// convention, the `order_configuration` payload shapes, the un-shortable
+// remainder. Everything below is behaviour every venue owes, driven from
+// `common::live` so a fix in one venue is a fix in both.
+
+impl common::live::LiveVenue for CoinbaseWallet {
+    fn fixture() -> common::live::VenueFixture {
+        use common::live::{Account, FillRow, VenueFixture};
+        const API: &str = "/api/v3/brokerage";
+        VenueFixture {
+            name: "coinbase",
+            symbol: SYMBOL,
+            // Spot: a venue size unit *is* a base unit.
+            contract_multiplier: 1.0,
+            grid_path: format!("{API}/market/products/{SYMBOL}"),
+            fills_path: format!("{API}/orders/historical/fills"),
+            place_order_path: format!("{API}/orders"),
+            // One order endpoint, so the protective leg shares it.
+            place_protective_path: format!("{API}/orders"),
+            cancel_entry_path: format!("{API}/orders/batch_cancel"),
+            cancel_protective_path: format!("{API}/orders/batch_cancel"),
+            grid_body: product(),
+            account_bodies: Box::new(|a: Account| {
+                vec![(
+                    format!("{API}/accounts"),
+                    accounts(&a.base_units.to_string(), &a.quote.to_string()),
+                )]
+            }),
+            fills_body: Box::new(|rows: &[FillRow]| {
+                let fills: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "trade_id": r.id,
+                            "order_id": r.order_id,
+                            // No monotone key here: the timestamp orders, the
+                            // id dedupes.
+                            "sequence_timestamp": r.sequence.to_string(),
+                            "side": match r.side { Side::Buy => "BUY", Side::Sell => "SELL" },
+                            "size": r.size.to_string(),
+                            "price": r.price.to_string(),
+                            "commission": r.fee.to_string(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "fills": fills })
+            }),
+            order_ok: Box::new(|id: &str| {
+                serde_json::json!({
+                    "success": true,
+                    "success_response": { "order_id": id },
+                })
+            }),
+            order_refused: serde_json::json!({
+                "success": false,
+                "error_response": { "message": "Insufficient balance" },
+            }),
+            cancel_ok: serde_json::json!({
+                "results": [{ "success": true, "order_id": "VENUE1" }],
+            }),
+        }
+    }
+
+    fn build(base_url: String) -> Self {
+        wallet(base_url)
+    }
+
+    fn error_log(&self) -> Vec<String> {
+        self.errors().iter().map(|e| e.to_string()).collect()
+    }
+}
+
+macro_rules! conformance {
+    ($($name:ident),* $(,)?) => {
+        $(#[test] fn $name() { common::live::$name::<CoinbaseWallet>() })*
+    };
+}
+
+conformance!(
+    market_order_round_trips_and_reports_the_fill,
+    a_repeated_fill_is_reported_only_once,
+    partial_fills_arrive_oldest_first,
+    a_venue_refusal_surfaces_through_take_rejections,
+    a_non_2xx_status_is_refused_and_logged,
+    a_malformed_body_is_refused_and_logged,
+    a_network_failure_is_logged_not_panicked,
+    a_protective_leg_dedups_an_unchanged_trigger,
+    a_limit_dedups_an_unchanged_resubmit,
+    cancel_by_id_withdraws_a_resting_limit,
+    flatten_cancels_the_resting_orders_and_closes_the_position,
+);

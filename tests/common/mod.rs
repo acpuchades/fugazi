@@ -16,6 +16,7 @@
 //! | [`fixtures`] | `tests/data/` CSV loading + the skip-vs-fail policy | — |
 //! | [`cli`] | driving the `fugazi` binary and reading its artefacts | `cli` |
 //! | [`net`] | hosting a `wiremock` server for a blocking client | `sources` |
+//! | [`live`] | the conformance suite every venue wallet must pass | `live` |
 //!
 //! Cargo compiles this file into every including crate, so a helper only one
 //! test uses is dead code in the rest — hence the blanket allow. That is the
@@ -33,3 +34,7 @@ pub mod cli;
 // `net` needs the async stack (`tokio`), which arrives with `sources`.
 #[cfg(feature = "sources")]
 pub mod net;
+
+// `live` drives the venue wallets, which only exist with the `live` feature.
+#[cfg(feature = "live")]
+pub mod live;
