@@ -954,8 +954,8 @@ impl PyStrategySpec {
 ///
 /// ```text
 /// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
-/// fields       [ {name, type, required, default, default_expr, node_output?,
-///              doc} ]  (map forms only)
+/// fields       [ {name, type, required, default, node_output?, doc} ]
+///              (map forms only)
 /// payload      positional payload type of a newtype/seq form ("node" |
 ///              "literal" | "node_list" | "str_list" | "number_list"); null for
 ///              unit/map forms
@@ -985,23 +985,29 @@ impl PyStrategySpec {
 /// parse error, `check` included. `!undefined` is `scope: "internal"` and
 /// should never be offered at all.
 ///
-/// **`default` and `default_expr` — what omitting a key gets you.** `default` is
-/// the JSON literal a scalar key falls back to (`!macd_line`'s `fast` is `12`).
-/// `default_expr` is the YAML fragment a key whose default is a *node* falls
-/// back to: `!ema`'s `source` reports `"!close"`, `!atr`'s `"!current"`,
-/// `!donchian_upper`'s `high` / `low` `"!high"` / `"!low"`, a selection rule's
-/// `of` `"!everything"`. It parses in the slot it describes, so a completion
-/// menu can both show it (`!macd_line · source=!close, fast=12, …`) and insert
-/// it. `!ema {period: 10}` and `!ema {source: !close, period: 10}` are the same
-/// expression, and a test settles that against the parser rather than leaving
-/// it to prose.
+/// **`default` — what omitting a key gets you.** A **tagged** value with three
+/// states, so a consumer never has to infer which it holds:
 ///
-/// The fragment is a **root floor**: always a bare leaf, which reads the series
-/// its enclosing document blesses — so it never nests (`!close`, not
-/// `!close {source: …}`), and a *leaf's own* `source:` reports **both** keys
-/// `null`. That pair means "no expressible default", not "unknown": omitting
-/// `!close`'s `source:` means the strategy's own series, which no tag names —
-/// and which the floor already implies. Don't scrape the `doc` for it.
+/// ```text
+/// {"literal": 12}       a scalar key's JSON default  (34 fields)
+/// {"expr": "!close"}    a YAML fragment              (69 fields)
+/// null                  no expressible default
+/// ```
+///
+/// `{"expr": …}` is the fragment a key whose default is a *node* falls back to:
+/// `!ema`'s `source` is `!close`, `!atr`'s `!current`, `!donchian_upper`'s
+/// `high` / `low` are `!high` / `!low`, a selection rule's `of` is
+/// `!everything`. It parses in the slot it describes, so a completion menu can
+/// both show it (`!macd_line · source=!close, fast=12, …`) and insert it.
+/// `!ema {period: 10}` and `!ema {source: !close, period: 10}` are the same
+/// expression, and a test settles that against the parser rather than leaving
+/// it to prose. Don't scrape the `doc` for any of this.
+///
+/// A fragment is always a **root floor**: a bare leaf, which reads the series
+/// its enclosing document blesses, so it never nests (`!close`, not
+/// `!close {source: …}`). That is also why `null` is a real answer and not a
+/// gap — a *leaf's own* `source:` defaults to the strategy's own series, which
+/// no tag names and the floor already implies.
 ///
 /// **`node_output` — what a slot must be filled *with*.** `type: "node"` says a
 /// field holds a nested expression; `node_output` says which expressions are
@@ -1037,11 +1043,12 @@ impl PyStrategySpec {
 /// for *shape* changes: `payload` + its `"literal"` field type landed in v2,
 /// `category` in v3 (0.51), `node_output` / `payload_output` in v4 (0.61),
 /// v5 (0.67) moved `shape` / `fields` / `payload` / `payload_output` off the tag
-/// and onto `forms`, v6 (0.68) added `host_affecting`, and v7 added a field's
-/// `default_expr`. The 0.50 group additions did
+/// and onto `forms`, v6 (0.68) added `host_affecting`, and v7 retagged a
+/// field's `default`. The 0.50 group additions did
 /// **not** bump it — new groups and legend values leave the record shape
-/// unchanged, only a new *field* does. v5 is the one breaking change so far:
-/// `tag["shape"]` becomes `tag["forms"][0]["shape"]`.
+/// unchanged, only a new *field* does. Two breaking changes so far:
+/// `tag["shape"]` became `tag["forms"][0]["shape"]` in v5, and a field's bare
+/// `default` value became `default["literal"]` in v7.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();

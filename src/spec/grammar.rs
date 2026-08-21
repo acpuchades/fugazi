@@ -71,17 +71,19 @@ use serde::Serialize;
 ///   `import`, `false` on every other tag. Every record now carries it (not
 ///   omitted when `false`), so a v5 consumer reading a fixed field set sees a
 ///   new key rather than a missing one.
-/// - v7 (unreleased): added [`GrammarField::default_expr`] — the YAML fragment
-///   a defaulted slot's absence is *equivalent to writing*, for the 69 fields
-///   whose default is a node rather than a JSON literal (`!ema`'s `source` →
-///   `!close`, `!atr`'s → `!current`, a selection rule's `of` → `!everything`).
-///   Always a bare leaf — the *root floor*, which carries its own series root
-///   implicitly, so a leaf's own `source:` stays `null` and no fragment nests.
-///   [`default`](GrammarField::default) keeps its meaning, so the fields that
-///   already reported a literal are unchanged; the pair
-///   `default: null` + `default_expr: null` now means **no default**, where
-///   `default: null` alone used to mean either that or "there is one, but it
-///   isn't a JSON literal". Always present, like `default`.
+/// - v7 (unreleased): [`GrammarField::default`] became a **tagged**
+///   [`GrammarDefault`] — `{ "literal": 12 }` or `{ "expr": "!close" }`, `null`
+///   for no default. It used to be a bare JSON value doing double duty: a
+///   literal for the 34 scalar keys that have one, and `null` for everything
+///   else — which conflated "no default" with "there is one, but it isn't a
+///   JSON literal". The latter was 69 fields whose default is a *node*
+///   (`!ema`'s `source` → `!close`, `!atr`'s → `!current`, a selection rule's
+///   `of` → `!everything`), and the only way to reach the fact was to regex
+///   English out of the field's `doc`. An `expr` is always a bare leaf — the
+///   *root floor*, carrying its own series root implicitly, so no fragment
+///   nests and a leaf's own `source:` is honestly `null`. Breaking: a consumer
+///   reading `field["default"]` as a value must read
+///   `field["default"]["literal"]`.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
@@ -95,6 +97,69 @@ pub const SCHEMA_VERSION: u32 = 7;
 /// the baseline. Tags added afterwards carry their own real `since` via
 /// `#[grammar(since = "X.Y")]`. See the module docs.
 pub const SINCE_BASELINE: &str = "0.46";
+
+/// What omitting an optional key gets you — the value of
+/// [`GrammarField::default`].
+///
+/// Two cases, **tagged** rather than inferred, because a bare JSON value cannot
+/// distinguish them: `{ "expr": "!close" }` and a field whose default is the
+/// *string* `"close"` would both be `"close"`, and the field-type vocabulary
+/// has `str` / `str_operand`, so that collision is expressible today.
+///
+/// - [`Literal`](Self::Literal) — a scalar key with a serde `default`. 34
+///   fields: `!macd_line`'s `fast: 12`, `!bb_upper`'s `k: 2.0`.
+/// - [`Expr`](Self::Expr) — a slot whose default is a **node**, reported as the
+///   YAML fragment writing it produces. 69 fields: `!ema`'s `source` is
+///   `!close`, `!atr`'s `!current`, `!donchian_upper`'s `high` / `low` are
+///   `!high` / `!low`, a selection rule's `of` is `!everything`. It parses in
+///   the slot it describes, so a consumer can both *display* it
+///   (`!macd_line · source=!close, fast=12`) and *insert* it.
+///
+/// **An `Expr` is a root floor.** Every one is a leaf written bare, and a bare
+/// leaf reads the blessed series its enclosing document confers — so the
+/// fragment bottoms out there and never nests: `!ema`'s `source` is `!close`,
+/// not `!close { source: … }`.
+///
+/// That floor is also why the **third case is `None`** and stays that way. A
+/// leaf's *own* `source:` (`!close`, `!high`, `!equity`, …) defaults to "the
+/// strategy's own series", which no tag names — it is the blessed series the
+/// document's shape confers (see the blessed-series table in `CLAUDE.md`, and
+/// [`Pick::rooted`](crate::indicators::Pick::rooted)), reachable by omission
+/// only. Inventing a spelling for it would be worse than reporting nothing, and
+/// nothing is lost by stopping a rung above it: the floor already says it.
+///
+/// An `Expr` is reflected off the default's own value
+/// (`grammar::default_expr_of`), never off the field's prose, and settled
+/// against the parser: `tests/spec_grammar.rs` parses the tag with the key
+/// omitted and with the key set to the fragment, and requires the two to build
+/// the same node.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrammarDefault {
+    /// A JSON literal, for a scalar key: `{ "literal": 12 }`.
+    Literal(serde_json::Value),
+    /// A YAML fragment, for a key whose default is a node:
+    /// `{ "expr": "!close" }`.
+    Expr(String),
+}
+
+impl GrammarDefault {
+    /// The JSON literal, if this default is one.
+    pub fn literal(&self) -> Option<&serde_json::Value> {
+        match self {
+            GrammarDefault::Literal(v) => Some(v),
+            GrammarDefault::Expr(_) => None,
+        }
+    }
+
+    /// The YAML fragment, if this default is one.
+    pub fn expr(&self) -> Option<&str> {
+        match self {
+            GrammarDefault::Expr(e) => Some(e),
+            GrammarDefault::Literal(_) => None,
+        }
+    }
+}
 
 /// One field of a `map`-shaped tag (the YAML body's keys). Empty for
 /// `unit` / `newtype` / `seq` tags, which have no named fields.
@@ -112,36 +177,14 @@ pub struct GrammarField {
     /// `false` when the key may be omitted — either the Rust field is an
     /// `Option`, or it carries a serde `default`.
     pub required: bool,
-    /// The default value when omitted, for scalar fields with a serde
-    /// `default` (e.g. `macd`'s `fast: 12`). `null` for required fields, and
-    /// for a field whose default is a *node* rather than a literal — that one
-    /// is reported by [`default_expr`](Self::default_expr).
-    pub default: Option<serde_json::Value>,
-    /// The YAML fragment that omitting the field is **equivalent to writing**,
-    /// when its default is a node rather than a JSON literal: `!ema`'s `source`
-    /// reports `!close`, `!atr`'s `!current`, `!donchian_upper`'s `high` / `low`
-    /// report `!high` / `!low`, a selection rule's `of` reports `!everything`.
-    /// A consumer can both *display* it (`!macd_line · source=!close, fast=12`)
-    /// and *insert* it, since it parses in the slot it describes.
-    ///
-    /// **The fragment is a root floor.** Every one of them is a leaf written
-    /// bare, and a bare leaf reads the blessed series its enclosing document
-    /// confers — so the fragment bottoms out there and the recursion stops:
-    /// `!ema`'s `source` is `!close`, never `!close { source: … }`. That is also
-    /// why a leaf's *own* `source:` reports nothing here. Omitting it means "the
-    /// strategy's own series", which is not a node any document can name (see
-    /// the blessed-series table in `CLAUDE.md`, and
-    /// [`Pick::rooted`](crate::indicators::Pick::rooted)) — but it is exactly
-    /// what the floor already says, so nothing is lost by stopping one rung
-    /// above it. `null` here together with a `null` [`default`](Self::default)
-    /// is therefore a real answer, "no expressible default", not a gap.
-    ///
-    /// Reflected off the default's own value (`grammar::default_expr_of`),
-    /// never off the field's prose, and settled against the parser:
-    /// `tests/spec_grammar.rs` parses the tag with the field omitted and with
-    /// the field set to this fragment, and requires the two to build the same
-    /// node.
-    pub default_expr: Option<String>,
+    /// What omitting the key is **equivalent to writing** — a JSON literal for
+    /// a scalar (`!macd_line`'s `fast` is `{ "literal": 12 }`), a YAML fragment
+    /// for a slot whose default is a node (`!ema`'s `source` is
+    /// `{ "expr": "!close" }`). `null` means the field has **no expressible
+    /// default**, which is a real answer rather than a gap: see
+    /// [`GrammarDefault`] for why the two cases are tagged and what the third
+    /// one is.
+    pub default: Option<GrammarDefault>,
     /// For an expression-holding field (`ty` = `node` / `node_list` /
     /// `match_cases`), what the nested expression must **produce** — the
     /// `output` legend value(s) a filler is allowed to have. `!and`'s `lhs` is
@@ -603,12 +646,11 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
                     name: (*name).to_owned(),
                     ty: (*ty).to_owned(),
                     required: *required,
-                    default: None,
-                    // None of the load-time tags default a slot to a node:
+                    // None of the load-time tags defaults a key at all:
                     // `!param`/`!arg`'s `default:` is an arbitrary value tree
                     // the *author* supplies, and `!import`'s `params:` is a
                     // table, not an expression.
-                    default_expr: None,
+                    default: None,
                     node_output: None,
                     doc: Some((*doc).to_owned()),
                 })
@@ -1131,12 +1173,17 @@ fn form_schema(name: &str, form: &GrammarForm) -> serde_json::Value {
     let bare = json!({ "type": "string", "const": name });
     match form.shape.as_str() {
         "map" => {
-            let keyed = single_key(name, map_body(&form.fields));
             if form.fields.iter().any(|f| f.required) {
-                keyed
-            } else {
-                json!({ "oneOf": [bare, keyed] })
+                return single_key(name, map_body(&form.fields));
             }
+            // No required key, so the body may be omitted entirely — as the bare
+            // string, or as an explicit null, which is what a YAML `!close`
+            // normalises to and what the parser has always taken. The null arm
+            // used to be missing here, so the schema rejected a document fugazi
+            // accepts (and, once fields carried defaults, its own advertised
+            // `default`). The `unit` arm below has always had it.
+            let body = json!({ "oneOf": [{ "type": "null" }, map_body(&form.fields)] });
+            json!({ "oneOf": [bare, single_key(name, body)] })
         }
         "unit" => json!({
             "oneOf": [
@@ -1184,17 +1231,54 @@ fn map_body(fields: &[GrammarField]) -> serde_json::Value {
 }
 
 /// The schema for one named field, with its `description` / `default` attached.
+///
+/// JSON Schema's `default` is an *instance*, so each
+/// [`GrammarDefault`] case is rendered in this schema's own encoding: a literal
+/// goes in as-is, and a YAML fragment is normalised through the loader's own
+/// YAML → JSON-bridge pass (`!close` → `"close"`), which is exactly the form
+/// this schema validates. A fragment that somehow doesn't parse is dropped
+/// rather than guessed at; `test_node_slot_defaults_validate` (the Python
+/// suite, where a real JSON Schema engine lives) pins that it never comes to
+/// that — every advertised default validates against the slot it sits on.
 fn field_schema(field: &GrammarField) -> serde_json::Value {
     let mut schema = type_fragment(&field.ty);
     if let serde_json::Value::Object(map) = &mut schema {
         if let Some(doc) = &field.doc {
             map.insert("description".to_owned(), serde_json::Value::from(doc.clone()));
         }
-        if let Some(default) = &field.default {
-            map.insert("default".to_owned(), default.clone());
+        let default = match &field.default {
+            Some(GrammarDefault::Literal(v)) => Some(v.clone()),
+            Some(GrammarDefault::Expr(e)) => bridge_instance(e),
+            None => None,
+        };
+        if let Some(default) = default {
+            map.insert("default".to_owned(), default);
         }
     }
     schema
+}
+
+/// A [`GrammarDefault::Expr`] fragment in **this schema's** encoding: the JSON
+/// bridge form, via the loader's own YAML → JSON pass.
+///
+/// `!close` parses to `{"close": null}` — a tagged empty scalar. That is a legal
+/// document (the parser takes it, and so does this schema), but the *canonical*
+/// bridge spelling of a parameterless leaf is the bare string `"close"`, which
+/// is what `forms[0]` describes and what a generator should emit. Advertise
+/// that, so a consumer inserting the schema's `default` writes the same thing a
+/// consumer inserting the descriptor's fragment does.
+///
+/// `None` if the fragment doesn't parse, which would be a broken invariant —
+/// the Python suite's `test_node_slot_defaults_validate` fails rather than
+/// letting a slot quietly lose its default.
+fn bridge_instance(fragment: &str) -> Option<serde_json::Value> {
+    let value = crate::spec::input::parse_value(fragment).ok()?;
+    // `{"close": null}` — a lone tag with an empty body — is the bare `"close"`.
+    let empty_tag = value.as_object().and_then(|map| match map.iter().next() {
+        Some((tag, serde_json::Value::Null)) if map.len() == 1 => Some(tag.clone()),
+        _ => None,
+    });
+    Some(empty_tag.map_or(value, serde_json::Value::from))
 }
 
 /// The bare positional payload of a `newtype` tag, from its grammar `payload` type.

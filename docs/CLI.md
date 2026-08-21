@@ -1188,22 +1188,26 @@ downstream tooling generates docs, editor autocomplete, and conformance checks
 from (`list indicators` itself is one such consumer). Guard on `schema_version`
 for record-*shape* changes.
 
-**A field says what omitting it gets you.** `default` is the JSON literal a
-scalar key falls back to (`!macd_line`'s `fast` is `12`); `default_expr` is the
-YAML fragment a key whose default is a *node* falls back to — `!ema`'s `source`
-reports `!close`, `!atr`'s `!current`, a selection rule's `of` `!everything`. It
-parses in the slot it describes, so it can be displayed *and* inserted:
+**A field says what omitting it gets you.** `default` is a *tagged* value with
+three states — `{"literal": 12}` for a scalar key (`!macd_line`'s `fast`),
+`{"expr": "!close"}` for a key whose default is a **node** (`!ema`'s `source`;
+`!atr`'s is `!current`, a selection rule's `of` is `!everything`), and `null` for
+no default at all. It is tagged rather than bare so the two cases can't be
+confused for one another — a fragment is source text, not a string value.
+
+An `expr` parses in the slot it describes, so it can be displayed *and*
+inserted:
 
 ```sh
 fugazi grammar | jq -r '.tags[] | .name as $t | .forms[].fields[]
-  | select(.default_expr) | "!\($t).\(.name) defaults to \(.default_expr)"'
+  | select(.default.expr) | "!\($t).\(.name) defaults to \(.default.expr)"'
 ```
 
 The fragment is a **root floor** — always a bare leaf, which reads the series
 its document blesses, so it never nests (`!close`, not `!close { source: … }`).
-A *leaf's own* `source:` therefore reports both keys as `null`, which means "no
-expressible default", not "unknown": omitting it means the strategy's own
-series, which no tag names and the floor already implies.
+A *leaf's own* `source:` therefore reports `null`, which means "no expressible
+default", not "unknown": omitting it means the strategy's own series, which no
+tag names and the floor already implies.
 
 **`forms` is a list, and a tag can have more than one.** Each entry is one
 spelling: `shape` (`unit` / `newtype` / `seq` / `map`), `fields` (with types,

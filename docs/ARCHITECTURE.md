@@ -1181,7 +1181,7 @@ tag is bound, or listed with a reason) and
 **The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
 (the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` / `UniverseSpec` into one
 JSON-serializable record per tag — names, `forms` (each with a shape, fields with types /
-required-ness / defaults / default expressions, or a payload), prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
+required-ness / tagged defaults, or a payload), prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
 spec's *presentation* metadata, the way `known_*_tags` is for its *names*: `spec_tags()` is
 now a projection of it, `test_parity.py` pins each Python constructor's defaults against it,
 and external tooling (docs, editor LSP, the web grammar table) generates from it rather than
@@ -1260,16 +1260,26 @@ completions from the descriptor instead of hand-maintaining a table pinned to fu
 Present on every record (not omitted when `false`), so this is a shape change — the field-count
 change, not a new group or legend value, is what earns the bump.
 
-**`default_expr` (v7) — a default that is a node, not a literal.** A field's `default` could
-only ever carry a JSON literal, so the 69 slots whose default is an *expression* reported
-`null` and left the fact in English: 37 `source:` keys said "defaults to the bar's `!close`
-when omitted", 23 "the current bar", six `!high`/`!low`, three `!everything`. That prose is
-the same failure mode `node_output` fixed one field over — a downstream table derived by
-regexing doc strings, which nothing pins and which silently stops matching the day a `///` is
-reworded. `default_expr` reports the YAML fragment instead: `!ema`'s `source` is `!close`,
-`!atr`'s `!current`, a selection rule's `of` `!everything`. It parses in the slot it
-describes, so an editor can both render it (`!macd_line · source=!close, fast=12`) and insert
-it, where before it could only write `source?`.
+**A tagged `default` (v7) — a default that is a node, not a literal.** A field's `default` was
+a bare JSON value doing double duty: a literal for the 34 scalar keys that have one, `null`
+for everything else. But "everything else" was two different answers, and a consumer could not
+tell them apart — 69 slots default to an *expression*, and the only trace of it was English:
+37 `source:` keys saying "defaults to the bar's `!close` when omitted", 23 "the current bar",
+six `!high`/`!low`, three `!everything`. That prose is the same failure mode `node_output`
+fixed one field over — a downstream table derived by regexing doc strings, which nothing pins
+and which silently stops matching the day a `///` is reworded.
+
+`default` is now a tagged `GrammarDefault`: `{"literal": 12}`, `{"expr": "!close"}`, or
+`null` for no default at all. `!ema`'s `source` is `!close`, `!atr`'s `!current`, a selection
+rule's `of` `!everything`. The fragment parses in the slot it describes, so an editor can both
+render it (`!macd_line · source=!close, fast=12`) and insert it, where before it could only
+write `source?`. Tagged rather than "bare value means literal": `{literal} | {expr}` is a
+discriminable union in every consumer language, where `JsonValue | {expr}` is only
+distinguishable by a runtime key probe that stops being sound the day a field defaults to an
+object. That is the original bug in miniature, and worth ten characters a record to avoid.
+Retagging also surfaced one: `!pick`'s `symbol` / `freq` are `Option<String>` with a serde
+default, so the derive was reporting `Some(Value::Null)` for them — a "default" that
+serialised to exactly the `null` a real absence did.
 
 It is **reflected off the default's own value**, not off prose: `grammar::default_expr_of`
 reads the `Debug` of what the `#[serde(default = "…")]` fn returns, the same trick
@@ -1281,16 +1291,24 @@ omitted and with the key set to the fragment, and requires the same tree.
 **The fragment is a root floor.** Every one is a bare leaf, and a bare leaf reads the blessed
 series its enclosing document confers — so a fragment never nests (`!close`, not
 `!close { source: … }`) and is always one token. That is also what lets the *other* 33 slots
-stay honest rather than being flattened into the same field: a candle leaf's own `source:`
-defaults to "the strategy's own series", which no tag spells, so it reports `default: null` +
-`default_expr: null` — the pair that now unambiguously means **no default**, where `default:
-null` alone used to mean either that or "there is one, and it isn't a literal". Nothing is
-lost by stopping a rung above it: the floor already says it. Two shapes were rejected getting
-here — putting `"!close"` in `default` itself (indistinguishable from a string-literal
-default) and retagging it as `{literal:…} | {expr:…}` (cleaner, but breaks every existing
-consumer for a field that mostly works). The derive's rule is structural, not editorial: a
-non-`Option` field with a serde default gets its value spelled; an `Option` field's default is
-Rust `None`, which names no node.
+stay honest rather than being flattened into the same arm: a candle leaf's own `source:`
+defaults to "the strategy's own series", which no tag spells, so it reports `null` — which now
+unambiguously means **no default**. Nothing is lost by stopping a rung above it: the floor
+already says it. The derive's rule is structural, not editorial: a non-`Option` field with a
+serde default gets its value spelled, as a literal or a fragment by type; an `Option` field's
+default is Rust `None`, which names neither.
+
+`spec_json_schema()` carries the same fact in its own encoding — a literal goes in as JSON
+Schema's `default` verbatim, a fragment is normalised through the loader's YAML → JSON-bridge
+pass first (`!close` → `"close"`, the canonical bare spelling rather than the `{"close": null}`
+a tagged empty scalar parses to), which is the form that schema validates. The Python suite
+validates every advertised default against the slot it sits on, so the two projections cannot
+disagree. Doing that found a second asymmetry of the v5 kind: the `map` arm of `form_schema`
+admitted the bare string and a real object body but **not** an explicit null, so the schema
+rejected `{"close": null}` — which is exactly what a YAML `!close` normalises to and what the
+parser has always taken. The `unit` arm always had that branch; the `map` arm now does too,
+pinned from both sides (`all_optional_map_tags_parse_from_a_null_body` for the parser,
+`test_all_optional_map_tags_accept_an_explicit_null_body` for the schema).
 
 Records carry one datum that is **not** reflected off serde: **`node_output`** (v4, 0.61), on
 every field whose `type` is `node` / `node_list` / `match_cases`, plus **`payload_output`** for

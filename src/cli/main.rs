@@ -122,10 +122,10 @@ enum Command {
     /// required-ness, defaults, prose), output, payload, and `since` — wrapped
     /// as `{ schema_version, tags }`. Each expression-holding field also
     /// carries `node_output`: what the nested expression must *produce*, read
-    /// from the same type table `check` enforces. A field whose default is a
-    /// node rather than a literal reports it as `default_expr`, the YAML
-    /// fragment omitting the key is equivalent to writing (`!ema`'s `source`
-    /// is `!close`). This is the CLI face of the library's
+    /// from the same type table `check` enforces. A field's `default` is
+    /// tagged: `{ literal: 12 }` for a scalar, `{ expr: "!close" }` for a key
+    /// whose default is a node — the YAML fragment omitting it is equivalent
+    /// to writing — and `null` for no default at all. This is the CLI face of the library's
     /// `spec_grammar()`: the descriptor is reflected off the serde definitions,
     /// so it never drifts from what the parser accepts. Emits only JSON on
     /// stdout — pipe into `jq`, or feed it to tooling that generates docs,

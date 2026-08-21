@@ -6,7 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use fugazi::spec::grammar::{SCHEMA_VERSION, spec_grammar, spec_grammar_document};
+use fugazi::spec::grammar::{
+    GrammarDefault, GrammarField, SCHEMA_VERSION, spec_grammar, spec_grammar_document,
+};
 use fugazi::spec::typecheck::{REWRITTEN_TAGS, known_node_tags, known_selection_tags};
 
 /// The one authority for *names* is serde's variant list. The descriptor's
@@ -280,9 +282,12 @@ fn reflects_fields_and_defaults() {
     let src = sma.canonical().fields.iter().find(|f| f.name == "source").unwrap();
     assert_eq!(src.ty, "node");
     assert!(!src.required, "sma.source has a default -> optional");
-    assert!(src.default.is_none(), "a node default is not a JSON literal");
+    assert!(
+        src.default.as_ref().and_then(GrammarDefault::literal).is_none(),
+        "a node default is not a JSON literal — that is why `default` is tagged",
+    );
     assert_eq!(
-        src.default_expr.as_deref(),
+        default_fragment(src),
         Some("!close"),
         "omitting !sma's source is writing !close, and the descriptor has to say so",
     );
@@ -297,10 +302,10 @@ fn reflects_fields_and_defaults() {
             .unwrap_or_else(|| panic!("!{tag}.{name}"))
             .clone()
     };
-    assert_eq!(field("atr", "source").default_expr.as_deref(), Some("!current"));
-    assert_eq!(field("donchian_upper", "high").default_expr.as_deref(), Some("!high"));
-    assert_eq!(field("donchian_upper", "low").default_expr.as_deref(), Some("!low"));
-    assert_eq!(field("top_bottom", "of").default_expr.as_deref(), Some("!everything"));
+    assert_eq!(default_fragment(&field("atr", "source")), Some("!current"));
+    assert_eq!(default_fragment(&field("donchian_upper", "high")), Some("!high"));
+    assert_eq!(default_fragment(&field("donchian_upper", "low")), Some("!low"));
+    assert_eq!(default_fragment(&field("top_bottom", "of")), Some("!everything"));
 
     // ... and the case that must stay silent: a candle leaf's `source:` defaults
     // to the strategy's own series, which no tag spells. `null` + `null` is the
@@ -308,9 +313,15 @@ fn reflects_fields_and_defaults() {
     let own_series = field("close", "source");
     assert!(!own_series.required);
     assert!(
-        own_series.default.is_none() && own_series.default_expr.is_none(),
+        own_series.default.is_none(),
         "!close.source has no expressible default — reporting one would be a lie",
     );
+
+    // Same answer, same reason, one type over: an `Option` *scalar*. The old
+    // untagged `default` reported these as `Some(Value::Null)`, which
+    // serialised to the same `null` a real absence did.
+    let freq = field("pick", "freq");
+    assert!(!freq.required && freq.default.is_none(), "!pick.freq defaults to nothing");
     let period = sma.canonical().fields.iter().find(|f| f.name == "period").unwrap();
     // A period is a `NonZeroUsize`, which the descriptor reports as
     // `positive_uint` so the generated JSON schema can say `minimum: 1`.
@@ -321,12 +332,13 @@ fn reflects_fields_and_defaults() {
     let macd = by_name("macd_line");
     let fast = macd.canonical().fields.iter().find(|f| f.name == "fast").unwrap();
     assert!(!fast.required);
-    assert_eq!(fast.default, Some(serde_json::json!(12)));
+    assert_eq!(literal(fast), Some(serde_json::json!(12)));
     let bb = by_name("bb_upper");
     let k = bb.canonical().fields.iter().find(|f| f.name == "k").unwrap();
-    assert_eq!(k.default, Some(serde_json::json!(2.0)));
-    // A literal default carries no fragment: `default` already answered.
-    assert!(fast.default_expr.is_none() && k.default_expr.is_none());
+    assert_eq!(literal(k), Some(serde_json::json!(2.0)));
+    // The two cases are exclusive by construction — `default` is one tagged
+    // value, so a literal cannot also carry a fragment.
+    assert!(default_fragment(fast).is_none() && default_fragment(k).is_none());
 
     // A bool predicate and its optional epsilon.
     let gt = by_name("gt");
@@ -357,8 +369,8 @@ fn a_default_expr_is_equivalent_to_omitting_the_field() {
             let Some(base) = minimal_body(form) else {
                 continue;
             };
-            for f in form.fields.iter().filter(|f| f.default_expr.is_some()) {
-                let expr = f.default_expr.as_deref().expect("filtered");
+            for f in form.fields.iter().filter(|f| default_fragment(f).is_some()) {
+                let expr = default_fragment(f).expect("filtered");
                 let at = format!("!{}.{}", tag.name, f.name);
                 // The fragment is YAML the way a document writes it, so it goes
                 // through the loader's own YAML → JSON-bridge normalisation.
@@ -428,7 +440,7 @@ fn defaulted_expression_slots_name_their_default() {
         for form in &tag.forms {
             for f in &form.fields {
                 let is_expression = matches!(f.ty.as_str(), "node" | "node_list" | "selection");
-                if f.required || f.default.is_some() || f.default_expr.is_some() || !is_expression {
+                if f.required || f.default.is_some() || !is_expression {
                     continue;
                 }
                 let demand: Option<Vec<&str>> = f
@@ -450,6 +462,16 @@ fn defaulted_expression_slots_name_their_default() {
          it:\n  {}",
         silent.join("\n  "),
     );
+}
+
+/// The YAML fragment a field defaults to, if its default is one.
+fn default_fragment(f: &GrammarField) -> Option<&str> {
+    f.default.as_ref().and_then(GrammarDefault::expr)
+}
+
+/// The JSON literal a field defaults to, if its default is one.
+fn literal(f: &GrammarField) -> Option<serde_json::Value> {
+    f.default.as_ref().and_then(GrammarDefault::literal).cloned()
 }
 
 /// The **minimal** JSON-bridge body for a `map` form: required fields filled
@@ -617,6 +639,40 @@ fn every_declared_form_parses() {
         "the descriptor declares these spellings, but the parser rejects them:\n  {}",
         broken.join("\n  "),
     );
+}
+
+/// A `map` tag with no required key parses from an **explicit null** body, not
+/// only from the bare string — `{"close": null}` is what a YAML `!close`
+/// normalises to on the way in.
+///
+/// The parser half of `test_all_optional_map_tags_accept_an_explicit_null_body`
+/// in the Python suite. `spec_json_schema()` used to reject this shape while the
+/// parser took it, so the schema called a document invalid that fugazi loads —
+/// and, once a field advertised a `default`, its own advertised value.
+#[test]
+fn all_optional_map_tags_parse_from_a_null_body() {
+    let mut rejected = Vec::new();
+    let mut checked = 0;
+    for tag in spec_grammar() {
+        if tag.group != "node" {
+            continue;
+        }
+        for form in &tag.forms {
+            if form.shape != "map" || form.fields.iter().any(|f| f.required) {
+                continue;
+            }
+            checked += 1;
+            if !parses(&serde_json::json!({ &tag.name: serde_json::Value::Null })) {
+                rejected.push(tag.name.clone());
+            }
+        }
+    }
+    assert!(
+        rejected.is_empty(),
+        "these tags refuse an explicit null body, which the schema advertises as \
+         valid: {rejected:?}",
+    );
+    assert!(checked >= 30, "only {checked} all-optional map forms were reachable");
 }
 
 /// **A form the parser accepts must be declared.** The converse guard, and the

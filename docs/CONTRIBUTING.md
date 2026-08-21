@@ -289,9 +289,10 @@ Foo { source, period } => dyn_indicator::wrap(
   a const-backed default fn (see `MACD_FAST` & co. in `expr.rs`), not hard-coded
   in the Python signature — the parity test pins the two together. A **node**
   default (a `source:` falling back to `!close` / `!current`) is read the same
-  way and reported as `default_expr`, the YAML fragment omitting the key writes:
-  give it a `#[serde(default = "…")]` fn returning the leaf and the descriptor
-  spells it for you. Two tests then hold you to it —
+  way and reported as the other arm of the tagged `default`, `{ expr: "!close" }`
+  — the YAML fragment omitting the key writes. Give it a
+  `#[serde(default = "…")]` fn returning the leaf and the descriptor spells it
+  for you. Two tests then hold you to it —
   `a_default_expr_is_equivalent_to_omitting_the_field` parses the tag both ways
   and demands the same tree, and `defaulted_expression_slots_name_their_default`
   fails if a defaulted expression slot reports nothing (teach

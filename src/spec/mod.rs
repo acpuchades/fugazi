@@ -143,8 +143,8 @@ pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::NodeSpec;
 pub use expr::Root;
 pub use grammar::{
-    GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE, spec_document_json_schema,
-    spec_grammar, spec_grammar_document, spec_json_schema,
+    GrammarDefault, GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE,
+    spec_document_json_schema, spec_grammar, spec_grammar_document, spec_json_schema,
 };
 pub use expr::ValueLit;
 pub use meta::Meta;

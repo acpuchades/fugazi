@@ -237,6 +237,9 @@ CONSTRUCTORS = {
 }
 
 
+_NO_LITERAL = object()
+
+
 def test_constructor_signatures_match_the_descriptor():
     grammar = {t["name"]: t for t in ta.spec_grammar()["tags"]}
     for ctor_name, (tags, renames) in CONSTRUCTORS.items():
@@ -256,10 +259,16 @@ def test_constructor_signatures_match_the_descriptor():
                 # Every constructor default must equal the descriptor's, so the
                 # duplicated constant can't drift.
                 if param.default is not inspect.Parameter.empty:
-                    descriptor_default = fields[field_name]["default"]
-                    assert descriptor_default is not None, (
+                    # `default` is tagged: a pyo3 signature default is always a
+                    # value, so it must line up with the `literal` arm. A slot
+                    # defaulting to a node (`{"expr": "!close"}`) is not
+                    # something a Python signature can carry.
+                    declared = fields[field_name]["default"] or {}
+                    descriptor_default = declared.get("literal", _NO_LITERAL)
+                    assert descriptor_default is not _NO_LITERAL, (
                         f"{ctor_name}({py_param}={param.default!r}) has a default but "
-                        f"!{tag}.{field_name} carries none in the descriptor"
+                        f"!{tag}.{field_name} carries no literal in the descriptor "
+                        f"(it reports {fields[field_name]['default']!r})"
                     )
                     assert param.default == descriptor_default, (
                         f"default drift: {ctor_name}({py_param}={param.default!r}) vs "

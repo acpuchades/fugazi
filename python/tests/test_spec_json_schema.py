@@ -93,6 +93,102 @@ def test_every_tag_has_a_valid_minimal_instance():
     )
 
 
+def test_node_slot_defaults_validate():
+    """Every default the schema advertises is a valid instance of its own slot.
+
+    The descriptor reports a node default as a YAML fragment (`{"expr":
+    "!close"}`); the schema has to report the same fact in *its* encoding, the
+    JSON bridge form (`"close"`) — the one it validates. Two encodings of one
+    fact is two chances to be wrong, so this validates each advertised `default`
+    against the slot's own schema. A literal is checked the same way, which also
+    pins the older half of the claim (`!macd_line`'s `fast: 12` really is a
+    legal `positive_uint`).
+    """
+    node = jsonschema.Draft202012Validator(ta.spec_json_schema())
+    checked = 0
+    for tag in ta.spec_grammar()["tags"]:
+        if tag["group"] != "node":
+            continue
+        for form in tag["forms"]:
+            for field in form["fields"]:
+                if field["default"] is None:
+                    continue
+                declared = _declared_default(node.schema, tag, form, field)
+                assert declared is not _MISSING, (
+                    f"!{tag['name']}.{field['name']} has a descriptor default "
+                    f"{field['default']!r} but the schema advertises none"
+                )
+                # Fill the optional key with the schema's own advertised default
+                # and require the whole tag to still validate.
+                instance = _valid_instance(tag, form)
+                instance[tag["name"]][field["name"]] = declared
+                assert node.is_valid(instance), (
+                    f"!{tag['name']}.{field['name']} defaults to {declared!r}, which "
+                    f"the schema rejects in that slot"
+                )
+                checked += 1
+    assert checked >= 90, f"only {checked} advertised defaults were reachable"
+
+
+_MISSING = object()
+
+
+def _declared_default(schema, tag, form, field):
+    """The `default` the JSON Schema attaches to one tag's field, or `_MISSING`."""
+    for branch in _tag_branches(schema["$defs"]["node"]["oneOf"], tag["name"]):
+        for props in _bodies(branch["properties"][tag["name"]]):
+            if "default" in props.get(field["name"], {}):
+                return props[field["name"]]["default"]
+    return _MISSING
+
+
+def _bodies(body):
+    """The `properties` map(s) of a tag body, through the null-or-object union.
+
+    A `map` tag with no required key accepts an omitted body — the bare string,
+    or an explicit null — so its body schema is a union and the keys sit one
+    level in.
+    """
+    if "properties" in body:
+        yield body["properties"]
+    for arm in body.get("oneOf", []):
+        yield from _bodies(arm)
+
+
+def _tag_branches(branches, name):
+    """Every `{name: body}` object branch for `name`, through nested unions."""
+    for branch in branches:
+        for key in ("oneOf", "anyOf"):
+            if key in branch:
+                yield from _tag_branches(branch[key], name)
+        if name in branch.get("properties", {}):
+            yield branch
+
+
+def test_all_optional_map_tags_accept_an_explicit_null_body():
+    """`{"close": null}` is what a YAML `!close` normalises to, and the parser
+    takes it — so the schema must too.
+
+    The `map` arm used to admit only the bare string and a real object body, so
+    a tag with no required key rejected the very form the loader produces. The
+    `unit` arm always had the null branch; this is the same claim one shape
+    over. The parser half is pinned in `tests/spec_grammar.rs`.
+    """
+    node = jsonschema.Draft202012Validator(ta.spec_json_schema())
+    checked = 0
+    for tag in ta.spec_grammar()["tags"]:
+        if tag["group"] != "node":
+            continue
+        for form in tag["forms"]:
+            if form["shape"] != "map" or any(f["required"] for f in form["fields"]):
+                continue
+            assert node.is_valid({tag["name"]: None}), (
+                f"the schema rejects {{{tag['name']!r}: null}}, which fugazi parses"
+            )
+            checked += 1
+    assert checked >= 30, f"only {checked} all-optional map forms were reachable"
+
+
 def test_unknown_tag_and_unknown_field_are_rejected():
     schema = ta.spec_json_schema()
     node = jsonschema.Draft202012Validator(schema)

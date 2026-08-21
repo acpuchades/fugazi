@@ -8,12 +8,12 @@
 //!   the ident in `snake_case` (matching serde's `rename_all = "snake_case"`).
 //! - **shape** — from the variant's field form (unit / newtype / seq / map).
 //! - **fields** — for a `map` variant, each named field's `type`, `required`,
-//!   `default`, `default_expr`, and `///` doc. `required` is false for `Option`
-//!   fields and for fields with a serde `default`; `default` is emitted (as a
-//!   runtime `serde_json::to_value(...)`) only for scalar fields with a serde
-//!   default, and `default_expr` (the YAML fragment the default writes as) only
-//!   for **non-`Option`** fields whose default is a node — an `Option`'s default
-//!   is `None`, which names no node a document could write.
+//!   `default`, and `///` doc. `required` is false for `Option` fields and for
+//!   fields with a serde `default`. `default` is a tagged `GrammarDefault`: a
+//!   `Literal` (a runtime `serde_json::to_value(...)`) for a scalar field with a
+//!   serde default, an `Expr` (the YAML fragment the default writes as) for a
+//!   **non-`Option`** field whose default is a node — an `Option`'s default is
+//!   `None`, which names no node a document could write.
 //! - **doc** — the variant's `///`.
 //!
 //! The four things serde cannot know come from `#[grammar(...)]`:
@@ -213,10 +213,9 @@ fn alt_form(
                         name: "source".to_owned(),
                         ty: "node".to_owned(),
                         required: true,
-                        default: ::std::option::Option::None,
                         // The keyed spelling of a `newtype` wrapper: its lone
                         // slot is the tag's payload, which is required.
-                        default_expr: ::std::option::Option::None,
+                        default: ::std::option::Option::None,
                         node_output: ::std::option::Option::None,
                         doc: ::std::option::Option::Some(#SOURCE_FIELD_DOC.to_owned()),
                     }],
@@ -291,43 +290,54 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
     let default_kind = serde_default(&field.attrs)?;
     let required = !is_option && matches!(default_kind, SerdeDefault::None);
 
-    // Emit a literal default value only for scalar fields with a serde default.
-    let default_value = match (&default_kind, is_scalar) {
-        (SerdeDefault::Fn(path), true) => {
-            let path = default_path(field, path)?;
-            quote! { ::serde_json::to_value(#path()).ok() }
-        }
-        (SerdeDefault::Bare, true) => {
-            let ty = &field.ty;
-            quote! { ::serde_json::to_value(<#ty as ::std::default::Default>::default()).ok() }
-        }
-        _ => quote! { ::std::option::Option::None },
-    };
-
-    // A non-scalar default is a *node* (`!ema`'s `source` is a `!close` leaf,
-    // a selection rule's `of` an `!everything`), which no JSON literal can
-    // carry — so it goes to `default_expr` as the YAML fragment writing it
-    // would produce. The value is spelled by `grammar::default_expr_of` at run
-    // time, off the default's own `Debug`, so this cannot drift from what the
-    // default fn returns.
+    // What omitting the key gets you, in the two shapes `GrammarDefault` has.
     //
-    // An `Option` field is excluded deliberately, and this is the whole split
-    // the field exists to make: its default is Rust `None` — "the key is
-    // absent" — which names no node. That is the honest answer for the
-    // blessed-series `source:` on a candle leaf, where omission means "the
-    // strategy's own series" and no tag says that.
-    let default_expr = match (&default_kind, is_scalar, is_option) {
+    // A **scalar** with a serde default carries a JSON literal. A **non-scalar**
+    // one carries a node (`!ema`'s `source` is a `!close` leaf, a selection
+    // rule's `of` an `!everything`), which no literal can hold — so it is
+    // spelled by `grammar::default_expr_of` at run time, off the default's own
+    // `Debug`, and cannot drift from what the default fn returns.
+    //
+    // An `Option` field has **no** default in either shape, deliberately: its
+    // serde default is Rust `None`, "the key is absent", which names no node. On
+    // a candle leaf's `source:` that is the honest answer — omission means "the
+    // strategy's own series", and no tag says that.
+    let node_default = |path: proc_macro2::TokenStream| {
+        quote! {
+            crate::spec::grammar::default_expr_of(#path)
+                .map(crate::spec::grammar::GrammarDefault::Expr)
+        }
+    };
+    //
+    // A `null` literal is dropped for the same reason, and this is where an
+    // `Option` *scalar* falls out: `serde_json::to_value(None::<String>)` is
+    // `Value::Null`, and `!pick`'s `symbol:` has no more of a default than
+    // `!close`'s `source:` does. The old untagged `default` hid that — a
+    // `Some(Value::Null)` and a `None` both serialised to `null`.
+    let literal_default = |value: proc_macro2::TokenStream| {
+        quote! {
+            ::serde_json::to_value(#value)
+                .ok()
+                .filter(|v| !v.is_null())
+                .map(crate::spec::grammar::GrammarDefault::Literal)
+        }
+    };
+    let default = match (&default_kind, is_scalar, is_option) {
+        (SerdeDefault::Fn(path), true, _) => {
+            let path = default_path(field, path)?;
+            literal_default(quote! { #path() })
+        }
+        (SerdeDefault::Bare, true, _) => {
+            let ty = &field.ty;
+            literal_default(quote! { <#ty as ::std::default::Default>::default() })
+        }
         (SerdeDefault::Fn(path), false, false) => {
             let path = default_path(field, path)?;
-            quote! { crate::spec::grammar::default_expr_of(#path()) }
+            node_default(quote! { #path() })
         }
         (SerdeDefault::Bare, false, false) => {
             let ty = &field.ty;
-            quote! {
-                crate::spec::grammar::default_expr_of(
-                    <#ty as ::std::default::Default>::default()
-                )
-            }
+            node_default(quote! { <#ty as ::std::default::Default>::default() })
         }
         _ => quote! { ::std::option::Option::None },
     };
@@ -337,8 +347,7 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
             name: #name.to_owned(),
             ty: #grammar_ty.to_owned(),
             required: #required,
-            default: #default_value,
-            default_expr: #default_expr,
+            default: #default,
             // Stamped after reflection — see `payload_output` above.
             node_output: ::std::option::Option::None,
             doc: #doc_expr,
