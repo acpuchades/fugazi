@@ -8,6 +8,15 @@
 //!
 //! Anything a third venue would also need belongs here rather than in whichever
 //! backend happened to need it first.
+//!
+//! | Module | Holds |
+//! |---|---|
+//! | this one | the exchange-precision arithmetic every venue quantises with |
+//! | [`rest`] | [`HttpCore`] — the client, the runtime, the base URL |
+
+mod rest;
+
+pub(in crate::live) use rest::HttpCore;
 
 use crate::types::Real;
 

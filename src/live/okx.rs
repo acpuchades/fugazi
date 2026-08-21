@@ -77,7 +77,7 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+    HttpCore, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
@@ -144,9 +144,7 @@ struct RestingLimit {
 /// [`PaperWallet`](crate::PaperWallet). Must be used from a synchronous context
 /// (it owns a `tokio` runtime and blocks on each REST call).
 pub struct OkxWallet {
-    client: reqwest::Client,
-    rt: tokio::runtime::Runtime,
-    base_url: String,
+    http: HttpCore,
     api_key: String,
     api_secret: String,
     passphrase: String,
@@ -218,14 +216,8 @@ impl OkxWallet {
         api_secret: impl Into<String>,
         passphrase: impl Into<String>,
     ) -> Self {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build a tokio runtime for the live wallet");
         Self {
-            client: reqwest::Client::new(),
-            rt,
-            base_url: base_url.into(),
+            http: HttpCore::new(base_url),
             api_key: api_key.into(),
             api_secret: api_secret.into(),
             passphrase: passphrase.into(),
@@ -450,9 +442,8 @@ impl OkxWallet {
             None => None,
         };
         let request_path = with_query(path, query);
-        let fut = signed_request(
-            &self.client,
-            &self.base_url,
+        let req = signed_request(
+            &self.http,
             &self.api_key,
             &self.api_secret,
             &self.passphrase,
@@ -461,7 +452,7 @@ impl OkxWallet {
             &request_path,
             body_str,
         );
-        self.rt.block_on(fut)
+        self.http.send(req)
     }
 
     /// An unsigned public GET (instrument specs, etc.).
@@ -470,21 +461,7 @@ impl OkxWallet {
         path: &str,
         params: Vec<(&str, String)>,
     ) -> Result<serde_json::Value, LiveError> {
-        let url = format!(
-            "{}{}",
-            self.base_url.trim_end_matches('/'),
-            with_query(path, &params)
-        );
-        let fut = async {
-            let resp = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| LiveError::Network(e.to_string()))?;
-            read_json(resp).await
-        };
-        self.rt.block_on(fut)
+        self.http.public_get(path, &params)
     }
 
     /// Fetch the recent fills for `symbol` (the venue's default window). The
@@ -1026,16 +1003,16 @@ fn side_token(side: Side) -> &'static str {
     }
 }
 
-/// Build, sign, and send a private request, returning the parsed JSON body.
+/// Build and sign a private request. The caller sends it through
+/// [`HttpCore::send`].
 ///
 /// The signature covers `timestamp + method + requestPath + body`, and the
 /// request carries that exact `requestPath` in the URL and that exact `body`
 /// string — no client-side re-encoding, so nothing can drift between what was
 /// signed and what was sent.
 #[allow(clippy::too_many_arguments)]
-async fn signed_request(
-    client: &reqwest::Client,
-    base_url: &str,
+fn signed_request(
+    http: &HttpCore,
     api_key: &str,
     api_secret: &str,
     passphrase: &str,
@@ -1043,14 +1020,15 @@ async fn signed_request(
     method: Method,
     request_path: &str,
     body: Option<String>,
-) -> Result<serde_json::Value, LiveError> {
+) -> reqwest::RequestBuilder {
     let timestamp = now_iso();
     let body_str = body.as_deref().unwrap_or("");
     let prehash = format!("{timestamp}{}{request_path}{body_str}", method.as_str());
     let signature = sign(api_secret, &prehash);
-    let url = format!("{}{request_path}", base_url.trim_end_matches('/'));
+    let url = http.url(request_path);
 
-    let mut req = client
+    let mut req = http
+        .client()
         .request(method, &url)
         .header("OK-ACCESS-KEY", api_key)
         .header("OK-ACCESS-SIGN", signature)
@@ -1063,30 +1041,7 @@ async fn signed_request(
     if let Some(body) = body {
         req = req.body(body);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| LiveError::Network(e.to_string()))?;
-    read_json(resp).await
-}
-
-/// Read a response body, mapping a non-2xx status into [`LiveError::Http`].
-async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveError> {
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| LiveError::Network(e.to_string()))?;
-    if !status.is_success() {
-        return Err(LiveError::Http {
-            status: status.as_u16(),
-            body,
-        });
-    }
-    if body.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    serde_json::from_str(&body).map_err(|e| LiveError::Decode(e.to_string()))
+    req
 }
 
 /// Unwrap an OKX envelope `{ "code": "0", "msg": "", "data": [...] }` into its

@@ -68,7 +68,7 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+    HttpCore, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://api.coinbase.com";
@@ -121,9 +121,7 @@ struct ProtectiveState {
 /// [`PaperWallet`](crate::PaperWallet). Must be used from a synchronous context
 /// (it owns a `tokio` runtime and blocks on each REST call).
 pub struct CoinbaseWallet {
-    client: reqwest::Client,
-    rt: tokio::runtime::Runtime,
-    base_url: String,
+    http: HttpCore,
     /// The host used in the JWT `uri` claim (`api.coinbase.com`).
     host: String,
     /// The CDP key name — the JWT `kid` header and `sub` claim.
@@ -179,14 +177,8 @@ impl CoinbaseWallet {
         let signing_key = parse_private_key(private_key_pem)?;
         let base_url = base_url.into();
         let host = host_of(&base_url);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build a tokio runtime for the live wallet");
         Ok(Self {
-            client: reqwest::Client::new(),
-            rt,
-            base_url,
+            http: HttpCore::new(base_url),
             host,
             key_name: key_name.into(),
             signing_key,
@@ -223,14 +215,8 @@ impl CoinbaseWallet {
     pub fn placeholder() -> Self {
         let signing_key = SigningKey::from_bytes((&[1u8; 32]).into())
             .expect("a fixed nonzero scalar is a valid P-256 key");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build a tokio runtime for the live wallet");
         Self {
-            client: reqwest::Client::new(),
-            rt,
-            base_url: MAINNET_BASE_URL.to_string(),
+            http: HttpCore::new(MAINNET_BASE_URL),
             host: host_of(MAINNET_BASE_URL),
             key_name: String::new(),
             signing_key,
@@ -451,42 +437,22 @@ impl CoinbaseWallet {
     ) -> Result<serde_json::Value, LiveError> {
         let full_path = format!("{API_PREFIX}{path}");
         let jwt = self.build_jwt(method.as_str(), &full_path)?;
-        let url = format!(
-            "{}{}",
-            self.base_url.trim_end_matches('/'),
-            with_query(&full_path, query)
-        );
-        let client = self.client.clone();
-        let fut = async move {
-            let mut req = client
-                .request(method, &url)
-                .bearer_auth(jwt)
-                .header("Content-Type", "application/json");
-            if let Some(b) = body {
-                req = req.json(&b);
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| LiveError::Network(e.to_string()))?;
-            read_json(resp).await
-        };
-        self.rt.block_on(fut)
+        let url = self.http.url(&with_query(&full_path, query));
+        let mut req = self
+            .http
+            .client()
+            .request(method, &url)
+            .bearer_auth(jwt)
+            .header("Content-Type", "application/json");
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        self.http.send(req)
     }
 
     /// An unsigned public GET (product specs, etc.). `path` is a full API path.
     fn public_get(&self, path: &str) -> Result<serde_json::Value, LiveError> {
-        let url = format!("{}{path}", self.base_url.trim_end_matches('/'));
-        let client = self.client.clone();
-        let fut = async move {
-            let resp = client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| LiveError::Network(e.to_string()))?;
-            read_json(resp).await
-        };
-        self.rt.block_on(fut)
+        self.http.public_get(path, &[])
     }
 
     /// Build an ES256 JWT for one `METHOD full_path` request. The `uri` claim
@@ -1045,25 +1011,6 @@ fn side_token(side: Side) -> &'static str {
         Side::Buy => "BUY",
         Side::Sell => "SELL",
     }
-}
-
-/// Read a response body, mapping a non-2xx status into [`LiveError::Http`].
-async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveError> {
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| LiveError::Network(e.to_string()))?;
-    if !status.is_success() {
-        return Err(LiveError::Http {
-            status: status.as_u16(),
-            body,
-        });
-    }
-    if body.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    serde_json::from_str(&body).map_err(|e| LiveError::Decode(e.to_string()))
 }
 
 /// Extract the venue `order_id` from a create-order response, mapping a
