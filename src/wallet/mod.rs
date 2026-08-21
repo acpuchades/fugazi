@@ -19,7 +19,7 @@ pub use types::{
     Rejection, Side, Size, Units, WalletError,
 };
 // `pub(crate)` in `types`, so they can only be re-exported crate-wide.
-pub(crate) use types::{cash_tolerance, marked_sum};
+pub(crate) use types::{cash_tolerance, marked_sum, trim_front};
 
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};

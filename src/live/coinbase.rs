@@ -68,7 +68,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON, marked_sum};
 
 use super::LiveError;
 use super::venue::{
-    HttpCore, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+    HttpCore, LiveLog, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick,
+    with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://api.coinbase.com";
@@ -147,11 +148,11 @@ pub struct CoinbaseWallet {
     protective: HashMap<Symbol, ProtectiveState>,
     limits: HashMap<Symbol, RestingOrder>,
 
-    // Fill polling: per-symbol set of already-reported trade ids, and the log.
+    // Fill polling: per-symbol set of already-reported trade ids.
     seen_trades: HashMap<String, HashSet<String>>,
-    errors: Vec<LiveError>,
-    // Refused orders awaiting a drain through take_rejections.
-    rejections: Vec<Rejection<Symbol>>,
+    // The error log, and the refused orders awaiting a drain through
+    // take_rejections. Both bounded; see `LiveLog`.
+    log: LiveLog,
 }
 
 impl CoinbaseWallet {
@@ -194,8 +195,7 @@ impl CoinbaseWallet {
             protective: HashMap::new(),
             limits: HashMap::new(),
             seen_trades: HashMap::new(),
-            errors: Vec::new(),
-            rejections: Vec::new(),
+            log: LiveLog::default(),
         })
     }
 
@@ -232,8 +232,7 @@ impl CoinbaseWallet {
             protective: HashMap::new(),
             limits: HashMap::new(),
             seen_trades: HashMap::new(),
-            errors: Vec::new(),
-            rejections: Vec::new(),
+            log: LiveLog::default(),
         }
     }
 
@@ -241,8 +240,13 @@ impl CoinbaseWallet {
     /// (the detail behind a returned [`WalletError::Venue`], plus best-effort
     /// refresh / fill-poll failures that don't have a return channel) is appended
     /// here, so a caller can see *why* a leg failed.
+    ///
+    /// Bounded: the oldest entries are dropped once the log grows past roughly
+    /// twice [`DEFAULT_RETENTION`](crate::wallet::DEFAULT_RETENTION), so a
+    /// long-running live process cannot leak through it. A caller who needs the
+    /// whole history wants their own durable store, not this accessor.
     pub fn errors(&self) -> &[LiveError] {
-        &self.errors
+        self.log.errors()
     }
 
     /// The base currency of a product id (`BTC-USD` → `BTC`) — the balance that
@@ -396,33 +400,6 @@ impl CoinbaseWallet {
         Ok(out)
     }
 
-    /// Record `err` on the internal log and return the trait-facing
-    /// [`WalletError::Venue`] category.
-    fn fail(&mut self, err: LiveError) -> WalletError {
-        self.errors.push(err);
-        WalletError::Venue
-    }
-
-    /// A **refused order**: log the detail, buffer a [`Rejection`] for
-    /// [`take_rejections`](Wallet::take_rejections), and return
-    /// [`WalletError::Venue`].
-    fn refuse(
-        &mut self,
-        symbol: &str,
-        id: OrderId,
-        kind: OrderKind,
-        err: LiveError,
-    ) -> WalletError {
-        self.errors.push(err);
-        self.rejections.push(Rejection {
-            symbol: crate::types::symbol(symbol),
-            id,
-            error: WalletError::Venue,
-            kind,
-        });
-        WalletError::Venue
-    }
-
     // --- REST plumbing -----------------------------------------------------
 
     /// A signed private request; blocks on the owned runtime. `query` is the
@@ -495,7 +472,7 @@ impl CoinbaseWallet {
         let body = serde_json::json!({ "order_ids": [order_id] });
         match self.signed(Method::POST, "/orders/batch_cancel", &[], Some(body)) {
             Ok(_) => Ok(()),
-            Err(e) => Err(self.fail(e)),
+            Err(e) => Err(self.log.fail(e)),
         }
     }
 
@@ -509,7 +486,7 @@ impl CoinbaseWallet {
         id: OrderId,
     ) -> Result<(), WalletError> {
         if let Err(e) = self.ensure_cursor(symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let body = serde_json::json!({
             "client_order_id": client_order_id(id),
@@ -519,11 +496,11 @@ impl CoinbaseWallet {
         });
         let value = match self.signed(Method::POST, "/orders", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(symbol, id, OrderKind::Market, e)),
         };
         let order_id = match order_result_id(&value) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(symbol, id, OrderKind::Market, e)),
         };
         self.map_order(id, &order_id, OrderKind::Market);
         Ok(())
@@ -540,7 +517,7 @@ impl CoinbaseWallet {
     ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if trigger <= 0.0 {
-            return Err(self.refuse(
+            return Err(self.log.refuse(
                 &symbol,
                 local,
                 kind,
@@ -551,7 +528,7 @@ impl CoinbaseWallet {
         }
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(&symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, kind, e)),
         };
         // A protective exit sells the held base balance; clamp the share to what
         // we hold (reduce-only) and round to the base increment.
@@ -566,7 +543,7 @@ impl CoinbaseWallet {
             .min(held);
         let base_size = floor_to_step(units, spec.base_increment);
         if base_size < spec.base_min || base_size <= POSITION_EPSILON {
-            return Err(self.refuse(
+            return Err(self.log.refuse(
                 &symbol,
                 local,
                 kind,
@@ -609,15 +586,15 @@ impl CoinbaseWallet {
             }},
         });
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let value = match self.signed(Method::POST, "/orders", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, kind, e)),
         };
         let order_id = match order_result_id(&value) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, kind, e)),
         };
         self.map_order(local, &order_id, kind);
         let leg = RestingOrder {
@@ -708,16 +685,16 @@ impl Wallet<Symbol> for CoinbaseWallet {
     fn update(&mut self, symbol: Symbol, candle: Candle) -> Vec<Order<Symbol>> {
         self.marks.insert(symbol.clone(), candle.close);
         if let Err(e) = self.refresh_account() {
-            self.errors.push(e);
+            self.log.note(e);
         }
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
             return Vec::new();
         }
         match self.poll_symbol(&symbol) {
             Ok(fills) => fills,
             Err(e) => {
-                self.errors.push(e);
+                self.log.note(e);
                 Vec::new()
             }
         }
@@ -728,19 +705,19 @@ impl Wallet<Symbol> for CoinbaseWallet {
         let id = self.mint();
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         let current = self.base_balance(&symbol);
         // Spot can't hold a short: a negative target is clamped to flat, and the
         // un-shortable remainder is reported so the strategy isn't misled.
         let effective_target = target.amount.max(0.0);
         if target.amount < -POSITION_EPSILON {
-            self.rejections.push(Rejection {
-                symbol: symbol.clone(),
+            self.log.reject(
+                &symbol,
                 id,
-                error: WalletError::UnsupportedOperation,
-                kind: OrderKind::Market,
-            });
+                WalletError::UnsupportedOperation,
+                OrderKind::Market,
+            );
         }
         let delta = effective_target - current;
         let side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
@@ -808,7 +785,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
     ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if limit.0 <= 0.0 {
-            return Err(self.refuse(
+            return Err(self.log.refuse(
                 &symbol,
                 local,
                 OrderKind::Limit,
@@ -817,7 +794,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
         }
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         let current = self.base_balance(&symbol);
         let units = size.resolve(limit.0, current, self.quote_balance(), self.equity().0);
@@ -847,7 +824,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
         }
 
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let body = serde_json::json!({
             "client_order_id": client_order_id(local),
@@ -860,11 +837,11 @@ impl Wallet<Symbol> for CoinbaseWallet {
         });
         let value = match self.signed(Method::POST, "/orders", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         let order_id = match order_result_id(&value) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         self.map_order(local, &order_id, OrderKind::Limit);
         self.limits.insert(
@@ -888,7 +865,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
     }
 
     fn take_rejections(&mut self) -> Vec<Rejection<Symbol>> {
-        std::mem::take(&mut self.rejections)
+        self.log.take_rejections()
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
@@ -897,7 +874,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
         for symbol in symbols {
             match self.poll_symbol(&symbol) {
                 Ok(mut fills) => out.append(&mut fills),
-                Err(e) => self.errors.push(e),
+                Err(e) => self.log.note(e),
             }
         }
         out

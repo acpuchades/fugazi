@@ -17,7 +17,7 @@ use super::types::{
     Ack, Order, OrderId, OrderKind, POSITION_EPSILON, PRICE_EPSILON, Reference, Rejection, Side,
     Size, Units, WalletError, cash_tolerance,
 };
-use super::{Wallet, marked_sum};
+use super::{Wallet, marked_sum, trim_front};
 use crate::hash::SymMap;
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -246,31 +246,14 @@ impl<Sym> PaperWallet<Sym> {
     /// amortized O(1) — a `drain` from the front is O(n), so trimming one entry
     /// per push past the limit would make a long run quadratic.
     fn trim(&mut self) {
-        let Some(limit) = self.retention else {
-            return;
-        };
-        // A zero limit means "keep nothing", so it has no slack to amortize
-        // against; clear on the spot instead of waiting for `2 * 0`.
-        if limit == 0 {
-            self.blotter.clear();
-            self.rejections_drained = 0;
-            self.rejections.clear();
-            return;
-        }
-        if self.blotter.len() >= limit * 2 {
-            let excess = self.blotter.len() - limit;
-            self.blotter.drain(..excess);
-        }
-        if self.rejections.len() >= limit * 2 {
-            let excess = self.rejections.len() - limit;
-            self.rejections.drain(..excess);
-            // The drain cursor indexes the vec's head, which just moved. Any
-            // dropped entry that had not been drained yet is gone for good —
-            // inherent to a bounded log — but saturating here keeps every
-            // *surviving* undrained entry reachable rather than skipping past
-            // them.
-            self.rejections_drained = self.rejections_drained.saturating_sub(excess);
-        }
+        trim_front(&mut self.blotter, self.retention);
+        let dropped = trim_front(&mut self.rejections, self.retention);
+        // The drain cursor indexes the vec's head, which just moved. Any
+        // dropped entry that had not been drained yet is gone for good —
+        // inherent to a bounded log — but saturating here keeps every
+        // *surviving* undrained entry reachable rather than skipping past
+        // them. (A zero limit drops everything, so this lands on 0.)
+        self.rejections_drained = self.rejections_drained.saturating_sub(dropped);
     }
 
     /// The most recent executed orders, oldest first (the trade blotter).

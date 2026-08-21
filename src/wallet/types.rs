@@ -37,6 +37,35 @@ pub(crate) fn cash_tolerance(scale: Real) -> Real {
     CASH_EPSILON * scale.abs().max(1.0)
 }
 
+/// Drop the oldest entries once `v` has grown to twice `limit`, bringing it
+/// back down to `limit`. Returns how many were dropped.
+///
+/// Batching the trim at `2 × limit` rather than trimming on every push past the
+/// limit is what keeps this amortized O(1): a `drain` from the front is O(n),
+/// so trimming one entry at a time would make a long run quadratic. The cost is
+/// that a bounded log can sit at up to twice its limit between trims, which
+/// every caller's own docs state.
+///
+/// `Some(0)` means "keep nothing" and has no slack to amortize against, so it
+/// clears on the spot rather than waiting for `2 × 0`. `None` is the opt-out:
+/// the caller asked for the whole history and gets it.
+pub(crate) fn trim_front<T>(v: &mut Vec<T>, limit: Option<usize>) -> usize {
+    let Some(limit) = limit else {
+        return 0;
+    };
+    if limit == 0 {
+        let dropped = v.len();
+        v.clear();
+        return dropped;
+    }
+    if v.len() >= limit * 2 {
+        let excess = v.len() - limit;
+        v.drain(..excess);
+        return excess;
+    }
+    0
+}
+
 /// `cash` plus every marked position, summed in a **canonical order**.
 ///
 /// The order matters and is not cosmetic. A wallet holds its positions in a

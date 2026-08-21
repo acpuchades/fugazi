@@ -77,7 +77,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    HttpCore, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+    HttpCore, LiveLog, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick,
+    with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
@@ -174,12 +175,12 @@ pub struct OkxWallet {
     // Resting limit orders, one per symbol — same convention as `protective`.
     limits: HashMap<Symbol, RestingLimit>,
 
-    // Fill polling: per-symbol last-seen billId, and the accumulated errors.
+    // Fill polling: per-symbol last-seen billId.
     trade_cursor: HashMap<Symbol, i64>,
-    errors: Vec<LiveError>,
-    // Refused orders awaiting a drain through take_rejections (the trait's
-    // failure stream — the twin of the fill stream update()/poll_fills return).
-    rejections: Vec<Rejection<Symbol>>,
+    // The error log, and the refused orders awaiting a drain through
+    // take_rejections (the trait's failure stream — the twin of the fill stream
+    // update()/poll_fills return). Both bounded; see `LiveLog`.
+    log: LiveLog,
 }
 
 impl OkxWallet {
@@ -235,8 +236,7 @@ impl OkxWallet {
             protective: HashMap::new(),
             limits: HashMap::new(),
             trade_cursor: HashMap::new(),
-            errors: Vec::new(),
-            rejections: Vec::new(),
+            log: LiveLog::default(),
         }
     }
 
@@ -251,8 +251,13 @@ impl OkxWallet {
     /// (the detail behind a returned [`WalletError::Venue`], plus best-effort
     /// refresh / fill-poll failures that don't have a return channel) is
     /// appended here, so a caller can see *why* a leg failed.
+    ///
+    /// Bounded: the oldest entries are dropped once the log grows past roughly
+    /// twice [`DEFAULT_RETENTION`](crate::wallet::DEFAULT_RETENTION), so a
+    /// long-running live process cannot leak through it. A caller who needs the
+    /// whole history wants their own durable store, not this accessor.
     pub fn errors(&self) -> &[LiveError] {
-        &self.errors
+        self.log.errors()
     }
 
     /// Force an account-state refresh (balance + positions) now, returning the
@@ -294,7 +299,7 @@ impl OkxWallet {
             let ct_val = match self.ensure_spec(inst) {
                 Ok(spec) => spec.ct_val,
                 Err(e) => {
-                    self.errors.push(e);
+                    self.log.note(e);
                     continue;
                 }
             };
@@ -392,37 +397,6 @@ impl OkxWallet {
         Ok(out)
     }
 
-    /// Record `err` on the internal log and return the trait-facing
-    /// [`WalletError::Venue`] category.
-    fn fail(&mut self, err: LiveError) -> WalletError {
-        self.errors.push(err);
-        WalletError::Venue
-    }
-
-    /// A **refused order**: log the detail, buffer a [`Rejection`] for
-    /// [`take_rejections`](Wallet::take_rejections) so the driver can route it to
-    /// [`Strategy::on_reject`](crate::Strategy::on_reject), and return the
-    /// trait-facing [`WalletError::Venue`]. Unlike [`fail`](Self::fail), this is
-    /// for a submission the strategy expected to place — an entry the venue
-    /// rejects leaves the strategy flat when it wanted a position, a rejected
-    /// protective leg leaves it holding one it wanted out of.
-    fn refuse(
-        &mut self,
-        symbol: &str,
-        id: OrderId,
-        kind: OrderKind,
-        err: LiveError,
-    ) -> WalletError {
-        self.errors.push(err);
-        self.rejections.push(Rejection {
-            symbol: crate::types::symbol(symbol),
-            id,
-            error: WalletError::Venue,
-            kind,
-        });
-        WalletError::Venue
-    }
-
     // --- REST plumbing -----------------------------------------------------
 
     /// A signed private request; blocks on the owned runtime. `query` is the
@@ -514,14 +488,14 @@ impl OkxWallet {
                         .get("sMsg")
                         .and_then(|m| m.as_str())
                         .unwrap_or("cancel failed");
-                    return Err(self.fail(LiveError::Http {
+                    return Err(self.log.fail(LiveError::Http {
                         status: 200,
                         body: msg.to_string(),
                     }));
                 }
                 Ok(())
             }
-            Err(e) => Err(self.fail(e)),
+            Err(e) => Err(self.log.fail(e)),
         }
     }
 
@@ -537,13 +511,13 @@ impl OkxWallet {
         let local = self.mint();
         let spec = match self.ensure_spec(symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
         };
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
         if pos.abs() <= POSITION_EPSILON {
             // Nothing to protect — our own guard, not a venue refusal; log it but
             // don't buffer a per-bar rejection for a flat re-submit.
-            return Err(self.fail(LiveError::Decode(format!(
+            return Err(self.log.fail(LiveError::Decode(format!(
                 "no open {symbol} position to rest a protective leg against"
             ))));
         }
@@ -575,15 +549,15 @@ impl OkxWallet {
             }
         }
         if let Err(e) = self.ensure_cursor(symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let value = match self.signed(Method::POST, "/api/v5/trade/order-algo", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
         };
         let algo_id = match order_result_id(&value, "algoId") {
             Ok(id) => id,
-            Err(e) => return Err(self.refuse(symbol, local, kind, e)),
+            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
         };
         self.map_order(local, &algo_id, kind);
         Ok(RestingLeg {
@@ -608,7 +582,7 @@ impl OkxWallet {
             Ok(s) => s,
             Err(e) => {
                 let id = self.mint();
-                return Err(self.refuse(&symbol, id, kind, e));
+                return Err(self.log.refuse(&symbol, id, kind, e));
             }
         };
         // Resolve the share against the cached position (base units), clamp to
@@ -626,7 +600,7 @@ impl OkxWallet {
         let contracts = floor_to_step(units / spec.ct_val, spec.lot_sz);
         if contracts <= POSITION_EPSILON {
             let id = self.mint();
-            return Err(self.refuse(
+            return Err(self.log.refuse(
                 &symbol,
                 id,
                 kind,
@@ -720,16 +694,16 @@ impl Wallet<Symbol> for OkxWallet {
         // Refresh account state best-effort; a failure just leaves the cache
         // stale (logged) rather than breaking the bar.
         if let Err(e) = self.refresh_account() {
-            self.errors.push(e);
+            self.log.note(e);
         }
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
             return Vec::new();
         }
         match self.poll_symbol(&symbol) {
             Ok(fills) => fills,
             Err(e) => {
-                self.errors.push(e);
+                self.log.note(e);
                 Vec::new()
             }
         }
@@ -742,7 +716,7 @@ impl Wallet<Symbol> for OkxWallet {
         let id = self.mint();
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target.amount - current;
@@ -756,7 +730,7 @@ impl Wallet<Symbol> for OkxWallet {
         // order that fills immediately is caught by the next poll rather than
         // skipped by a cursor advanced past its own fill.
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
         let body = serde_json::json!({
@@ -769,11 +743,11 @@ impl Wallet<Symbol> for OkxWallet {
         });
         let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         let ord_id = match order_result_id(&value, "ordId") {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         self.map_order(id, &ord_id, OrderKind::Market);
         Ok(Ack::Working(id))
@@ -835,7 +809,7 @@ impl Wallet<Symbol> for OkxWallet {
     ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if limit.0 <= 0.0 {
-            return Err(self.refuse(
+            return Err(self.log.refuse(
                 &symbol,
                 local,
                 OrderKind::Limit,
@@ -844,7 +818,7 @@ impl Wallet<Symbol> for OkxWallet {
         }
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
 
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
@@ -875,7 +849,7 @@ impl Wallet<Symbol> for OkxWallet {
         // Seed the fill cursor before placing, so a marketable limit that fills
         // instantly is caught by the next poll rather than skipped.
         if let Err(e) = self.ensure_cursor(&symbol) {
-            self.errors.push(e);
+            self.log.note(e);
         }
         let body = serde_json::json!({
             "instId": symbol,
@@ -888,11 +862,11 @@ impl Wallet<Symbol> for OkxWallet {
         });
         let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         let ord_id = match order_result_id(&value, "ordId") {
             Ok(v) => v,
-            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         self.map_order(local, &ord_id, OrderKind::Limit);
         self.limits.insert(
@@ -916,7 +890,7 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn take_rejections(&mut self) -> Vec<Rejection<Symbol>> {
-        std::mem::take(&mut self.rejections)
+        self.log.take_rejections()
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
@@ -925,7 +899,7 @@ impl Wallet<Symbol> for OkxWallet {
         for symbol in symbols {
             match self.poll_symbol(&symbol) {
                 Ok(mut fills) => out.append(&mut fills),
-                Err(e) => self.errors.push(e),
+                Err(e) => self.log.note(e),
             }
         }
         out

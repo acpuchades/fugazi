@@ -13,10 +13,13 @@
 //! |---|---|
 //! | this one | the exchange-precision arithmetic every venue quantises with |
 //! | [`rest`] | [`HttpCore`] — the client, the runtime, the base URL |
+//! | [`state`] | the bookkeeping every backend keeps, venue-independent |
 
 mod rest;
+mod state;
 
 pub(in crate::live) use rest::HttpCore;
+pub(in crate::live) use state::LiveLog;
 
 use crate::types::Real;
 
