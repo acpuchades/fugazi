@@ -76,8 +76,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    Bracket, HttpCore, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder, decimals_of,
-    parse_num, with_query,
+    Bracket, CursorModel, FillCursor, HttpCore, InstrumentGrid, LiveLog, OrderRegistry,
+    RestingOrder, VenueFill, decimals_of, parse_num, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
@@ -86,6 +86,9 @@ const MAINNET_BASE_URL: &str = "https://www.okx.com";
 const QUOTE_CCY: &str = "USDT";
 /// OKX's sentinel for "execute the triggered protective order at market".
 const MARKET_ORDER_PX: &str = "-1";
+/// `billId` is monotone across the account, so one high-water mark per symbol
+/// is enough to tell a fresh fill from one already reported.
+const CURSOR_MODEL: CursorModel = CursorModel::Watermark;
 
 /// A live [`Wallet`] over OKX V5 perpetual swaps. See the module-level docs
 /// for the trait-to-venue mapping and the contracts↔units convention.
@@ -121,8 +124,8 @@ pub struct OkxWallet {
     // Resting limit orders, one per symbol — same convention as `protective`.
     limits: SymMap<Symbol, RestingOrder>,
 
-    // Fill polling: per-symbol last-seen billId.
-    trade_cursor: SymMap<Symbol, i64>,
+    // Fill polling: per-symbol dedupe state (a `billId` high-water mark).
+    cursors: SymMap<Symbol, FillCursor>,
     // The error log, and the refused orders awaiting a drain through
     // take_rejections (the trait's failure stream — the twin of the fill stream
     // update()/poll_fills return). Both bounded; see `LiveLog`.
@@ -178,7 +181,7 @@ impl OkxWallet {
             orders: OrderRegistry::default(),
             protective: SymMap::default(),
             limits: SymMap::default(),
-            trade_cursor: SymMap::default(),
+            cursors: SymMap::default(),
             log: LiveLog::default(),
         }
     }
@@ -269,56 +272,57 @@ impl OkxWallet {
         Ok(grid)
     }
 
-    /// Ensure a fill cursor exists for `symbol`, seeding it to the latest
-    /// existing `billId` so we only ever report fills that happen *after* we
-    /// started trading it (not the account's whole history).
+    /// Ensure a fill cursor exists for `symbol`, seeding it past the existing
+    /// history so we only ever report fills that happen *after* we started
+    /// trading it.
     fn ensure_cursor(&mut self, symbol: &str) -> Result<(), LiveError> {
-        if self.trade_cursor.contains_key(symbol) {
+        if self.cursors.contains_key(symbol) {
             return Ok(());
         }
-        let trades = self.fetch_fills(symbol)?;
-        let max = trades.iter().map(|t| t.bill_id).max().unwrap_or(0);
-        self.trade_cursor.insert(crate::types::symbol(symbol), max);
+        let history = self.fetch_fills(symbol)?;
+        let cursor = FillCursor::seeded(CURSOR_MODEL, &history);
+        self.cursors.insert(crate::types::symbol(symbol), cursor);
         Ok(())
     }
 
-    /// Poll new fills for `symbol` since its cursor, advance the cursor, and
+    /// Poll new fills for `symbol` past its cursor, advance the cursor, and
     /// return them as [`Order`]s in base units. A venue order we placed maps back
     /// to its local [`OrderId`] and recorded [`OrderKind`]; a fill on an order we
     /// don't know (placed out-of-band) gets a fresh local id and `Market` kind.
+    ///
+    /// Pulls the recent window (OKX returns the last few days, most-recent
+    /// first) and filters locally rather than passing a `billId` cursor param —
+    /// robust for the once-per-bar cadence a driver uses, and it needs no
+    /// bootstrap value.
     fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
         let grid = self.ensure_grid(symbol)?;
-        let cursor = self.trade_cursor.get(symbol).copied().unwrap_or(0);
-        // Pull the recent fills (OKX returns the last few days, most-recent
-        // first) and keep only those newer than the cursor. Polling a small
-        // recent window and filtering locally avoids a bootstrap `billId`
-        // cursor param — robust for the once-per-bar cadence a driver uses.
-        let mut trades = self.fetch_fills(symbol)?;
-        trades.sort_by_key(|t| t.bill_id);
+        let mut fills = self.fetch_fills(symbol)?;
+        fills.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        let mut cursor = self
+            .cursors
+            .remove(symbol)
+            .unwrap_or_else(|| FillCursor::seeded(CURSOR_MODEL, &[]));
+        let fresh: Vec<VenueFill> = fills.into_iter().filter(|f| cursor.admit(f)).collect();
+        self.cursors.insert(crate::types::symbol(symbol), cursor);
+
         let mut out = Vec::new();
-        let mut max = cursor;
-        for t in trades {
-            if t.bill_id <= cursor {
-                continue;
-            }
-            max = max.max(t.bill_id);
-            let local = match self.orders.local_for(&t.ord_id) {
+        for f in fresh {
+            let local = match self.orders.local_for(&f.order_id) {
                 Some(id) => id,
                 None => self.orders.mint(),
             };
-            let kind = self.orders.kind_for(&t.ord_id);
+            let kind = self.orders.kind_for(&f.order_id);
             let order = Order::new(
                 crate::types::symbol(symbol),
-                t.side,
-                grid.base_units(t.contracts),
-                t.price,
+                f.side,
+                grid.base_units(f.size),
+                f.price,
                 kind,
                 local,
             )
-            .with_commission(t.commission);
+            .with_commission(f.commission);
             out.push(order);
         }
-        self.trade_cursor.insert(crate::types::symbol(symbol), max);
         Ok(out)
     }
 
@@ -365,7 +369,7 @@ impl OkxWallet {
 
     /// Fetch the recent fills for `symbol` (the venue's default window). The
     /// caller keeps only those past its per-symbol `billId` cursor.
-    fn fetch_fills(&self, symbol: &str) -> Result<Vec<Fill>, LiveError> {
+    fn fetch_fills(&self, symbol: &str) -> Result<Vec<VenueFill>, LiveError> {
         let params = vec![
             ("instType", "SWAP".to_string()),
             ("instId", symbol.to_string()),
@@ -814,7 +818,7 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
-        let symbols: Vec<Symbol> = self.trade_cursor.keys().cloned().collect();
+        let symbols: Vec<Symbol> = self.cursors.keys().cloned().collect();
         let mut out = Vec::new();
         for symbol in symbols {
             match self.poll_symbol(&symbol) {
@@ -1016,25 +1020,15 @@ fn parse_instrument_grid(value: &serde_json::Value, symbol: &str) -> Option<Inst
     })
 }
 
-/// One row of `GET /api/v5/trade/fills`, reduced to what a fill needs. `contracts`
-/// is the venue-native `fillSz`; the caller multiplies by `ctVal` for base units.
-#[derive(Debug, Clone)]
-struct Fill {
-    bill_id: i64,
-    ord_id: String,
-    side: Side,
-    contracts: Real,
-    price: Real,
-    commission: Real,
-}
-
-fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
+/// One row of `GET /api/v5/trade/fills`, normalized. `size` is the venue-native
+/// `fillSz`, in contracts; the caller multiplies by `ctVal` for base units.
+fn parse_fill(v: &serde_json::Value) -> Result<VenueFill, LiveError> {
     let bill_id = v
         .get("billId")
         .and_then(|x| x.as_str())
         .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| LiveError::Decode("fill missing billId".into()))?;
-    let ord_id = v
+    let order_id = v
         .get("ordId")
         .and_then(|x| x.as_str())
         .unwrap_or_default()
@@ -1043,18 +1037,22 @@ fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
         Some("buy") => Side::Buy,
         _ => Side::Sell,
     };
-    let contracts =
+    let size =
         num_field(v, "fillSz").ok_or_else(|| LiveError::Decode("fill missing fillSz".into()))?;
     let price =
         num_field(v, "fillPx").ok_or_else(|| LiveError::Decode("fill missing fillPx".into()))?;
     // OKX reports `fee` as a signed number: negative when charged, positive for
     // a rebate. Book the cost as a non-negative commission.
     let commission = num_field(v, "fee").map(|f| (-f).max(0.0)).unwrap_or(0.0);
-    Ok(Fill {
-        bill_id,
-        ord_id,
+    Ok(VenueFill {
+        // `billId` is monotone across the account, which is what lets this
+        // venue dedupe on a single high-water mark.
+        ordinal: Some(bill_id),
+        id: bill_id.to_string(),
+        sequence: bill_id.to_string(),
+        order_id,
         side,
-        contracts,
+        size,
         price,
         commission,
     })
@@ -1145,14 +1143,17 @@ mod tests {
             "billId": "88", "ordId": "42", "side": "sell",
             "fillSz": "2", "fillPx": "27000.5", "fee": "-0.27"
         });
-        let t = parse_fill(&row).expect("fill parsed");
-        assert_eq!(t.bill_id, 88);
-        assert_eq!(t.ord_id, "42");
-        assert_eq!(t.side, Side::Sell);
-        assert!((t.contracts - 2.0).abs() < 1e-9);
-        assert!((t.price - 27000.5).abs() < 1e-9);
+        let f = parse_fill(&row).expect("fill parsed");
+        // `billId` is monotone, so it is the ordinal the cursor watermarks on.
+        assert_eq!(f.ordinal, Some(88));
+        assert_eq!(f.id, "88");
+        assert_eq!(f.order_id, "42");
+        assert_eq!(f.side, Side::Sell);
+        // Venue-native: `fillSz` is contracts, converted by the grid on the way out.
+        assert!((f.size - 2.0).abs() < 1e-9);
+        assert!((f.price - 27000.5).abs() < 1e-9);
         // Fee negative-as-charged becomes a positive commission.
-        assert!((t.commission - 0.27).abs() < 1e-9);
+        assert!((f.commission - 0.27).abs() < 1e-9);
     }
 
     #[test]

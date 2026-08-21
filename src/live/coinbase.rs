@@ -52,7 +52,7 @@
 //! REST fill polling is the MVP; a WebSocket user-data stream is the natural
 //! lower-latency follow-up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -69,8 +69,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON, marked_sum};
 
 use super::LiveError;
 use super::venue::{
-    Bracket, HttpCore, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder, decimals_of,
-    parse_num, with_query,
+    Bracket, CursorModel, FillCursor, HttpCore, InstrumentGrid, LiveLog, OrderRegistry,
+    RestingOrder, VenueFill, decimals_of, parse_num, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://api.coinbase.com";
@@ -79,6 +79,11 @@ const API_PREFIX: &str = "/api/v3/brokerage";
 const DEFAULT_QUOTE_CCY: &str = "USD";
 /// How long each signed JWT is valid, in seconds (Coinbase's fixed window).
 const JWT_TTL_SECS: u64 = 120;
+/// Advanced Trade issues opaque `trade_id`s with no monotone key, so a fill is
+/// deduped against the ids already reported. The bound is far above the
+/// hundred-row page `GET /orders/historical/fills` returns, which is what makes
+/// evicting the oldest safe: a forgotten id can no longer come back in a poll.
+const CURSOR_MODEL: CursorModel = CursorModel::SeenIds { capacity: 4096 };
 
 /// A live [`Wallet`] over Coinbase Advanced Trade spot. See the module-level
 /// docs for the trait-to-venue mapping and the spot-balance convention.
@@ -111,8 +116,8 @@ pub struct CoinbaseWallet {
     protective: SymMap<Symbol, Bracket>,
     limits: SymMap<Symbol, RestingOrder>,
 
-    // Fill polling: per-symbol set of already-reported trade ids.
-    seen_trades: SymMap<Symbol, HashSet<String>>,
+    // Fill polling: per-symbol dedupe state (a bounded set of reported ids).
+    cursors: SymMap<Symbol, FillCursor>,
     // The error log, and the refused orders awaiting a drain through
     // take_rejections. Both bounded; see `LiveLog`.
     log: LiveLog,
@@ -154,7 +159,7 @@ impl CoinbaseWallet {
             nonce_counter: 0,
             protective: SymMap::default(),
             limits: SymMap::default(),
-            seen_trades: SymMap::default(),
+            cursors: SymMap::default(),
             log: LiveLog::default(),
         })
     }
@@ -188,7 +193,7 @@ impl CoinbaseWallet {
             nonce_counter: 0,
             protective: SymMap::default(),
             limits: SymMap::default(),
-            seen_trades: SymMap::default(),
+            cursors: SymMap::default(),
             log: LiveLog::default(),
         }
     }
@@ -292,16 +297,16 @@ impl CoinbaseWallet {
         Ok(grid)
     }
 
-    /// Ensure the seen-trades set for `symbol` exists, seeding it with the
-    /// product's current fills so we only ever report fills that happen *after*
-    /// we started trading it (not the account's whole history).
+    /// Ensure a fill cursor exists for `symbol`, seeding it with the product's
+    /// current fills so we only ever report fills that happen *after* we started
+    /// trading it (not the account's whole history).
     fn ensure_cursor(&mut self, symbol: &str) -> Result<(), LiveError> {
-        if self.seen_trades.contains_key(symbol) {
+        if self.cursors.contains_key(symbol) {
             return Ok(());
         }
-        let fills = self.fetch_fills(symbol)?;
-        let seen: HashSet<String> = fills.into_iter().map(|f| f.trade_id).collect();
-        self.seen_trades.insert(crate::types::symbol(symbol), seen);
+        let history = self.fetch_fills(symbol)?;
+        let cursor = FillCursor::seeded(CURSOR_MODEL, &history);
+        self.cursors.insert(crate::types::symbol(symbol), cursor);
         Ok(())
     }
 
@@ -312,15 +317,14 @@ impl CoinbaseWallet {
     fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
         let mut fills = self.fetch_fills(symbol)?;
         // Oldest-first, so partial fills reach the strategy in execution order.
-        fills.sort_by(|a, b| a.sequence.cmp(&b.sequence));
-        let seen = self
-            .seen_trades
-            .entry(crate::types::symbol(symbol))
-            .or_default();
-        let fresh: Vec<Fill> = fills
-            .into_iter()
-            .filter(|f| seen.insert(f.trade_id.clone()))
-            .collect();
+        fills.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        let mut cursor = self
+            .cursors
+            .remove(symbol)
+            .unwrap_or_else(|| FillCursor::seeded(CURSOR_MODEL, &[]));
+        let fresh: Vec<VenueFill> = fills.into_iter().filter(|f| cursor.admit(f)).collect();
+        self.cursors.insert(crate::types::symbol(symbol), cursor);
+
         let mut out = Vec::new();
         for f in fresh {
             let local = match self.orders.local_for(&f.order_id) {
@@ -331,6 +335,7 @@ impl CoinbaseWallet {
             let order = Order::new(
                 crate::types::symbol(symbol),
                 f.side,
+                // Spot fills report base units already.
                 f.size,
                 f.price,
                 kind,
@@ -394,7 +399,7 @@ impl CoinbaseWallet {
     }
 
     /// Fetch the recent fills for `symbol`.
-    fn fetch_fills(&mut self, symbol: &str) -> Result<Vec<Fill>, LiveError> {
+    fn fetch_fills(&mut self, symbol: &str) -> Result<Vec<VenueFill>, LiveError> {
         let query = vec![
             ("product_id", symbol.to_string()),
             ("limit", "100".to_string()),
@@ -800,7 +805,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
-        let symbols: Vec<Symbol> = self.seen_trades.keys().cloned().collect();
+        let symbols: Vec<Symbol> = self.cursors.keys().cloned().collect();
         let mut out = Vec::new();
         for symbol in symbols {
             match self.poll_symbol(&symbol) {
@@ -976,20 +981,9 @@ fn parse_product_grid(value: &serde_json::Value) -> Option<InstrumentGrid> {
     })
 }
 
-/// One row of the fills endpoint, reduced to what a fill needs.
-#[derive(Debug, Clone)]
-struct Fill {
-    trade_id: String,
-    order_id: String,
-    /// A monotonic ordering key (the `sequence_timestamp` string, or `trade_id`).
-    sequence: String,
-    side: Side,
-    size: Real,
-    price: Real,
-    commission: Real,
-}
-
-fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
+/// One row of the fills endpoint, normalized. `size` is already in base units:
+/// spot has no contract wrapper.
+fn parse_fill(v: &serde_json::Value) -> Result<VenueFill, LiveError> {
     let trade_id = v
         .get("trade_id")
         .and_then(|x| x.as_str())
@@ -1023,10 +1017,13 @@ fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
         .and_then(parse_num)
         .map(|c| c.max(0.0))
         .unwrap_or(0.0);
-    Ok(Fill {
-        trade_id,
-        order_id,
+    Ok(VenueFill {
+        // No monotone key on this venue — `sequence_timestamp` orders the
+        // fills, and `trade_id` is what dedupes them.
+        ordinal: None,
+        id: trade_id,
         sequence,
+        order_id,
         side,
         size,
         price,
@@ -1150,7 +1147,10 @@ mod tests {
             "sequence_timestamp": "2024-01-01T00:00:00Z"
         });
         let f = parse_fill(&row).expect("fill parsed");
-        assert_eq!(f.trade_id, "111");
+        // No monotone key on this venue: the id dedupes, the timestamp orders.
+        assert_eq!(f.ordinal, None);
+        assert_eq!(f.id, "111");
+        assert_eq!(f.sequence, "2024-01-01T00:00:00Z");
         assert_eq!(f.order_id, "abc");
         assert_eq!(f.side, Side::Sell);
         assert!((f.size - 2.0).abs() < 1e-9);
