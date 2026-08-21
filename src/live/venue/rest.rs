@@ -18,6 +18,7 @@ use super::with_query;
 /// The runtime incantation was written out three times before this existed
 /// (twice in `coinbase.rs`, once in `okx.rs`), each with the same `expect`
 /// message.
+#[derive(Debug)]
 pub(in crate::live) struct HttpCore {
     client: reqwest::Client,
     rt: tokio::runtime::Runtime,

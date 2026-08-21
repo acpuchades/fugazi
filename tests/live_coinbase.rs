@@ -481,6 +481,10 @@ impl common::live::LiveVenue for CoinbaseWallet {
     fn error_log(&self) -> Vec<String> {
         self.errors().iter().map(|e| e.to_string()).collect()
     }
+
+    fn sync(&mut self) {
+        let _ = self.refresh_account();
+    }
 }
 
 macro_rules! conformance {
@@ -501,4 +505,6 @@ conformance!(
     a_limit_dedups_an_unchanged_resubmit,
     cancel_by_id_withdraws_a_resting_limit,
     flatten_cancels_the_resting_orders_and_closes_the_position,
+    a_non_positive_protective_trigger_is_refused_locally,
+    a_protective_leg_rested_before_the_first_bar_sizes_at_its_trigger,
 );

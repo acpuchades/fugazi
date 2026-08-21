@@ -193,6 +193,100 @@ fn a_limit_order_posts_its_price_on_the_instrument_tick() {
     assert_eq!(body["px"], "26000.0", "the price lands on the 0.1 tick");
 }
 
+/// A protective leg below the instrument's **minimum** is refused locally,
+/// rather than POSTed for the venue to reject.
+///
+/// OKX checked only that the size didn't round to *zero*, so an instrument
+/// whose `minSz` exceeds its `lotSz` — a real and common shape — got a
+/// well-formed order the venue was always going to bounce. Coinbase already
+/// checked the minimum; this is the half of the asymmetry that moved.
+///
+/// It cannot live in the shared suite, because expressing it needs
+/// `minSz > lotSz` and the shared fixture's grid has them equal.
+#[test]
+fn a_protective_leg_below_the_instrument_minimum_is_refused_locally() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `lotSz` 0.1 but `minSz` 1.0: 0.5 contracts is a legal multiple of the
+    // step and still under the minimum. The old check only caught a size that
+    // rounded to *zero*, so this shape sailed through to the venue.
+    let coarse = serde_json::json!({
+        "code": "0",
+        "data": [{
+            "instId": SYMBOL,
+            "lotSz": "0.1", "minSz": "1", "tickSz": "0.1", "ctVal": "0.01"
+        }]
+    });
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counter = posts.clone();
+
+    let mock = serve(move |server| {
+        let (coarse, counter) = (coarse.clone(), counter.clone());
+        Box::pin(async move {
+            Mock::given(method("GET"))
+                .and(path("/api/v5/public/instruments"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(coarse))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/balance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(balance()))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/positions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(positions("3")))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/trade/fills"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "code": "0", "data": [] })),
+                )
+                .mount(server)
+                .await;
+            // Mounted and accepting, so a submission that *does* go out reads
+            // as a success — the assertion below is on the count, not on the
+            // wallet happening to error for some other reason.
+            Mock::given(method("POST"))
+                .and(path("/api/v5/trade/order-algo"))
+                .respond_with(move |_req: &wiremock::Request| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": "0", "data": [{ "algoId": "ALGO1", "sCode": "0" }]
+                    }))
+                })
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = wallet(mock.uri.clone());
+    w.update(
+        intern(SYMBOL),
+        Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0),
+    );
+
+    // 0.005 BTC is 0.5 contracts: on the 0.1 step, under the 1.0 minimum.
+    let result = w.set_stop(intern(SYMBOL), Reference(26000.0), Size::units(0.005));
+    assert_eq!(
+        posts.load(Ordering::SeqCst),
+        0,
+        "a sub-minimum protective leg must never reach the venue"
+    );
+    assert!(
+        result.is_err(),
+        "and the submission must report the refusal"
+    );
+    assert_eq!(
+        w.take_rejections().len(),
+        1,
+        "and the strategy must learn it is unprotected"
+    );
+}
+
 /// The body of the most recent order POST, parsed.
 fn sent_order(mock: &common::live::VenueMock) -> serde_json::Value {
     let raw = mock.last_order.lock().expect("uncontended").clone();
@@ -466,6 +560,10 @@ impl common::live::LiveVenue for OkxWallet {
     fn error_log(&self) -> Vec<String> {
         self.errors().iter().map(|e| e.to_string()).collect()
     }
+
+    fn sync(&mut self) {
+        let _ = self.refresh_account();
+    }
 }
 
 macro_rules! conformance {
@@ -486,4 +584,6 @@ conformance!(
     a_limit_dedups_an_unchanged_resubmit,
     cancel_by_id_withdraws_a_resting_limit,
     flatten_cancels_the_resting_orders_and_closes_the_position,
+    a_non_positive_protective_trigger_is_refused_locally,
+    a_protective_leg_rested_before_the_first_bar_sizes_at_its_trigger,
 );

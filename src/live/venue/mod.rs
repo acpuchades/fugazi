@@ -15,14 +15,19 @@
 //! | [`rest`] | [`HttpCore`] — the client, the runtime, the base URL |
 //! | [`state`] | the bookkeeping every backend keeps, venue-independent |
 //! | [`fills`] | the normalized fill feed and its two dedupe models |
+//! | [`backend`] | [`VenueBackend`] — the hooks a venue supplies |
+//! | [`flow`] | the shared `Wallet` bodies, over those hooks |
 
+mod backend;
 mod fills;
+pub(in crate::live) mod flow;
 mod rest;
 mod state;
 
+pub(in crate::live) use backend::VenueBackend;
 pub(in crate::live) use fills::{CursorModel, FillCursor, VenueFill};
 pub(in crate::live) use rest::HttpCore;
-pub(in crate::live) use state::{Bracket, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder};
+pub(in crate::live) use state::{InstrumentGrid, LiveCore, OrderClass, RestingOrder};
 
 use crate::types::Real;
 

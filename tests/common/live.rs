@@ -127,6 +127,11 @@ pub trait LiveVenue: Wallet<Symbol> + Sized {
     /// The wallet's error log, rendered — so the suite needs no `LiveError`
     /// import and can put the detail in every failure message.
     fn error_log(&self) -> Vec<String>;
+    /// Force an account sync without feeding a bar. Both wallets expose this
+    /// publicly and the README tells callers to use it right after
+    /// construction; it is how the suite reaches the "positions known, no mark
+    /// yet" state a strategy is in before its first `update`.
+    fn sync(&mut self);
 }
 
 /// What the mock should serve.
@@ -806,5 +811,85 @@ pub fn flatten_cancels_the_resting_orders_and_closes_the_position<V: LiveVenue>(
         "{}: flatten must submit a close for the open position; errors: {:?}",
         fx.name,
         w.error_log()
+    );
+}
+
+/// A non-positive trigger is refused **before** it reaches the venue.
+///
+/// Nonsense on any venue, and a wallet that forwards it is asking to have an
+/// order rejected on arrival with the detail buried in a REST envelope.
+pub fn a_non_positive_protective_trigger_is_refused_locally<V: LiveVenue>() {
+    let fx = V::fixture();
+    let sym = intern(fx.symbol);
+    let base = 3.0 * fx.contract_multiplier;
+    let mock = mount::<V>(MockPlan::new(Account {
+        quote: 10_000.0,
+        base_units: base,
+    }));
+    let mut w = V::build(mock.uri());
+    tick(&mut w, &sym, 27_000.0);
+    let placed_before = mock.orders();
+
+    let result = w.set_stop(sym.clone(), Reference(0.0), Size::units(base));
+    assert!(result.is_err(), "{}: a zero trigger is refused", fx.name);
+    assert_eq!(
+        mock.orders(),
+        placed_before,
+        "{}: nothing may reach the venue",
+        fx.name
+    );
+    assert_eq!(
+        w.take_rejections().len(),
+        1,
+        "{}: and the strategy must learn its stop did not rest",
+        fx.name
+    );
+}
+
+/// A protective leg rested **before the first bar** sizes against its own
+/// trigger.
+///
+/// A strategy that syncs its account and rests a stop before feeding a candle
+/// has no mark yet. Falling back to zero makes `Size::resolve` answer `0.0` for
+/// every fraction-shaped size — so every such stop refuses, and the position
+/// sits unprotected with only a line in the error log to say so. The trigger is
+/// the only price the caller has actually named, and it is the price the leg
+/// will fill near.
+pub fn a_protective_leg_rested_before_the_first_bar_sizes_at_its_trigger<V: LiveVenue>() {
+    let fx = V::fixture();
+    let sym = intern(fx.symbol);
+    let base = 3.0 * fx.contract_multiplier;
+    let mock = mount::<V>(MockPlan::new(Account {
+        quote: 10_000.0,
+        base_units: base,
+    }));
+    let mut w = V::build(mock.uri());
+
+    // Account synced, no candle fed: `price()` is None on purpose.
+    w.sync();
+    assert!(
+        w.price(&sym).is_none(),
+        "{}: the fixture must have no mark, or this proves nothing",
+        fx.name
+    );
+    assert!(
+        (w.position(&sym).amount - base).abs() < 1e-9,
+        "{}: the synced position is what the leg is sized against",
+        fx.name
+    );
+
+    w.set_stop(sym.clone(), Reference(26_000.0), Size::value_frac(0.5))
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}: a fraction-sized stop before the first bar: {e:?} {:?}",
+                fx.name,
+                w.error_log()
+            )
+        });
+    assert_eq!(
+        mock.orders(),
+        1,
+        "{}: the protective leg must reach the venue",
+        fx.name
     );
 }

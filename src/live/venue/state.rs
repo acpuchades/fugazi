@@ -8,7 +8,19 @@ use crate::wallet::{
 };
 
 use super::super::LiveError;
-use super::{floor_to_step, format_decimals, round_to_tick};
+use super::{FillCursor, HttpCore, floor_to_step, format_decimals, round_to_tick};
+
+/// Which cancel endpoint a venue order belongs to.
+///
+/// OKX has two (`/trade/cancel-order` for a resting entry,
+/// `/trade/cancel-algos` for a protective leg); a venue with one ignores this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::live) enum OrderClass {
+    /// A resting limit entry.
+    Entry,
+    /// A stop or take-profit leg.
+    Protective,
+}
 
 /// The trading grid for one instrument, in **venue-native size units** —
 /// contracts on a derivatives venue, base-asset units on spot.
@@ -359,5 +371,167 @@ mod tests {
             log.take_rejections().is_empty(),
             "a second drain must yield nothing"
         );
+    }
+}
+
+/// Everything both live wallets keep that isn't credentials, signing, or the
+/// venue's own account shape.
+///
+/// A Rust trait can't have fields, so the shared `Wallet` bodies in
+/// [`flow`](super::flow) reach this through
+/// [`VenueBackend`](super::VenueBackend)'s accessor pair. What stays outside is
+/// exactly what differs in *kind* between venues: the credentials, the signing,
+/// and how the account reports balances and positions.
+#[derive(Debug)]
+pub(in crate::live) struct LiveCore {
+    pub(in crate::live) http: HttpCore,
+    marks: SymMap<Symbol, Real>,
+    grids: SymMap<Symbol, InstrumentGrid>,
+    orders: OrderRegistry,
+    protective: SymMap<Symbol, Bracket>,
+    limits: SymMap<Symbol, RestingOrder>,
+    cursors: SymMap<Symbol, FillCursor>,
+    log: LiveLog,
+}
+
+impl LiveCore {
+    pub(in crate::live) fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            http: HttpCore::new(base_url),
+            marks: SymMap::default(),
+            grids: SymMap::default(),
+            orders: OrderRegistry::default(),
+            protective: SymMap::default(),
+            limits: SymMap::default(),
+            cursors: SymMap::default(),
+            log: LiveLog::default(),
+        }
+    }
+
+    // --- marks -------------------------------------------------------------
+
+    pub(in crate::live) fn mark(&self, symbol: &str) -> Option<Real> {
+        self.marks.get(symbol).copied()
+    }
+
+    pub(in crate::live) fn set_mark(&mut self, symbol: &Symbol, price: Real) {
+        self.marks.insert(symbol.clone(), price);
+    }
+
+    /// Every symbol a candle has been fed for. On a venue whose account reports
+    /// balances by *currency* rather than by product, this is the only way to
+    /// name the products it holds.
+    pub(in crate::live) fn marked_symbols(&self) -> impl Iterator<Item = &Symbol> {
+        self.marks.keys()
+    }
+
+    /// Every fed mark. `ExactSizeIterator` because
+    /// [`marked_sum`](crate::wallet::marked_sum) sizes its stack buffer from
+    /// the count before it walks the values.
+    pub(in crate::live) fn marks(&self) -> impl ExactSizeIterator<Item = (&Symbol, Real)> {
+        self.marks.iter().map(|(s, &p)| (s, p))
+    }
+
+    // --- instrument grids --------------------------------------------------
+
+    pub(in crate::live) fn grid(&self, symbol: &str) -> Option<InstrumentGrid> {
+        self.grids.get(symbol).copied()
+    }
+
+    pub(in crate::live) fn cache_grid(&mut self, symbol: &str, grid: InstrumentGrid) {
+        self.grids.insert(crate::types::symbol(symbol), grid);
+    }
+
+    // --- order ids ---------------------------------------------------------
+
+    pub(in crate::live) fn orders(&self) -> &OrderRegistry {
+        &self.orders
+    }
+
+    pub(in crate::live) fn orders_mut(&mut self) -> &mut OrderRegistry {
+        &mut self.orders
+    }
+
+    pub(in crate::live) fn mint(&mut self) -> OrderId {
+        self.orders.mint()
+    }
+
+    // --- resting orders ----------------------------------------------------
+
+    pub(in crate::live) fn bracket(&self, symbol: &str) -> Option<&Bracket> {
+        self.protective.get(symbol)
+    }
+
+    pub(in crate::live) fn set_leg(&mut self, symbol: &Symbol, kind: OrderKind, leg: RestingOrder) {
+        self.protective
+            .entry(symbol.clone())
+            .or_default()
+            .set(kind, leg);
+    }
+
+    pub(in crate::live) fn take_bracket(&mut self, symbol: &str) -> Option<Bracket> {
+        self.protective.remove(symbol)
+    }
+
+    pub(in crate::live) fn clear_leg(&mut self, symbol: &str, local: OrderId) {
+        if let Some(bracket) = self.protective.get_mut(symbol) {
+            bracket.clear_local(local);
+        }
+    }
+
+    pub(in crate::live) fn limit(&self, symbol: &str) -> Option<&RestingOrder> {
+        self.limits.get(symbol)
+    }
+
+    pub(in crate::live) fn set_limit(&mut self, symbol: &Symbol, order: RestingOrder) {
+        self.limits.insert(symbol.clone(), order);
+    }
+
+    pub(in crate::live) fn take_limit(&mut self, symbol: &str) -> Option<RestingOrder> {
+        self.limits.remove(symbol)
+    }
+
+    /// The symbol whose resting limit carries this local id.
+    pub(in crate::live) fn symbol_of_limit(&self, local: OrderId) -> Option<Symbol> {
+        self.limits
+            .iter()
+            .find_map(|(sym, order)| (order.local == local).then(|| sym.clone()))
+    }
+
+    /// The symbol whose protective bracket carries this local id.
+    pub(in crate::live) fn symbol_of_leg(&self, local: OrderId) -> Option<Symbol> {
+        self.protective
+            .iter()
+            .find_map(|(sym, bracket)| bracket.leg_local(local).then(|| sym.clone()))
+    }
+
+    // --- fill cursors ------------------------------------------------------
+
+    pub(in crate::live) fn has_cursor(&self, symbol: &str) -> bool {
+        self.cursors.contains_key(symbol)
+    }
+
+    pub(in crate::live) fn seed_cursor(&mut self, symbol: &str, cursor: FillCursor) {
+        self.cursors.insert(crate::types::symbol(symbol), cursor);
+    }
+
+    pub(in crate::live) fn take_cursor(&mut self, symbol: &str) -> Option<FillCursor> {
+        self.cursors.remove(symbol)
+    }
+
+    /// Every symbol with a cursor — the ones this wallet has traded, and so the
+    /// ones [`poll_fills`](crate::Wallet::poll_fills) has to sweep.
+    pub(in crate::live) fn cursor_symbols(&self) -> Vec<Symbol> {
+        self.cursors.keys().cloned().collect()
+    }
+
+    // --- logs --------------------------------------------------------------
+
+    pub(in crate::live) fn log(&self) -> &LiveLog {
+        &self.log
+    }
+
+    pub(in crate::live) fn log_mut(&mut self) -> &mut LiveLog {
+        &mut self.log
     }
 }

@@ -70,14 +70,14 @@ use crate::hash::SymMap;
 use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{
-    Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, POSITION_EPSILON, Reference, Rejection, Side, Size, Units,
+    Wallet, WalletError,
 };
-use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    Bracket, CursorModel, FillCursor, HttpCore, InstrumentGrid, LiveLog, OrderRegistry,
-    RestingOrder, VenueFill, decimals_of, parse_num, with_query,
+    CursorModel, HttpCore, InstrumentGrid, LiveCore, OrderClass, VenueBackend, VenueFill,
+    decimals_of, flow, parse_num, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
@@ -98,7 +98,9 @@ const CURSOR_MODEL: CursorModel = CursorModel::Watermark;
 /// [`PaperWallet`](crate::PaperWallet). Must be used from a synchronous context
 /// (it owns a `tokio` runtime and blocks on each REST call).
 pub struct OkxWallet {
-    http: HttpCore,
+    /// Everything a venue backend keeps that isn't credentials, signing, or
+    /// this venue's own account shape.
+    core: LiveCore,
     api_key: String,
     api_secret: String,
     passphrase: String,
@@ -112,24 +114,6 @@ pub struct OkxWallet {
     equity: Real,
     /// Signed positions in **base units** (converted from the venue's contracts).
     positions: SymMap<Symbol, Real>,
-    marks: SymMap<Symbol, Real>,
-    grids: SymMap<Symbol, InstrumentGrid>,
-
-    // Wallet-minted local ids <-> venue order/algo ids, and the kind each was
-    // placed as (so a polled fill is tagged Market / Stop / TakeProfit / Limit).
-    orders: OrderRegistry,
-
-    // Resting protective legs, for idempotent re-submit / cancel-on-change.
-    protective: SymMap<Symbol, Bracket>,
-    // Resting limit orders, one per symbol — same convention as `protective`.
-    limits: SymMap<Symbol, RestingOrder>,
-
-    // Fill polling: per-symbol dedupe state (a `billId` high-water mark).
-    cursors: SymMap<Symbol, FillCursor>,
-    // The error log, and the refused orders awaiting a drain through
-    // take_rejections (the trait's failure stream — the twin of the fill stream
-    // update()/poll_fills return). Both bounded; see `LiveLog`.
-    log: LiveLog,
 }
 
 impl OkxWallet {
@@ -167,7 +151,7 @@ impl OkxWallet {
         passphrase: impl Into<String>,
     ) -> Self {
         Self {
-            http: HttpCore::new(base_url),
+            core: LiveCore::new(base_url),
             api_key: api_key.into(),
             api_secret: api_secret.into(),
             passphrase: passphrase.into(),
@@ -176,13 +160,6 @@ impl OkxWallet {
             available_balance: 0.0,
             equity: 0.0,
             positions: SymMap::default(),
-            marks: SymMap::default(),
-            grids: SymMap::default(),
-            orders: OrderRegistry::default(),
-            protective: SymMap::default(),
-            limits: SymMap::default(),
-            cursors: SymMap::default(),
-            log: LiveLog::default(),
         }
     }
 
@@ -203,7 +180,7 @@ impl OkxWallet {
     /// long-running live process cannot leak through it. A caller who needs the
     /// whole history wants their own durable store, not this accessor.
     pub fn errors(&self) -> &[LiveError] {
-        self.log.errors()
+        self.core.log().errors()
     }
 
     /// Force an account-state refresh (balance + positions) now, returning the
@@ -242,10 +219,10 @@ impl OkxWallet {
                 continue;
             }
             // Convert contracts to base units; needs the instrument's ctVal.
-            let grid = match self.ensure_grid(inst) {
+            let grid = match flow::ensure_grid(self, inst) {
                 Ok(g) => g,
                 Err(e) => {
-                    self.log.note(e);
+                    self.core.log_mut().note(e);
                     continue;
                 }
             };
@@ -253,77 +230,6 @@ impl OkxWallet {
                 .insert(crate::types::symbol(inst), grid.base_units(contracts));
         }
         Ok(())
-    }
-
-    /// Ensure the [`InstrumentGrid`] for `symbol` is cached, fetching
-    /// `/api/v5/public/instruments` if not.
-    fn ensure_grid(&mut self, symbol: &str) -> Result<InstrumentGrid, LiveError> {
-        if let Some(g) = self.grids.get(symbol) {
-            return Ok(*g);
-        }
-        let params = vec![
-            ("instType", "SWAP".to_string()),
-            ("instId", symbol.to_string()),
-        ];
-        let value = self.public_get("/api/v5/public/instruments", params)?;
-        let grid = parse_instrument_grid(&value, symbol)
-            .ok_or_else(|| LiveError::Decode(format!("no instrument spec for {symbol}")))?;
-        self.grids.insert(crate::types::symbol(symbol), grid);
-        Ok(grid)
-    }
-
-    /// Ensure a fill cursor exists for `symbol`, seeding it past the existing
-    /// history so we only ever report fills that happen *after* we started
-    /// trading it.
-    fn ensure_cursor(&mut self, symbol: &str) -> Result<(), LiveError> {
-        if self.cursors.contains_key(symbol) {
-            return Ok(());
-        }
-        let history = self.fetch_fills(symbol)?;
-        let cursor = FillCursor::seeded(CURSOR_MODEL, &history);
-        self.cursors.insert(crate::types::symbol(symbol), cursor);
-        Ok(())
-    }
-
-    /// Poll new fills for `symbol` past its cursor, advance the cursor, and
-    /// return them as [`Order`]s in base units. A venue order we placed maps back
-    /// to its local [`OrderId`] and recorded [`OrderKind`]; a fill on an order we
-    /// don't know (placed out-of-band) gets a fresh local id and `Market` kind.
-    ///
-    /// Pulls the recent window (OKX returns the last few days, most-recent
-    /// first) and filters locally rather than passing a `billId` cursor param —
-    /// robust for the once-per-bar cadence a driver uses, and it needs no
-    /// bootstrap value.
-    fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
-        let grid = self.ensure_grid(symbol)?;
-        let mut fills = self.fetch_fills(symbol)?;
-        fills.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        let mut cursor = self
-            .cursors
-            .remove(symbol)
-            .unwrap_or_else(|| FillCursor::seeded(CURSOR_MODEL, &[]));
-        let fresh: Vec<VenueFill> = fills.into_iter().filter(|f| cursor.admit(f)).collect();
-        self.cursors.insert(crate::types::symbol(symbol), cursor);
-
-        let mut out = Vec::new();
-        for f in fresh {
-            let local = match self.orders.local_for(&f.order_id) {
-                Some(id) => id,
-                None => self.orders.mint(),
-            };
-            let kind = self.orders.kind_for(&f.order_id);
-            let order = Order::new(
-                crate::types::symbol(symbol),
-                f.side,
-                grid.base_units(f.size),
-                f.price,
-                kind,
-                local,
-            )
-            .with_commission(f.commission);
-            out.push(order);
-        }
-        Ok(out)
     }
 
     // --- REST plumbing -----------------------------------------------------
@@ -346,7 +252,7 @@ impl OkxWallet {
         };
         let request_path = with_query(path, query);
         let req = signed_request(
-            &self.http,
+            &self.core.http,
             &self.api_key,
             &self.api_secret,
             &self.passphrase,
@@ -355,7 +261,7 @@ impl OkxWallet {
             &request_path,
             body_str,
         );
-        self.http.send(req)
+        self.core.http.send(req)
     }
 
     /// An unsigned public GET (instrument specs, etc.).
@@ -364,12 +270,102 @@ impl OkxWallet {
         path: &str,
         params: Vec<(&str, String)>,
     ) -> Result<serde_json::Value, LiveError> {
-        self.http.public_get(path, &params)
+        self.core.http.public_get(path, &params)
     }
 
-    /// Fetch the recent fills for `symbol` (the venue's default window). The
-    /// caller keeps only those past its per-symbol `billId` cursor.
-    fn fetch_fills(&self, symbol: &str) -> Result<Vec<VenueFill>, LiveError> {
+    /// Cancel a venue order, treating "order does not exist" as success — the
+    /// post-condition (that order isn't working) holds either way.
+    ///
+    /// OKX splits this across two endpoints: a resting entry is an ordinary
+    /// order, a protective leg is an *algo* order, and each has its own cancel
+    /// path and body shape. That split is the reason [`OrderClass`] exists.
+    fn cancel_by_class(
+        &mut self,
+        symbol: &str,
+        venue_id: &str,
+        class: OrderClass,
+    ) -> Result<(), LiveError> {
+        let (path, body) = match class {
+            OrderClass::Entry => (
+                "/api/v5/trade/cancel-order",
+                serde_json::json!({ "instId": symbol, "ordId": venue_id }),
+            ),
+            OrderClass::Protective => (
+                "/api/v5/trade/cancel-algos",
+                serde_json::json!([{ "instId": symbol, "algoId": venue_id }]),
+            ),
+        };
+        self.cancel_call(Method::POST, path, body)
+    }
+
+    /// Shared cancel path: a non-existent order (an `sCode` [`is_gone_code`]
+    /// recognises) is treated as already gone.
+    ///
+    /// Returns `LiveError` rather than `WalletError`: whether a cancel failure
+    /// is worth a `Rejection` is the caller's call, and the caller is `flow`.
+    fn cancel_call(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<(), LiveError> {
+        let value = self.signed(method, path, &[], Some(body))?;
+        // Business-level failure rides in `code` / `data[].sCode`; the
+        // "order does not exist" codes are the success-equivalents.
+        if let Some(row) = value
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            && let Some(s_code) = row.get("sCode").and_then(|c| c.as_str())
+            && s_code != "0"
+            && !is_gone_code(s_code)
+        {
+            let msg = row
+                .get("sMsg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("cancel failed");
+            return Err(LiveError::Http {
+                status: 200,
+                body: msg.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The venue-fact half: OKX's endpoints, envelopes and request bodies. The
+/// order flow that drives these lives in [`flow`](super::venue::flow) and is
+/// shared with every other backend.
+impl VenueBackend for OkxWallet {
+    fn core(&self) -> &LiveCore {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut LiveCore {
+        &mut self.core
+    }
+
+    fn refresh(&mut self) -> Result<(), LiveError> {
+        self.refresh_account()
+    }
+
+    fn fetch_grid(&mut self, symbol: &str) -> Result<InstrumentGrid, LiveError> {
+        let params = vec![
+            ("instType", "SWAP".to_string()),
+            ("instId", symbol.to_string()),
+        ];
+        let value = self.public_get("/api/v5/public/instruments", params)?;
+        parse_instrument_grid(&value, symbol)
+            .ok_or_else(|| LiveError::Decode(format!("no instrument spec for {symbol}")))
+    }
+
+    fn cursor_model(&self) -> CursorModel {
+        CURSOR_MODEL
+    }
+
+    /// The recent fills for `symbol` — OKX answers with the last few days,
+    /// most-recent first, and the caller filters against its cursor.
+    fn fetch_fills(&mut self, symbol: &str) -> Result<Vec<VenueFill>, LiveError> {
         let params = vec![
             ("instType", "SWAP".to_string()),
             ("instId", symbol.to_string()),
@@ -379,181 +375,98 @@ impl OkxWallet {
         rows.iter().map(parse_fill).collect()
     }
 
-    /// Cancel a venue order (limit / market) by id on `symbol`, treating "order
-    /// does not exist" as success — the post-condition (that order isn't
-    /// working) holds either way.
-    fn cancel_order(&mut self, symbol: &str, ord_id: &str) -> Result<(), WalletError> {
-        let body = serde_json::json!({ "instId": symbol, "ordId": ord_id });
-        self.cancel_call(Method::POST, "/api/v5/trade/cancel-order", body)
-    }
-
-    /// Cancel a venue **algo** order (protective leg) by id on `symbol`.
-    fn cancel_algo(&mut self, symbol: &str, algo_id: &str) -> Result<(), WalletError> {
-        let body = serde_json::json!([{ "instId": symbol, "algoId": algo_id }]);
-        self.cancel_call(Method::POST, "/api/v5/trade/cancel-algos", body)
-    }
-
-    /// Shared cancel path: a non-existent order (`sCode` 51400/51401/51503 or a
-    /// top-level not-found `code`) is treated as already gone.
-    fn cancel_call(
+    fn place_market(
         &mut self,
-        method: Method,
-        path: &str,
-        body: serde_json::Value,
-    ) -> Result<(), WalletError> {
-        match self.signed(method, path, &[], Some(body)) {
-            Ok(value) => {
-                // Business-level failure rides in `code` / `data[].sCode`; the
-                // "order does not exist" codes are the success-equivalents.
-                if let Some(row) = value
-                    .get("data")
-                    .and_then(|d| d.as_array())
-                    .and_then(|a| a.first())
-                    && let Some(s_code) = row.get("sCode").and_then(|c| c.as_str())
-                    && s_code != "0"
-                    && !is_gone_code(s_code)
-                {
-                    let msg = row
-                        .get("sMsg")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("cancel failed");
-                    return Err(self.log.fail(LiveError::Http {
-                        status: 200,
-                        body: msg.to_string(),
-                    }));
-                }
-                Ok(())
-            }
-            Err(e) => Err(self.log.fail(e)),
-        }
+        symbol: &str,
+        side: Side,
+        size: Real,
+        grid: &InstrumentGrid,
+        local: OrderId,
+    ) -> Result<String, LiveError> {
+        let body = serde_json::json!({
+            "instId": symbol,
+            "tdMode": self.td_mode,
+            "side": side_token(side),
+            "ordType": "market",
+            "sz": grid.size_str(size),
+            "clOrdId": client_order_id(local),
+        });
+        let value = self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body))?;
+        order_result_id(&value, "ordId")
     }
 
-    /// Place a `reduceOnly` protective algo order (a conditional stop or
-    /// take-profit) and record it. Deduped by the caller.
+    fn place_limit(
+        &mut self,
+        symbol: &str,
+        side: Side,
+        size: Real,
+        price: Real,
+        grid: &InstrumentGrid,
+        local: OrderId,
+    ) -> Result<String, LiveError> {
+        let body = serde_json::json!({
+            "instId": symbol,
+            "tdMode": self.td_mode,
+            "side": side_token(side),
+            "ordType": "limit",
+            "sz": grid.size_str(size),
+            "px": grid.price_str(price),
+            "clOrdId": client_order_id(local),
+        });
+        let value = self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body))?;
+        order_result_id(&value, "ordId")
+    }
+
+    /// A `conditional` algo order with a single trigger. `slOrdPx` / `tpOrdPx`
+    /// of `-1` means "fill at market when triggered" — the reduce-only twin of
+    /// Binance's `STOP_MARKET` / `TAKE_PROFIT_MARKET`.
+    ///
+    /// **Which field pair is set is how OKX encodes the direction.** There is no
+    /// `stop_direction` here, unlike Coinbase, so the stop and take-profit legs
+    /// differ only in the two keys written below.
     fn place_protective(
         &mut self,
         symbol: &str,
         kind: OrderKind,
+        side: Side,
+        size: Real,
         trigger: Real,
-        contracts: Real,
-    ) -> Result<RestingOrder, WalletError> {
-        let local = self.orders.mint();
-        let grid = match self.ensure_grid(symbol) {
-            Ok(g) => g,
-            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
-        };
-        let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
-        if pos.abs() <= POSITION_EPSILON {
-            // Nothing to protect — our own guard, not a venue refusal; log it but
-            // don't buffer a per-bar rejection for a flat re-submit.
-            return Err(self.log.fail(LiveError::Decode(format!(
-                "no open {symbol} position to rest a protective leg against"
-            ))));
-        }
-        // A protective exit trades the opposite side of the open position.
-        let side = if pos > 0.0 { Side::Sell } else { Side::Buy };
-        let price = grid.price_str(grid.on_tick(trigger));
-        let sz = grid.size_str(contracts);
-        // `conditional` algo with a single trigger; `slOrdPx`/`tpOrdPx` of -1
-        // means "fill at market when triggered", the reduce-only twin of
-        // Binance's STOP_MARKET / TAKE_PROFIT_MARKET.
+        grid: &InstrumentGrid,
+        _local: OrderId,
+    ) -> Result<String, LiveError> {
+        let price = grid.price_str(trigger);
         let mut body = serde_json::json!({
             "instId": symbol,
             "tdMode": self.td_mode,
             "side": side_token(side),
             "ordType": "conditional",
-            "sz": sz,
+            "sz": grid.size_str(size),
             "reduceOnly": "true",
         });
         match kind {
             OrderKind::TakeProfit => {
-                body["tpTriggerPx"] = price.clone().into();
+                body["tpTriggerPx"] = price.into();
                 body["tpOrdPx"] = MARKET_ORDER_PX.into();
             }
-            // Stop is the default protective leg; Market/Limit never reach here
-            // (a market exit is `set_position`, a resting entry is `set_limit`).
+            // Stop is the default protective leg; Market / Limit never reach
+            // here (a market exit is `set_position`, a resting entry is
+            // `set_limit`).
             _ => {
-                body["slTriggerPx"] = price.clone().into();
+                body["slTriggerPx"] = price.into();
                 body["slOrdPx"] = MARKET_ORDER_PX.into();
             }
         }
-        if let Err(e) = self.ensure_cursor(symbol) {
-            self.log.note(e);
-        }
-        let value = match self.signed(Method::POST, "/api/v5/trade/order-algo", &[], Some(body)) {
-            Ok(v) => v,
-            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
-        };
-        let algo_id = match order_result_id(&value, "algoId") {
-            Ok(id) => id,
-            Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
-        };
-        self.orders.record(local, &algo_id, kind);
-        Ok(RestingOrder {
-            price: trigger,
-            size: contracts,
-            side,
-            venue_id: algo_id,
-            local,
-        })
+        let value = self.signed(Method::POST, "/api/v5/trade/order-algo", &[], Some(body))?;
+        order_result_id(&value, "algoId")
     }
 
-    /// Rest a protective leg with idempotent dedup: an unchanged trigger + size
-    /// is a no-op (returns the existing leg's id); a change cancels the old venue
-    /// order before placing the new one.
-    fn rest_protective(
+    fn cancel_venue_order(
         &mut self,
-        symbol: Symbol,
-        kind: OrderKind,
-        trigger: Real,
-        size: Size,
-    ) -> Result<Ack<Symbol>, WalletError> {
-        let grid = match self.ensure_grid(&symbol) {
-            Ok(g) => g,
-            Err(e) => {
-                let id = self.orders.mint();
-                return Err(self.log.refuse(&symbol, id, kind, e));
-            }
-        };
-        // Resolve the share against the cached position (base units), clamp to
-        // the position magnitude — a protective leg is reduce-only — then convert
-        // to the contract count the venue wants.
-        let pos = self.positions.get(&symbol).copied().unwrap_or(0.0);
-        let units = size
-            .resolve(
-                self.marks.get(&symbol).copied().unwrap_or(0.0),
-                pos,
-                self.available_balance,
-                self.equity,
-            )
-            .min(pos.abs());
-        let contracts = grid.venue_size(units);
-        if contracts <= POSITION_EPSILON {
-            let id = self.orders.mint();
-            return Err(self.log.refuse(
-                &symbol,
-                id,
-                kind,
-                LiveError::Decode("protective size rounds to zero contracts".into()),
-            ));
-        }
-        let existing = self
-            .protective
-            .get(&symbol)
-            .and_then(|bracket| bracket.leg(kind))
-            .cloned();
-        if let Some(leg) = existing {
-            if (leg.price - trigger).abs() <= PRICE_EPSILON
-                && (leg.size - contracts).abs() <= POSITION_EPSILON
-            {
-                return Ok(Ack::Working(leg.local));
-            }
-            self.cancel_algo(&symbol, &leg.venue_id)?;
-        }
-        let leg = self.place_protective(&symbol, kind, trigger, contracts)?;
-        let local = leg.local;
-        self.protective.entry(symbol).or_default().set(kind, leg);
-        Ok(Ack::Working(local))
+        symbol: &str,
+        venue_id: &str,
+        class: OrderClass,
+    ) -> Result<(), LiveError> {
+        self.cancel_by_class(symbol, venue_id, class)
     }
 }
 
@@ -603,7 +516,7 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn price(&self, symbol: &Symbol) -> Option<Reference> {
-        self.marks.get(symbol).map(|&p| Reference(p))
+        self.core.mark(symbol).map(Reference)
     }
 
     /// The account's `totalEq`, which OKX reports as a **USD** valuation of every
@@ -617,67 +530,11 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn update(&mut self, symbol: Symbol, candle: Candle) -> Vec<Order<Symbol>> {
-        self.marks.insert(symbol.clone(), candle.close);
-        // Refresh account state best-effort; a failure just leaves the cache
-        // stale (logged) rather than breaking the bar.
-        if let Err(e) = self.refresh_account() {
-            self.log.note(e);
-        }
-        if let Err(e) = self.ensure_cursor(&symbol) {
-            self.log.note(e);
-            return Vec::new();
-        }
-        match self.poll_symbol(&symbol) {
-            Ok(fills) => fills,
-            Err(e) => {
-                self.log.note(e);
-                Vec::new()
-            }
-        }
+        flow::update(self, symbol, candle)
     }
 
     fn set_position(&mut self, target: Units<Symbol>) -> Result<Ack<Symbol>, WalletError> {
-        let symbol = target.symbol;
-        // Mint the id up front so a refusal before the POST still carries the
-        // submission's id into its Rejection.
-        let id = self.orders.mint();
-        let grid = match self.ensure_grid(&symbol) {
-            Ok(g) => g,
-            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
-        };
-        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
-        let delta = target.amount - current;
-        let contracts = grid.venue_size(delta.abs());
-        if grid.below_minimum(contracts) {
-            // Below the venue's minimum tradable size: accept the submission but
-            // place nothing (no fill will arrive under this id).
-            return Ok(Ack::Working(id));
-        }
-        // Seed the fill cursor to the pre-trade max *before* placing, so a market
-        // order that fills immediately is caught by the next poll rather than
-        // skipped by a cursor advanced past its own fill.
-        if let Err(e) = self.ensure_cursor(&symbol) {
-            self.log.note(e);
-        }
-        let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
-        let body = serde_json::json!({
-            "instId": symbol,
-            "tdMode": self.td_mode,
-            "side": side_token(side),
-            "ordType": "market",
-            "sz": grid.size_str(contracts),
-            "clOrdId": client_order_id(id),
-        });
-        let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
-            Ok(v) => v,
-            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
-        };
-        let ord_id = match order_result_id(&value, "ordId") {
-            Ok(v) => v,
-            Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
-        };
-        self.orders.record(id, &ord_id, OrderKind::Market);
-        Ok(Ack::Working(id))
+        flow::set_position(self, target)
     }
 
     fn set_stop(
@@ -686,7 +543,7 @@ impl Wallet<Symbol> for OkxWallet {
         trigger: Reference,
         size: Size,
     ) -> Result<Ack<Symbol>, WalletError> {
-        self.rest_protective(symbol, OrderKind::Stop, trigger.0, size)
+        flow::rest_protective(self, symbol, OrderKind::Stop, trigger.0, size)
     }
 
     fn set_take_profit(
@@ -695,35 +552,13 @@ impl Wallet<Symbol> for OkxWallet {
         trigger: Reference,
         size: Size,
     ) -> Result<Ack<Symbol>, WalletError> {
-        self.rest_protective(symbol, OrderKind::TakeProfit, trigger.0, size)
+        flow::rest_protective(self, symbol, OrderKind::TakeProfit, trigger.0, size)
     }
 
     fn cancel_protective(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
-        if let Some(bracket) = self.protective.remove(symbol) {
-            for leg in bracket.into_legs() {
-                self.cancel_algo(symbol, &leg.venue_id)?;
-            }
-        }
-        Ok(())
+        flow::cancel_protective(self, symbol)
     }
 
-    /// Rest a `limit` / `GTC` order on the venue.
-    ///
-    /// The [`Size`] resolves at the **limit price** — that is where the order
-    /// fills, so it is the price the target should be sized against, matching
-    /// [`PaperWallet`](crate::PaperWallet)'s "resolve at the fill" rule.
-    ///
-    /// The venue order's side comes from the resolved *delta*, not from `side`
-    /// directly: `side · size` is an absolute target, so reducing a long is a
-    /// sell however the caller spelled the target. A limit already through the
-    /// market is simply a marketable limit — the venue fills it immediately, at
-    /// the limit or better.
-    ///
-    /// Idempotent per symbol: re-submitting the same side / price / size is a
-    /// no-op that returns the existing order's id; any other change cancels the
-    /// previous venue order before placing the replacement — the convention
-    /// `rest_protective` uses, so a strategy can walk its
-    /// limit every bar without piling up orders.
     fn set_limit(
         &mut self,
         symbol: Symbol,
@@ -731,133 +566,23 @@ impl Wallet<Symbol> for OkxWallet {
         size: Size,
         limit: Reference,
     ) -> Result<Ack<Symbol>, WalletError> {
-        let local = self.orders.mint();
-        if limit.0 <= 0.0 {
-            return Err(self.log.refuse(
-                &symbol,
-                local,
-                OrderKind::Limit,
-                LiveError::Decode(format!("limit price must be positive, got {}", limit.0)),
-            ));
-        }
-        let grid = match self.ensure_grid(&symbol) {
-            Ok(g) => g,
-            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
-        };
-
-        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
-        let units = size.resolve(limit.0, current, self.available_balance, self.equity);
-        let delta = side.sign() * units - current;
-        let contracts = grid.venue_size(delta.abs());
-        let price = grid.on_tick(limit.0);
-        if grid.below_minimum(contracts) {
-            // Below the venue's minimum tradable size: accept the submission but
-            // place nothing, exactly as `set_position` does.
-            return Ok(Ack::Working(local));
-        }
-        let order_side = if delta > 0.0 { Side::Buy } else { Side::Sell };
-
-        // Idempotent re-submit: an unchanged order stays where it is.
-        if let Some(existing) = self.limits.get(&symbol).cloned() {
-            if existing.side == order_side
-                && (existing.price - price).abs() <= POSITION_EPSILON
-                && (existing.size - contracts).abs() <= POSITION_EPSILON
-            {
-                return Ok(Ack::Working(existing.local));
-            }
-            let ord_id = existing.venue_id.clone();
-            self.cancel_order(&symbol, &ord_id)?;
-            self.limits.remove(&symbol);
-        }
-
-        // Seed the fill cursor before placing, so a marketable limit that fills
-        // instantly is caught by the next poll rather than skipped.
-        if let Err(e) = self.ensure_cursor(&symbol) {
-            self.log.note(e);
-        }
-        let body = serde_json::json!({
-            "instId": symbol,
-            "tdMode": self.td_mode,
-            "side": side_token(order_side),
-            "ordType": "limit",
-            "sz": grid.size_str(contracts),
-            "px": grid.price_str(price),
-            "clOrdId": client_order_id(local),
-        });
-        let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
-            Ok(v) => v,
-            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
-        };
-        let ord_id = match order_result_id(&value, "ordId") {
-            Ok(v) => v,
-            Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
-        };
-        self.orders.record(local, &ord_id, OrderKind::Limit);
-        self.limits.insert(
-            symbol,
-            RestingOrder {
-                price,
-                size: contracts,
-                side: order_side,
-                venue_id: ord_id,
-                local,
-            },
-        );
-        Ok(Ack::Working(local))
+        flow::set_limit(self, symbol, side, size, limit)
     }
 
     fn cancel_limit(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
-        if let Some(resting) = self.limits.remove(symbol) {
-            self.cancel_order(symbol, &resting.venue_id)?;
-        }
-        Ok(())
+        flow::cancel_limit(self, symbol)
     }
 
     fn take_rejections(&mut self) -> Vec<Rejection<Symbol>> {
-        self.log.take_rejections()
+        self.core.log_mut().take_rejections()
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
-        let symbols: Vec<Symbol> = self.cursors.keys().cloned().collect();
-        let mut out = Vec::new();
-        for symbol in symbols {
-            match self.poll_symbol(&symbol) {
-                Ok(mut fills) => out.append(&mut fills),
-                Err(e) => self.log.note(e),
-            }
-        }
-        out
+        flow::poll_fills(self)
     }
 
     fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
-        let Some(venue_id) = self.orders.venue_for(id).map(str::to_string) else {
-            return Ok(());
-        };
-        // Locate the resting record this id belongs to (a working market order
-        // fills near-instantly and isn't tracked for cancel).
-        if let Some(symbol) = self
-            .limits
-            .iter()
-            .find_map(|(sym, l)| (l.local == id).then(|| sym.clone()))
-        {
-            self.cancel_order(&symbol, &venue_id)?;
-            self.limits.remove(&symbol);
-            return Ok(());
-        }
-        let leg_symbol = self
-            .protective
-            .iter()
-            .find_map(|(sym, bracket)| bracket.leg_local(id).then(|| sym.clone()));
-        let Some(symbol) = leg_symbol else {
-            // Known venue id, but not a tracked resting order: nothing
-            // actionable, treat as gone.
-            return Ok(());
-        };
-        self.cancel_algo(&symbol, &venue_id)?;
-        if let Some(bracket) = self.protective.get_mut(&symbol) {
-            bracket.clear_local(id);
-        }
-        Ok(())
+        flow::cancel(self, id)
     }
 }
 
