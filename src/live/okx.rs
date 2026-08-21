@@ -715,6 +715,18 @@ fn order_result_id(value: &serde_json::Value, id_field: &str) -> Result<String, 
 
 /// The OKX `sCode`s that mean "the order you asked to cancel is already gone"
 /// — cancelling it is idempotently successful, not a failure.
+///
+/// | code | OKX's message |
+/// |---|---|
+/// | `51400` | cancellation failed: the order does not exist |
+/// | `51401` | cancellation failed: the order is already cancelled |
+/// | `51402` | cancellation failed: the order is already completed |
+/// | `51503` | cancellation failed: the algo order does not exist |
+///
+/// "Already filled" belongs here with "never existed": the caller asked for
+/// that order not to be working, and it isn't. Anything else — a bad
+/// instrument, a rejected parameter, a rate limit — is a real failure and
+/// reaches the error log.
 fn is_gone_code(s_code: &str) -> bool {
     matches!(s_code, "51400" | "51401" | "51402" | "51503")
 }
@@ -860,6 +872,20 @@ mod tests {
         // as 5.0 rather than 5.1.
         assert_eq!(grid.size_str(grid.venue_size(0.0509)), "5.0");
         assert!(grid.below_minimum(grid.venue_size(0.0005)));
+    }
+
+    /// The already-gone set, pinned against the table in the doc above — the
+    /// two drifted once, with `51402` accepted by the code and missing from
+    /// the prose.
+    #[test]
+    fn already_gone_codes_are_exactly_the_four_documented() {
+        for gone in ["51400", "51401", "51402", "51503"] {
+            assert!(is_gone_code(gone), "{gone} means the order is already gone");
+        }
+        // A real failure must not be swallowed as an idempotent cancel.
+        for live in ["0", "51008", "51000", "51500", "1"] {
+            assert!(!is_gone_code(live), "{live} is a genuine cancel failure");
+        }
     }
 
     #[test]
