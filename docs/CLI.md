@@ -1124,7 +1124,14 @@ bar indicators, boolean logic, comparisons, constants, cross-timeframe
 composition — `!resample` + `!latch`, which `check overlay` also validates
 (missing `inner`, `every: 0`, and unknown nested tags all fail there) —
 crossovers, MACD, moving averages, oscillators, placeholders, position
-anchors, rolling extrema, stability gate, trend/directional). `list tickers
+anchors, rolling extrema, stability gate, trend/directional). Each entry shows
+the tag's YAML surface, with an omissible key rendered as `name=<default>` when
+the descriptor says what omitting it is equivalent to — `!sma { source=!close,
+period }`, `!bb_upper { source=!close, period=20, k=2.0 }` — and as `name?` when
+there is nothing to say (`!pick`'s `symbol`, or a cross-asset `source:`, which
+defaults to the strategy's own series and so names no tag).
+
+`list tickers
 binance` calls
 `/api/v3/exchangeInfo` and prints its full spot vocabulary — piped into
 `grep`/`wc -l`/`sort -u` it's one ticker per line; interactive, it lays out

@@ -341,7 +341,9 @@ fn write_indicators<W: Write>(w: &mut W) -> io::Result<()> {
 /// Render a tag's YAML surface from its descriptor record. Parameterless leaves
 /// (a `unit` tag, or a `map` whose keys are all omissible) parse as bare strings
 /// and render without the `!`; everything else renders in its `!tag`-prefixed
-/// form, with an optional `map` key marked by a trailing `?`.
+/// form, with an omissible `map` key rendered as `name=<default>` when the
+/// descriptor says what omitting it is equivalent to, and a bare `name?` when
+/// there is nothing to say.
 fn signature(tag: &crate::spec::grammar::GrammarTag) -> String {
     // The canonical spelling. A tag with alternates (`!changed`, `!unstable`,
     // `!param`, …) renders the one to reach for by default; the alternates are
@@ -355,17 +357,38 @@ fn signature(tag: &crate::spec::grammar::GrammarTag) -> String {
         // body, optional keys marked `?`.
         "map" if form.fields.iter().all(|f| f.name == "source") => tag.name.clone(),
         "map" => {
-            let body: Vec<String> = form
-                .fields
-                .iter()
-                .map(|f| if f.required { f.name.clone() } else { format!("{}?", f.name) })
-                .collect();
+            let body: Vec<String> = form.fields.iter().map(field_form).collect();
             format!("!{} {{ {} }}", tag.name, body.join(", "))
         }
         "newtype" => format!("!{} {}", tag.name, payload_form(form.payload.as_deref())),
         "seq" => format!("!{} {}", tag.name, seq_form(form.payload.as_deref())),
         // `unit` and anything unforeseen: the bare word.
         _ => tag.name.clone(),
+    }
+}
+
+/// One `map` key: `name` when it's required, `name=<default>` when omitting it
+/// is equivalent to writing something, `name?` when it is omissible and the
+/// descriptor has nothing to say about what that gets you.
+///
+/// The third case is not a gap — a candle leaf's `source:` defaults to the
+/// strategy's own series, which no tag spells. See `GrammarDefault`.
+fn field_form(f: &crate::spec::grammar::GrammarField) -> String {
+    use crate::spec::grammar::GrammarDefault;
+    match (f.required, &f.default) {
+        (true, _) => f.name.clone(),
+        (false, Some(GrammarDefault::Expr(e))) => format!("{}={e}", f.name),
+        (false, Some(GrammarDefault::Literal(v))) => format!("{}={}", f.name, literal_form(v)),
+        (false, None) => format!("{}?", f.name),
+    }
+}
+
+/// A literal default as a document would write it — a string unquoted, anything
+/// else as its JSON rendering.
+fn literal_form(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -421,8 +444,8 @@ mod tests {
     }
 
     /// The signature renderer's shape rules: a candle leaf is bare, an indicator
-    /// shows its (optional-marked) params, and the load-time / seq forms carry a
-    /// placeholder body.
+    /// shows its params — each with what omitting it gets you — and the
+    /// load-time / seq forms carry a placeholder body.
     #[test]
     fn signatures_render_from_the_descriptor() {
         use crate::spec::grammar::spec_grammar;
@@ -434,9 +457,20 @@ mod tests {
 
         // `!close { source? }` collapses to the bare leaf; `!sma` shows params.
         assert_eq!(sig("close"), "close");
-        assert_eq!(sig("sma"), "!sma { source?, period }");
-        // All-defaulted params still render (not collapsed to bare).
-        assert!(sig("bb_upper").starts_with("!bb_upper { "), "{}", sig("bb_upper"));
+        // An omissible key renders what omitting it is equivalent to — the
+        // whole point of the descriptor's tagged `default`. `period` is
+        // required, so it renders bare.
+        assert_eq!(sig("sma"), "!sma { source=!close, period }");
+        // Both arms of `GrammarDefault`, on one tag.
+        assert_eq!(sig("bb_upper"), "!bb_upper { source=!close, period=20, k=2.0 }");
+        // A node default that isn't a price series.
+        assert_eq!(sig("atr"), "!atr { source=!current, period }");
+        assert_eq!(sig("top_bottom"), "!top_bottom { longs, shorts, of=!everything }");
+        // `?` survives for the slot that genuinely has nothing to report: a
+        // cross-asset `source:` defaults to the strategy's own series, which no
+        // tag spells. `!get`'s `key` is required, so the `?` here is `source`.
+        assert_eq!(sig("get"), "!get { key, source? }");
+
         // newtype / seq placeholders.
         assert_eq!(sig("import"), "!import <name>");
         assert_eq!(sig("fixed"), "!fixed [ w0, … ]");
