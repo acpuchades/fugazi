@@ -129,7 +129,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 | Strategy decision logic | `tests/strategies.rs` (catalogue-wide) or the shape's own file (`pairs.rs`, `portfolio.rs`) |
 | `backtest::run` / `backtest::warm_up` | `tests/driver_contract.rs` |
 | Run resuming (`save_state`/`restore_state`, `RunState`, `--flatten`) | `tests/resume.rs` — chunked-resume-vs-one-shot for **every** shape, at three or more chunks — **and** `python/tests/test_specs.py`, which drives the same property through the bindings |
-| Wallet order flow | unit tests in `src/wallet.rs`; live venues in `tests/live_<venue>.rs` against `wiremock` |
+| Wallet order flow | unit tests in `src/wallet.rs`; live venues via the `common::live` conformance suite in `tests/live_<venue>.rs`, against `wiremock` |
 | `PaperWallet` fill pricing, cash or cost arithmetic | `tests/wallet_validation.rs` — extend the schedule in `tools/gen_wallet_bars.py` or add a cost configuration, then `pixi run gen-wallet` |
 | A metric | a unit test in `src/metrics.rs`, **plus** a reference value in one of the two `(metric, expected)` generators — `tests/metrics_coverage.rs` fails until it has one or an exemption |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
@@ -157,9 +157,18 @@ to one copy never reached the others.
 | `common::fixtures` | `tests/data/` CSV loading, `Csv`, and the skip-vs-fail policy | — |
 | `common::cli` | `Cmd` (fluent binary invocation), `Outcome`, `unique_path`, `Artefacts` | `cli` |
 | `common::net` | `serve` — a `wiremock` server on a kept-alive runtime, for **blocking** clients | `sources` |
+| `common::live` | the conformance suite every venue wallet must pass: `LiveVenue`, `VenueFixture`, `mount` | `live` |
 
-Two conventions:
+Three conventions:
 
+- **A venue wallet's behaviour is shared; its payloads are not.**
+  `common::live` holds thirteen parameterized bodies a venue lists as one-line
+  `#[test]` delegations, and they assert **counts and outcomes** — one POST
+  reached the venue, one rejection was booked, this fill reached the strategy.
+  Request-body assertions stay in `tests/live_<venue>.rs`, because the payload
+  *is* the venue contract and a shared assertion over it would be an
+  `if venue ==` in disguise. Adding a venue means implementing `LiveVenue`;
+  nothing in the suite needs editing.
 - **Shapes are shared; series constants are not.** `common::bars` gives you bar
   and snapshot *builders*. A file whose assertions depend on which crossovers
   its path fires (`resume.rs`, `montecarlo.rs`, `strategies.rs`) keeps its own

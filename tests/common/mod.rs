@@ -5,7 +5,8 @@
 //! module existed the harnesses were copy-pasted: `unique_path` sat
 //! byte-identical in `run.rs` and `costs.rs`, `serve` in `live_okx.rs` and
 //! `live_coinbase.rs`, and six files each grew their own `flat_bar`. A fix to
-//! one copy never reached the others.
+//! one copy never reached the others. The two live suites went further and
+//! mirrored each other's whole test bodies — see [`live`].
 //!
 //! Layout — one module per concern, so a test crate pays only for what its
 //! feature set can actually build:

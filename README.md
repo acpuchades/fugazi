@@ -684,7 +684,7 @@ think about it, and provide *one* mechanism to opt out.
 The same `Wallet` a backtest trades into is the seam to a real broker. The `live`
 feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST) and
 `CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST), each a
-`Wallet<String>`. A strategy driven by `backtest::run` needs no change:
+`Wallet<Symbol>`. A strategy driven by `backtest::run` needs no change:
 
 ```rust,ignore
 use fugazi::live::OkxWallet;

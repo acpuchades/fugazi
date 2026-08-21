@@ -583,9 +583,54 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   order-flow surface) and `CoinbaseWallet` (`mainnet` only; spot, so a `position` is
   a base balance and `set_position` diffs it, market-ordering the difference — a
   short target sells to flat and reports the un-shortable remainder), `Order`, and
-  `Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`). The live wallets
-  differ only in signing: `OkxWallet` HMAC-SHA256, `CoinbaseWallet` an ES256
-  (ECDSA P-256) JWT per request.
+  `Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`).
+
+### Live venues (`src/live/`, feature `live`)
+
+Two backends, and **one order flow between them**. `src/live/venue/` holds the
+shared half:
+
+| Module | Holds |
+|---|---|
+| `venue/mod.rs` | the exchange-precision arithmetic every venue quantises with |
+| `venue/rest.rs` | `HttpCore` — the `reqwest` client, the private `tokio` runtime, the base URL |
+| `venue/state.rs` | `InstrumentGrid`, `OrderRegistry`, `RestingOrder`, `Bracket`, `LiveLog`, and the `LiveCore` that owns them |
+| `venue/fills.rs` | `VenueFill` and `FillCursor` — one fill shape, two dedupe models |
+| `venue/backend.rs` | **`VenueBackend`** — the ten hooks a venue supplies |
+| `venue/flow.rs` | the shared `Wallet` bodies, over those hooks |
+
+`VenueBackend` is `pub(in crate::live)` and **must stay that way**. Capability on
+`Wallet` is expressed by overriding-or-defaulting on *one* trait; this is an
+internal implementation-sharing trait, and it changes nothing a downstream
+implementor of `Wallet` sees. Every hook is a venue *fact* — an endpoint, an
+envelope, a request body — and returns `LiveError`, never `WalletError`, because
+"log it" versus "log it and buffer a `Rejection`" is the call site's decision and
+every call site is in `flow`. **A hook whose body wants to be `true` / `false` /
+`unreachable!()` / empty on one venue is the signal that the method belongs back
+in that venue's `Wallet` impl.**
+
+`flow`'s bodies are **free generic functions**, not provided trait methods: a
+provided `update` would collide with the `Wallet::update` it implements, and a
+free function can't be silently overridden — a venue needing different behaviour
+has to add a visible hook. They may read only five `Wallet` methods (`funds`,
+`equity`, `price`, `position`, `can_short`), the five neither wallet delegates
+back; anything else recurses. A trait can't have fields, so state is reached
+through `core()` / `core_mut()`, and every body is a straight-line sequence that
+re-borrows — a `&mut` into the core cannot be held across a hook call.
+
+What stays per-venue is what differs in *kind*: the credentials, the signing
+(`OkxWallet` base64-HMAC-SHA256 over `timestamp+method+path+body`,
+`CoinbaseWallet` an ES256 / ECDSA P-256 JWT per request), `refresh_account`, the
+envelope parsers, the request bodies inside the `place_*` hooks, and the six
+reads that *are* the account shape. `OkxWallet` holds one signed swap position in
+base units (`InstrumentGrid::contract_multiplier` converts, so nothing above the
+wallet sees a contract); `CoinbaseWallet` holds a table of currency balances,
+cannot short, and values its own book through `wallet::marked_sum` so the sum is
+canonical across processes.
+
+Both logs are bounded at `DEFAULT_RETENTION`, and so is the fill-dedupe set —
+these run for months, and an unbounded reporting artifact in that deployment is a
+leak rather than a convenience.
 
 ## Run driver (`src/backtest.rs`)
 

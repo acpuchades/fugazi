@@ -601,41 +601,67 @@ series just yields atoms with no bar.
 
 ## Add a live wallet
 
-A live venue is one `Wallet<String>` impl behind the `live` feature (`src/live/`,
-alongside `OkxWallet`) — the failure-side twin of a provider. Every strategy
-shape drives it unchanged: `backtest::run(&mut strategy, &mut venue, snaps)`.
+A live venue is one `Wallet<Symbol>` impl behind the `live` feature
+(`src/live/`, alongside `OkxWallet`) — the failure-side twin of a provider.
+Every strategy shape drives it unchanged:
+`backtest::run(&mut strategy, &mut venue, snaps)`.
 
-1. `src/live/<venue>.rs` implementing `Wallet<String>`. The trait is a small
-   synchronous `&mut self` surface; a REST API is async, so own a private
-   `tokio` runtime and block on each call (drive it from a *synchronous* context
-   only). Serve the reads (`funds`/`position`/`price`/`equity`) from an
-   account-state cache refreshed at the top of `update()`; route `set_position`
-   (the one required movement) to the venue and return `Ack::Working` — the fill
-   lands later.
-2. Override the optional methods the venue supports, and **leave the rest at
-   their trait defaults** — the seam degrades rather than breaks. In particular:
-   - **`take_rejections()`** — the failure stream. Any wallet that can drop an
-     order **must** override it, or a refused entry/exit silently desyncs the
-     strategy's view of its position. Buffer every refusal (submit-time,
-     at-fill, and refused protective legs) and drain them here.
-   - **`positions()`** — enumerate open positions (the trait default is empty).
-     Needed so a [`SleeveWallet`] can snapshot a baseline and a `Portfolio` can
-     check its books; without it those treat the account as flat.
-   - **`poll_fills()`** for a venue that reports fills out of band (a trades
-     endpoint) rather than only through `update()`.
-   - Resting `set_stop`/`set_take_profit`/`cancel_protective` and
-     `set_limit`/`cancel_limit`/`cancel` where the venue has them; the `size` on
-     the protective legs is **reduce-only** and may be a *partial* (several
-     owners rest their own share on one account).
-   Any unit translation the venue needs lives at this boundary — `OkxWallet`
-   converts contracts↔base units so nothing above the wallet sees a contract.
-3. Errors: the trait-facing `WalletError` is a `Copy` enum with no room for
-   detail, so return the `Venue` category and stash the endpoint/status/body on
-   an internal `LiveError` log (`src/live/mod.rs`) a caller can inspect
-   (`<Venue>Wallet::errors()`).
-4. Re-export from `src/live/mod.rs` and `src/lib.rs`, both under
+**Almost none of that impl is yours to write.** The order flow — feed a bar,
+diff a target, rest a leg, dedup an unchanged re-submit, cancel by id, drain
+fills — lives once in `src/live/venue/flow.rs`, over the hooks
+`src/live/venue/backend.rs` declares. You supply the venue *facts*: its
+endpoints, its envelopes, its request bodies, and its signing.
+
+1. **`src/live/<venue>.rs`.** A struct holding a `LiveCore` (the shared
+   bookkeeping: transport, marks, instrument grids, order-id registry, resting
+   orders, fill cursors, the bounded error log) plus whatever the venue itself
+   needs — credentials, a signing key, and the account cache the reads answer
+   from. Constructors take credentials as arguments; nothing in `src/live/`
+   reads an environment variable.
+
+   The `Wallet` trait is a small synchronous `&mut self` surface and a REST API
+   is async, so `LiveCore` owns a private `tokio` runtime and blocks on each
+   call — drive it from a *synchronous* context only.
+
+2. **`impl VenueBackend`** — ten items, and every one of them is a venue fact:
+   the `core()`/`core_mut()` accessor pair, `refresh`, `fetch_grid`,
+   `cursor_model`, `fetch_fills`, `place_market`, `place_limit`,
+   `place_protective`, `cancel_venue_order`. Each returns `LiveError`, never
+   `WalletError`: whether a failure deserves a `Rejection` is decided at the
+   call site, and every call site is in `flow`.
+
+   **If a hook's body wants to be `true`, `false`, `unreachable!()` or empty on
+   your venue, stop** — that method belongs in your `Wallet` impl rather than on
+   the trait, and the trait wants changing rather than padding.
+
+3. **`impl Wallet<Symbol>`** — one-line delegations to `flow` for the movement
+   and the bar loop (`update`, `set_position`, `set_stop`, `set_take_profit`,
+   `cancel_protective`, `set_limit`, `cancel_limit`, `cancel`, `poll_fills`),
+   plus the six reads that *are* the account-shape difference: `funds`,
+   `position`, `positions`, `equity`, `can_short`, `quote_ccy`. `take_rejections`
+   is `self.core.log_mut().take_rejections()`.
+
+   Two of those reads are load-bearing beyond their own answer.
+   **`positions()`** is what makes the trait's `flatten` default work and lets a
+   [`SleeveWallet`] snapshot a baseline; a venue that can't enumerate flattens
+   nothing, silently. **`equity()`** on a venue that values its own multi-leg
+   book must go through `wallet::marked_sum`, or the sum varies by a ULP between
+   processes — see `CoinbaseWallet::equity`.
+
+   Any unit translation lives here: `InstrumentGrid::contract_multiplier`
+   converts contracts↔base units, so nothing above the wallet sees a contract.
+   Report `1.0` on a spot venue and every conversion is the exact identity.
+
+4. **Errors.** The trait-facing `WalletError` is a `Copy` enum with no room for
+   detail, so `flow` returns the `Venue` category and stashes the
+   endpoint/status/body on a `LiveError` log a caller can inspect
+   (`<Venue>Wallet::errors()`, forwarding to `self.core.log().errors()`). The
+   log is bounded at `DEFAULT_RETENTION`; don't add an unbounded one beside it.
+
+5. **Re-export** from `src/live/mod.rs` and `src/lib.rs`, both under
    `#[cfg(feature = "live")]`.
-5. Python (mirror `PyOkxWallet` in `python/src/strategy.rs`): a `Py*Wallet`
+
+6. **Python** (mirror `PyOkxWallet` in `python/src/strategy.rs`): a `Py*Wallet`
    pyclass mirroring `PaperWallet`'s order-flow surface plus the venue's
    constructors; register it in `#[pymodule]`; **add its type to the
    `over_any_wallet!` dispatch's `cast::<…>` chain** — one edit, and it reaches
@@ -643,10 +669,22 @@ shape drives it unchanged: `backtest::run(&mut strategy, &mut venue, snaps)`.
    (`StrategySpec.run` / `.run_resumable` / `.warm_up`). Enable `"live"` in
    `python/Cargo.toml`. Record its bound / not-bound methods in
    `python/tests/test_parity.py` (test-enforced ledger).
-6. Tests go against a mock HTTP server (`wiremock`) — `tests/live_okx.rs` and the
-   `src/live/okx.rs` unit tests — never the live API. A venue's free **demo /
-   paper** endpoint (OKX selects it with an `x-simulated-trading` header) is the
-   manual end-to-end.
+
+7. **Tests.** `impl common::live::LiveVenue` in `tests/live_<venue>.rs` — the
+   endpoint paths, the envelopes, a constructor — then list the conformance
+   bodies as one-line `#[test]` delegations. That is thirteen behaviours for
+   free, and they are the ones that keep the venues honest with each other.
+   Add venue-specific tests for **payloads** only: the shared suite asserts
+   counts and outcomes, and a shared assertion over a request body would be an
+   `if venue ==` in disguise. Everything runs against `wiremock`, never the
+   live API; a venue's free **demo / paper** endpoint (OKX selects it with an
+   `x-simulated-trading` header) is the manual end-to-end, behind `#[ignore]`.
+
+`live` compiles in exactly one CI row, so check both
+`cargo check/clippy -p fugazi --no-default-features --features live --lib`
+(does it build alone?) and `cargo clippy -p fugazi --all-features --all-targets`
+(do the live *test* targets build?). `FAST=1 scripts/ci-local.sh` skips the
+feature matrix and never compiles `live` at all.
 
 [`SleeveWallet`]: run the strategy against its own carve-out of an account that
 already holds positions — wrap the live wallet before `backtest::run`.
