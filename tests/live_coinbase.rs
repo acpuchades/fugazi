@@ -495,6 +495,125 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
     );
 }
 
+/// Equity must sum the marked base balances in **ascending value order**, not
+/// in `HashMap` order.
+///
+/// A spot account values its own book — unlike OKX, which reports a scalar — so
+/// it folds one float per marked product. `marks` is a `HashMap` with a
+/// per-process `RandomState`, and folding it in iteration order made `equity()`
+/// vary by a ULP between processes on identical inputs. A ULP either side of a
+/// threshold is a different trade.
+///
+/// That cross-process drift cannot be reproduced inside one test process — the
+/// seed is fixed for the run. What *is* testable is the convention: pin
+/// `equity()` to an independently-computed ascending fold built from the public
+/// `funds` / `position` / `price` accessors. The discriminating power lives in
+/// `wallet::types`'s `marked_sum` unit tests, which prove the fixture's
+/// magnitudes really do sum differently in different orders.
+///
+/// Balances span ~16 decades and are scrambled so neither insertion order nor
+/// symbol order correlates with magnitude — a realistic book of same-magnitude
+/// legs sums identically in every order and would prove nothing.
+#[test]
+fn equity_sums_the_marked_balances_in_canonical_order() {
+    // Past the 32-leg stack/heap boundary in `marked_sum`, and verified below
+    // to discriminate between summation orders — n = 40 does not, so the size
+    // is chosen, not arbitrary.
+    const N: usize = 33;
+
+    let legs: Vec<(String, f64, f64)> = (0..N)
+        .map(|i| {
+            let exp = ((i * 7 + 3) % 17) as i32 - 8; // -8 ..= 8
+            (
+                format!("S{i:03}"),
+                1.0 + (i as f64) * 0.5,
+                10.0_f64.powi(exp),
+            )
+        })
+        .collect();
+
+    let balances = legs.clone();
+    let mock = serve(move |server| {
+        let balances = balances.clone();
+        Box::pin(async move {
+            let mut rows: Vec<serde_json::Value> = balances
+                .iter()
+                .map(|(ccy, units, _)| {
+                    serde_json::json!({
+                        "uuid": ccy, "currency": ccy,
+                        "available_balance": { "value": format!("{units}"), "currency": ccy },
+                    })
+                })
+                .collect();
+            // A zero quote balance on purpose: the fold seeds from `funds`, and
+            // a large seed would swamp the small legs in *every* order, leaving
+            // nothing for the ordering to change.
+            rows.push(serde_json::json!({
+                "uuid": "usd", "currency": "USD",
+                "available_balance": { "value": "0", "currency": "USD" },
+            }));
+            Mock::given(method("GET"))
+                .and(path("/api/v3/brokerage/accounts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "accounts": rows, "has_next": false, "cursor": "" }),
+                ))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v3/brokerage/orders/historical/fills"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(no_fills()))
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = wallet(mock.uri.clone());
+    // `update` feeds the mark and refreshes the balances; one bar per product.
+    for (ccy, _, price) in &legs {
+        let symbol = intern(format!("{ccy}-USD"));
+        w.update(symbol, Candle::new(*price, *price, *price, *price, 1.0));
+    }
+
+    // The independent fold, from the public accessors only.
+    let mut marked: Vec<f64> = legs
+        .iter()
+        .map(|(ccy, _, _)| {
+            let symbol = intern(format!("{ccy}-USD"));
+            let units = w.position(&symbol).amount;
+            let price = w.price(&symbol).expect("mark was fed").0;
+            units * price
+        })
+        .collect();
+    assert_eq!(marked.len(), N, "every leg was marked");
+    // Distinguishes "the balances never loaded" from "the sum is misordered":
+    // an all-zero book sums identically in every order.
+    assert!(
+        marked.iter().any(|v| *v != 0.0),
+        "the account balances did not reach the wallet; errors: {:?}",
+        w.errors(),
+    );
+    marked.sort_by(|a, b| a.total_cmp(b));
+    let want = marked.iter().fold(w.funds().0, |acc, v| acc + v);
+
+    // Guard: if descending gives the same bits the fixture is not
+    // discriminating and the assertion below would be vacuous.
+    let desc = marked.iter().rev().fold(w.funds().0, |acc, v| acc + v);
+    assert_ne!(
+        want.to_bits(),
+        desc.to_bits(),
+        "fixture does not discriminate between summation orders",
+    );
+
+    let got = w.equity().0;
+    assert_eq!(
+        got.to_bits(),
+        want.to_bits(),
+        "equity {got:?} is not the ascending-order fold {want:?} \
+         — a spot account must sum its book canonically; errors: {:?}",
+        w.errors(),
+    );
+}
+
 /// Opt-in connectivity check against Coinbase Advanced Trade **production**.
 ///
 /// Ignored by default and gated on `COINBASE_KEY_NAME` / `COINBASE_PRIVATE_KEY`

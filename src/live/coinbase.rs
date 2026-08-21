@@ -64,7 +64,7 @@ use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
-use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
+use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON, marked_sum};
 
 use super::LiveError;
 use super::venue::{
@@ -688,13 +688,21 @@ impl Wallet<Symbol> for CoinbaseWallet {
         self.marks.get(symbol).map(|&p| Reference(p))
     }
 
+    /// The quote balance plus every marked base balance valued at its last
+    /// close, summed in the canonical order [`marked_sum`] defines.
+    ///
+    /// `marks` is a `HashMap`, and folding it in iteration order made this vary
+    /// by a ULP between processes on identical inputs — the same drift
+    /// [`PaperWallet`](crate::PaperWallet)'s equity was already sorted to avoid.
+    /// OKX is immune because its equity is a scalar the venue reports; a spot
+    /// account has to value the book itself, so it has to sum it canonically.
     fn equity(&self) -> Reference {
-        // Quote balance plus every marked base balance valued at its last close.
-        let mut eq = self.quote_balance();
-        for (symbol, &mark) in &self.marks {
-            eq += self.base_balance(symbol) * mark;
-        }
-        Reference(eq)
+        Reference(marked_sum(
+            self.quote_balance(),
+            self.marks
+                .iter()
+                .map(|(symbol, &mark)| self.base_balance(symbol) * mark),
+        ))
     }
 
     fn update(&mut self, symbol: Symbol, candle: Candle) -> Vec<Order<Symbol>> {

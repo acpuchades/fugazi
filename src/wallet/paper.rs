@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};
 
-use super::Wallet;
 use super::types::{
     Ack, Order, OrderId, OrderKind, POSITION_EPSILON, PRICE_EPSILON, Reference, Rejection, Side,
     Size, Units, WalletError, cash_tolerance,
 };
+use super::{Wallet, marked_sum};
 use crate::hash::SymMap;
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -406,47 +406,18 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
 }
 
 impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
-    /// Cash plus every position marked at `mark(symbol)`, summed in a
-    /// **canonical order**.
+    /// Cash plus every position marked at `mark(symbol)`, summed in the
+    /// canonical order [`marked_sum`] defines.
     ///
-    /// The order matters and is not cosmetic. `positions` is a `HashMap` with a
-    /// per-process `RandomState`, so iterating it yields the legs in an order
-    /// that varies *between runs of the same binary on the same data*. Floating
-    /// addition is not associative, so summing in that order made a multi-symbol
-    /// equity curve differ by a ULP from one invocation to the next — and a ULP
-    /// either side of a threshold is a different trade, which makes a resumed
-    /// run's bit-identity a coin flip.
-    ///
-    /// Sorting the marked values (rather than the symbols) is the same fix
-    /// [`Book::update`](crate::indicators::Book) already applies to its legs,
-    /// and needs no `Ord` bound on `Sym`. Single-symbol runs — the common case —
-    /// were never affected, which is why this survived so long.
-    ///
-    /// Values land in a stack buffer while the book is small, so the once-a-bar
-    /// `equity()` call does not allocate for a realistic universe.
+    /// Single-symbol runs — the common case — were never affected by the
+    /// ordering, which is why the drift this guards against survived so long.
     fn marked_equity(&self, mark: impl Fn(&Sym) -> Real) -> Reference {
-        /// Positions held before the sum spills to the heap. Comfortably above
-        /// any realistic single-strategy book.
-        const INLINE: usize = 32;
-
-        let n = self.positions.len();
-        let mut inline = [0.0 as Real; INLINE];
-        let mut spilled: Vec<Real>;
-        let values: &mut [Real] = if n <= INLINE {
-            for (slot, (symbol, &amount)) in inline.iter_mut().zip(self.positions.iter()) {
-                *slot = amount * mark(symbol);
-            }
-            &mut inline[..n]
-        } else {
-            spilled = self
-                .positions
+        Reference(marked_sum(
+            self.funds,
+            self.positions
                 .iter()
-                .map(|(symbol, &amount)| amount * mark(symbol))
-                .collect();
-            &mut spilled
-        };
-        values.sort_by(|a, b| a.total_cmp(b));
-        Reference(values.iter().fold(self.funds, |acc, v| acc + v))
+                .map(|(symbol, &amount)| amount * mark(symbol)),
+        ))
     }
 
     /// Book a fill: drive `symbol` to `target` signed units, using

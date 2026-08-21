@@ -37,6 +37,49 @@ pub(crate) fn cash_tolerance(scale: Real) -> Real {
     CASH_EPSILON * scale.abs().max(1.0)
 }
 
+/// `cash` plus every marked position, summed in a **canonical order**.
+///
+/// The order matters and is not cosmetic. A wallet holds its positions in a
+/// `HashMap`, so iterating one yields the legs in an order that varies *between
+/// runs of the same binary on the same data*. Floating addition is not
+/// associative, so summing in that order makes a multi-symbol equity curve
+/// differ by a ULP from one invocation to the next — and a ULP either side of a
+/// threshold is a different trade, which makes a resumed run's bit-identity a
+/// coin flip.
+///
+/// Sorting the marked *values* (rather than the symbols) is the same fix
+/// [`Book::update`](crate::indicators::Book) already applies to its legs, and
+/// needs no `Ord` bound on the symbol type.
+///
+/// Values land in a stack buffer while the book is small, so the once-a-bar
+/// `equity()` call does not allocate for a realistic universe.
+///
+/// Every wallet that values a multi-leg book goes through here — the simulated
+/// [`PaperWallet`](crate::PaperWallet) and the live spot venues alike. It lives
+/// in this module rather than beside either of them because it is vocabulary,
+/// and because a live wallet must be able to reach it with the `live` feature
+/// off nowhere in sight.
+pub(crate) fn marked_sum(cash: Real, marked: impl ExactSizeIterator<Item = Real>) -> Real {
+    /// Positions held before the sum spills to the heap. Comfortably above any
+    /// realistic single-strategy book.
+    const INLINE: usize = 32;
+
+    let n = marked.len();
+    let mut inline = [0.0 as Real; INLINE];
+    let mut spilled: Vec<Real>;
+    let values: &mut [Real] = if n <= INLINE {
+        for (slot, value) in inline.iter_mut().zip(marked) {
+            *slot = value;
+        }
+        &mut inline[..n]
+    } else {
+        spilled = marked.collect();
+        &mut spilled
+    };
+    values.sort_by(|a, b| a.total_cmp(b));
+    values.iter().fold(cash, |acc, v| acc + v)
+}
+
 /// Which way an [`Order`] trades, and the direction a [`set`](crate::Wallet::set)
 /// targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,4 +402,75 @@ pub struct Rejection<Sym> {
     /// strategy flat when it wanted a position, while a refused stop leaves it
     /// holding one it wanted out of.
     pub kind: OrderKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Marked values spanning ~16 decades, scrambled so no index order
+    /// correlates with magnitude. The wide spread is the point: summing
+    /// ascending accumulates the tiny legs into something big enough to survive
+    /// being added to the large ones, whereas any other order absorbs them one
+    /// at a time.
+    fn scrambled(n: usize) -> Vec<Real> {
+        (0..n)
+            .map(|i| {
+                let exp = ((i * 7 + 3) % 17) as i32 - 8; // -8 ..= 8
+                (1.0 + (i as Real) * 0.5) * 10.0_f64.powi(exp)
+            })
+            .collect()
+    }
+
+    /// The sum must not depend on the order the legs arrive in.
+    ///
+    /// Swept across the `INLINE` spill boundary (32): both the stack and the
+    /// heap path must hold the convention, or crossing the threshold would
+    /// quietly reintroduce the drift on large universes.
+    #[test]
+    fn marked_sum_is_order_invariant() {
+        for n in [1usize, 12, 31, 32, 33, 64] {
+            let values = scrambled(n);
+            let mut reversed = values.clone();
+            reversed.reverse();
+            let mut ascending = values.clone();
+            ascending.sort_by(|a, b| a.total_cmp(b));
+
+            let want = marked_sum(100.0, values.iter().copied());
+            for (label, order) in [("reversed", &reversed), ("ascending", &ascending)] {
+                let got = marked_sum(100.0, order.iter().copied());
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "n = {n}: the {label} order summed to {got:?}, not {want:?}",
+                );
+            }
+        }
+    }
+
+    /// The fixture above really does discriminate between summation orders, so
+    /// the invariance assertion is not vacuous — a naive fold over the same
+    /// values ascending and descending lands on different bits.
+    ///
+    /// Without this, dropping the sort from `marked_sum` would still pass:
+    /// every order would agree because every order was already equal.
+    ///
+    /// Ascending-vs-descending is the comparison that matters, because
+    /// ascending is the order `marked_sum` imposes. `n = 1` is excluded — one
+    /// value has only one order — but stays in the sweep above, where it is a
+    /// legitimate edge case.
+    #[test]
+    fn the_order_invariance_fixture_is_discriminating() {
+        for n in [12usize, 31, 32, 33, 64] {
+            let mut ascending = scrambled(n);
+            ascending.sort_by(|a, b| a.total_cmp(b));
+            let up = ascending.iter().fold(100.0 as Real, |acc, v| acc + v);
+            let down = ascending.iter().rev().fold(100.0 as Real, |acc, v| acc + v);
+            assert_ne!(
+                up.to_bits(),
+                down.to_bits(),
+                "n = {n}: fixture does not discriminate between summation orders",
+            );
+        }
+    }
 }
