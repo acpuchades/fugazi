@@ -24,13 +24,14 @@ use serde::Deserialize;
 // resolve on the enum variant. The `Pick` root is the one exception because
 // it isn't a `NodeSpec` variant.
 use crate::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,
-    BollingerValue, Book, Cci, Component, Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema,
-    Exp, GarmanKlass, GetBool, GetReal, GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis,
-    Latch, Log, Macd, MacdValue, Match as MatchIndicator, Mfi, Obv, Parkinson, Percentile,
-    PercentileRank, Pick, PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness,
-    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR,
-    Wma, ZScore,
+    Abs, Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Beta,
+    Bollinger, BollingerValue, Book, Cci, Component, Correlation, Covariance, CumMax, CumMin,
+    CumSum, Dmi, DmiValue, Donchian, DonchianValue, Ema, Exp, GarmanKlass, GetBool, GetReal,
+    GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, LinReg, Log, Macd, MacdValue,
+    Match as MatchIndicator, Max as MaxOf, Mfi,
+    Min as MinOf, Obv, Parkinson, Percentile, PercentileRank, Pick, PickAny, Position, Pow,
+    Resample, Rma, RogersSatchell, Rsi, Sar, Sigmoid, Sign, Skewness, Sma, Sqrt, StdDev, StochRsi,
+    Stochastic, Tanh, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use crate::prelude::*;
 use crate::types::Snapshot;
@@ -221,6 +222,22 @@ fn checked_base(base: Real) -> Result<Real, String> {
             "`base` must be a finite positive number distinct from 1.0, got {base}"
         ))
     }
+}
+
+/// The `LinReg` behind the four `!linreg_*` readings, with the one bound
+/// `NonZeroUsize` cannot carry.
+///
+/// A single point has no slope: the fit is vertical, and the degenerate answer
+/// would be a silent `0.0` rather than a refusal. The constructor `assert!`s on
+/// it, so the check happens here and is reported as the bad *input* it is.
+fn linreg<S>(source: S, period: NonZeroUsize) -> Result<LinReg<S>, String> {
+    let period = period.get();
+    if period < 2 {
+        return Err(format!(
+            "`period` must be at least 2, got {period} — a single point has no slope"
+        ));
+    }
+    Ok(LinReg::new(source, period))
 }
 
 /// Default annualized risk-free rate for `!sharpe` / `!sortino`: `0.0`.
@@ -956,6 +973,78 @@ pub enum NodeSpec {
         /// Lookback window, in bars.
         period: NonZeroUsize,
     },
+    /// Rolling population covariance between two Real sources — correlation
+    /// without the normalisation, so it keeps the units and the magnitude. Both
+    /// operands are required.
+    #[grammar(kind = "indicator", since = "0.69")]
+    Covariance {
+        /// Left-hand operand.
+        lhs: Box<NodeSpec>,
+        /// Right-hand operand.
+        rhs: Box<NodeSpec>,
+        /// Lookback window, in bars.
+        period: NonZeroUsize,
+    },
+    /// Rolling beta of `lhs` against `rhs` — the least-squares slope explaining
+    /// the first series by the second, so the order is "asset, then benchmark"
+    /// and swapping them is a different number. Feed returns (`!roc { period: 1 }`)
+    /// rather than prices unless you want the price-level relationship: this
+    /// takes what it is handed and does not difference behind your back. Reads
+    /// `0` when the benchmark is flat over the window.
+    #[grammar(kind = "indicator", since = "0.69")]
+    Beta {
+        /// The series being explained.
+        lhs: Box<NodeSpec>,
+        /// The benchmark it is explained by.
+        rhs: Box<NodeSpec>,
+        /// Lookback window, in bars.
+        period: NonZeroUsize,
+    },
+    /// Slope of the least-squares line fitting `source` against the bar index,
+    /// in source units **per bar**. The trend primitive nothing else in the
+    /// grammar can spell: no composition of lagged differences produces a
+    /// regression. Pair it with `!linreg_r2` — `slope · r²` discounts a steep
+    /// fit that nothing actually follows.
+    #[grammar(kind = "indicator", since = "0.69")]
+    LinregSlope {
+        /// Lookback window, in bars. At least 2 — one point has no slope.
+        period: NonZeroUsize,
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// The `!linreg_slope` fit evaluated at the **oldest** bar in the window —
+    /// the level the current trend started from.
+    #[grammar(kind = "indicator", since = "0.69")]
+    LinregIntercept {
+        /// Lookback window, in bars. At least 2 — one point has no slope.
+        period: NonZeroUsize,
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// The `!linreg_slope` fit evaluated at the **newest** bar in the window — a
+    /// de-noised reading of the level now, and the least-squares counterpart of
+    /// a moving average.
+    #[grammar(kind = "indicator", since = "0.69")]
+    LinregValue {
+        /// Lookback window, in bars. At least 2 — one point has no slope.
+        period: NonZeroUsize,
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Coefficient of determination of the `!linreg_slope` fit, in `[0, 1]`: how
+    /// much of the source's variation over the window a straight line accounts
+    /// for.
+    #[grammar(kind = "indicator", since = "0.69")]
+    LinregR2 {
+        /// Lookback window, in bars. At least 2 — one point has no slope.
+        period: NonZeroUsize,
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
     /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
     /// mean-reverting) over the source's first differences.
     #[grammar(kind = "indicator")]
@@ -1559,6 +1648,115 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
+    },
+    /// `lhs` raised to the power `rhs`. Emits `None` where the result is not a
+    /// finite real — a negative base at a fractional exponent, `0` to a negative
+    /// power, or an overflow.
+    #[grammar(kind = "operator", since = "0.69")]
+    Pow {
+        /// The base.
+        lhs: Box<NodeSpec>,
+        /// The exponent.
+        rhs: Box<NodeSpec>,
+    },
+    /// The larger of `lhs` and `rhs`, bar by bar. Not `!rolling_max`, which
+    /// maximises one series over a window rather than two series against each
+    /// other.
+    #[grammar(kind = "operator", since = "0.69")]
+    Max {
+        /// Left-hand operand.
+        lhs: Box<NodeSpec>,
+        /// Right-hand operand.
+        rhs: Box<NodeSpec>,
+    },
+    /// The smaller of `lhs` and `rhs`, bar by bar — the twin of `!max`.
+    #[grammar(kind = "operator", since = "0.69")]
+    Min {
+        /// Left-hand operand.
+        lhs: Box<NodeSpec>,
+        /// Right-hand operand.
+        rhs: Box<NodeSpec>,
+    },
+    /// `source` confined to `[lower, upper]` — `!min` of `!max`, spelled as one
+    /// node because a bounded size is one idea. Both bounds are expressions, so
+    /// a band can itself be computed. Inverted bounds (`lower` above `upper`)
+    /// collapse to `upper` rather than erroring: that is what the composed form
+    /// does, and it is the honest answer to a contradictory band.
+    #[grammar(kind = "operator", since = "0.69")]
+    Clamp {
+        /// Lower bound.
+        lower: Box<NodeSpec>,
+        /// Upper bound.
+        upper: Box<NodeSpec>,
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Absolute value of `source`.
+    #[grammar(kind = "operator", since = "0.69")]
+    Abs {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Sign of `source`: `1` above zero, `-1` below, `0` at exactly zero.
+    #[grammar(kind = "operator", since = "0.69")]
+    Sign {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Square root of `source`. Emits `None` on samples where the source is
+    /// negative.
+    #[grammar(kind = "operator", since = "0.69")]
+    Sqrt {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Hyperbolic tangent of `source`, squashing any input into `(-1, 1)`. The
+    /// bounded response a sizing expression wants: linear near zero, saturating
+    /// past |x| ≈ 2, and smooth throughout — unlike a `!clamp`.
+    #[grammar(kind = "operator", since = "0.69")]
+    Tanh {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Logistic sigmoid of `source`, `1 / (1 + e^-x)`, squashing any input into
+    /// `(0, 1)` — the one-sided twin of `!tanh`, for a fraction rather than a
+    /// signed response.
+    #[grammar(kind = "operator", since = "0.69")]
+    Sigmoid {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Running total of every value `source` has produced, from the first bar of
+    /// the run onward. Where it starts is part of its meaning: `!obv` and `!ad`
+    /// are two hard-wired instances of this shape.
+    #[grammar(kind = "operator", since = "0.69")]
+    CumSum {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Running maximum of `source` since the start of the run — the unbounded
+    /// `!rolling_max`. `!div { lhs: x, rhs: !cum_max { source: x } }` less one is
+    /// the drawdown of any series, generalising the book-anchored `!drawdown`.
+    #[grammar(kind = "operator", since = "0.69")]
+    CumMax {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Running minimum of `source` since the start of the run — the unbounded
+    /// `!rolling_min`.
+    #[grammar(kind = "operator", since = "0.69")]
+    CumMin {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
     /// `then`'s value when `cond` is true, `otherwise`'s when false, and
@@ -2286,6 +2484,36 @@ enum NodeSpecRaw {
         rhs: Box<NodeSpec>,
         period: NonZeroUsize,
     },
+    Covariance {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        period: NonZeroUsize,
+    },
+    Beta {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        period: NonZeroUsize,
+    },
+    LinregSlope {
+        period: NonZeroUsize,
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    LinregIntercept {
+        period: NonZeroUsize,
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    LinregValue {
+        period: NonZeroUsize,
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    LinregR2 {
+        period: NonZeroUsize,
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
     /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
     /// mean-reverting) over the source's first differences.
     VarianceRatio {
@@ -2666,6 +2894,56 @@ enum NodeSpecRaw {
         lhs: Box<NodeSpec>,
         rhs: Box<NodeSpec>,
     },
+    Pow {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Max {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Min {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Clamp {
+        lower: Box<NodeSpec>,
+        upper: Box<NodeSpec>,
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    Abs {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    Sign {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    Sqrt {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    Tanh {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    Sigmoid {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    CumSum {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    CumMax {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
+    CumMin {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+    },
     /// Three-source ternary: reads `cond` (a bool signal), emits
     /// `then`'s value when `cond` is true, `otherwise`'s when false, and
     /// `None` when `cond` is `None`. All three sources are advanced every
@@ -2995,6 +3273,12 @@ impl From<NodeSpecRaw> for NodeSpec {
                 NodeSpec::BarsSinceLow { source, period }
             }
             NodeSpecRaw::Correlation { lhs, rhs, period } => NodeSpec::Correlation { lhs, rhs, period },
+            NodeSpecRaw::Covariance { lhs, rhs, period } => NodeSpec::Covariance { lhs, rhs, period },
+            NodeSpecRaw::Beta { lhs, rhs, period } => NodeSpec::Beta { lhs, rhs, period },
+            NodeSpecRaw::LinregSlope { source, period } => NodeSpec::LinregSlope { source, period },
+            NodeSpecRaw::LinregIntercept { source, period } => NodeSpec::LinregIntercept { source, period },
+            NodeSpecRaw::LinregValue { source, period } => NodeSpec::LinregValue { source, period },
+            NodeSpecRaw::LinregR2 { source, period } => NodeSpec::LinregR2 { source, period },
             NodeSpecRaw::VarianceRatio {
                 source,
                 period,
@@ -3054,6 +3338,18 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Sub { lhs, rhs } => NodeSpec::Sub { lhs, rhs },
             NodeSpecRaw::Mul { lhs, rhs } => NodeSpec::Mul { lhs, rhs },
             NodeSpecRaw::Div { lhs, rhs } => NodeSpec::Div { lhs, rhs },
+            NodeSpecRaw::Pow { lhs, rhs } => NodeSpec::Pow { lhs, rhs },
+            NodeSpecRaw::Max { lhs, rhs } => NodeSpec::Max { lhs, rhs },
+            NodeSpecRaw::Min { lhs, rhs } => NodeSpec::Min { lhs, rhs },
+            NodeSpecRaw::Clamp { source, lower, upper } => NodeSpec::Clamp { source, lower, upper },
+            NodeSpecRaw::Abs { source } => NodeSpec::Abs { source },
+            NodeSpecRaw::Sign { source } => NodeSpec::Sign { source },
+            NodeSpecRaw::Sqrt { source } => NodeSpec::Sqrt { source },
+            NodeSpecRaw::Tanh { source } => NodeSpec::Tanh { source },
+            NodeSpecRaw::Sigmoid { source } => NodeSpec::Sigmoid { source },
+            NodeSpecRaw::CumSum { source } => NodeSpec::CumSum { source },
+            NodeSpecRaw::CumMax { source } => NodeSpec::CumMax { source },
+            NodeSpecRaw::CumMin { source } => NodeSpec::CumMin { source },
             NodeSpecRaw::IfElse {
                 cond,
                 then,
@@ -4073,6 +4369,27 @@ impl NodeSpec {
             Correlation { lhs, rhs, period } => {
                 any(self::Correlation::new(real(lhs)?, real(rhs)?, period.get()))
             }
+            Covariance { lhs, rhs, period } => {
+                any(self::Covariance::new(real(lhs)?, real(rhs)?, period.get()))
+            }
+            Beta { lhs, rhs, period } => {
+                any(self::Beta::new(real(lhs)?, real(rhs)?, period.get()))
+            }
+            // The four regression readings share one fit, and each names which
+            // end of it it wants. `NonZeroUsize` gets `period` past 0; the fit
+            // needs a second point before a slope exists at all, which no type
+            // here can express — so it is a build error, as `!variance_ratio`'s
+            // relational bound is.
+            LinregSlope { source, period } => {
+                any(linreg(real(source)?, *period)?.slope())
+            }
+            LinregIntercept { source, period } => {
+                any(linreg(real(source)?, *period)?.intercept())
+            }
+            LinregValue { source, period } => {
+                any(linreg(real(source)?, *period)?.value())
+            }
+            LinregR2 { source, period } => any(linreg(real(source)?, *period)?.r2()),
             VarianceRatio {
                 source,
                 period,
@@ -4405,6 +4722,25 @@ impl NodeSpec {
             Sub { lhs, rhs } => any(real(lhs)?.sub(real(rhs)?)),
             Mul { lhs, rhs } => any(real(lhs)?.mul(real(rhs)?)),
             Div { lhs, rhs } => any(real(lhs)?.div(real(rhs)?)),
+            Pow { lhs, rhs } => any(self::Pow::new(real(lhs)?, real(rhs)?)),
+            Max { lhs, rhs } => any(MaxOf::new(real(lhs)?, real(rhs)?)),
+            Min { lhs, rhs } => any(MinOf::new(real(lhs)?, real(rhs)?)),
+            Clamp {
+                source,
+                lower,
+                upper,
+            } => any(MinOf::new(
+                MaxOf::new(real(source)?, real(lower)?),
+                real(upper)?,
+            )),
+            Abs { source } => any(self::Abs::new(real(source)?)),
+            Sign { source } => any(self::Sign::new(real(source)?)),
+            Sqrt { source } => any(self::Sqrt::new(real(source)?)),
+            Tanh { source } => any(self::Tanh::new(real(source)?)),
+            Sigmoid { source } => any(self::Sigmoid::new(real(source)?)),
+            CumSum { source } => any(self::CumSum::new(real(source)?)),
+            CumMax { source } => any(self::CumMax::new(real(source)?)),
+            CumMin { source } => any(self::CumMin::new(real(source)?)),
             IfElse {
                 cond,
                 then,

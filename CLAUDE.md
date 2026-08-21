@@ -138,12 +138,17 @@ builders. Use the internal cores (`EmaState`/`WilderState`, `WindowStats`/
 
 ### Adding an operator
 
-A `*Op` type impl'ing the relevant trait (`BinaryOp`/`LookbackOp`/`ExtremeOp`) plus a
-type alias — **never a macro**. Arithmetic/boolean/lookback are zero-sized `Default`
+A `*Op` type impl'ing the relevant trait (`BinaryOp`/`UnaryOp`/`LookbackOp`/`ExtremeOp`/
+`CumulativeOp`) plus a type alias — **never a macro**. Arithmetic/boolean/lookback are
+zero-sized `Default`
 markers; comparisons carry a `Tolerance { abs, rel }` (band = `max(abs, rel·max|operand|)`, default `(1e-12, 1e-9)` — **relative, because operand scale is unbounded**; the execution-side quantity epsilons live in `src/wallet.rs`). `Combine` feeds the *same* input to both sides
-(requires `Input: Clone`; use `lhs`/`rhs` naming), holds op by value; `Lookback`/`Extreme`
+(requires `Input: Clone`; use `lhs`/`rhs` naming), holds op by value; `Unary`/`Lookback`/
+`Extreme`/`Cumulative`
 hold a zero-sized op as `PhantomData<fn() -> Op>`. `Change` is a **bidirectional** toggle
 detector; directional events come from pairing it with a comparison.
+**One marker may wear several hats** — `AddOp` is binary `+` and the `CumSum` fold;
+`MaxOp`/`MinOp` are the pairwise, rolling *and* cumulative extremes. Reach for that
+before adding a near-duplicate op type.
 
 ### Blessed series — what a `source:`-omitted leaf reads
 
@@ -382,6 +387,12 @@ If you're about to write a private helper whose name looks like something here, 
 | Multi-output accessor bodies | `component_accessors!` macro | `src/indicators/component.rs` |
 | Real recurrence for internal smoothing | `EmaState` / `WilderState` | `src/indicators/smoothing.rs` |
 | Any fixed-capacity window (push, evict oldest, iterate oldest-first) | `stats::Ring<T>` — the generic ring. Serializes as a bare oldest-first array (the old `VecDeque` shape, so run-state files still load) and has **no `Deserialize`**: the array carries no capacity, so restoring goes through `stats::LoadWindow` via the `#[state(window)]` derive role, which sizes from the destination. Don't reach for a `VecDeque` — see PERFORMANCE *Phase 13* | `src/indicators/stats.rs` |
+| Pointwise transform of one source (`abs`, `sign`, `sqrt`, `tanh`, `sigmoid`) | `Unary<S, Op>` + `UnaryOp` — stateless, `Option` return so an out-of-domain sample reads `None`. Don't add a bespoke struct for a new one | `src/indicators/ops.rs` |
+| Unbounded running fold (`cum_sum`, `cum_max`, `cum_min`) | `Cumulative<S, Op>` + `CumulativeOp` — folds with the **existing** `AddOp`/`MaxOp`/`MinOp` markers, so a new accumulator is usually zero new types. `x / x.cum_max() - 1` is the drawdown of any series | `src/indicators/ops.rs` |
+| Pairwise (two sources, one bar) extremum or power | `Max`/`Min`/`Pow` = `Combine<L, R, Op>`; `.clamp(lo, hi)` is `Min` of `Max`. **Not** `RollingMax`, which is one source over a window | `src/indicators/ops.rs` |
+| Rolling two-source statistic (correlation / covariance / beta) | `PairStat<L, R, Op>` + `PairStatOp` over `WindowCovariance`; aliases `Correlation`/`Covariance`/`Beta`. Each reads one field of a single `moments()` pass — **ask the core once**, never two accessors | `src/indicators/pairwise.rs` |
+| Rolling regression against time (slope / intercept / fitted value / r²) | `LinReg<S>` + `component_accessors!` — one `WindowCovariance` fed the bar index as its `x` leg. `period >= 2` | `src/indicators/linreg.rs` |
+| Every second-order reading of a paired window, from one scan | `WindowCovariance::moments()` → `Moments` (`correlation` / `slope_y_on_x` / `slope_x_on_y` / `r_squared`). `r_squared` is `cov²/(varₓ·var_y)` **direct**, not `correlation()²` — squaring undoes the sqrt | `src/indicators/stats.rs` |
 | Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>` — **both fixed rings**, not `VecDeque`s, and deliberately **not** built on `Ring` (each needs an access pattern it lacks: one contiguous full-window run, and monotonic push/pop at both ends). **Dispersion reads scan the window** (O(period), on four accumulators; `LANES`); the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` digits and was wrong at crypto price scale — don't reintroduce it. Want the mean *and* the dispersion? `mean_and_stddev` / `mean_and_variance`, not both calls | `src/indicators/stats.rs` |
 | Rolling quantile / rank-in-window | `WindowQuantile` backing `Percentile` / `PercentileRank` | `src/indicators/stats.rs`, `src/indicators/percentile.rs` |
 | The crate's **one** quantile convention (R type-7) | `stats::quantile_of_sorted(sorted, p)` — don't add a second | `src/indicators/stats.rs` |

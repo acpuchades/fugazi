@@ -467,8 +467,20 @@ pub type Pow<L, R> = Combine<L, R, PowOp>;
 ```
 
 - Binary → `BinaryOp` + `Combine` (`src/indicators/ops.rs`).
+- Pointwise unary → `UnaryOp` + `Unary`. `apply` returns `Option`, so an input
+  the operator has no answer for (`√x` of a negative) reads `None` rather than
+  propagating a NaN.
 - Unary lookback → `LookbackOp` + `Lookback`.
 - Rolling extremum → `ExtremeOp` + `Extreme`.
+- Unbounded running fold → `CumulativeOp` + `Cumulative`. The fold takes
+  `acc: Option<Real>` so an op with no identity element seeds from its first
+  sample.
+
+**Check whether the marker already exists first.** These traits are on the
+operation, not on the carrier, so one marker can serve several: `AddOp` is both
+binary `+` and the fold behind `CumSum`, and `MaxOp`/`MinOp` are the pairwise,
+rolling and cumulative extremes alike. `CumSum`/`CumMax`/`CumMin` added **zero**
+new op types. A near-duplicate marker is the smell this is meant to prevent.
 
 Arithmetic and boolean ops are zero-sized `Default` markers; comparison ops
 carry their `epsilon` by value. Then follow steps 3–8 above.

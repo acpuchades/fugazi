@@ -521,7 +521,13 @@ fn demand_labels(types: Vec<crate::runtime::PayloadType>) -> Vec<String> {
 /// can render the curated grouping and order directly, not just the per-tag
 /// `category` string.
 pub const CATEGORIES: &[(&str, &[&str])] = &[
-    ("arithmetic operators", &["add", "sub", "mul", "div", "log", "exp"]),
+    (
+        "arithmetic operators",
+        &[
+            "add", "sub", "mul", "div", "pow", "log", "exp", "sqrt", "abs", "sign", "tanh",
+            "sigmoid",
+        ],
+    ),
     (
         "bands",
         &[
@@ -559,22 +565,28 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
     ("edge detectors", &["changed", "became_true", "became_false"]),
     ("event timing", &["bars_since", "bars_since_high", "bars_since_low"]),
     ("level comparisons", &["above", "below"]),
+    (
+        "linear regression",
+        &["linreg_slope", "linreg_intercept", "linreg_value", "linreg_r2"],
+    ),
     ("load-time placeholders", &["param", "arg", "import", "undefined"]),
     ("lookback operators", &["lag", "diff", "ratio", "roc"]),
     ("macd", &["macd_line", "macd_signal", "macd_histogram"]),
     ("moving averages", &["sma", "ema", "rma", "wma", "hma"]),
     ("oscillators", &["rsi", "stddev", "cci", "stochastic", "stoch_rsi", "williams_r"]),
     ("overlay side channel", &["get", "has_column"]),
+    ("pairwise extrema", &["min", "max", "clamp"]),
     ("portfolio weighting", &["equal_weight", "fixed"]),
     ("position anchors", &["entry", "peak", "trough"]),
     ("rolling extrema", &["rolling_max", "rolling_min"]),
     (
         "rolling statistics",
         &[
-            "correlation", "kurtosis", "percentile", "percentile_rank", "skewness",
-            "variance_ratio", "zscore",
+            "beta", "correlation", "covariance", "kurtosis", "percentile", "percentile_rank",
+            "skewness", "variance_ratio", "zscore",
         ],
     ),
+    ("running accumulators", &["cum_sum", "cum_max", "cum_min"]),
     (
         "sizing helpers",
         &["vol_target", "atr_risk", "drawdown_throttle", "equity_vol_target", "fractional_kelly"],

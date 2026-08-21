@@ -48,6 +48,8 @@
 #define BBANDS_K 2.0
 #define AROON_P 14
 #define DMI_P 14
+#define CORREL_P 20
+#define LINREG_P 14
 
 #define REPS 7
 
@@ -164,6 +166,29 @@ int main(int argc, char **argv) {
     BENCH("rsi", TA_RSI(0, n - 1, c, RSI_P, &beg, &cnt, out));
     BENCH("stddev", TA_STDDEV(0, n - 1, c, STDDEV_P, 1.0, &beg, &cnt, out));
     BENCH("atr", TA_ATR(0, n - 1, h, l, c, ATR_P, &beg, &cnt, out));
+
+    /* Two-source rolling statistics. Both legs are the close series in all
+     * three tiers: the paired window's cost does not depend on the values, and
+     * making the second leg the cheapest possible source keeps the row a
+     * measurement of the window rather than of its operands.
+     *
+     * `correlation` stands for the whole
+     * paired family: `Covariance` and `Beta` are the same `WindowCovariance`
+     * core reading a different field out of one shared `moments()` pass, so
+     * their cost is this row's. (`TA_BETA` is deliberately *not* benched: it
+     * differences its two inputs into returns internally, so it is doing work
+     * fugazi's `Beta` is not handed, and the row would compare two different
+     * amounts of work.) */
+    BENCH("correlation", TA_CORREL(0, n - 1, c, c, CORREL_P, &beg, &cnt, out));
+
+    /* `TA_LINEARREG_SLOPE` fills one array; fugazi's `LinReg` produces slope,
+     * intercept, value and r² from one window every bar and the accessor
+     * projects one out. So this row charges fugazi for four readings against
+     * TA-Lib's one — the honest comparison for a caller who wants a slope,
+     * and the reason `linreg` is *not* in the multi-output block above (TA-Lib
+     * has no single call that fills all four). */
+    BENCH("linreg_slope",
+          TA_LINEARREG_SLOPE(0, n - 1, c, LINREG_P, &beg, &cnt, out));
 
     /* ---- multi-output ---------------------------------------------------
      *

@@ -270,6 +270,49 @@ history, hand it to `run_resumable`, go live.
 
 ## Spec documents
 
+### The math primitives that were surveyed and left out
+
+0.69 added eighteen tags to close the gaps where a document either could not
+express something at all or had to pay for it several times over: `!abs`,
+`!sign`, `!sqrt`, `!tanh`, `!sigmoid`, `!pow`, `!min`, `!max`, `!clamp`,
+`!cum_sum`, `!cum_max`, `!cum_min`, `!covariance`, `!beta` and the four
+`!linreg_*` readings.
+
+The cost argument is the one worth recording, because it is not obvious from the
+YAML: `IfElse::update` advances **all three** branches unconditionally and
+`Combine` holds two independent source instances. So `|x|` spelled as
+`!if_else { cond: !gt {x, 0}, then: x, else: !mul {x, -1} }` builds and ticks
+*three* copies of `x` every bar, and a three-way `!sign` builds five. That is
+what made these primitives rather than recipes — not the verbosity.
+
+The same survey named four groups that were **rejected**, and each would need a
+new argument to reopen:
+
+- **`!floor` / `!ceil` / `!round` / `!mod`.** Quantisation is a venue property —
+  a lot size, a tick size — and belongs at the wallet layer where the venue's
+  own increments are known, not in an expression that has no idea what it is
+  being rounded *for*. `!mod` buys only calendar cycles, which the calendar
+  leaves already cover. Reopen if a strategy-layer need appears that is not
+  execution quantisation.
+- **Trigonometry.** The one real use is cyclic seasonality encoding
+  (`sin(2π·doy/365)` as a feature). Worth adding the day the crate grows a
+  seasonality story; until then it is six tags nothing in the repo would call.
+- **Cross-sectional `!rank` / `!softmax`.** These are a different layer:
+  ranking *across* a universe on one bar is `strategies::basket::Selection`,
+  which already composes (`TopBottom`/`Threshold`/`Quantile`). A per-expression
+  rank tag would be a second, weaker spelling of it.
+- **`!coalesce` / `!nz` — "read 0 when the source is `None`".** Refused on
+  principle, not on cost. `None` is how this crate says *not settled yet*, and
+  the readiness gate is built on it; a tag that turns an unsettled bar into a
+  tradeable zero contradicts *Safe defaults, opt-in overrides* directly.
+  `!unstable` is the named opt-out and it is the honest one — it says "trade
+  through the settling tail", not "pretend the value is zero".
+
+Two more were considered and folded in rather than added: `!rolling_sum` is
+`!sma` times its period, one extra node, and `!linreg_angle` (TA-Lib has it) is
+`atan` of a slope whose units are arbitrary — the slope itself is the number a
+strategy can reason about.
+
 ### `meta:` is a named subtree, not a relaxed `deny_unknown_fields`
 
 0.60.0 gave every document (the five strategy shapes, presets, portfolio

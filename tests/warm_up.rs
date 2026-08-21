@@ -9,12 +9,13 @@
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, BarsSinceHigh, BarsSinceLow, Bollinger, Cci, Correlation, CurrentTime, Current,
-    Day, DayOfWeek, DayOfYear, Dmi, Donchian, Ema, Exp, GarmanKlass, Hma, Hour, Identity, IsWeekday,
-    IsWeekend, Keltner, Kurtosis, Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Percentile,
-    PercentileRank, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
-    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, VarianceRatio, Vwap, WeekOfYear,
-    WilliamsR, Wma, Year, ZScore,
+    Abs, Adx, Aroon, Atr, BarsSinceHigh, BarsSinceLow, Beta, Bollinger, Cci, Correlation,
+    Covariance, CumMax, CumMin, CumSum, CurrentTime, Current, Day, DayOfWeek, DayOfYear, Dmi,
+    Donchian, Ema, Exp, GarmanKlass, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis,
+    Latch, LinReg, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Percentile, PercentileRank,
+    Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Sigmoid, Sign, Skewness, Sma, Sqrt,
+    StdDev, Stochastic, Tanh, TrueRange, UnixMillis, UnixSeconds, Value, VarianceRatio, Vwap,
+    WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -89,9 +90,17 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Current::close(), "close");
     candle_case(Log::natural(Current::close()), "log");
     candle_case(Exp::natural(Current::close()), "exp");
+    candle_case(Abs::new(Current::close()), "abs");
+    candle_case(Sign::new(Current::close()), "sign");
+    candle_case(Sqrt::new(Current::close()), "sqrt");
+    candle_case(Tanh::new(Current::close()), "tanh");
+    candle_case(Sigmoid::new(Current::close()), "sigmoid");
     candle_case(TrueRange::new(Current::candle()), "true_range");
     candle_case(Obv::new(Current::candle()), "obv");
     candle_case(fugazi::indicators::Ad::new(Current::candle()), "ad");
+    candle_case(CumSum::new(Current::close()), "cum_sum");
+    candle_case(CumMax::new(Current::close()), "cum_max");
+    candle_case(CumMin::new(Current::close()), "cum_min");
     candle_case(Vwap::new(Current::candle(), 20), "vwap");
     candle_case(Sar::with_defaults(Current::candle()), "sar");
     candle_case(Atr::new(Current::candle(), 14), "atr");
@@ -131,6 +140,12 @@ fn warm_up_is_exact_for_the_catalogue() {
         Correlation::new(Current::close(), Current::open(), 20),
         "correlation",
     );
+    candle_case(
+        Covariance::new(Current::close(), Current::open(), 20),
+        "covariance",
+    );
+    candle_case(Beta::new(Current::close(), Current::open(), 20), "beta");
+    candle_case(LinReg::new(Current::close(), 20), "linreg");
     candle_case(
         VarianceRatio::new(Current::close(), 20, 2),
         "variance_ratio",
@@ -196,6 +211,15 @@ fn warm_up_is_exact_for_composition() {
     candle_case(Current::close().lag(3), "lag");
     candle_case(Current::close().roc(5), "roc");
     candle_case(Current::close().rolling_max(10), "rolling_max");
+    candle_case(Current::close().pow(Value::new(2.0)), "pow");
+    candle_case(
+        Current::close().max(Sma::new(Current::close(), 10)),
+        "pairwise_max",
+    );
+    candle_case(
+        Current::close().clamp(Value::new(0.0), Sma::new(Current::close(), 10)),
+        "clamp",
+    );
     // NB: `IfElse` is deliberately not part of the exact-warm-up battery.
     // Its `warm_up_bars()` reports the max of the three sources (safe
     // upper bound for downstream stability gates), but the actual first

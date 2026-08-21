@@ -96,10 +96,12 @@ MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 BBANDS_P, BBANDS_K = 20, 2.0
 AROON_P = 14
 DMI_P = 14
+CORREL_P = 20
+LINREG_P = 14
 
 # The rows the report prints, in order. Scalar first, then the multi-output
 # block this comparison exists for.
-SCALAR = ("sma", "ema", "rsi", "stddev", "atr")
+SCALAR = ("sma", "ema", "rsi", "stddev", "atr", "correlation", "linreg_slope")
 MULTI = ("macd", "bbands", "aroon", "dmi", "adx")
 
 
@@ -308,6 +310,18 @@ def talib_py_tier(c, h, lo) -> dict[str, float]:
         "rsi": timed_samples(lambda: talib.RSI(c, RSI_P)),
         "stddev": timed_samples(lambda: talib.STDDEV(c, STDDEV_P)),
         "atr": timed_samples(lambda: talib.ATR(h, lo, c, ATR_P)),
+        # Both legs are the close series in all three tiers: the paired
+        # window's cost does not depend on the values, and the cheapest
+        # possible second leg keeps this a measurement of the window rather
+        # than of its operands.
+        # `correlation` stands for the paired family (`covariance` / `beta`
+        # share its core and its cost); `talib.BETA` differences its inputs
+        # internally, so it is not a like-for-like partner.
+        "correlation": timed_samples(lambda: talib.CORREL(c, c, CORREL_P)),
+        # fugazi's LinReg produces four readings per bar and projects one;
+        # `talib.LINEARREG_SLOPE` fills one array. The gap is that extra work,
+        # which is what a caller wanting a slope actually pays.
+        "linreg_slope": timed_samples(lambda: talib.LINEARREG_SLOPE(c, LINREG_P)),
         # One call, every line — the shape a fugazi multi-output `update` has.
         "macd": timed_samples(lambda: talib.MACD(
             c, fastperiod=MACD_FAST, slowperiod=MACD_SLOW, signalperiod=MACD_SIGNAL)),
@@ -353,6 +367,12 @@ def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
         "rsi": timed_samples(scalar(lambda: fz.rsi(fz.identity(), RSI_P))),
         "stddev": timed_samples(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))),
         "atr": timed_samples(lambda: fz.atr(ATR_P).feed(frame)),
+        "correlation": timed_samples(
+            lambda: fz.correlation(fz.identity(), fz.identity(), CORREL_P).feed(c)
+        ),
+        "linreg_slope": timed_samples(
+            lambda: fz.linreg(fz.identity(), LINREG_P).shared().slope().feed(c)
+        ),
         # `PyMulti.feed` returns every line as its own column from one pass, so
         # these are the same unit of work as the `talib` calls above.
         "macd": timed_samples(lambda: fz.macd(

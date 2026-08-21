@@ -9,7 +9,7 @@
 //!
 //! Every *dispersion* read here — [`variance`](WindowStats::variance) and what
 //! derives from it, plus `mean_abs_dev` / `downside_dev` / `skewness` /
-//! `kurtosis` and [`WindowCovariance::correlation`] — makes one O(period) pass
+//! `kurtosis` and [`WindowCovariance::moments`] — makes one O(period) pass
 //! over the retained window, centring on the mean.
 //!
 //! The O(1) alternative is the textbook `E[X²] − E[X]²` shortcut, carrying a
@@ -208,6 +208,22 @@ impl<T: Copy + Default> Ring<T> {
         } else {
             (&self.buf[self.head..], &self.buf[..end - self.buf.len()])
         }
+    }
+
+    /// The whole buffer as **one** contiguous run, when the ring is full.
+    ///
+    /// A full ring has every slot live, so the buffer is the window — rotated,
+    /// which is irrelevant to any order-independent reduction. Handing a scan
+    /// one run of `capacity` samples instead of the two short halves
+    /// [`slices`](Self::slices) returns is what makes a lane-parallel reduction
+    /// pay: at period 10 the split puts six of ten samples in the scalar
+    /// remainder, back on a serial dependency chain. `WindowStats` reduces over
+    /// exactly this, for exactly this reason — see `docs/PERFORMANCE.md`.
+    ///
+    /// `None` while the ring is still filling; the caller falls back to
+    /// `slices`.
+    pub fn full_run(&self) -> Option<&[T]> {
+        (self.len == self.buf.len()).then_some(&self.buf)
     }
 
     /// The live samples, oldest first — the logical order the wire format uses.
@@ -597,6 +613,131 @@ pub(crate) const MOMENT_EPS: Real = 1e-12;
 /// impls below, which emit the same `{period, window, sum_x, sum_y}` object with
 /// the window in logical (oldest-first) order that the `VecDeque` derive
 /// produced. Run-state files written by earlier versions still load.
+/// `(Σ(x−x̄)², Σ(y−ȳ)², Σ(x−x̄)(y−ȳ))` over `xs`, on [`LANES`] independent
+/// accumulators per term.
+///
+/// The paired twin of [`lanes_sum_sq`], and it exists for the same measured
+/// reason: a single running total per term makes every add wait on the one
+/// before it, so the scan costs `period` × the FPU's add latency no matter how
+/// tight the loop. Three terms give three independent chains, which is better
+/// than one and still `period` long each; four lanes per term cuts each to
+/// `period / 4` and lets the multiplies issue alongside.
+///
+/// Like `lanes_sum_sq` this is **not** bit-identical to a single running total —
+/// floating-point addition does not reassociate — and is, if anything, the more
+/// accurate arrangement, for the same reason pairwise summation is the standard
+/// remedy. `window_covariance_matches_a_two_pass_pearson` pins it against a
+/// two-pass reference.
+#[inline]
+fn lanes_centred_pairs(xs: &[(Real, Real)], mean_x: Real, mean_y: Real) -> (Real, Real, Real) {
+    // Three separate lane arrays, not one array of triples: the separate ones
+    // are three contiguous `[f64; 4]` blocks a vector op can load whole, where
+    // an interleaved `[(f64, f64, f64); 4]` would stride over 24 bytes. Zipped
+    // rather than indexed, so no bounds check has to be proved away — the same
+    // shape `lanes_sum_sq` uses.
+    let mut acc_xx = [0.0 as Real; LANES];
+    let mut acc_yy = [0.0 as Real; LANES];
+    let mut acc_xy = [0.0 as Real; LANES];
+    let (chunks, remainder) = xs.as_chunks::<LANES>();
+    for chunk in chunks {
+        let lanes = acc_xx.iter_mut().zip(&mut acc_yy).zip(&mut acc_xy);
+        for (((axx, ayy), axy), &(x, y)) in lanes.zip(chunk) {
+            let (dx, dy) = (x - mean_x, y - mean_y);
+            *axx += dx * dx;
+            *ayy += dy * dy;
+            *axy += dx * dy;
+        }
+    }
+    // The tail folds into lane 0 — arbitrary, but the same lane every call, so
+    // a given window always reduces the same way.
+    for &(x, y) in remainder {
+        let (dx, dy) = (x - mean_x, y - mean_y);
+        acc_xx[0] += dx * dx;
+        acc_yy[0] += dy * dy;
+        acc_xy[0] += dx * dy;
+    }
+    // Pairwise, not left-to-right: one more halving of the rounding, free.
+    let reduce = |a: [Real; LANES]| (a[0] + a[1]) + (a[2] + a[3]);
+    (reduce(acc_xx), reduce(acc_yy), reduce(acc_xy))
+}
+
+/// The second-order readings of a `WindowCovariance` window, all five from one
+/// centred pass — see `WindowCovariance::moments`.
+///
+/// Population (divide-by-`n`) throughout. That is not a convention this crate
+/// has to defend: every ratio built from these (correlation, beta, a regression
+/// slope) divides one of them by another, and the `n` cancels.
+#[derive(Debug, Clone, Copy)]
+pub struct Moments {
+    /// Mean of the `x` (left) leg.
+    pub mean_x: Real,
+    /// Mean of the `y` (right) leg.
+    pub mean_y: Real,
+    /// Population variance of the `x` leg.
+    pub var_x: Real,
+    /// Population variance of the `y` leg.
+    pub var_y: Real,
+    /// Population covariance of the two legs.
+    pub cov: Real,
+}
+
+impl Moments {
+    /// Pearson correlation, or `0.0` when either leg is dispersion-free
+    /// (variance below the crate's shared moment epsilon) — undefined there, and
+    /// the same graceful degradation `WindowStats::skewness` applies.
+    ///
+    /// Clamped to `[-1, 1]`: the centred form is far more accurate than the raw
+    /// one but `cov/√(varₓ·var_y)` can still land a few ulps outside on a
+    /// perfectly (anti-)correlated window.
+    pub fn correlation(&self) -> Real {
+        if self.var_x < MOMENT_EPS || self.var_y < MOMENT_EPS {
+            return 0.0;
+        }
+        (self.cov / (self.var_x * self.var_y).sqrt()).clamp(-1.0, 1.0)
+    }
+
+    /// The coefficient of determination, `cov² / (varₓ·var_y)`, in `[0, 1]`.
+    ///
+    /// Computed directly rather than as `correlation()²`: squaring undoes the
+    /// square root, so the direct form drops a `sqrt` — ~15 cycles, unpipelined,
+    /// on the per-bar path — *and* avoids the round-trip's rounding. `0.0` on a
+    /// dispersion-free leg, matching [`correlation`](Self::correlation), and
+    /// clamped for the same last-ulp reason.
+    pub fn r_squared(&self) -> Real {
+        if self.var_x < MOMENT_EPS || self.var_y < MOMENT_EPS {
+            return 0.0;
+        }
+        (self.cov * self.cov / (self.var_x * self.var_y)).clamp(0.0, 1.0)
+    }
+
+    /// Slope of the least-squares line fitting `y` as a function of `x`:
+    /// `cov / varₓ`.
+    ///
+    /// `0.0` when `x` is dispersion-free — a vertical fit has no finite slope,
+    /// and answering `0` keeps the degradation consistent with
+    /// [`correlation`](Self::correlation) rather than propagating an infinity
+    /// into a position size.
+    pub fn slope_y_on_x(&self) -> Real {
+        if self.var_x < MOMENT_EPS {
+            return 0.0;
+        }
+        self.cov / self.var_x
+    }
+
+    /// Slope of the least-squares line fitting `x` as a function of `y`:
+    /// `cov / var_y`. The mirror of [`slope_y_on_x`](Self::slope_y_on_x), and
+    /// **not** its reciprocal — the two coincide only on a perfect fit.
+    ///
+    /// This is the one a rolling beta wants, since the leg being explained is
+    /// the left operand and the benchmark is the right.
+    pub fn slope_x_on_y(&self) -> Real {
+        if self.var_y < MOMENT_EPS {
+            return 0.0;
+        }
+        self.cov / self.var_y
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WindowCovariance {
     period: usize,
@@ -676,39 +817,52 @@ impl WindowCovariance {
         self.window.is_full()
     }
 
-    /// Pearson correlation over the window, from one centred pass. Returns `0.0`
-    /// when either series is dispersion-free (variance below [`MOMENT_EPS`]) —
-    /// correlation is undefined there. Still clamped to `[-1, 1]`: the centred
-    /// form is far more accurate but `cov/√(varₓ·var_y)` can still land a few
-    /// ulps outside on a perfectly (anti-)correlated window. Only meaningful
-    /// once [`is_full`](Self::is_full).
-    pub fn correlation(&self) -> Real {
+    /// The `x` of the oldest retained pair — the left edge of the window, in
+    /// whatever coordinate the caller pushed. `None` on an empty window.
+    ///
+    /// A regression reports its intercept at that edge, and the caller cannot
+    /// derive it from the count when the pushed `x` skips samples.
+    pub fn oldest_x(&self) -> Option<Real> {
+        self.window.iter().next().map(|(x, _)| x)
+    }
+
+    /// Both means, both population variances and the population covariance of
+    /// the window, from **one** centred pass.
+    ///
+    /// The shared intermediate every second-order reading here is built from —
+    /// correlation, covariance, beta, a regression slope. Asking for it once and
+    /// dividing yourself costs one pass; calling two accessors costs two, which
+    /// is the mistake this exists to prevent.
+    ///
+    /// Centred rather than `Σxy/n − μₓμ_y` for the same reason
+    /// [`WindowStats::variance`] is: the raw-moment form cancels away
+    /// `(μ/σ)²` significant digits and was wrong at crypto price scale. Only
+    /// meaningful once [`is_full`](Self::is_full).
+    pub fn moments(&self) -> Moments {
         let n = self.period as Real;
         let mean_x = self.sum_x / n;
         let mean_y = self.sum_y / n;
-        let (mut var_x, mut var_y, mut cov) = (0.0, 0.0, 0.0);
-        // The window's two contiguous halves, reduced in turn into the *same*
-        // three accumulators. That keeps the summation order exactly what the
-        // `VecDeque` produced — oldest to newest — so this stays bit-identical;
-        // it is only the per-element "which half am I in?" test of a chained
-        // iterator that goes away. (Summing the halves separately and adding
-        // would not be: see `WindowStats::variance`.)
-        let (a, b) = self.window.slices();
-        let mut accumulate = |xs: &[(Real, Real)]| {
-            for &(x, y) in xs {
-                let (dx, dy) = (x - mean_x, y - mean_y);
-                var_x += dx * dx;
-                var_y += dy * dy;
-                cov += dx * dy;
+        // A full window is the state every reading here is documented to be
+        // meaningful in, and in it every slot of the ring is live — so the whole
+        // buffer is one contiguous run, which is what lets the lanes pay. A
+        // partial window is not a meaningful read but still has to be a defined
+        // one, so it reduces its two halves the same way.
+        let (var_x, var_y, cov) = match self.window.full_run() {
+            Some(run) => lanes_centred_pairs(run, mean_x, mean_y),
+            None => {
+                let (a, b) = self.window.slices();
+                let (axx, ayy, axy) = lanes_centred_pairs(a, mean_x, mean_y);
+                let (bxx, byy, bxy) = lanes_centred_pairs(b, mean_x, mean_y);
+                (axx + bxx, ayy + byy, axy + bxy)
             }
         };
-        accumulate(a);
-        accumulate(b);
-        let (var_x, var_y, cov) = (var_x / n, var_y / n, cov / n);
-        if var_x < MOMENT_EPS || var_y < MOMENT_EPS {
-            return 0.0;
+        Moments {
+            mean_x,
+            mean_y,
+            var_x: var_x / n,
+            var_y: var_y / n,
+            cov: cov / n,
         }
-        (cov / (var_x * var_y).sqrt()).clamp(-1.0, 1.0)
     }
 
     pub fn reset(&mut self) {
@@ -1370,7 +1524,7 @@ mod tests {
         }
     }
 
-    /// The same cancellation lived in `WindowCovariance::correlation`, whose
+    /// The same cancellation lived in `WindowCovariance`'s correlation, whose
     /// `Σx²/n − μ²` variance terms and `Σxy/n − μₓμy` covariance term all
     /// cancelled the same way. Two series that move together at a large offset
     /// must still read as perfectly correlated.
@@ -1385,9 +1539,9 @@ mod tests {
             cov.update(100_000.0 + d, 250_000.0 + 3.0 * d);
         }
         assert!(
-            (cov.correlation() - 1.0).abs() < 1e-9,
+            (cov.moments().correlation() - 1.0).abs() < 1e-9,
             "a perfectly correlated pair at price scale read {}",
-            cov.correlation()
+            cov.moments().correlation()
         );
     }
 
@@ -1431,7 +1585,7 @@ mod tests {
             let vx = naive_variance(xs);
             let vy = naive_variance(yw);
             if vx < MOMENT_EPS || vy < MOMENT_EPS {
-                assert_eq!(cov.correlation(), 0.0, "flat leg at sample {i}");
+                assert_eq!(cov.moments().correlation(), 0.0, "flat leg at sample {i}");
                 continue;
             }
             let c: Real = xs
@@ -1440,7 +1594,7 @@ mod tests {
                 .map(|(x, y)| (x - mx) * (y - my))
                 .sum::<Real>()
                 / period as Real;
-            close(cov.correlation(), c / (vx * vy).sqrt(), "correlation", i);
+            close(cov.moments().correlation(), c / (vx * vy).sqrt(), "correlation", i);
         }
     }
 
@@ -1458,9 +1612,9 @@ mod tests {
             same.update(x, x);
             opposite.update(x, -x);
         }
-        assert!((same.correlation() - 1.0).abs() < 1e-12);
-        assert!((opposite.correlation() + 1.0).abs() < 1e-12);
-        assert!(same.correlation() <= 1.0 && opposite.correlation() >= -1.0);
+        assert!((same.moments().correlation() - 1.0).abs() < 1e-12);
+        assert!((opposite.moments().correlation() + 1.0).abs() < 1e-12);
+        assert!(same.moments().correlation() <= 1.0 && opposite.moments().correlation() >= -1.0);
     }
 
     // -----------------------------------------------------------------------
@@ -1699,7 +1853,7 @@ mod tests {
         let cov: WindowCovariance = serde_json::from_str(blob).expect("legacy cov state");
         assert_eq!(cov.period(), 2);
         assert!(cov.is_full());
-        assert_eq!(cov.correlation(), 1.0);
+        assert_eq!(cov.moments().correlation(), 1.0);
 
         // A zero period would panic in `Ring::new`; it is bad data, not a bug.
         assert!(serde_json::from_str::<WmaState>(r#"{"period":0,"window":[],"sum":0.0,"weighted":0.0}"#).is_err());
@@ -1732,8 +1886,8 @@ mod tests {
             assert_eq!(restored.update(x, y), b.update(x, y));
         }
         assert_eq!(
-            restored.correlation().to_bits(),
-            b.correlation().to_bits(),
+            restored.moments().correlation().to_bits(),
+            b.moments().correlation().to_bits(),
             "restored correlation is not bit-identical"
         );
     }

@@ -179,6 +179,24 @@ pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
         | BarsSinceHigh { .. }
         | BarsSinceLow { .. }
         | Correlation { .. }
+        | Covariance { .. }
+        | Beta { .. }
+        | LinregSlope { .. }
+        | LinregIntercept { .. }
+        | LinregValue { .. }
+        | LinregR2 { .. }
+        | Pow { .. }
+        | Max { .. }
+        | Min { .. }
+        | Clamp { .. }
+        | Abs { .. }
+        | Sign { .. }
+        | Sqrt { .. }
+        | Tanh { .. }
+        | Sigmoid { .. }
+        | CumSum { .. }
+        | CumMax { .. }
+        | CumMin { .. }
         | VarianceRatio { .. }
         | Cci { .. }
         | Stochastic { .. }
@@ -305,6 +323,18 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         | RollingMin { source, .. }
         | Log { source, .. }
         | Exp { source, .. }
+        | Abs { source }
+        | Sign { source }
+        | Sqrt { source }
+        | Tanh { source }
+        | Sigmoid { source }
+        | CumSum { source }
+        | CumMax { source }
+        | CumMin { source }
+        | LinregSlope { source, .. }
+        | LinregIntercept { source, .. }
+        | LinregValue { source, .. }
+        | LinregR2 { source, .. }
         | Latch { source } => vec![("source", REAL, source)],
 
         // --- Candle-source families (bar indicators) ---
@@ -356,8 +386,27 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         VolTarget { source, .. } | AtrRisk { source, .. } => opt("source", ATOM, source),
 
         // --- two-operand Real ---
-        Correlation { lhs, rhs, .. } | Add { lhs, rhs } | Sub { lhs, rhs } | Mul { lhs, rhs }
-        | Div { lhs, rhs } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
+        Correlation { lhs, rhs, .. }
+        | Covariance { lhs, rhs, .. }
+        | Beta { lhs, rhs, .. }
+        | Add { lhs, rhs }
+        | Sub { lhs, rhs }
+        | Mul { lhs, rhs }
+        | Div { lhs, rhs }
+        | Pow { lhs, rhs }
+        | Max { lhs, rhs }
+        | Min { lhs, rhs } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
+
+        // Three Real slots: the value and the band it is held inside.
+        Clamp {
+            source,
+            lower,
+            upper,
+        } => vec![
+            ("source", REAL, source),
+            ("lower", REAL, lower),
+            ("upper", REAL, upper),
+        ],
 
         DonchianUpper { high, low, .. }
         | DonchianMiddle { high, low, .. }

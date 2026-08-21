@@ -1529,6 +1529,45 @@ pub(crate) fn correlation(
         |l, r| Correlation::new(l, r, period)
     )?))
 }
+/// Rolling population covariance between two Real sources over `period` —
+/// correlation without the normalisation, so it keeps the units and the
+/// magnitude. Both operands must share an input domain (both candle-rooted,
+/// both value-rooted, or both snapshot-rooted).
+#[pyfunction]
+pub(crate) fn covariance(
+    lhs: PyRef<'_, PyIndicator>,
+    rhs: PyRef<'_, PyIndicator>,
+    period: usize,
+) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    Ok(PyIndicator::wrap(combine_sources!(
+        lhs.src.clone(),
+        rhs.src.clone(),
+        |l, r| Covariance::new(l, r, period)
+    )?))
+}
+
+/// Rolling beta of `lhs` against `rhs` over `period` — the least-squares slope
+/// explaining the first series by the second.
+///
+/// The order is **asset, then benchmark**; swapping them gives a different
+/// number, not the reciprocal. Feed returns rather than prices unless you want
+/// the price-level relationship: this takes what it is handed and does not
+/// difference behind your back. A flat benchmark over the window reads `0.0`.
+#[pyfunction]
+pub(crate) fn beta(
+    lhs: PyRef<'_, PyIndicator>,
+    rhs: PyRef<'_, PyIndicator>,
+    period: usize,
+) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    Ok(PyIndicator::wrap(combine_sources!(
+        lhs.src.clone(),
+        rhs.src.clone(),
+        |l, r| Beta::new(l, r, period)
+    )?))
+}
+
 /// Lo-MacKinlay variance-ratio regime classifier over `source`'s first
 /// differences: reads `1.0` under the random-walk null, `> 1.0` in a trending
 /// (positively autocorrelated) regime and `< 1.0` in a mean-reverting one.
@@ -1747,6 +1786,25 @@ pub(crate) fn bollinger(source: PyRef<'_, PyIndicator>, period: usize, k: f64) -
     ensure_period(period)?;
     Ok(PyMulti {
         inner: map_multi!(source.src.clone(), |s| Bollinger::new(s, period, k)),
+    })
+}
+
+/// Rolling least-squares fit of `source` against the bar index:
+/// {slope, intercept, value, r2}.
+///
+/// `slope` is in source units **per bar**; `value` is the fit at the newest bar
+/// of the window and `intercept` the fit at the oldest; `r2` is in `[0, 1]`.
+/// `period` must be at least 2 — one point has no slope.
+#[pyfunction]
+#[pyo3(signature = (source, period = 20))]
+pub(crate) fn linreg(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyMulti> {
+    if period < 2 {
+        return Err(PyValueError::new_err(
+            "period must be at least 2 (a single point has no slope)",
+        ));
+    }
+    Ok(PyMulti {
+        inner: map_multi!(source.src.clone(), |s| LinReg::new(s, period)),
     })
 }
 

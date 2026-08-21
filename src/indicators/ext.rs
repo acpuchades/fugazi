@@ -8,7 +8,10 @@ use crate::indicators::exp::Exp;
 use crate::indicators::if_else::IfElse;
 use crate::indicators::log::Log;
 use crate::indicators::logic::{And, BecameFalse, BecameTrue, Change, Not, Or, Xor};
-use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
+use crate::indicators::ops::{
+    Abs, Add, CumMax, CumMin, CumSum, Diff, Div, Lag, Max, Min, Mul, Pow, Ratio, Roc, RollingMax,
+    RollingMin, Sigmoid, Sign, Sqrt, Sub, Tanh,
+};
 use crate::indicators::unstable::Unstable;
 use crate::indicators::value::Value;
 use crate::types::Real;
@@ -162,6 +165,91 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
     /// distinct from `1.0`.
     fn exp(self, base: Real) -> Exp<Self> {
         Exp::new(self, base)
+    }
+
+    /// `self` raised to the power `rhs`, pointwise (`None` where the result is
+    /// not finite — a negative base at a fractional exponent, or an overflow).
+    fn pow<R>(self, rhs: R) -> Pow<Self, R>
+    where
+        R: Indicator<Input = Self::Input, Output = Real>,
+    {
+        Pow::new(self, rhs)
+    }
+
+    /// The larger of `self` and `rhs`, pointwise. Not to be confused with
+    /// [`rolling_max`](Self::rolling_max), which maximises one source over a
+    /// window rather than two sources against each other.
+    fn max<R>(self, rhs: R) -> Max<Self, R>
+    where
+        R: Indicator<Input = Self::Input, Output = Real>,
+    {
+        Max::new(self, rhs)
+    }
+
+    /// The smaller of `self` and `rhs`, pointwise — the twin of
+    /// [`max`](Self::max).
+    fn min<R>(self, rhs: R) -> Min<Self, R>
+    where
+        R: Indicator<Input = Self::Input, Output = Real>,
+    {
+        Min::new(self, rhs)
+    }
+
+    /// `self` confined to `[lower, upper]`, pointwise — `min(max(self, lower), upper)`.
+    ///
+    /// The bounds are sources, not constants, so a band can itself be an
+    /// expression (an ATR-scaled cap, say). Nothing checks that `lower <=
+    /// upper`: inverted bounds collapse to `upper`, which is what the composed
+    /// form does and the honest answer to a contradictory band.
+    fn clamp<L, U>(self, lower: L, upper: U) -> Min<Max<Self, L>, U>
+    where
+        L: Indicator<Input = Self::Input, Output = Real>,
+        U: Indicator<Input = Self::Input, Output = Real>,
+    {
+        Min::new(Max::new(self, lower), upper)
+    }
+
+    /// Absolute value of `self`, pointwise.
+    fn abs(self) -> Abs<Self> {
+        Abs::new(self)
+    }
+
+    /// Sign of `self`: `1`, `-1`, or `0` at exactly zero.
+    fn sign(self) -> Sign<Self> {
+        Sign::new(self)
+    }
+
+    /// Square root of `self` (emits `None` on negative samples).
+    fn sqrt(self) -> Sqrt<Self> {
+        Sqrt::new(self)
+    }
+
+    /// Hyperbolic tangent of `self`, squashing the real line into `(-1, 1)`.
+    fn tanh(self) -> Tanh<Self> {
+        Tanh::new(self)
+    }
+
+    /// Logistic sigmoid of `self`, `1 / (1 + e^-x)`, squashing into `(0, 1)`.
+    fn sigmoid(self) -> Sigmoid<Self> {
+        Sigmoid::new(self)
+    }
+
+    /// Running total of every value `self` has produced, from the first bar of
+    /// the run onward.
+    fn cum_sum(self) -> CumSum<Self> {
+        CumSum::new(self)
+    }
+
+    /// Running maximum of `self` since the start of the run — the unbounded
+    /// [`rolling_max`](Self::rolling_max). `x / x.cum_max() - 1` is the
+    /// drawdown of any series.
+    fn cum_max(self) -> CumMax<Self> {
+        CumMax::new(self)
+    }
+
+    /// Running minimum of `self` since the start of the run.
+    fn cum_min(self) -> CumMin<Self> {
+        CumMin::new(self)
     }
 
     /// Rolling maximum of `self` over `period` steps.

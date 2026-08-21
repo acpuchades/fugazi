@@ -1216,6 +1216,60 @@ RSI.
 `!skewness`, `!kurtosis` (raw, ~3 for a normal), `!zscore`,
 `!correlation { lhs, rhs, period }`, `!variance_ratio { source, period, lag }`.
 
+`!covariance { lhs, rhs, period }` — correlation without the normalisation, so
+it keeps the units and the magnitude correlation throws away.
+
+`!beta { lhs, rhs, period }` — the least-squares slope explaining `lhs` by
+`rhs`. The order is **asset, then benchmark**, and swapping the two is a
+different number, not the reciprocal. Feed returns rather than prices unless you
+specifically want the price-level relationship — this takes what it is handed and
+does not difference behind your back:
+
+```yaml
+# How much of ETH's move is explained by BTC's, over the last 60 bars.
+!beta
+  lhs: !roc { source: close, period: 1 }
+  rhs: !roc { source: !close { source: !pick { symbol: BTC } }, period: 1 }
+  period: 60
+```
+
+### Linear regression — `{ source = close, period }`
+
+`!linreg_slope`, `!linreg_intercept`, `!linreg_value`, `!linreg_r2`: the
+least-squares fit of `source` against the bar index, over a rolling window.
+`period` must be at least 2 — one point has no slope, and a document asking for
+one is a build error rather than a silent `0`.
+
+This is the one trend primitive the rest of the grammar cannot spell. No
+composition of lagged differences is a regression, so a slope has to be a tag.
+The four readings answer different questions:
+
+- `!linreg_slope` — the trend rate, in source units **per bar**.
+- `!linreg_value` — the fit at the **newest** bar: a de-noised level now, the
+  least-squares counterpart of a moving average.
+- `!linreg_intercept` — the fit at the **oldest** bar: where the current trend
+  started.
+- `!linreg_r2` — in `[0, 1]`, how much of the window's variation the line
+  accounts for.
+
+The classic pairing is `slope · r²`, which discounts a steep fit that nothing
+actually follows:
+
+```yaml
+# Trend rate, scale-free (per-bar slope as a fraction of level), quality-weighted.
+!mul
+  lhs: !div
+    lhs: !linreg_slope { period: 60 }
+    rhs: !linreg_value { period: 60 }
+  rhs: !linreg_r2 { period: 60 }
+```
+
+Each `!linreg_*` tag builds its own fit, exactly as the `!bb_*` and `!macd_*`
+lines do — four tags over one window is four windows. That is deliberate and
+measured: an `Arc<Mutex<_>>`-shared source costs more per bar than recomputing
+these does. See *Do not reach for `.shared()`* in
+[PERFORMANCE.md](PERFORMANCE.md).
+
 `!percentile { source = close, period, pct }` — the `pct`-quantile over the
 window, linearly interpolated (R type-7, the same convention the report-level
 percentiles use). `pct: 0.5` is the rolling median. This is the adaptive-threshold
@@ -1377,6 +1431,13 @@ candle-field leaves.
 | Tags | Fields | Meaning |
 | --- | --- | --- |
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
+| `!pow` | `{ lhs, rhs }` | `lhs` to the power `rhs`; `None` where the result is not a finite real (a negative base at a fractional exponent, `0` to a negative power, an overflow) |
+| `!max`, `!min` | `{ lhs, rhs }` | the larger / smaller of two sources, **bar by bar** — not `!rolling_max`, which maximises one source over a window |
+| `!clamp` | `{ source = close, lower, upper }` | `source` held inside a band. Both bounds are expressions. Inverted bounds collapse to `upper`, which is what the `!min`-of-`!max` form it stands for does |
+| `!abs`, `!sign` | `{ source = close }` | absolute value; sign (`1` / `-1` / `0` at exactly zero) |
+| `!sqrt` | `{ source = close }` | square root; `None` on negative samples |
+| `!tanh`, `!sigmoid` | `{ source = close }` | squash the whole real line into `(-1, 1)` / `(0, 1)` — a bounded sizing response that stays smooth where a `!clamp` has corners |
+| `!cum_sum`, `!cum_max`, `!cum_min` | `{ source = close }` | running total / extremum since the **first bar of the run**, unbounded. `!obv` and `!ad` are hard-wired instances of `!cum_sum`; `!cum_max` is what makes a drawdown of an arbitrary series, [see below](#running-accumulators--cum_sum-cum_max-cum_min) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
 | `!exp` | `{ source = close, base = e }` | exponential of `source` (`base^x`), the inverse of `!log`; `None` where the result overflows to infinity |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
@@ -1403,6 +1464,31 @@ All three sources advance every bar — the branch that didn't fire keeps warmin
 up rather than stalling. The ternary reads `None` while the condition or the
 branch it selects is still warming up (its reported warm-up length is the max
 across all three, a safe upper bound for the readiness gate).
+
+#### Running accumulators — `!cum_sum`, `!cum_max`, `!cum_min`
+
+The unbounded siblings of `!rolling_max` / `!rolling_min`: no window, so they
+answer over the whole run rather than the last `period` bars. Where they start is
+part of their meaning — a resumed run carries the accumulator forward with the
+rest of its state.
+
+`!cum_max` is what generalises drawdown. The built-in `!drawdown` reads the
+strategy's book; this reads anything:
+
+```yaml
+# Drawdown of the price itself, as a negative fraction — usable as a dip filter
+# on an asset the strategy is not trading.
+!sub
+  lhs: !div
+    lhs: &px !close { source: !pick { symbol: BTC } }
+    rhs: !cum_max { source: *px }
+  rhs: !value 1
+```
+
+A bar where the source reads `None` leaves the accumulator untouched *and
+unreported*: the tag emits `None` for that bar and the next real sample folds
+into the value carried across the gap. `None` here means "no reading this bar",
+never "the total reset".
 
 #### Cross-timeframe composition — `!resample` + `!latch`
 

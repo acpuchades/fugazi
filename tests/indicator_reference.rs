@@ -26,8 +26,9 @@
 //! warm-up only as the `None` prefix of the series it is checking.
 
 use fugazi::indicators::{
-    Ad, Aroon, Bollinger, Cci, Current, Ema, Exp, Identity, Log, Mfi, Obv, Percentile, RollingMax,
-    RollingMin, Rma, Rsi, Sma, StdDev, Stochastic, TrueRange, Value, WilliamsR, Wma,
+    Abs, Ad, Aroon, Beta, Bollinger, Cci, Covariance, CumMax, CumMin, CumSum, Current, Ema, Exp,
+    Identity, LinReg, Log, Mfi, Obv, Percentile, RollingMax, RollingMin, Rma, Rsi, Sigmoid, Sign,
+    Sma, Sqrt, StdDev, Stochastic, Tanh, TrueRange, Value, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 
@@ -502,4 +503,223 @@ fn reset_replays_every_stateful_shape_identically() {
         SPIKY.iter().copied().map(flat).collect(),
         "obv",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pointwise transforms
+// ---------------------------------------------------------------------------
+
+/// `|x|` of `-2, -1, 0, 1, 2` is `2, 1, 0, 1, 2` — no window, so every sample
+/// answers immediately.
+#[test]
+fn abs_is_the_magnitude() {
+    let got = run(Abs::new(Identity::new()), vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+    assert_series(&got, &some(&[2.0, 1.0, 0.0, 1.0, 2.0]), "abs");
+}
+
+/// `sign` is `1` above zero, `-1` below, and `0` **at** zero — deliberately not
+/// `f64::signum`, which answers `1.0` for `+0.0`.
+#[test]
+fn sign_answers_zero_at_zero() {
+    let got = run(Sign::new(Identity::new()), vec![-2.0, -0.0, 0.0, 0.5]);
+    assert_series(&got, &some(&[-1.0, 0.0, 0.0, 1.0]), "sign");
+}
+
+/// `√x` on the perfect squares `0, 1, 4, 9`; a negative input is outside the
+/// domain, so it reads `None` rather than a NaN.
+#[test]
+fn sqrt_refuses_negative_inputs() {
+    let got = run(Sqrt::new(Identity::new()), vec![0.0, 1.0, -1.0, 4.0, 9.0]);
+    assert_series(
+        &got,
+        &[Some(0.0), Some(1.0), None, Some(2.0), Some(3.0)],
+        "sqrt",
+    );
+}
+
+/// `tanh(0) = 0` and `tanh(±x) = ∓tanh(∓x)`; at `±1` it is
+/// `(e² − 1)/(e² + 1) ≈ ±0.7615941559557649`, and it saturates — never reaching
+/// `±1` — which is the whole point of using it as a bounded response.
+#[test]
+fn tanh_is_odd_and_saturating() {
+    let got = run(Tanh::new(Identity::new()), vec![0.0, 1.0, -1.0, 40.0]);
+    let t1 = (std::f64::consts::E.powi(2) - 1.0) / (std::f64::consts::E.powi(2) + 1.0);
+    assert_series(&got, &some(&[0.0, t1, -t1, 1.0]), "tanh");
+    assert!(t1 < 1.0, "tanh(1) must stay inside the open interval");
+}
+
+/// `1/(1 + e^-x)`: `0.5` at zero, `e/(1+e)` at one, and the reflection
+/// `sigmoid(-x) = 1 − sigmoid(x)`.
+#[test]
+fn sigmoid_is_the_logistic_curve() {
+    let got = run(Sigmoid::new(Identity::new()), vec![0.0, 1.0, -1.0]);
+    let s1 = std::f64::consts::E / (1.0 + std::f64::consts::E);
+    assert_series(&got, &some(&[0.5, s1, 1.0 - s1]), "sigmoid");
+}
+
+/// `x^y` pointwise: `2³ = 8`, `9^0.5 = 3`, `x⁰ = 1`. A negative base at a
+/// fractional exponent has no real answer, so it reads `None`.
+#[test]
+fn pow_refuses_what_has_no_real_answer() {
+    let got = run(
+        Identity::new().pow(Value::new(0.5)),
+        vec![9.0, 16.0, -4.0],
+    );
+    assert_series(&got, &[Some(3.0), Some(4.0), None], "pow_half");
+    let cubed = run(Identity::new().pow(Value::new(3.0)), vec![2.0, -2.0]);
+    assert_series(&cubed, &some(&[8.0, -8.0]), "pow_cubed");
+}
+
+/// Pairwise `max`/`min` compare the two sources **on the same bar** — against a
+/// constant 3, the ramp `1..5` clips to `3,3,3,4,5` and `1,2,3,3,3`.
+#[test]
+fn pairwise_extremes_compare_two_sources_on_one_bar() {
+    let hi = run(Identity::new().max(Value::new(3.0)), RAMP.to_vec());
+    assert_series(&hi, &some(&[3.0, 3.0, 3.0, 4.0, 5.0]), "max");
+    let lo = run(Identity::new().min(Value::new(3.0)), RAMP.to_vec());
+    assert_series(&lo, &some(&[1.0, 2.0, 3.0, 3.0, 3.0]), "min");
+}
+
+/// `clamp` is `min(max(x, lo), hi)`, so the ramp confined to `[2, 4]` reads
+/// `2, 2, 3, 4, 4`. Inverted bounds collapse to the upper one: `max` lifts every
+/// sample to 4, then `min` drops it to 2.
+#[test]
+fn clamp_confines_to_a_band() {
+    let got = run(
+        Identity::new().clamp(Value::new(2.0), Value::new(4.0)),
+        RAMP.to_vec(),
+    );
+    assert_series(&got, &some(&[2.0, 2.0, 3.0, 4.0, 4.0]), "clamp");
+    let inverted = run(
+        Identity::new().clamp(Value::new(4.0), Value::new(2.0)),
+        RAMP.to_vec(),
+    );
+    assert_series(&inverted, &some(&[2.0; 5]), "clamp_inverted");
+}
+
+// ---------------------------------------------------------------------------
+// Running accumulators
+// ---------------------------------------------------------------------------
+
+/// The running total of `1..5` is the triangular numbers, and the running
+/// extremes of a monotone ramp are its two ends.
+#[test]
+fn cumulative_folds_run_from_the_first_bar() {
+    let sum = run(CumSum::new(Identity::new()), RAMP.to_vec());
+    assert_series(&sum, &some(&[1.0, 3.0, 6.0, 10.0, 15.0]), "cum_sum");
+    let hi = run(CumMax::new(Identity::new()), vec![3.0, 1.0, 4.0, 1.0, 5.0]);
+    assert_series(&hi, &some(&[3.0, 3.0, 4.0, 4.0, 5.0]), "cum_max");
+    let lo = run(CumMin::new(Identity::new()), vec![3.0, 1.0, 4.0, 1.0, 5.0]);
+    assert_series(&lo, &some(&[3.0, 1.0, 1.0, 1.0, 1.0]), "cum_min");
+}
+
+/// `x / cum_max(x) − 1` is the drawdown of any series: flat at the highs, and
+/// `15/20 − 1 = −0.25` once it has given back a quarter of the peak.
+#[test]
+fn cum_max_makes_a_drawdown_of_any_series() {
+    let px = || Identity::<Real>::new();
+    let got = run(
+        px().div(CumMax::new(px())).sub(Value::new(1.0)),
+        vec![10.0, 20.0, 15.0, 20.0, 10.0],
+    );
+    assert_series(&got, &some(&[0.0, 0.0, -0.25, 0.0, -0.5]), "drawdown");
+}
+
+// ---------------------------------------------------------------------------
+// Paired statistics and the regression
+// ---------------------------------------------------------------------------
+
+/// The covariance of a series with itself *is* its population variance. Over
+/// the window `1,2,3`: mean 2, so `((−1)² + 0² + 1²)/3 = 2/3`. Over `2,3,4` and
+/// `3,4,5` the window is the same shape translated, so the answer repeats.
+#[test]
+fn covariance_of_a_series_with_itself_is_its_variance() {
+    let got = run(
+        Covariance::new(Identity::new(), Identity::new(), 3),
+        RAMP.to_vec(),
+    );
+    assert_series(&got, &warm(2, &[2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0]), "cov");
+}
+
+/// Beta is the slope explaining `lhs` by `rhs`, so `lhs = 3·rhs` reads 3 — and
+/// the reverse pairing reads `1/3`, since beta is directional and not a
+/// reciprocal in general.
+#[test]
+fn beta_is_the_directional_slope() {
+    let fwd = run(
+        Beta::new(Identity::new().mul(Value::new(3.0)), Identity::new(), 3),
+        RAMP.to_vec(),
+    );
+    assert_series(&fwd, &warm(2, &[3.0, 3.0, 3.0]), "beta_fwd");
+    let rev = run(
+        Beta::new(Identity::new(), Identity::new().mul(Value::new(3.0)), 3),
+        RAMP.to_vec(),
+    );
+    assert_series(&rev, &warm(2, &[1.0 / 3.0; 3]), "beta_rev");
+}
+
+/// A perfect line is recovered exactly. `y = 2x + 1` sampled at bars 0,1,2
+/// gives `1,3,5`: slope 2, the fit at the oldest bar of the window is that
+/// bar's own value, and so is the fit at the newest.
+///
+/// Slid one bar on (`3,5,7` at bars 1,2,3) both ends move by the slope, which
+/// is what makes `value` a de-noised level rather than a lagged one.
+#[test]
+fn linreg_recovers_a_perfect_line() {
+    let fit = LinReg::new(Identity::new(), 3);
+    let slope = run(fit.clone().slope(), vec![1.0, 3.0, 5.0, 7.0]);
+    assert_series(&slope, &warm(2, &[2.0, 2.0]), "slope");
+    let value = run(fit.clone().value(), vec![1.0, 3.0, 5.0, 7.0]);
+    assert_series(&value, &warm(2, &[5.0, 7.0]), "value");
+    let intercept = run(fit.clone().intercept(), vec![1.0, 3.0, 5.0, 7.0]);
+    assert_series(&intercept, &warm(2, &[1.0, 3.0]), "intercept");
+    let r2 = run(fit.r2(), vec![1.0, 3.0, 5.0, 7.0]);
+    assert_series(&r2, &warm(2, &[1.0, 1.0]), "r2");
+}
+
+/// A window that is not a line. `1,3,5,4` over a 3-window is read twice: the
+/// first window `1,3,5` is the perfect line above (slope 2, `r² = 1`, ends at 1
+/// and 5), and the second is where the fitting shows.
+///
+/// Over `3,5,4` at bars 1,2,3: x̄ = 2, ȳ = 4,
+/// `cov = ((−1)(−1) + 0·1 + 1·0)/3 = 1/3` and `varₓ = 2/3`, so the slope is
+/// `0.5`. The fit at the newest bar is `ȳ + slope·(3 − 2) = 4.5`, at the oldest
+/// `ȳ + slope·(1 − 2) = 3.5`.
+///
+/// `r² = cov²/(varₓ·var_y)`: `var_y = ((−1)² + 1² + 0²)/3 = 2/3`, so
+/// `r² = (1/9)/((2/3)(2/3)) = 0.25`.
+#[test]
+fn linreg_fits_a_noisy_window_by_least_squares() {
+    let bars = vec![1.0, 3.0, 5.0, 4.0];
+    let fit = LinReg::new(Identity::new(), 3);
+    assert_series(
+        &run(fit.clone().slope(), bars.clone()),
+        &warm(2, &[2.0, 0.5]),
+        "slope",
+    );
+    assert_series(
+        &run(fit.clone().value(), bars.clone()),
+        &warm(2, &[5.0, 4.5]),
+        "value",
+    );
+    assert_series(
+        &run(fit.clone().intercept(), bars.clone()),
+        &warm(2, &[1.0, 3.5]),
+        "intercept",
+    );
+    assert_series(&run(fit.r2(), bars), &warm(2, &[1.0, 0.25]), "r2");
+}
+
+/// A flat window has no trend to fit: slope 0, both ends of the line on the
+/// level, and `r² = 0` — the line explains none of a variation that isn't
+/// there.
+#[test]
+fn linreg_on_a_flat_window_has_no_trend() {
+    let fit = LinReg::new(Identity::new(), 3);
+    assert_series(
+        &run(fit.clone().slope(), vec![4.0, 4.0, 4.0]),
+        &warm(2, &[0.0]),
+        "slope",
+    );
+    assert_series(&run(fit.r2(), vec![4.0, 4.0, 4.0]), &warm(2, &[0.0]), "r2");
 }

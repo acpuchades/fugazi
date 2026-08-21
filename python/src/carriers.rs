@@ -252,6 +252,20 @@ impl MultiOutput for DonchianValue {
         out[2 * stride] = self.lower;
     }
 }
+impl MultiOutput for LinRegValue {
+    fn names() -> &'static [&'static str] {
+        &["slope", "intercept", "value", "r2"]
+    }
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.slope, self.intercept, self.value, self.r2]);
+    }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.slope;
+        out[stride] = self.intercept;
+        out[2 * stride] = self.value;
+        out[3 * stride] = self.r2;
+    }
+}
 impl MultiOutput for AdxValue {
     fn names() -> &'static [&'static str] {
         &["plus_di", "minus_di", "adx"]

@@ -2449,6 +2449,72 @@ was confirmed by a Rust bench, a Rust-built chain inside the extension, and a
 Python-built chain driven two different ways. Agreement across four paths is
 evidence; one number is an anecdote.
 
+## Phase 15 — the paired window that never got the lanes
+
+`WindowStats`' centred dispersion scan was put on `LANES` accumulators over one
+contiguous run, and Phase 13 found the six windows that never got the ring
+by asking about layout rather than instruction counts. The same "written up as a
+fact about `WindowStats` rather than as a pattern" failure had left one more
+instance standing: **`WindowCovariance`'s centred pass was still a single serial
+accumulator per term**, reduced over the two halves `slices()` returns.
+
+It backed only `Correlation`, so it was easy to miss. 0.69 put `Covariance`,
+`Beta` and `LinReg` on the same core — and `LinReg` reads it *every bar* — which
+made it three tags and a per-bar regression rather than one indicator.
+
+### What changed
+
+- **`moments()` replaced `correlation()`** as the core's one reading. It returns
+  `Moments { mean_x, mean_y, var_x, var_y, cov }` from a single pass, and the
+  four consumers each divide out of it. This is the *Ask a core for everything
+  you need in one call* rule applied structurally: with `correlation()` and a
+  hypothetical `covariance()` as separate accessors, an indicator wanting both
+  would have scanned twice, and `LinReg` wants three of the five.
+- **`lanes_centred_pairs`** is the paired twin of `lanes_sum_sq`: three terms ×
+  `LANES` accumulators, three *separate* `[f64; 4]` arrays rather than one
+  `[(f64, f64, f64); 4]` (separate ones are contiguous blocks a vector op can
+  load whole; interleaved would stride over 24 bytes), zipped rather than
+  indexed so no bounds check has to be proved away.
+- **`Ring::full_run()`** — the accessor `Ring` lacked and `WindowStats`
+  hand-rolled. A full ring has every slot live, so the buffer *is* the window,
+  rotated; rotation is irrelevant to an order-independent reduction. Reducing
+  one run of `period` samples instead of two short halves is what makes the
+  lanes pay at all: the `WindowStats` conversion measured that at period 10 the split put six of ten
+  samples in the scalar remainder and the lanes bought nothing.
+- **`Moments::r_squared()` is `cov²/(varₓ·var_y)` directly**, not
+  `correlation()²`. Squaring undoes the square root, so the direct form drops a
+  `sqrt` — ~15 cycles, unpipelined — from `LinReg`'s per-bar path, and avoids
+  the round-trip's rounding.
+
+**Not bit-identical, and cannot be**: floating-point addition does not
+reassociate. It is if anything the more accurate arrangement, for the reason
+pairwise summation is the standard remedy — four partial sums each accumulate a
+quarter of the rounding a single one does.
+`stats::tests::window_covariance_matches_a_two_pass_pearson` pins the result
+against a two-pass reference, and that is the guarantee; the last ulp is not.
+
+### Not yet measured
+
+`benches/three_tier.rs`, `tools/bench_talib_native.c` and
+`tools/bench_three_tier.py` gained matching `correlation` (`TA_CORREL`) and
+`linreg_slope` (`TA_LINEARREG_SLOPE`) rows — the paired window had no three-tier
+row at all before, which is how it stayed serial through nine phases of this
+document. **The rows are wired but not yet run**, so no numbers are recorded
+here. `benches/window_ring.rs` already carries a `correlation_20` workload, which
+is the cheapest way to price the change on its own.
+
+Two notes on what those rows do and do not compare:
+
+- `correlation` stands for the whole paired family. `Covariance` and `Beta` read
+  a different field of the same `moments()` pass, so their cost is that row's.
+  `TA_BETA` is deliberately absent: it differences its two inputs into returns
+  internally, so it would be doing work fugazi's `Beta` is not handed.
+- `linreg_slope` charges fugazi for **four** readings against TA-Lib's one.
+  `LinReg::update` produces slope, intercept, value and r² from one window and
+  the component projects one out, where `TA_LINEARREG_SLOPE` fills one array.
+  That is what a caller who wants a slope actually pays, and it is why `linreg`
+  is not in the multi-output block: TA-Lib has no single call filling all four.
+
 ## Known costs, and why they are there
 
 Some slow things are deliberate. Before "fixing" one, check here.
@@ -2457,7 +2523,11 @@ Some slow things are deliberate. Before "fixing" one, check here.
   `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` significant digits and was
   measurably wrong at crypto price scale — at `mean = 1e9, σ = 0.01` it clamped
   the variance to `0.0`. See the module docs in `src/indicators/stats.rs`.
-  `Sma` reads only `mean` and stays O(1).
+  `Sma` reads only `mean` and stays O(1). The same holds for
+  `WindowCovariance::moments()`, for the same cancellation: the covariance term
+  loses digits the same way the variance does. Both scans are lane-reduced over
+  one contiguous run (see Phase 15), which is as fast as an O(period) centred
+  pass gets — but they are still O(period), on purpose.
 - **`Snapshot` clones are refcount bumps, not deep copies.** This is
   load-bearing rather than an optimisation: a snapshot is fed to every signal
   slot of every symbol each bar, so with a plain `Vec` the per-bar cost grew

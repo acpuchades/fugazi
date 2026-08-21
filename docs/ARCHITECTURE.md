@@ -933,9 +933,30 @@ type):
   comparisons (op carries a `Tolerance`), boolean logic. Needs `Op: Default`;
   comparisons get `with_epsilon` / `with_tolerance`. Feeds the *same* input to both sides, requires `Input: Clone`;
   use `lhs`/`rhs` naming.
+  Arithmetic also covers `Pow` (`None` where the result is not a finite real) and
+  the **pairwise** `Max`/`Min` — two sources compared on one bar, as against
+  `Extreme`'s one source over a window. `.clamp(lo, hi)` is `Min` of `Max`, and
+  the YAML `!clamp` builds exactly that nesting rather than a fourth type.
+- **`Unary<S, Op>`** (pointwise, `UnaryOp`, zero-sized markers): `Abs`, `Sign`,
+  `Sqrt`, `Tanh`, `Sigmoid`. Stateless — the answer depends on this sample alone,
+  so warm-up and unstable period pass straight through, and the op returns
+  `Option` so a domain it has no answer for (`√x` of a negative) reads `None`
+  rather than a NaN. `Log`/`Exp` predate it and stay standalone; they carry a
+  `base`, where every op here is zero-sized.
 - **`Lookback<I, Op>`** (unary, `LookbackOp`, zero-sized markers): `Lag`, `Diff`,
   `Ratio`, `Roc`.
 - **`Extreme<S, Op>`** (rolling, `ExtremeOp`): `RollingMax`/`RollingMin`.
+- **`Cumulative<S, Op>`** (unbounded fold, `CumulativeOp`): `CumSum`, `CumMax`,
+  `CumMin`. No window, so the state is one `Real`. The fold takes
+  `acc: Option<Real>`, which is how an op with no identity element seeds from
+  its first sample. Anchored, not unstable — where the total starts is part of
+  its meaning, exactly as `Obv` is (and `Obv`/`Ad` are hard-wired `CumSum`s).
+  `x / x.cum_max() - 1` is the drawdown of any series, which is what generalises
+  the book-anchored `!drawdown`.
+
+**Three markers wear more than one hat**, because the operation is one idea and
+only the carrier differs: `AddOp` is binary `+` *and* the fold behind `CumSum`;
+`MaxOp`/`MinOp` serve the pairwise, rolling and cumulative extremes alike.
 
 **`IfElse<Cond, T, F>`** — three-source ternary. `Cond: Indicator<Output=bool>`
 picks: `Some(true)` → `if_true`, `Some(false)` → `if_false`, `None` propagates. All
@@ -954,7 +975,11 @@ Bare `Real -> Real` math, **no source, no `Indicator` impl**, shared:
   uses four. Internal smoothing uses these cores directly — `Rma<S>`/`Ema<S>` wrap a
   *source* and can't smooth inline values.
 - `stats.rs`: `WindowStats` (sum + sum-of-squares → mean/variance/stddev) backs
-  `Sma`/`StdDev`/`Bollinger`; `WindowExtreme<Op>` (monotonic-deque) backs
+  `Sma`/`StdDev`/`Bollinger`; `WindowCovariance` (paired window; one centred
+  lane-reduced pass → `Moments { mean_x, mean_y, var_x, var_y, cov }`) backs the
+  whole `PairStat<L, R, Op>` family — `Correlation`, `Covariance`, `Beta`, which
+  differ only in which field of one `moments()` call they read — and `LinReg`,
+  which feeds it the bar index as its `x` leg; `WindowExtreme<Op>` (monotonic-deque) backs
   `Extreme`/`RollingMax`/`RollingMin`/`Stochastic`; `WindowQuantile` (sorted `Vec` +
   arrival `VecDeque`; O(period)/bar, O(log period) query) backs `Percentile` /
   `PercentileRank`; `quantile_of_sorted(sorted, p)` is the crate's **one** quantile

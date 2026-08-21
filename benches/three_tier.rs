@@ -16,7 +16,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, Bollinger, Dmi, Ema, Identity, Macd, Rsi, Sma, StdDev,
+    Adx, Aroon, Atr, Bollinger, Correlation, Dmi, Ema, Identity, LinReg, Macd, Rsi, Sma, StdDev,
 };
 use fugazi::prelude::*;
 use fugazi::runtime::{self, PayloadValue as DynValue};
@@ -38,6 +38,8 @@ const BBANDS_P: usize = 20;
 const BBANDS_K: Real = 2.0;
 const AROON_P: usize = 14;
 const DMI_P: usize = 14;
+const CORREL_P: usize = 20;
+const LINREG_P: usize = 14;
 
 const REPS: usize = 7;
 /// Discarded reps before timing starts.
@@ -150,6 +152,39 @@ fn main() {
         let mut ind = Atr::new(Identity::<fugazi::market::Candle>::new(), ATR_P);
         for c in &candles {
             black_box(ind.update(*c));
+        }
+    })));
+
+    // Two-source rolling statistics. Both legs are the close series in all
+    // three tiers: the paired window's cost does not depend on the values, and
+    // the cheapest possible second leg keeps this a measurement of the window
+    // rather than of its operands. This row stands for the whole paired family:
+    // `Covariance` and `Beta` are the same `WindowCovariance` core reading a
+    // different field out of one shared `moments()` pass, so their cost is
+    // this one's. (`TA_BETA` differences its inputs into returns internally,
+    // so it is not a like-for-like partner for `Beta` and is not benched.)
+    out.push(("correlation", bench(n, || {
+        let mut ind = Correlation::new(
+            Identity::<Real>::new(),
+            Identity::<Real>::new(),
+            CORREL_P,
+        );
+        for &p in &closes {
+            black_box(ind.update(p));
+        }
+    })));
+
+    // What a strategy pays for a regression slope. `LinReg::update` produces
+    // slope, intercept, value and r² from one window every bar and the
+    // component projects one out, where `TA_LINEARREG_SLOPE` fills one array —
+    // so this charges fugazi for four readings against TA-Lib's one. That is
+    // the comparison a caller who wants a slope actually faces, and it is why
+    // this is not in the multi-output block below: TA-Lib has no single call
+    // that fills all four.
+    out.push(("linreg_slope", bench(n, || {
+        let mut ind = LinReg::new(Identity::<Real>::new(), LINREG_P).slope();
+        for &p in &closes {
+            black_box(ind.update(p));
         }
     })));
 

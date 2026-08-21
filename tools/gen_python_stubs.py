@@ -127,10 +127,11 @@ RETURNS = {
         "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
         "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
         "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
-        "week_of_year quarter unix_seconds unix_millis"
+        "week_of_year quarter unix_seconds unix_millis covariance beta"
     ).split()},
     **{n: "Signal" for n in "is_weekday is_weekend every str_eq str_ne get_bool".split()},
-    **{n: "MultiIndicator" for n in "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi".split()},
+    **{n: "MultiIndicator" for n in
+       "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi linreg".split()},
     "value_str": "StrSource",
     "get_str": "StrSource",
     "get": "Indicator | Signal | StrSource",
@@ -350,8 +351,10 @@ INDICATOR_TO_SIGNAL = {
     "crosses_above", "crosses_below",
 }
 INDICATOR_TO_INDICATOR = {
-    "add", "sub", "mul", "div", "lag", "diff", "ratio", "roc",
-    "rolling_max", "rolling_min", "log", "exp", "unstable",
+    "add", "sub", "mul", "div", "pow", "lag", "diff", "ratio", "roc",
+    "rolling_max", "rolling_min", "max", "min", "clamp", "log", "exp",
+    "abs", "sign", "sqrt", "tanh", "sigmoid",
+    "cum_sum", "cum_max", "cum_min", "unstable",
 }
 SIGNAL_TO_SIGNAL = {"and_", "or_", "xor_", "not_", "changed", "unstable"}
 
@@ -420,7 +423,7 @@ def fmt_default(value: object) -> str:
 
 def param_type(owner: str, func: str, name: str) -> str:
     """The annotation for one parameter."""
-    if owner in ("Indicator",) and name == "other":
+    if owner in ("Indicator",) and name in ("other", "lower", "upper"):
         return OPERAND
     if owner == "Signal" and name == "other":
         return "Signal"
@@ -582,6 +585,13 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
         for d, r in binary_ind.items():
             if hasattr(cls, d):
                 out.append((d, f"(self, other: {OPERAND}) -> {r}"))
+        # `**` carries Python's optional third `pow()` argument, so it does not
+        # fit the binary shape above; the extension rejects a non-`None` one.
+        for d in ("__pow__", "__rpow__"):
+            if hasattr(cls, d):
+                out.append((d, f"(self, other: {OPERAND}, modulo: Any = ...) -> Indicator"))
+        if hasattr(cls, "__abs__"):
+            out.append(("__abs__", "(self) -> Indicator"))
     if cls_name == "Signal":
         for d in ("__and__", "__or__", "__xor__"):
             if hasattr(cls, d):

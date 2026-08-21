@@ -1,16 +1,25 @@
 //! Composable indicator transform operators and their generic carriers.
 //!
-//! Three carriers, each driven by an operator type so new operators are a trait
+//! Five carriers, each driven by an operator type so new operators are a trait
 //! impl rather than a new type:
 //!
 //! * [`Combine`] — a *binary* op over two sources ([`BinaryOp`]). The op carries
 //!   its own input/output types, so this one carrier serves arithmetic
-//!   (`Real, Real → Real`: `Add`/`Sub`/`Mul`/`Div`), comparison
+//!   (`Real, Real → Real`: `Add`/`Sub`/`Mul`/`Div`/`Pow`/`Min`/`Max`), comparison
 //!   (`Real, Real → bool`: the operators in [`compare`](super::compare)) and
 //!   boolean logic (`bool, bool → bool`: the operators in [`logic`](super::logic)).
+//! * [`Unary`] — a *pointwise* op over one source ([`UnaryOp`]): `Abs`, `Sign`,
+//!   `Sqrt`, `Tanh`, `Sigmoid`.
 //! * [`Lookback`] — a *unary* op relating a source to its own value `period`
 //!   steps ago ([`LookbackOp`]): `Lag`, `Diff`, `Ratio`.
 //! * [`Extreme`] — a rolling extremum over a window ([`ExtremeOp`]).
+//! * [`Cumulative`] — an *unbounded* running fold ([`CumulativeOp`]): `CumSum`,
+//!   `CumMax`, `CumMin`.
+//!
+//! Three markers wear more than one of those hats, because the operation is one
+//! idea and only the carrier differs: [`AddOp`] is both binary `+` and the fold
+//! behind `CumSum`, and [`MaxOp`]/[`MinOp`] serve the pairwise, rolling and
+//! cumulative extremes alike.
 //!
 //! Candle field accessors live in `candle`.
 
@@ -22,6 +31,7 @@ use fugazi_derive::SaveState;
 use crate::indicator::Indicator;
 use crate::indicators::stats::Ring;
 use crate::indicators::stats::WindowExtreme;
+use crate::num::{max_finite, min_finite};
 use crate::types::Real;
 
 // ---------------------------------------------------------------------------
@@ -187,6 +197,24 @@ impl BinaryOp for DivOp {
     }
 }
 
+/// `lhs` raised to the power `rhs`, or `None` when the result is not finite.
+///
+/// That guard covers both halves of what `powf` answers with a `NaN` — a base
+/// and exponent with no real answer (`(-8)^(1/3)`, `0^-1`) — and an overflow to
+/// infinity, exactly the contract [`Exp`](super::Exp) applies to its own
+/// results. `0^0` is `1`, as `powf` has it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PowOp;
+impl BinaryOp for PowOp {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
+        let y = lhs.powf(rhs);
+        y.is_finite().then_some(y)
+    }
+}
+
 /// Pointwise sum of two sources.
 pub type Add<L, R> = Combine<L, R, AddOp>;
 /// Pointwise difference of two sources.
@@ -195,6 +223,185 @@ pub type Sub<L, R> = Combine<L, R, SubOp>;
 pub type Mul<L, R> = Combine<L, R, MulOp>;
 /// Pointwise quotient of two sources (`None` on divide-by-zero).
 pub type Div<L, R> = Combine<L, R, DivOp>;
+/// Pointwise power of two sources (`None` when the result is not finite).
+pub type Pow<L, R> = Combine<L, R, PowOp>;
+
+// ---------------------------------------------------------------------------
+// Pointwise transformation of one source
+// ---------------------------------------------------------------------------
+
+/// A pointwise unary operator over one warmed-up source output.
+///
+/// Stateless by construction: the answer depends on this sample alone, never on
+/// the window or on the source's own past — that is [`LookbackOp`]'s job. Every
+/// implementor is a zero-sized marker, so [`Unary`] holds it as a `PhantomData`
+/// and the method is an associated function rather than taking `&self`.
+pub trait UnaryOp {
+    /// Transform `x`, or `None` where the operator has no answer: an input
+    /// outside its domain (`√x` of a negative), or a result it cannot represent.
+    /// The same contract [`Log`](super::Log) applies to its non-positive inputs
+    /// and [`Exp`](super::Exp) to its overflows.
+    fn apply(x: Real) -> Option<Real>;
+}
+
+/// Pointwise transform of a single source, parameterised by operator.
+///
+/// Use the aliases ([`Abs`], [`Sign`], [`Sqrt`], [`Tanh`], [`Sigmoid`]) or the
+/// `IndicatorExt` builders (`a.abs()`, `a.sqrt()`). Carries no state and adds no
+/// warm-up of its own: the output tracks the source one-for-one, except on the
+/// samples the operator declines.
+///
+/// ```
+/// use fugazi::prelude::*;
+/// use fugazi::indicators::{Abs, Identity};
+///
+/// let mut abs = Abs::new(Identity::new());
+/// assert_eq!(abs.update(-3.0), Some(3.0));
+/// ```
+#[derive(Debug, Clone, SaveState)]
+pub struct Unary<S, Op> {
+    #[state(source)]
+    source: S,
+    /// Latest transformed value; `None` whenever the source is, and on any
+    /// sample the operator has no answer for. A recomputed cache — `update`
+    /// refreshes it before the next `value()` read — so it is not saved state.
+    #[state(skip)]
+    pub value: Option<Real>,
+    #[state(skip)]
+    _op: PhantomData<fn() -> Op>,
+}
+
+impl<S, Op> Unary<S, Op> {
+    /// Wrap `source` with the operator's pointwise transform.
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+            _op: PhantomData,
+        }
+    }
+}
+
+impl<S, Op> Indicator for Unary<S, Op>
+where
+    S: Indicator<Output = Real>,
+    Op: UnaryOp,
+{
+    type Input = S::Input;
+    type Output = Real;
+
+    fn update(&mut self, input: Self::Input) -> Option<Real> {
+        self.value = self.source.update(input).and_then(Op::apply);
+        self.value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars()
+    }
+
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
+    }
+
+    fn reset(&mut self) {
+        self.source.reset();
+        self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
+}
+
+/// Absolute value: `|x|`.
+#[derive(Debug, Clone, Copy)]
+pub struct AbsOp;
+impl UnaryOp for AbsOp {
+    fn apply(x: Real) -> Option<Real> {
+        Some(x.abs())
+    }
+}
+
+/// Sign of the input: `1`, `-1`, or `0` at exactly zero.
+///
+/// Deliberately not [`f64::signum`], which answers `±1` for `±0.0` — a zero
+/// difference has no direction, and every call site here (a spread's sign, a
+/// position's intended side) wants the flat case answered as flat. A `NaN`
+/// compares false against all three, so it is declined rather than assigned an
+/// arbitrary direction.
+#[derive(Debug, Clone, Copy)]
+pub struct SignOp;
+impl UnaryOp for SignOp {
+    fn apply(x: Real) -> Option<Real> {
+        if x > 0.0 {
+            Some(1.0)
+        } else if x < 0.0 {
+            Some(-1.0)
+        } else if x == 0.0 {
+            Some(0.0)
+        } else {
+            None
+        }
+    }
+}
+
+/// Square root, `None` on a negative input (and on `NaN`, which fails the
+/// comparison) — the domain guard [`Log`](super::Log) applies to its own.
+#[derive(Debug, Clone, Copy)]
+pub struct SqrtOp;
+impl UnaryOp for SqrtOp {
+    fn apply(x: Real) -> Option<Real> {
+        (x >= 0.0).then(|| x.sqrt())
+    }
+}
+
+/// Hyperbolic tangent, squashing the real line into `(-1, 1)`.
+///
+/// The bounded response a sizing expression wants: linear near zero, saturating
+/// past |x| ≈ 2, and — unlike a hand-rolled clamp — smooth at the join. Only a
+/// `NaN` arriving from the source is declined; `±∞` map to `±1`.
+#[derive(Debug, Clone, Copy)]
+pub struct TanhOp;
+impl UnaryOp for TanhOp {
+    fn apply(x: Real) -> Option<Real> {
+        let y = x.tanh();
+        y.is_finite().then_some(y)
+    }
+}
+
+/// Logistic sigmoid, `1 / (1 + e^-x)`, squashing the real line into `(0, 1)`.
+///
+/// The one-sided twin of [`TanhOp`] (`sigmoid(x) = (1 + tanh(x/2))/2`), for the
+/// case where the output is a fraction rather than a signed response. Saturates
+/// to a representable `0` or `1` rather than overflowing, so only a `NaN` from
+/// the source is declined.
+#[derive(Debug, Clone, Copy)]
+pub struct SigmoidOp;
+impl UnaryOp for SigmoidOp {
+    fn apply(x: Real) -> Option<Real> {
+        let y = 1.0 / (1.0 + (-x).exp());
+        y.is_finite().then_some(y)
+    }
+}
+
+/// Absolute value of a source.
+pub type Abs<S> = Unary<S, AbsOp>;
+/// Sign of a source: `1`, `-1` or `0`.
+pub type Sign<S> = Unary<S, SignOp>;
+/// Square root of a source (`None` on negative inputs).
+pub type Sqrt<S> = Unary<S, SqrtOp>;
+/// Hyperbolic tangent of a source, bounded to `(-1, 1)`.
+pub type Tanh<S> = Unary<S, TanhOp>;
+/// Logistic sigmoid of a source, bounded to `(0, 1)`.
+pub type Sigmoid<S> = Unary<S, SigmoidOp>;
 
 // ---------------------------------------------------------------------------
 // Unary operators relating a source to its own past
@@ -364,23 +571,51 @@ pub trait ExtremeOp {
     fn dominates(incoming: Real, current: Real) -> bool;
 }
 
-/// Running maximum.
-#[derive(Debug, Clone, Copy)]
+/// The larger of two values — pairwise ([`BinaryOp`]), rolling ([`ExtremeOp`])
+/// and cumulative ([`CumulativeOp`]). One marker, three carriers: taking the
+/// maximum is a single idea, and only the shape of the window differs.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MaxOp;
 impl ExtremeOp for MaxOp {
     fn dominates(incoming: Real, current: Real) -> bool {
         incoming >= current
     }
 }
+impl BinaryOp for MaxOp {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
+        Some(max_finite(lhs, rhs))
+    }
+}
 
-/// Running minimum.
-#[derive(Debug, Clone, Copy)]
+/// The smaller of two values — the twin of [`MaxOp`], in the same three roles.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MinOp;
 impl ExtremeOp for MinOp {
     fn dominates(incoming: Real, current: Real) -> bool {
         incoming <= current
     }
 }
+impl BinaryOp for MinOp {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
+        Some(min_finite(lhs, rhs))
+    }
+}
+
+/// Pointwise maximum of two sources.
+///
+/// Compares with `>`, via `crate::num::max_finite` — so a `NaN` operand
+/// propagates rather than being suppressed the way [`f64::max`] would. Every
+/// source in the crate emits a finite value or `None`, so that case is reachable
+/// only through an expression that manufactures one.
+pub type Max<L, R> = Combine<L, R, MaxOp>;
+/// Pointwise minimum of two sources — the twin of [`Max`].
+pub type Min<L, R> = Combine<L, R, MinOp>;
 
 /// Rolling extremum of a source over a window, parameterised by direction.
 ///
@@ -461,6 +696,146 @@ where
 pub type RollingMax<S> = Extreme<S, MaxOp>;
 /// Rolling minimum of a source over `period` steps.
 pub type RollingMin<S> = Extreme<S, MinOp>;
+
+// ---------------------------------------------------------------------------
+// Unbounded running accumulation
+// ---------------------------------------------------------------------------
+
+/// A fold over every sample the source has ever produced.
+///
+/// The unbounded counterpart of [`ExtremeOp`]: no window, no eviction, so the
+/// state is one `Real` and the update is O(1) forever. Implementors are the
+/// existing arithmetic and extremum markers — cumulative summation *is* folding
+/// with [`AddOp`] — so this trait adds no new operator types.
+pub trait CumulativeOp {
+    /// Fold `x` into the running value. `acc` is `None` on the first sample, so
+    /// an operator with no identity element (the extremes) can seed from the
+    /// sample itself rather than from a sentinel.
+    fn fold(acc: Option<Real>, x: Real) -> Real;
+}
+
+impl CumulativeOp for AddOp {
+    fn fold(acc: Option<Real>, x: Real) -> Real {
+        acc.unwrap_or(0.0) + x
+    }
+}
+
+impl CumulativeOp for MaxOp {
+    fn fold(acc: Option<Real>, x: Real) -> Real {
+        match acc {
+            Some(a) => max_finite(a, x),
+            None => x,
+        }
+    }
+}
+
+impl CumulativeOp for MinOp {
+    fn fold(acc: Option<Real>, x: Real) -> Real {
+        match acc {
+            Some(a) => min_finite(a, x),
+            None => x,
+        }
+    }
+}
+
+/// Running fold of every sample a source has produced, parameterised by
+/// operator.
+///
+/// Use the aliases ([`CumSum`], [`CumMax`], [`CumMin`]) or the `IndicatorExt`
+/// builders (`a.cum_sum()`). Where the value *starts* is part of its meaning —
+/// the total is anchored to the first bar of the run, exactly as
+/// [`Obv`](super::Obv) is — so this reports ready as soon as its source is and
+/// leaves [`unstable_bars`](Indicator::unstable_bars) to the source.
+///
+/// A `CumMax` is what turns any series into a drawdown: `x / cum_max(x) - 1`
+/// generalises the book-anchored `!drawdown` to an arbitrary expression.
+///
+/// ```
+/// use fugazi::prelude::*;
+/// use fugazi::indicators::{CumSum, Identity};
+///
+/// let mut total = CumSum::new(Identity::new());
+/// assert_eq!(total.update(2.0), Some(2.0));
+/// assert_eq!(total.update(3.0), Some(5.0));
+/// ```
+#[derive(Debug, Clone, SaveState)]
+pub struct Cumulative<S, Op> {
+    #[state(source)]
+    source: S,
+    /// The running value; `None` until the source's first output. Genuine
+    /// state, not a cache — it *is* the accumulator, so it is saved and
+    /// restored with the rest of the run.
+    pub value: Option<Real>,
+    #[state(skip)]
+    _op: PhantomData<fn() -> Op>,
+}
+
+impl<S, Op> Cumulative<S, Op> {
+    /// Accumulate `source` from its first output onward.
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+            _op: PhantomData,
+        }
+    }
+}
+
+impl<S, Op> Indicator for Cumulative<S, Op>
+where
+    S: Indicator<Output = Real>,
+    Op: CumulativeOp,
+{
+    type Input = S::Input;
+    type Output = Real;
+
+    fn update(&mut self, input: Self::Input) -> Option<Real> {
+        // A bar the source declines leaves the accumulator untouched *and
+        // unreported*: `None` here means "no reading this bar", not "the total
+        // reset". The next sample folds into the value carried across the gap.
+        if let Some(x) = self.source.update(input) {
+            self.value = Some(Op::fold(self.value, x));
+            self.value
+        } else {
+            None
+        }
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    /// Ready as soon as the source is; the running total is *anchored*, not
+    /// unstable — where it starts is part of its meaning, so
+    /// [`unstable_bars`](Indicator::unstable_bars) stays the source's own.
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
+    }
+
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
+    }
+
+    fn reset(&mut self) {
+        self.source.reset();
+        self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
+}
+
+/// Running total of every sample a source has produced.
+pub type CumSum<S> = Cumulative<S, AddOp>;
+/// Running maximum since the start of the run (the unbounded [`RollingMax`]).
+pub type CumMax<S> = Cumulative<S, MaxOp>;
+/// Running minimum since the start of the run (the unbounded [`RollingMin`]).
+pub type CumMin<S> = Cumulative<S, MinOp>;
 
 #[cfg(test)]
 mod tests {

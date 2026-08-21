@@ -1446,6 +1446,87 @@ impl PyIndicator {
         )?))
     }
 
+    /// Pointwise `self ** other` (`None` where the result is not a finite real —
+    /// a negative base at a fractional exponent, `0` to a negative power, or an
+    /// overflow).
+    pub(crate) fn pow(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
+        let rhs = coerce_operand(other)?;
+        Ok(PyIndicator::wrap(combine_sources!(
+            self.src.clone(),
+            rhs,
+            |l, r| l.pow(r)
+        )?))
+    }
+    /// The larger of `self` and `other`, **bar by bar**.
+    ///
+    /// Not `rolling_max`, which maximises this one source over a window; this
+    /// compares two sources against each other on the same bar.
+    pub(crate) fn max(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
+        let rhs = coerce_operand(other)?;
+        Ok(PyIndicator::wrap(combine_sources!(
+            self.src.clone(),
+            rhs,
+            |l, r| l.max(r)
+        )?))
+    }
+    /// The smaller of `self` and `other`, bar by bar — the twin of
+    /// [`max`](Self::max).
+    pub(crate) fn min(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
+        let rhs = coerce_operand(other)?;
+        Ok(PyIndicator::wrap(combine_sources!(
+            self.src.clone(),
+            rhs,
+            |l, r| l.min(r)
+        )?))
+    }
+    /// `self` held inside `[lower, upper]`.
+    ///
+    /// Both bounds may be indicators or scalars. Inverted bounds (`lower` above
+    /// `upper`) collapse to `upper` — what the `min`-of-`max` form this stands
+    /// for does, and the honest answer to a contradictory band.
+    pub(crate) fn clamp(
+        &self,
+        lower: &Bound<'_, PyAny>,
+        upper: &Bound<'_, PyAny>,
+    ) -> PyResult<PyIndicator> {
+        self.max(lower)?.min(upper)
+    }
+    /// Absolute value of `self`, pointwise.
+    pub(crate) fn abs(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.abs()))
+    }
+    /// Sign of `self`: `1` above zero, `-1` below, `0` at exactly zero.
+    pub(crate) fn sign(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.sign()))
+    }
+    /// Square root of `self` (`None` on negative samples).
+    pub(crate) fn sqrt(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.sqrt()))
+    }
+    /// Hyperbolic tangent of `self`, squashing the real line into `(-1, 1)`.
+    pub(crate) fn tanh(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.tanh()))
+    }
+    /// Logistic sigmoid of `self`, `1 / (1 + e**-x)`, squashing into `(0, 1)`.
+    pub(crate) fn sigmoid(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.sigmoid()))
+    }
+    /// Running total of every value `self` has produced, from the first sample
+    /// onward. Unbounded — no window.
+    pub(crate) fn cum_sum(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.cum_sum()))
+    }
+    /// Running maximum since the first sample — the unbounded
+    /// [`rolling_max`](Self::rolling_max). `x / x.cum_max() - 1` is the
+    /// drawdown of any series.
+    pub(crate) fn cum_max(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.cum_max()))
+    }
+    /// Running minimum since the first sample.
+    pub(crate) fn cum_min(&self) -> PyIndicator {
+        PyIndicator::wrap(map_rooted!(self, |s| s.cum_min()))
+    }
+
     pub(crate) fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
         self.add(other)
     }
@@ -1457,6 +1538,25 @@ impl PyIndicator {
     }
     pub(crate) fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
         self.div(other)
+    }
+    pub(crate) fn __pow__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyIndicator> {
+        // Python's three-argument `pow` is integer modular exponentiation.
+        // There is no elementwise reading of it over a float series, so it is
+        // refused rather than silently ignored.
+        if modulo.is_some_and(|m| !m.is_none()) {
+            return Err(PyValueError::new_err(
+                "three-argument pow() is not supported on an Indicator",
+            ));
+        }
+        self.pow(other)
+    }
+    /// `abs(ind)` — the operator form of [`abs`](Self::abs).
+    pub(crate) fn __abs__(&self) -> PyIndicator {
+        self.abs()
     }
     pub(crate) fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndicator> {
         let lhs = coerce_operand(other)?;
@@ -1488,6 +1588,23 @@ impl PyIndicator {
             lhs,
             self.src.clone(),
             |l, r| l.div(r)
+        )?))
+    }
+    pub(crate) fn __rpow__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyIndicator> {
+        if modulo.is_some_and(|m| !m.is_none()) {
+            return Err(PyValueError::new_err(
+                "three-argument pow() is not supported on an Indicator",
+            ));
+        }
+        let lhs = coerce_operand(other)?;
+        Ok(PyIndicator::wrap(combine_sources!(
+            lhs,
+            self.src.clone(),
+            |l, r| l.pow(r)
         )?))
     }
 
@@ -2094,6 +2211,23 @@ impl PySharedMulti {
     /// Aroon oscillator (up − down).
     pub(crate) fn oscillator(&self) -> PyResult<PyIndicator> {
         self.inner.project("oscillator")
+    }
+
+    /// Linear-regression slope, in source units per bar.
+    pub(crate) fn slope(&self) -> PyResult<PyIndicator> {
+        self.inner.project("slope")
+    }
+    /// Linear-regression fit at the oldest bar of the window.
+    pub(crate) fn intercept(&self) -> PyResult<PyIndicator> {
+        self.inner.project("intercept")
+    }
+    /// Linear-regression fit at the newest bar of the window.
+    pub(crate) fn value(&self) -> PyResult<PyIndicator> {
+        self.inner.project("value")
+    }
+    /// Linear-regression coefficient of determination, in `[0, 1]`.
+    pub(crate) fn r2(&self) -> PyResult<PyIndicator> {
+        self.inner.project("r2")
     }
 
     /// The output field names available on the underlying multi.

@@ -5,17 +5,20 @@
 //! small value struct). Leaf sources [`Value`] (a constant) and [`Identity`]
 //! (the raw input) let literals and prices take part in composition.
 //!
-//! Generic transform operators live in [`ops`] (arithmetic `Add`/`Sub`/`Mul`/`Div`,
-//! the lookback ops `Lag`/`Diff`/`Ratio`, and the rolling extremum
-//! `RollingMax`/`RollingMin`), with the fluent [`IndicatorExt`] builder in
-//! [`ext`]. Boolean conditions are also indicators — those yielding `bool`:
+//! Generic transform operators live in [`ops`] (arithmetic `Add`/`Sub`/`Mul`/`Div`/
+//! `Pow` and the pairwise `Max`/`Min`, the pointwise `Abs`/`Sign`/`Sqrt`/`Tanh`/
+//! `Sigmoid`, the lookback ops `Lag`/`Diff`/`Ratio`, the rolling extremum
+//! `RollingMax`/`RollingMin`, and the unbounded `CumSum`/`CumMax`/`CumMin`), with
+//! the fluent [`IndicatorExt`] builder in [`ext`]. Boolean conditions are also indicators — those yielding `bool`:
 //! comparison operators live in [`compare`] and the boolean connectives /
 //! edge detectors in [`logic`].
 //!
 //! Shared lower-level cores keep the math in one place: `smoothing`'s
 //! `EmaState`/`WilderState` back [`Ema`]/[`Macd`] and [`Rma`]/[`Rsi`]/[`Atr`]/
-//! [`Adx`]; `stats`'s `WindowStats` backs [`Sma`]/[`StdDev`]/[`Bollinger`] and
-//! its `WindowExtreme` backs the rolling extremum and [`Stochastic`].
+//! [`Adx`]; `stats`'s `WindowStats` backs [`Sma`]/[`StdDev`]/[`Bollinger`],
+//! its `WindowExtreme` backs the rolling extremum and [`Stochastic`], and its
+//! `WindowCovariance` backs [`Correlation`]/[`Covariance`]/[`Beta`] and
+//! [`LinReg`].
 
 pub mod compare;
 pub mod ext;
@@ -34,7 +37,6 @@ mod calendar;
 mod candle;
 mod cci;
 mod component;
-mod correlation;
 mod crosses;
 mod dmi;
 mod donchian;
@@ -48,10 +50,12 @@ mod identity;
 mod if_else;
 mod keltner;
 mod kurtosis;
+mod linreg;
 mod log;
 mod macd;
 mod mfi;
 mod obv;
+mod pairwise;
 mod parkinson;
 mod percentile;
 mod pick;
@@ -65,7 +69,8 @@ mod sma;
 mod smoothing;
 // Crate-visible rather than private: `crate::metrics` reaches in for the shared
 // `quantile_of_sorted` / `cmp_asc` so report-level and rolling percentiles use
-// one convention. Nothing here is re-exported publicly.
+// one convention. The stateful cores stay in here; `Moments` is the one
+// re-export, because it is what a public `PairStatOp` reads.
 pub(crate) mod stats;
 mod stddev;
 mod stochastic;
@@ -102,7 +107,6 @@ pub use compare::{
     Tolerance,
 };
 pub use component::{Component, Shared, SharedComponent, SharedHandle};
-pub use correlation::Correlation;
 pub use crosses::{CrossesAbove, CrossesBelow};
 pub use dmi::{Dmi, DmiValue};
 pub use dispatch::Match;
@@ -117,6 +121,7 @@ pub use identity::Identity;
 pub use if_else::IfElse;
 pub use keltner::{Keltner, KeltnerValue};
 pub use kurtosis::Kurtosis;
+pub use linreg::{LinReg, LinRegValue};
 pub use log::Log;
 pub use logic::{And, BecameFalse, BecameTrue, Change, Every, Not, Or, ValueBool, Xor};
 pub use macd::{Macd, MacdValue};
@@ -124,10 +129,17 @@ pub use mfi::Mfi;
 pub use obv::Obv;
 pub use parkinson::Parkinson;
 pub use percentile::{Percentile, PercentileRank};
+pub use stats::Moments;
+
+pub use pairwise::{
+    Beta, BetaOp, Correlation, CorrelationOp, Covariance, CovarianceOp, PairStat, PairStatOp,
+};
 pub use pick::{Pick, PickAny};
 pub use ops::{
-    Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,
-    Mul, Ratio, Roc, RollingMax, RollingMin, Sub,
+    Abs, AbsOp, Add, BinaryOp, Combine, CumMax, CumMin, CumSum, Cumulative, CumulativeOp, Diff, Div,
+    Extreme, ExtremeOp, Lag, Lookback, LookbackOp, Max, MaxOp, Min, MinOp, Mul, Pow, PowOp, Ratio,
+    Roc, RollingMax, RollingMin, Sigmoid, SigmoidOp, Sign, SignOp, Sqrt, SqrtOp, Sub, Tanh, TanhOp,
+    Unary, UnaryOp,
 };
 pub use position::{Position, PositionField};
 pub use rma::Rma;

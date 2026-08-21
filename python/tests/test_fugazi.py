@@ -875,6 +875,87 @@ def test_correlation_bounds_and_domain_check():
         ta.correlation(ta.close(), ta.identity(), 3)
 
 
+def test_pointwise_transforms():
+    assert feed(ta.close().abs(), closes([-1.0, 2.0, -3.0])) == [1.0, 2.0, 3.0]
+    assert feed(abs(ta.close()), closes([-4.0])) == [4.0]
+    # Zero has no direction: `sign` answers 0 there, unlike `math.copysign`.
+    assert feed(ta.close().sign(), closes([-2.0, 0.0, 5.0])) == [-1.0, 0.0, 1.0]
+    # A negative input is outside sqrt's domain, so it reads `None`.
+    assert feed(ta.close().sqrt(), closes([4.0, -1.0, 9.0])) == [2.0, None, 3.0]
+    assert feed(ta.close().tanh(), closes([0.0, 1.0])) == pytest.approx(
+        [0.0, math.tanh(1.0)]
+    )
+    assert feed(ta.close().sigmoid(), closes([0.0, 1.0])) == pytest.approx(
+        [0.5, 1.0 / (1.0 + math.exp(-1.0))]
+    )
+
+
+def test_pow_min_max_and_clamp():
+    assert feed(ta.close().pow(ta.value(2.0)), closes([2.0, 3.0])) == [4.0, 9.0]
+    assert feed(ta.close() ** 2.0, closes([2.0, 3.0])) == [4.0, 9.0]
+    assert feed(2.0 ** ta.close(), closes([3.0])) == [8.0]
+    # `(-8) ** (1/3)` has no real answer, so it reads `None` rather than a NaN.
+    assert feed(ta.close() ** (1.0 / 3.0), closes([-8.0])) == [None]
+    # Python's three-argument pow() has no elementwise reading.
+    with pytest.raises(ValueError):
+        pow(ta.close(), 2.0, 3.0)
+    # Pairwise, not windowed: `max` compares two sources on the same bar, where
+    # `rolling_max` maximises one source over a window.
+    assert feed(ta.close().max(2.0), closes([1.0, 5.0])) == [2.0, 5.0]
+    assert feed(ta.close().min(2.0), closes([1.0, 5.0])) == [1.0, 2.0]
+    assert feed(ta.close().clamp(0.0, 1.0), closes([-1.0, 0.5, 7.0])) == [0.0, 0.5, 1.0]
+    # Inverted bounds collapse to `upper` — what the min-of-max form does.
+    assert feed(ta.close().clamp(1.0, 0.0), closes([0.5])) == [0.0]
+
+
+def test_running_accumulators():
+    assert feed(ta.close().cum_sum(), closes([1.0, 2.0, 3.0])) == [1.0, 3.0, 6.0]
+    assert feed(ta.close().cum_max(), closes([1.0, 3.0, 2.0])) == [1.0, 3.0, 3.0]
+    assert feed(ta.close().cum_min(), closes([3.0, 1.0, 2.0])) == [3.0, 1.0, 1.0]
+    # The drawdown of an arbitrary series, which `cum_max` is what makes possible.
+    dd = ta.close() / ta.close().cum_max() - 1.0
+    assert feed(dd, closes([10.0, 20.0, 15.0])) == pytest.approx([0.0, 0.0, -0.25])
+
+
+def test_covariance_and_beta():
+    # x against itself: the covariance of a series with itself is its variance,
+    # population form — for {1,2,3}, ((-1)^2 + 0 + 1^2)/3 = 2/3.
+    cov = feed(ta.covariance(ta.close(), ta.close(), 3), closes([1.0, 2.0, 3.0]))
+    assert cov[0] is None and cov[1] is None
+    assert cov[2] == pytest.approx(2.0 / 3.0)
+    # `lhs = 2 * rhs`, so the slope explaining lhs by rhs is 2 ...
+    b = ta.beta(ta.close() * 2.0, ta.close(), 3)
+    assert feed(b, closes([1.0, 2.0, 3.0]))[2] == pytest.approx(2.0)
+    # ... and 0.5 the other way round. Beta is directional, not symmetric.
+    rb = ta.beta(ta.close(), ta.close() * 2.0, 3)
+    assert feed(rb, closes([1.0, 2.0, 3.0]))[2] == pytest.approx(0.5)
+    # A flat benchmark measures no sensitivity, rather than an infinity.
+    flat = ta.beta(ta.close(), ta.close() * 0.0 + 7.0, 3)
+    assert feed(flat, closes([1.0, 2.0, 3.0]))[2] == pytest.approx(0.0)
+
+
+def test_linreg_fits_a_ramp():
+    # y = 2x + 1 over bars 0,1,2: slope 2, the fit at the oldest bar is 1, at
+    # the newest 5, and a straight line explains all of it.
+    fit = ta.linreg(ta.close(), 3).shared()
+    bars = closes([1.0, 3.0, 5.0])
+    assert feed(fit.slope(), bars)[2] == pytest.approx(2.0)
+    # One handle, one underlying fit — it has already consumed those bars, so
+    # each further reading gets its own.
+    assert feed(ta.linreg(ta.close(), 3).shared().intercept(), bars)[2] == pytest.approx(1.0)
+    assert feed(ta.linreg(ta.close(), 3).shared().value(), bars)[2] == pytest.approx(5.0)
+    assert feed(ta.linreg(ta.close(), 3).shared().r2(), bars)[2] == pytest.approx(1.0)
+    assert ta.linreg(ta.close(), 3).shared().names() == [
+        "slope",
+        "intercept",
+        "value",
+        "r2",
+    ]
+    # A single point has no slope; the guard is a ValueError, not a panic.
+    with pytest.raises(ValueError):
+        ta.linreg(ta.close(), 1)
+
+
 def test_variance_ratio_classifies_regime():
     vr = ta.variance_ratio(ta.close(), 5, 2)
     # Prices {0,1,3,6,10}: accelerating returns → trending → VR = 32/15 > 1.
