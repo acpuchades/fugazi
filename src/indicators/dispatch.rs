@@ -118,10 +118,7 @@ where
     }
 
     fn warm_up_bars(&self) -> usize {
-        let mut w = self
-            .on
-            .warm_up_bars()
-            .max(self.default.warm_up_bars());
+        let mut w = self.on.warm_up_bars().max(self.default.warm_up_bars());
         for (_, br) in &self.cases {
             w = w.max(br.warm_up_bars());
         }

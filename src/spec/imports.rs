@@ -196,9 +196,9 @@ fn import_directive(map: &Map<String, Value>) -> Result<Option<ImportDirective>>
             let inline_params = match fields.get("params") {
                 None => None,
                 Some(Value::Object(p)) => Some(p.clone()),
-                Some(other) => bail!(
-                    "!import `params` must be a mapping of NAME: value, got {other}"
-                ),
+                Some(other) => {
+                    bail!("!import `params` must be a mapping of NAME: value, got {other}")
+                }
             };
             // Reject stray keys — the object form only recognises `path`
             // and `params`, and a typo (e.g. `parmas:`) would otherwise
@@ -234,9 +234,8 @@ fn load(
     stack: &mut Vec<PathBuf>,
 ) -> Result<Value> {
     let joined = base.join(&directive.path);
-    let canonical = std::fs::canonicalize(&joined).with_context(|| {
-        format!("!import {}: reading `{}`", directive.path, joined.display())
-    })?;
+    let canonical = std::fs::canonicalize(&joined)
+        .with_context(|| format!("!import {}: reading `{}`", directive.path, joined.display()))?;
 
     // Confine to `root` regardless of how the escape was spelled — an
     // absolute `directive.path` (which makes `join` discard `base` entirely),
@@ -244,7 +243,11 @@ fn load(
     // all caught here, because `canonicalize` has already resolved every
     // symlink and `..` component on both sides.
     let canonical_root = std::fs::canonicalize(root).with_context(|| {
-        format!("!import {}: resolving import root `{}`", directive.path, root.display())
+        format!(
+            "!import {}: resolving import root `{}`",
+            directive.path,
+            root.display()
+        )
     })?;
     if !canonical.starts_with(&canonical_root) {
         bail!(
@@ -338,11 +341,7 @@ mod tests {
             "!crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }",
         );
 
-        let value = resolve_text(
-            "symbol: BTC\nlong:\n  enter: !import enter.yml\n",
-            &dir,
-        )
-        .unwrap();
+        let value = resolve_text("symbol: BTC\nlong:\n  enter: !import enter.yml\n", &dir).unwrap();
 
         let expected = crate::spec::input::parse_value(
             "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }\n",
@@ -371,7 +370,9 @@ mod tests {
         write(&dir, "a.yml", "enter: !import b.yml\n");
         write(&dir, "b.yml", "exit: !import a.yml\n");
 
-        let err = resolve_text("long: !import a.yml\n", &dir).unwrap_err().to_string();
+        let err = resolve_text("long: !import a.yml\n", &dir)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("!import cycle"), "{err}");
         assert!(err.contains("a.yml"), "{err}");
         assert!(err.contains("b.yml"), "{err}");
@@ -455,11 +456,7 @@ mod tests {
         // SLOW isn't — it survives the imports pass and the outer
         // params::substitute pass resolves it against --params.
         let dir = tmp_dir("fall_through");
-        write(
-            &dir,
-            "trend.yml",
-            "fast: !param FAST\nslow: !param SLOW\n",
-        );
+        write(&dir, "trend.yml", "fast: !param FAST\nslow: !param SLOW\n");
 
         let value = resolve_text(
             "cfg: !import { path: trend.yml, params: { FAST: 5 } }\n",
@@ -467,10 +464,7 @@ mod tests {
         )
         .unwrap();
         // Only FAST resolved; SLOW is still a placeholder.
-        let params = std::collections::HashMap::from([(
-            "SLOW".to_string(),
-            Value::from(50),
-        )]);
+        let params = std::collections::HashMap::from([("SLOW".to_string(), Value::from(50))]);
         let value = crate::spec::params::substitute(value, &params).unwrap();
         let expected = crate::spec::input::parse_value("cfg: { fast: 5, slow: 50 }\n").unwrap();
         assert_eq!(value, expected);
@@ -482,34 +476,20 @@ mod tests {
         // survive the partial pass — otherwise the outer --params
         // couldn't override its default.
         let dir = tmp_dir("defaults");
-        write(
-            &dir,
-            "x.yml",
-            "value: !param { key: FAST, default: 99 }\n",
-        );
+        write(&dir, "x.yml", "value: !param { key: FAST, default: 99 }\n");
 
         // No inline table: default kicks in on the outer pass, --params
         // wins over it.
-        let value = resolve_text(
-            "cfg: !import { path: x.yml, params: {} }\n",
-            &dir,
-        )
-        .unwrap();
-        let params = std::collections::HashMap::from([(
-            "FAST".to_string(),
-            Value::from(3),
-        )]);
+        let value = resolve_text("cfg: !import { path: x.yml, params: {} }\n", &dir).unwrap();
+        let params = std::collections::HashMap::from([("FAST".to_string(), Value::from(3))]);
         let value = crate::spec::params::substitute(value, &params).unwrap();
         let expected = crate::spec::input::parse_value("cfg: { value: 3 }\n").unwrap();
         assert_eq!(value, expected);
 
         // Same import, no --params: default applies on the outer pass.
-        let value = resolve_text(
-            "cfg: !import { path: x.yml, params: {} }\n",
-            &dir,
-        )
-        .unwrap();
-        let value = crate::spec::params::substitute(value, &std::collections::HashMap::new()).unwrap();
+        let value = resolve_text("cfg: !import { path: x.yml, params: {} }\n", &dir).unwrap();
+        let value =
+            crate::spec::params::substitute(value, &std::collections::HashMap::new()).unwrap();
         let expected = crate::spec::input::parse_value("cfg: { value: 99 }\n").unwrap();
         assert_eq!(value, expected);
     }
@@ -524,13 +504,9 @@ mod tests {
         write(&dir, "a.yml", "inner: !import b.yml\n");
         write(&dir, "b.yml", "fast: !param FAST\n");
 
-        let value = resolve_text(
-            "cfg: !import { path: a.yml, params: { FAST: 5 } }\n",
-            &dir,
-        )
-        .unwrap();
-        let expected =
-            crate::spec::input::parse_value("cfg: { inner: { fast: 5 } }\n").unwrap();
+        let value =
+            resolve_text("cfg: !import { path: a.yml, params: { FAST: 5 } }\n", &dir).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { inner: { fast: 5 } }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -548,13 +524,9 @@ mod tests {
         );
         write(&dir, "b.yml", "fast: !param FAST\n");
 
-        let value = resolve_text(
-            "cfg: !import { path: a.yml, params: { FAST: 5 } }\n",
-            &dir,
-        )
-        .unwrap();
-        let expected =
-            crate::spec::input::parse_value("cfg: { inner: { fast: 99 } }\n").unwrap();
+        let value =
+            resolve_text("cfg: !import { path: a.yml, params: { FAST: 5 } }\n", &dir).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { inner: { fast: 99 } }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -576,10 +548,7 @@ mod tests {
         // The inline partial pass replaces `!param FAST` (inside x.yml)
         // with the placeholder `!param OUTER` from the outer document;
         // the outer pass then resolves it against --params.
-        let params = std::collections::HashMap::from([(
-            "OUTER".to_string(),
-            Value::from(7),
-        )]);
+        let params = std::collections::HashMap::from([("OUTER".to_string(), Value::from(7))]);
         let value = crate::spec::params::substitute(value, &params).unwrap();
         let expected = crate::spec::input::parse_value("cfg: { fast: 7 }\n").unwrap();
         assert_eq!(value, expected);
@@ -602,8 +571,7 @@ mod tests {
         .unwrap();
         // score.yml resolves to `!value 42`, which is spliced in as
         // the SCORE value inside outer.yml.
-        let expected =
-            crate::spec::input::parse_value("cfg: { score: !value 42 }\n").unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { score: !value 42 }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -627,12 +595,9 @@ mod tests {
         write(&outside, "secret.yml", "!value 1\n");
         let absolute = outside.join("secret.yml");
 
-        let err = resolve_text(
-            &format!("enter: !import {}\n", absolute.display()),
-            &dir,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = resolve_text(&format!("enter: !import {}\n", absolute.display()), &dir)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("outside the import root"), "{err}");
     }
 
@@ -643,7 +608,10 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         let outside = tmp_dir("dotdot_outside");
         write(&outside, "secret.yml", "!value 1\n");
-        let escape = format!("../../{}/secret.yml", outside.file_name().unwrap().to_str().unwrap());
+        let escape = format!(
+            "../../{}/secret.yml",
+            outside.file_name().unwrap().to_str().unwrap()
+        );
 
         let err = resolve_text(&format!("enter: !import {escape}\n"), &sub)
             .unwrap_err()
@@ -662,8 +630,15 @@ mod tests {
         write(&outside, "secret.yml", "!value 1\n");
         // `parts/side.yml` sits two levels under `/tmp`, so `../..` from
         // there reaches `/tmp` — outside `dir`, the confinement root.
-        let escape = format!("../../{}/secret.yml", outside.file_name().unwrap().to_str().unwrap());
-        write(&dir, "parts/side.yml", &format!("enter: !import {escape}\n"));
+        let escape = format!(
+            "../../{}/secret.yml",
+            outside.file_name().unwrap().to_str().unwrap()
+        );
+        write(
+            &dir,
+            "parts/side.yml",
+            &format!("enter: !import {escape}\n"),
+        );
 
         let err = resolve_text("long: !import parts/side.yml\n", &dir)
             .unwrap_err()
@@ -677,7 +652,11 @@ mod tests {
         // import, reached via a `..` that never actually leaves `base`.
         let dir = tmp_dir("within_root");
         write(&dir, "shared/exit.yml", "!value 1\n");
-        write(&dir, "strategies/enter.yml", "enter: !import ../shared/exit.yml\n");
+        write(
+            &dir,
+            "strategies/enter.yml",
+            "enter: !import ../shared/exit.yml\n",
+        );
 
         let value = resolve_text("long: !import strategies/enter.yml\n", &dir).unwrap();
         let expected = crate::spec::input::parse_value("long:\n  enter: !value 1\n").unwrap();
@@ -695,19 +674,19 @@ mod tests {
 
     #[test]
     fn refuse_bails_on_an_import_nested_inside_a_template_body() {
-        let value = crate::spec::input::parse_value(
-            "score: !mul { lhs: !import a.yml, rhs: !value 2 }\n",
-        )
-        .unwrap();
+        let value =
+            crate::spec::input::parse_value("score: !mul { lhs: !import a.yml, rhs: !value 2 }\n")
+                .unwrap();
         let err = refuse(&value).unwrap_err().to_string();
         assert!(err.contains("disabled"), "{err}");
     }
 
     #[test]
     fn refuse_accepts_a_document_with_no_import_at_all() {
-        let value =
-            crate::spec::input::parse_value("symbol: BTC\nlong:\n  enter: !gt { lhs: close, rhs: !value 10 }\n")
-                .unwrap();
+        let value = crate::spec::input::parse_value(
+            "symbol: BTC\nlong:\n  enter: !gt { lhs: close, rhs: !value 10 }\n",
+        )
+        .unwrap();
         assert!(refuse(&value).is_ok());
     }
 }

@@ -152,7 +152,8 @@ impl<F: CandleField, S: Indicator<Output = Atom>> Indicator for Field<F, S> {
     type Output = Real;
 
     fn update(&mut self, input: S::Input) -> Option<Real> {
-        self.value = self.source
+        self.value = self
+            .source
             .update(input)
             .and_then(|a| a.candle)
             .map(|c| F::get(&c));

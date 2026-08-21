@@ -80,7 +80,9 @@ def test_example_documents_validate_as_their_shape():
     for fname, shape in _CORPUS.items():
         doc = _load(_EXAMPLES / fname)
         errors = list(validator.iter_errors(doc))
-        assert not errors, f"{fname} failed the document schema: {[e.message for e in errors]}"
+        assert not errors, (
+            f"{fname} failed the document schema: {[e.message for e in errors]}"
+        )
         assert _which_shape(schema, doc) == [shape], (
             f"{fname} should validate as exactly [{shape}], got {_which_shape(schema, doc)}"
         )

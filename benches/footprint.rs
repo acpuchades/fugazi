@@ -57,13 +57,13 @@ fn main() {
     // `Sym`, so this needs no change to the library, only to the caller.
     {
         use std::sync::Arc;
-        let syms: Vec<Arc<str>> = (0..1).map(|i| Arc::from(format!("X{i}").as_str())).collect();
+        let syms: Vec<Arc<str>> = (0..1)
+            .map(|i| Arc::from(format!("X{i}").as_str()))
+            .collect();
         let candles = common::synth_candles(BARS);
         let (v, allocs, bytes) = alloc_count::measure(|| {
             (0..BARS)
-                .map(|b| {
-                    fugazi::types::Snapshot::single(syms[0].clone(), Atom::new(candles[b]))
-                })
+                .map(|b| fugazi::types::Snapshot::single(syms[0].clone(), Atom::new(candles[b])))
                 .collect::<Vec<fugazi::types::Snapshot<Arc<str>>>>()
         });
         row("single-asset, Sym = Arc<str>", BARS, allocs, bytes);
@@ -103,7 +103,9 @@ fn main() {
     .expect("probe spec parses");
     let schema = fugazi::market::Schema::empty();
     let yaml_run = || {
-        let mut strat = spec.try_build(10_000.0, &schema).expect("probe spec builds");
+        let mut strat = spec
+            .try_build(10_000.0, &schema)
+            .expect("probe spec builds");
         let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
         rep.equity_curve.len()

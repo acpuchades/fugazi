@@ -103,7 +103,11 @@ fn costs_flag_populates_commission_and_costs_section() {
         "metrics.yml should include costs section:\n{}",
         out.metrics
     );
-    for field in ["total_commission:", "total_slippage_cost:", "cost_drag_pct:"] {
+    for field in [
+        "total_commission:",
+        "total_slippage_cost:",
+        "cost_drag_pct:",
+    ] {
         assert!(
             out.metrics.contains(field),
             "metrics.yml costs section missing `{field}`:\n{}",
@@ -187,7 +191,10 @@ fn flatten_books_its_closing_legs_in_both_the_priced_and_gross_runs() {
 /// runs, and populates the same fields.
 #[test]
 fn binance_preset_end_to_end() {
-    let out = run_with(&[&at("examples/binance.yml")], "fugazi_costs_binance_preset");
+    let out = run_with(
+        &[&at("examples/binance.yml")],
+        "fugazi_costs_binance_preset",
+    );
     assert!(
         out.fills.lines().next().unwrap().ends_with(",commission"),
         "binance preset should populate the commission column"
@@ -287,7 +294,10 @@ fn scope_precedence_applies_at_run_time() {
 #[test]
 fn later_term_wins_at_same_scope() {
     // Only the "wins" 5% commission.
-    let alone = run_with(&["commission=!percentage { rate: 0.05 }"], "fugazi_costs_first");
+    let alone = run_with(
+        &["commission=!percentage { rate: 0.05 }"],
+        "fugazi_costs_first",
+    );
     // The 0% is set first, then the same 5% overrides it.
     let overridden = run_with(
         &[
@@ -346,7 +356,10 @@ fn pairs_series_csv() -> String {
     ];
     for (sym, series) in [("A", &a[..]), ("B", &b[..])] {
         for (i, &p) in series.iter().enumerate() {
-            rows.push_str(&format!("{sym};2024-01-{:02};{p};{p};{p};{p};1000\n", i + 1));
+            rows.push_str(&format!(
+                "{sym};2024-01-{:02};{p};{p};{p};{p};1000\n",
+                i + 1
+            ));
         }
     }
     rows

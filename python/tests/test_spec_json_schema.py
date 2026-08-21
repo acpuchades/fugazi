@@ -88,8 +88,8 @@ def test_every_tag_has_a_valid_minimal_instance():
         errors = list(validators[tag["group"]].iter_errors(instance))
         if errors:
             failures.append(f"!{tag['name']} ({tag['shape']}): {errors[0].message}")
-    assert not failures, "these tags' minimal instances failed validation:\n  " + "\n  ".join(
-        failures
+    assert not failures, (
+        "these tags' minimal instances failed validation:\n  " + "\n  ".join(failures)
     )
 
 

@@ -36,8 +36,8 @@
 //! symbol declares two or more cadences the untagged rows stay in their own `""`
 //! group, where the cadence census reports them rather than guessing.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
@@ -373,7 +373,10 @@ impl DataFrame {
             .map(str::to_string)
             .or_else(|| untagged_fallback.get(&symbol).cloned())
             .unwrap_or_default();
-        self.rows.entry((symbol, freq, time)).or_default().extend(row);
+        self.rows
+            .entry((symbol, freq, time))
+            .or_default()
+            .extend(row);
         Ok(())
     }
 
@@ -463,7 +466,12 @@ impl DataFrame {
         let column_types: Vec<(String, OverlayType)> = schema
             .map(|s| {
                 s.keys()
-                    .map(|k| (k.to_string(), s.type_of_key(k).expect("key came from keys()")))
+                    .map(|k| {
+                        (
+                            k.to_string(),
+                            s.type_of_key(k).expect("key came from keys()"),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -540,10 +548,12 @@ fn sole_declared_cadences(loaded: &[(&str, Row)]) -> HashMap<String, String> {
         seen.entry(symbol.as_str()).or_default().insert(freq);
     }
     seen.into_iter()
-        .filter_map(|(sym, freqs)| match freqs.into_iter().collect::<Vec<_>>().as_slice() {
-            [only] => Some((sym.to_string(), only.to_string())),
-            _ => None,
-        })
+        .filter_map(
+            |(sym, freqs)| match freqs.into_iter().collect::<Vec<_>>().as_slice() {
+                [only] => Some((sym.to_string(), only.to_string())),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -624,7 +634,9 @@ fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Option<Candle>> {
 /// Read a CSV file into lowercased-column rows, autodetecting its delimiter.
 fn read_csv(path: &str) -> Result<Vec<Row>> {
     let mut reader = csv::ReaderBuilder::new()
-        .delimiter(crate::csv_source::detect_delimiter(std::path::Path::new(path))?)
+        .delimiter(crate::csv_source::detect_delimiter(std::path::Path::new(
+            path,
+        ))?)
         .from_path(path)
         .with_context(|| format!("opening CSV `{path}`"))?;
     let headers: Vec<String> = reader
@@ -693,7 +705,8 @@ mod tests {
             "fugazi_data_test_a.csv",
             "time;open;high;low;close;volume\n1;10;11;9;10.5;100\n2;10.5;12;10;11;120\n",
         );
-        let frame = DataFrame::from_series(&[format!("symbol='BTC',@{path}").parse().unwrap()]).unwrap();
+        let frame =
+            DataFrame::from_series(&[format!("symbol='BTC',@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
         assert_eq!(series.atoms[0].0, "1");
@@ -707,17 +720,17 @@ mod tests {
             "fugazi_data_test_p.csv",
             "time;open;high;low;close\n1;10;11;9;10\n2;10;12;10;11\n",
         );
-        let fundamentals = tmp_csv(
-            "fugazi_data_test_f.csv",
-            "time;pe_ratio\n1;15.0\n2;16.0\n",
-        );
+        let fundamentals = tmp_csv("fugazi_data_test_f.csv", "time;pe_ratio\n1;15.0\n2;16.0\n");
         let frame = DataFrame::from_series(&[
             format!("symbol=BTC,@{prices}").parse().unwrap(),
             format!("symbol=BTC,@{fundamentals}").parse().unwrap(),
         ])
         .unwrap();
         // The extra column rode along on the joined rows.
-        assert_eq!(frame.rows[&("BTC".into(), String::new(), "1".into())]["pe_ratio"], "15.0");
+        assert_eq!(
+            frame.rows[&("BTC".into(), String::new(), "1".into())]["pe_ratio"],
+            "15.0"
+        );
         // Candles still build (volume defaulted to 0).
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
@@ -735,14 +748,21 @@ mod tests {
             "time;open;high;low;close\n3;11;13;11;12\n4;12;14;12;13\n",
         );
         // Mixed order, two files and two literals in one series.
-        let frame =
-            DataFrame::from_series(&[format!("symbol=BTC,@{p1},exchange=NYSE,@{p2}").parse().unwrap()])
-                .unwrap();
+        let frame = DataFrame::from_series(&[format!("symbol=BTC,@{p1},exchange=NYSE,@{p2}")
+            .parse()
+            .unwrap()])
+        .unwrap();
         // Both files' rows concatenated.
         assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 4);
         // Both literals broadcast onto rows from either file.
-        assert_eq!(frame.rows[&("BTC".into(), String::new(), "1".into())]["exchange"], "NYSE");
-        assert_eq!(frame.rows[&("BTC".into(), String::new(), "4".into())]["exchange"], "NYSE");
+        assert_eq!(
+            frame.rows[&("BTC".into(), String::new(), "1".into())]["exchange"],
+            "NYSE"
+        );
+        assert_eq!(
+            frame.rows[&("BTC".into(), String::new(), "4".into())]["exchange"],
+            "NYSE"
+        );
     }
 
     #[test]
@@ -769,8 +789,14 @@ mod tests {
         // Alphabetical order: regime_score, vol_20.
         assert_eq!(schema.index_of("regime_score"), Some(0));
         assert_eq!(schema.index_of("vol_20"), Some(1));
-        assert_eq!(overlays.get_real(schema.index_of("vol_20").unwrap()), Some(0.12));
-        assert_eq!(overlays.get_real(schema.index_of("regime_score").unwrap()), Some(1.0));
+        assert_eq!(
+            overlays.get_real(schema.index_of("vol_20").unwrap()),
+            Some(0.12)
+        );
+        assert_eq!(
+            overlays.get_real(schema.index_of("regime_score").unwrap()),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -786,17 +812,24 @@ mod tests {
         let series = frame.atoms("BTC").unwrap();
         // `exchange` is non-numeric — preserved as a Str overlay, not dropped.
         assert!(series.skipped_columns.is_empty());
-        let overlays = series.atoms[0].1.overlays.as_ref().expect("overlays attached");
+        let overlays = series.atoms[0]
+            .1
+            .overlays
+            .as_ref()
+            .expect("overlays attached");
         let schema = overlays.schema();
         assert_eq!(schema.type_of_key("exchange"), Some(OverlayType::Str));
         assert_eq!(schema.type_of_key("vol_20"), Some(OverlayType::Real));
         let ex_idx = schema.index_of("exchange").unwrap();
+        assert_eq!(overlays.get_str(ex_idx).map(|s| s.as_ref()), Some("NYSE"),);
         assert_eq!(
-            overlays.get_str(ex_idx).map(|s| s.as_ref()),
-            Some("NYSE"),
-        );
-        assert_eq!(
-            series.atoms[1].1.overlays.as_ref().unwrap().get_str(ex_idx).map(|s| s.as_ref()),
+            series.atoms[1]
+                .1
+                .overlays
+                .as_ref()
+                .unwrap()
+                .get_str(ex_idx)
+                .map(|s| s.as_ref()),
             Some("NASDAQ"),
         );
     }
@@ -813,7 +846,11 @@ mod tests {
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
-        let overlays = series.atoms[0].1.overlays.as_ref().expect("overlays attached");
+        let overlays = series.atoms[0]
+            .1
+            .overlays
+            .as_ref()
+            .expect("overlays attached");
         let schema = overlays.schema();
         // Bool wins over Real because `true`/`false` don't parse as Real.
         assert_eq!(schema.type_of_key("risk_on"), Some(OverlayType::Bool));
@@ -843,11 +880,23 @@ mod tests {
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
-        let schema = series.atoms[0].1.overlays.as_ref().unwrap().schema().clone();
+        let schema = series.atoms[0]
+            .1
+            .overlays
+            .as_ref()
+            .unwrap()
+            .schema()
+            .clone();
         assert_eq!(schema.type_of_key("label"), Some(OverlayType::Str));
         let idx = schema.index_of("label").unwrap();
         assert_eq!(
-            series.atoms[2].1.overlays.as_ref().unwrap().get_str(idx).map(|s| s.as_ref()),
+            series.atoms[2]
+                .1
+                .overlays
+                .as_ref()
+                .unwrap()
+                .get_str(idx)
+                .map(|s| s.as_ref()),
             Some("0.15"),
         );
     }
@@ -859,10 +908,7 @@ mod tests {
             "time;open;high;low;close\n1;10;11;9;10\n2;10;12;10;11\n",
         );
         // Sparse extra column: only present at time=1, missing at time=2.
-        let overlay = tmp_csv(
-            "fugazi_atoms_overlay.csv",
-            "time;pe_ratio\n1;15.0\n",
-        );
+        let overlay = tmp_csv("fugazi_atoms_overlay.csv", "time;pe_ratio\n1;15.0\n");
         let frame = DataFrame::from_series(&[
             format!("symbol=BTC,@{prices}").parse().unwrap(),
             format!("symbol=BTC,@{overlay}").parse().unwrap(),
@@ -874,7 +920,13 @@ mod tests {
         let idx = overlays0.schema().index_of("pe_ratio").unwrap();
 
         let v0 = overlays0.get_real(idx).unwrap();
-        let v1 = series.atoms[1].1.overlays.as_ref().unwrap().get_real(idx).unwrap();
+        let v1 = series.atoms[1]
+            .1
+            .overlays
+            .as_ref()
+            .unwrap()
+            .get_real(idx)
+            .unwrap();
         assert_eq!(v0, 15.0);
         assert!(v1.is_nan(), "missing overlay value should be NaN, got {v1}");
     }
@@ -892,8 +944,15 @@ mod tests {
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
         assert!(series.skipped_columns.is_empty());
-        let overlays = series.atoms[0].1.overlays.as_ref().expect("Str overlay attached");
-        assert_eq!(overlays.schema().type_of_key("exchange"), Some(OverlayType::Str));
+        let overlays = series.atoms[0]
+            .1
+            .overlays
+            .as_ref()
+            .expect("Str overlay attached");
+        assert_eq!(
+            overlays.schema().type_of_key("exchange"),
+            Some(OverlayType::Str)
+        );
     }
 
     #[test]
@@ -908,10 +967,19 @@ mod tests {
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
-        let schema0 = series.atoms[0].1.overlays.as_ref().unwrap().schema().clone();
+        let schema0 = series.atoms[0]
+            .1
+            .overlays
+            .as_ref()
+            .unwrap()
+            .schema()
+            .clone();
         for (_, atom) in &series.atoms[1..] {
             let s = atom.overlays.as_ref().unwrap().schema();
-            assert!(Arc::ptr_eq(&schema0, s), "every atom must reuse the shared Arc<Schema>");
+            assert!(
+                Arc::ptr_eq(&schema0, s),
+                "every atom must reuse the shared Arc<Schema>"
+            );
         }
     }
 
@@ -969,8 +1037,7 @@ mod tests {
             "fugazi_atoms_overlay_only.csv",
             "symbol;time;funding\nBTC.funding;1;0.0003\nBTC.funding;2;-0.0001\n",
         );
-        let frame =
-            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC.funding").unwrap();
         assert_eq!(series.atoms.len(), 2);
         for (_, atom) in &series.atoms {
@@ -992,8 +1059,7 @@ mod tests {
             "symbol;time;open;high;low;close;volume;funding\n\
              BTC.funding;1;;;;;;0.0003\n",
         );
-        let frame =
-            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC.funding").unwrap();
         assert!(series.atoms[0].1.candle.is_none());
     }
@@ -1006,8 +1072,7 @@ mod tests {
             "fugazi_atoms_half_bar.csv",
             "symbol;time;open;high;close\nBTC;1;10;11;10.5\n",
         );
-        let frame =
-            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
         let err = frame.atoms("BTC").unwrap_err().to_string();
         assert!(err.contains("`low`"), "got {err}");
         assert!(err.contains("malformed candle"), "got {err}");
@@ -1140,7 +1205,11 @@ mod tests {
             "fugazi_cadence_order_b.csv",
             "symbol,time,note\nBTC,2024-01-01T00:00:00Z,untagged\n",
         );
-        let key = ("BTC".to_string(), "1d".to_string(), "2024-01-01T00:00:00Z".to_string());
+        let key = (
+            "BTC".to_string(),
+            "1d".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+        );
 
         let untagged_last = DataFrame::from_series(&[
             format!("@{tagged}").parse().unwrap(),

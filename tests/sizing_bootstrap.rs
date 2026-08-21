@@ -114,7 +114,10 @@ fn a_zero_seed_still_deadlocks_which_is_what_makes_the_seed_the_fix() {
 fn drawdown_throttle_is_unchanged() {
     let baseline = fills_for("sizing_baseline", "!value 1.0");
     assert_eq!(
-        fills_for("sizing_throttle", "!drawdown_throttle { max_drawdown: 0.20 }"),
+        fills_for(
+            "sizing_throttle",
+            "!drawdown_throttle { max_drawdown: 0.20 }"
+        ),
         baseline,
         "drawdown_throttle reads a drawdown that is well-defined at zero, so \
          it never needed a seed and must be untouched"

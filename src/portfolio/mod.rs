@@ -184,10 +184,10 @@ use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
 use crate::wallet::{Order, PaperWallet, Rejection, Wallet};
 
-use self::policy::{ChildSample, WeightPolicy};
-use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
 use self::ledger::LedgerWallet;
 use self::netting::{PortfolioInner, allocate_funds};
+use self::policy::{ChildSample, WeightPolicy};
+use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
 
 /// One child slot in a [`Portfolio`]: a user-supplied name and the boxed
 /// strategy that trades that slot's sub-wallet.
@@ -443,8 +443,8 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
                 .map_err(|e| format!("agg_book > {e}"))?;
         }
         if let Some(v) = obj.get("bars_seen") {
-            self.bars_seen = serde_json::from_value(v.clone())
-                .map_err(|e| format!("bars_seen: {e}"))?;
+            self.bars_seen =
+                serde_json::from_value(v.clone()).map_err(|e| format!("bars_seen: {e}"))?;
         }
         if let Some(v) = obj.get("rebalance") {
             self.rebalance
@@ -480,7 +480,10 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
                 ));
             }
             for (i, (child, entry)) in self.children.iter_mut().zip(saved).enumerate() {
-                let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                let name = entry
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default();
                 if name != child.name {
                     return Err(format!(
                         "children[{i}]: state is for child `{name}` but this document has `{}` \
@@ -765,7 +768,9 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
         // fail, costs nothing, and generates no orders.
         let shortfalls = {
             let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-            let total: Real = (0..inner.child_count()).map(|i| inner.child_equity(i)).sum();
+            let total: Real = (0..inner.child_count())
+                .map(|i| inner.child_equity(i))
+                .sum();
             let targets: Vec<Real> = weights.iter().map(|w| total * w / sum_w).collect();
             inner.rebalance_ledgers_to(&targets)
         };
@@ -1048,7 +1053,8 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             share_indicators.len(),
             children.len(),
         );
-        let policy: Box<dyn WeightPolicy + Send> = policy.unwrap_or_else(|| Box::new(policy::EqualWeight));
+        let policy: Box<dyn WeightPolicy + Send> =
+            policy.unwrap_or_else(|| Box::new(policy::EqualWeight));
         let n = children.len();
         let weights = policy.weights(n);
         assert_eq!(
@@ -1081,4 +1087,3 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         }
     }
 }
-

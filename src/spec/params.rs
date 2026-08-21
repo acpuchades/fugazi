@@ -139,7 +139,10 @@ pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
                     let value = input::parse_value_at(&text, &src.label())?;
                     match value {
                         Value::Object(map) => table.extend(map),
-                        _ => bail!("params file {} must be a mapping of NAME: value", src.label()),
+                        _ => bail!(
+                            "params file {} must be a mapping of NAME: value",
+                            src.label()
+                        ),
                     }
                 }
             }
@@ -336,9 +339,9 @@ fn substitute_for_check_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use crate::spec::convert::yaml_to_json;
     use crate::spec::SingleStrategySpec;
+    use crate::spec::convert::yaml_to_json;
+    use serde_json::json;
 
     fn table_of(specs: &[&str]) -> HashMap<String, Value> {
         let specs: Vec<ParamSpec> = specs.iter().map(|s| s.parse().unwrap()).collect();
@@ -418,7 +421,8 @@ mod tests {
     #[test]
     fn json_param_placeholder_resolves() {
         // The `{"param": …}` form straight from JSON (no YAML tag involved).
-        let value: Value = serde_json::from_str(r#"{"period": {"param": {"key": "FAST"}}}"#).unwrap();
+        let value: Value =
+            serde_json::from_str(r#"{"period": {"param": {"key": "FAST"}}}"#).unwrap();
         let out = substitute(value, &table_of(&["FAST=5"])).unwrap();
         assert_eq!(out.get("period"), Some(&Value::from(5)));
     }
@@ -480,14 +484,19 @@ mod tests {
 
     #[test]
     fn check_still_prefers_a_supplied_value_or_default() {
-        let (spec, holes) =
-            check("symbol: !param { key: SYM, default: BTC }\nlong: { enter: !value true }", &[])
-                .unwrap();
+        let (spec, holes) = check(
+            "symbol: !param { key: SYM, default: BTC }\nlong: { enter: !value true }",
+            &[],
+        )
+        .unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert_eq!(holes, 0);
 
-        let (spec, holes) =
-            check("symbol: !param SYM\nlong: { enter: !value true }", &["SYM=ETH"]).unwrap();
+        let (spec, holes) = check(
+            "symbol: !param SYM\nlong: { enter: !value true }",
+            &["SYM=ETH"],
+        )
+        .unwrap();
         assert_eq!(spec.symbol, "ETH");
         assert_eq!(holes, 0);
     }
@@ -495,8 +504,11 @@ mod tests {
     #[test]
     fn check_still_rejects_a_malformed_placeholder() {
         // No string `key` is a genuine format error, not a hole to fill.
-        let err = check("symbol: !param { default: BTC }\nlong: { enter: !value true }", &[])
-            .unwrap_err();
+        let err = check(
+            "symbol: !param { default: BTC }\nlong: { enter: !value true }",
+            &[],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("needs a string"), "{err}");
     }
 

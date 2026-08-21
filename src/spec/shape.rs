@@ -125,11 +125,19 @@ mod tests {
             ShapeHint::Pairs,
         );
         assert_eq!(
-            detect_shape(&parse("{ score: !close, selection: !top_bottom { longs: 1 } }")),
+            detect_shape(&parse(
+                "{ score: !close, selection: !top_bottom { longs: 1 } }"
+            )),
             ShapeHint::Basket,
         );
-        assert_eq!(detect_shape(&parse("{ symbol: X, long: {} }")), ShapeHint::Single);
-        assert_eq!(detect_shape(&parse("{ long: {}, sizing: !value 1.0 }")), ShapeHint::Multi);
+        assert_eq!(
+            detect_shape(&parse("{ symbol: X, long: {} }")),
+            ShapeHint::Single
+        );
+        assert_eq!(
+            detect_shape(&parse("{ long: {}, sizing: !value 1.0 }")),
+            ShapeHint::Multi
+        );
     }
 
     #[test]

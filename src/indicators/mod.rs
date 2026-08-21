@@ -38,9 +38,9 @@ mod candle;
 mod cci;
 mod component;
 mod crosses;
+mod dispatch;
 mod dmi;
 mod donchian;
-mod dispatch;
 mod ema;
 mod exp;
 mod garman_klass;
@@ -74,9 +74,8 @@ mod smoothing;
 pub(crate) mod stats;
 mod stddev;
 mod stochastic;
-mod trailing;
-mod zscore;
 mod timeframe;
+mod trailing;
 mod true_range;
 mod unstable;
 mod value;
@@ -84,6 +83,7 @@ mod variance_ratio;
 mod vwap;
 mod williams_r;
 mod wma;
+mod zscore;
 
 pub use ad::Ad;
 pub use adx::{Adx, AdxValue};
@@ -108,8 +108,8 @@ pub use compare::{
 };
 pub use component::{Component, Shared, SharedComponent, SharedHandle};
 pub use crosses::{CrossesAbove, CrossesBelow};
-pub use dmi::{Dmi, DmiValue};
 pub use dispatch::Match;
+pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
 pub use exp::Exp;
@@ -131,16 +131,16 @@ pub use parkinson::Parkinson;
 pub use percentile::{Percentile, PercentileRank};
 pub use stats::Moments;
 
+pub use ops::{
+    Abs, AbsOp, Add, BinaryOp, Combine, CumMax, CumMin, CumSum, Cumulative, CumulativeOp, Diff,
+    Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, Max, MaxOp, Min, MinOp, Mul, Pow, PowOp,
+    Ratio, Roc, RollingMax, RollingMin, Sigmoid, SigmoidOp, Sign, SignOp, Sqrt, SqrtOp, Sub, Tanh,
+    TanhOp, Unary, UnaryOp,
+};
 pub use pairwise::{
     Beta, BetaOp, Correlation, CorrelationOp, Covariance, CovarianceOp, PairStat, PairStatOp,
 };
 pub use pick::{Pick, PickAny};
-pub use ops::{
-    Abs, AbsOp, Add, BinaryOp, Combine, CumMax, CumMin, CumSum, Cumulative, CumulativeOp, Diff, Div,
-    Extreme, ExtremeOp, Lag, Lookback, LookbackOp, Max, MaxOp, Min, MinOp, Mul, Pow, PowOp, Ratio,
-    Roc, RollingMax, RollingMin, Sigmoid, SigmoidOp, Sign, SignOp, Sqrt, SqrtOp, Sub, Tanh, TanhOp,
-    Unary, UnaryOp,
-};
 pub use position::{Position, PositionField};
 pub use rma::Rma;
 pub use rogers_satchell::RogersSatchell;

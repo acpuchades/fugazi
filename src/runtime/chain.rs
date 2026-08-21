@@ -500,8 +500,11 @@ macro_rules! probed {
                 match self {
                     AnyChain::$variant(c) => c,
                     other => panic!(
-                        concat!("`{}` built a {} chain, expected ", $what,
-                                " — the per-symbol template was not probed at build time"),
+                        concat!(
+                            "`{}` built a {} chain, expected ",
+                            $what,
+                            " — the per-symbol template was not probed at build time"
+                        ),
                         slot,
                         other.kind(),
                     ),
@@ -563,7 +566,9 @@ impl<Out: Clone + 'static> Indicator for CandleOver<Out> {
     type Output = Out;
     fn update(&mut self, input: Snapshot<Symbol>) -> Option<Out> {
         self.value = match self.outer.update(input) {
-            Some(candle) => self.inner.update(Snapshot::<Symbol>::of_atom(candle.into())),
+            Some(candle) => self
+                .inner
+                .update(Snapshot::<Symbol>::of_atom(candle.into())),
             None => None,
         };
         self.value.clone()
@@ -638,8 +643,8 @@ into_domain!(into_time, Time, Timestamp, "Time");
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::{Close, Pick, Sma};
     use crate::indicators::IndicatorExt;
+    use crate::indicators::{Close, Pick, Sma};
 
     fn close() -> Close<Pick<Symbol>> {
         Close::of(Pick::<Symbol>::new())

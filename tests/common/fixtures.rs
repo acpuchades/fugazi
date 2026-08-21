@@ -98,8 +98,7 @@ impl Csv {
     /// reference. Its absence is a broken checkout, not a missing tool.
     #[track_caller]
     pub fn require(name: &str) -> Self {
-        Self::load(name)
-            .unwrap_or_else(|| panic!("missing committed fixture tests/data/{name}"))
+        Self::load(name).unwrap_or_else(|| panic!("missing committed fixture tests/data/{name}"))
     }
 
     pub fn len(&self) -> usize {
@@ -125,9 +124,7 @@ impl Csv {
         self.headers
             .iter()
             .position(|h| h == column)
-            .unwrap_or_else(|| {
-                panic!("no column `{column}`; have {:?}", self.headers)
-            })
+            .unwrap_or_else(|| panic!("no column `{column}`; have {:?}", self.headers))
     }
 
     /// A column read verbatim, without parsing.

@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use fugazi::Snapshot;
 use fugazi::indicators::{Combine, GetBool, GetReal, GetStr, StrEqOp, Value, ValueStr};
 use fugazi::prelude::*;
 use fugazi::types::{Symbol, symbol as intern};
-use fugazi::Snapshot;
 
 /// Build the shared schema: one column of each type.
 fn schema() -> Arc<Schema> {
@@ -49,13 +49,50 @@ fn get_real_composes_into_a_numeric_signal() {
     let mut sig = GetReal::new(&schema, "vol_20").gt(Value::new(0.15));
 
     let atoms = [
-        (Fixture { close: 100.0, vol: 0.10, risk_on: false, regime: "bull" }, false),
-        (Fixture { close: 100.0, vol: 0.15, risk_on: false, regime: "bull" }, false), // == not >
-        (Fixture { close: 100.0, vol: 0.20, risk_on: false, regime: "bull" }, true),
-        (Fixture { close: 100.0, vol: 0.05, risk_on: false, regime: "bear" }, false),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.10,
+                risk_on: false,
+                regime: "bull",
+            },
+            false,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.15,
+                risk_on: false,
+                regime: "bull",
+            },
+            false,
+        ), // == not >
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.20,
+                risk_on: false,
+                regime: "bull",
+            },
+            true,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.05,
+                risk_on: false,
+                regime: "bear",
+            },
+            false,
+        ),
     ];
     for (f, expected) in &atoms {
-        assert_eq!(sig.update(atom(&schema, f)), Some(*expected), "vol={}", f.vol);
+        assert_eq!(
+            sig.update(atom(&schema, f)),
+            Some(*expected),
+            "vol={}",
+            f.vol
+        );
     }
 }
 
@@ -66,7 +103,12 @@ fn get_bool_is_a_direct_signal() {
     let schema = schema();
     let mut sig = GetBool::new(&schema, "risk_on");
     for &b in &[true, false, true, true, false] {
-        let f = Fixture { close: 100.0, vol: 0.0, risk_on: b, regime: "bull" };
+        let f = Fixture {
+            close: 100.0,
+            vol: 0.0,
+            risk_on: b,
+            regime: "bull",
+        };
         assert_eq!(sig.update(atom(&schema, &f)), Some(b));
     }
 }
@@ -80,10 +122,24 @@ fn get_str_composes_with_str_eq_into_a_regime_signal() {
         GetStr::new(&schema, "regime"),
         ValueStr::new("bull"),
     );
-    let cases = [("bull", true), ("bear", false), ("bull", true), ("crab", false)];
+    let cases = [
+        ("bull", true),
+        ("bear", false),
+        ("bull", true),
+        ("crab", false),
+    ];
     for (regime, expected) in cases {
-        let f = Fixture { close: 100.0, vol: 0.0, risk_on: false, regime };
-        assert_eq!(sig.update(atom(&schema, &f)), Some(expected), "regime={regime}");
+        let f = Fixture {
+            close: 100.0,
+            vol: 0.0,
+            risk_on: false,
+            regime,
+        };
+        assert_eq!(
+            sig.update(atom(&schema, &f)),
+            Some(expected),
+            "regime={regime}"
+        );
     }
 }
 
@@ -107,11 +163,51 @@ fn strategy_style_and_of_three_types_fires_only_on_full_agreement() {
         .and(vol_high);
 
     let bars = [
-        (Fixture { close: 100.0, vol: 0.20, risk_on: true, regime: "bull" }, true),
-        (Fixture { close: 100.0, vol: 0.20, risk_on: false, regime: "bull" }, false),
-        (Fixture { close: 100.0, vol: 0.20, risk_on: true, regime: "bear" }, false),
-        (Fixture { close: 100.0, vol: 0.10, risk_on: true, regime: "bull" }, false),
-        (Fixture { close: 100.0, vol: 0.16, risk_on: true, regime: "bull" }, true),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.20,
+                risk_on: true,
+                regime: "bull",
+            },
+            true,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.20,
+                risk_on: false,
+                regime: "bull",
+            },
+            false,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.20,
+                risk_on: true,
+                regime: "bear",
+            },
+            false,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.10,
+                risk_on: true,
+                regime: "bull",
+            },
+            false,
+        ),
+        (
+            Fixture {
+                close: 100.0,
+                vol: 0.16,
+                risk_on: true,
+                regime: "bull",
+            },
+            true,
+        ),
     ];
     for (f, expected) in &bars {
         assert_eq!(
@@ -165,8 +261,7 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
             GetStr::of(&schema, "regime", Pick::<Symbol>::new()),
             ValueStr::<Snapshot<Symbol>>::new("bull"),
         );
-        let vol_high = GetReal::of(&schema, "vol_20", Pick::<Symbol>::new())
-            .gt(Value::new(0.15));
+        let vol_high = GetReal::of(&schema, "vol_20", Pick::<Symbol>::new()).gt(Value::new(0.15));
         GetBool::of(&schema, "risk_on", Pick::<Symbol>::new())
             .and(regime_bull)
             .and(vol_high)
@@ -179,15 +274,39 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
     };
 
     let symbol = intern("TEST");
-    let mut strategy = SingleAssetStrategy::new(symbol.clone())
-        .long_on(make_enter(), make_exit());
+    let mut strategy = SingleAssetStrategy::new(symbol.clone()).long_on(make_enter(), make_exit());
 
     let bars: Vec<Fixture> = vec![
-        Fixture { close: 100.0, vol: 0.10, risk_on: true, regime: "bull" },
-        Fixture { close: 105.0, vol: 0.20, risk_on: true, regime: "bull" },
-        Fixture { close: 108.0, vol: 0.20, risk_on: true, regime: "bull" },
-        Fixture { close: 112.0, vol: 0.20, risk_on: true, regime: "bear" },
-        Fixture { close: 110.0, vol: 0.20, risk_on: true, regime: "bear" },
+        Fixture {
+            close: 100.0,
+            vol: 0.10,
+            risk_on: true,
+            regime: "bull",
+        },
+        Fixture {
+            close: 105.0,
+            vol: 0.20,
+            risk_on: true,
+            regime: "bull",
+        },
+        Fixture {
+            close: 108.0,
+            vol: 0.20,
+            risk_on: true,
+            regime: "bull",
+        },
+        Fixture {
+            close: 112.0,
+            vol: 0.20,
+            risk_on: true,
+            regime: "bear",
+        },
+        Fixture {
+            close: 110.0,
+            vol: 0.20,
+            risk_on: true,
+            regime: "bear",
+        },
     ];
 
     // The strategy consumes `Snapshot<Symbol>`; wrap each atom in a

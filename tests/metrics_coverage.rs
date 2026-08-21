@@ -183,7 +183,10 @@ fn no_exemption_names_a_field_that_no_longer_exists() {
         ruin_bar: None,
     };
     let sample = metrics::from_report(&empty, 252.0, 0.0, None);
-    let known: HashSet<&str> = metrics::flatten(&sample).into_iter().map(|(k, _)| k).collect();
+    let known: HashSet<&str> = metrics::flatten(&sample)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
 
     let stale: Vec<&str> = EXEMPT
         .iter()

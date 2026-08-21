@@ -8,10 +8,10 @@ use std::hash::Hash;
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};
 
-use super::types::{
-    Ack, POSITION_EPSILON, Order, OrderId, Reference, Rejection, Side, Size, Units, WalletError,
-};
 use super::Wallet;
+use super::types::{
+    Ack, Order, OrderId, POSITION_EPSILON, Reference, Rejection, Side, Size, Units, WalletError,
+};
 
 /// A **sleeve**: a [`Wallet`] view that runs a strategy against its own carve-out
 /// of a shared account. The positions the wrapped wallet **already held when it
@@ -178,7 +178,8 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
         size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
         let units = self.own_units(&symbol, trigger.0, size);
-        self.inner.set_take_profit(symbol, trigger, Size::units(units))
+        self.inner
+            .set_take_profit(symbol, trigger, Size::units(units))
     }
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
         self.inner.cancel_protective(symbol)
@@ -236,9 +237,7 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
 /// [`SleeveWallet`] — the positions to treat as the user's own and leave
 /// untouched. Reads through the [`Wallet`] trait, so it needs
 /// [`positions`](Wallet::positions) to enumerate.
-pub fn external_baseline<Sym: Clone + Eq + Hash>(
-    wallet: &dyn Wallet<Sym>,
-) -> HashMap<Sym, Real> {
+pub fn external_baseline<Sym: Clone + Eq + Hash>(wallet: &dyn Wallet<Sym>) -> HashMap<Sym, Real> {
     wallet
         .positions()
         .into_iter()

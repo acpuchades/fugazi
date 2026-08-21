@@ -44,9 +44,9 @@ pub use spec::CostSpec;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::config::{CommissionSpec, SpreadSpec};
     use super::spec::CostTerm;
+    use super::*;
     use crate::spec::calendar::Frequency;
     use crate::spec::input::Source;
     use std::str::FromStr;
@@ -125,10 +125,7 @@ mod tests {
 
     #[test]
     fn symbol_scoped_overrides_default_at_resolution() {
-        let cfg = config_of(&[
-            "spread=!bps { bps: 10 }",
-            "BTC:spread=!bps { bps: 3 }",
-        ]);
+        let cfg = config_of(&["spread=!bps { bps: 10 }", "BTC:spread=!bps { bps: 3 }"]);
         // Global default is 10 bps; BTC gets its own 3 bps.
         let btc = cfg.resolve("BTC", None);
         let eth = cfg.resolve("ETH", None);
@@ -173,8 +170,10 @@ mod tests {
             spread: !bps
               bps: 5
         "#;
-        let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(yaml.to_string()))])])
-            .unwrap();
+        let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(
+            yaml.to_string(),
+        ))])])
+        .unwrap();
         assert!(matches!(
             cfg.commission.default,
             Some(CommissionSpec::Percentage { .. })
@@ -191,8 +190,10 @@ mod tests {
                 BTC: !bps { bps: 1 }
                 ETH: !bps { bps: 1.5 }
         "#;
-        let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(yaml.to_string()))])])
-            .unwrap();
+        let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(
+            yaml.to_string(),
+        ))])])
+        .unwrap();
         let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let btc = cfg.resolve("BTC", None);
         let eth = cfg.resolve("ETH", None);
@@ -242,9 +243,7 @@ mod tests {
     #[test]
     fn leading_scope_distributes_over_later_unscoped_terms() {
         // `--costs 'BTC:commission=…,spread=…'` should scope BOTH terms to BTC.
-        let cfg = config_of(&[
-            "BTC:commission=!percentage { rate: 0.001 },spread=!bps { bps: 3 }",
-        ]);
+        let cfg = config_of(&["BTC:commission=!percentage { rate: 0.001 },spread=!bps { bps: 3 }"]);
         // Both live under by_symbol["BTC"], not the default leg.
         assert!(cfg.commission.default.is_none());
         assert!(cfg.spread.default.is_none());
@@ -261,9 +260,8 @@ mod tests {
     #[test]
     fn per_term_scope_overrides_leading_distributive_scope() {
         // `BTC:X=…,ETH:Y=…` — the per-term ETH scope wins over the outer BTC.
-        let cfg = config_of(&[
-            "BTC:commission=!percentage { rate: 0.001 },ETH:spread=!bps { bps: 3 }",
-        ]);
+        let cfg =
+            config_of(&["BTC:commission=!percentage { rate: 0.001 },ETH:spread=!bps { bps: 3 }"]);
         let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         // BTC has the commission, no spread.
         let btc = cfg.resolve("BTC", None);

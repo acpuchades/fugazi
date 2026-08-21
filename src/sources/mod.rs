@@ -59,8 +59,8 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::types::{Atom, Schema};
 pub use crate::types::Timestamp;
+use crate::types::{Atom, Schema};
 
 pub use binance::Binance;
 pub use binance_vision::BinanceVision;
@@ -98,7 +98,11 @@ pub(crate) fn floor_to_bucket(ms: i64, interval: Interval) -> i64 {
         }
         other => {
             let step = other.duration_ms();
-            if step <= 0 { ms } else { ms - ms.rem_euclid(step) }
+            if step <= 0 {
+                ms
+            } else {
+                ms - ms.rem_euclid(step)
+            }
         }
     }
 }
@@ -254,4 +258,3 @@ pub trait SeriesSource: Send + Sync {
         }
     }
 }
-

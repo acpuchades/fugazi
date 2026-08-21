@@ -47,7 +47,11 @@ impl Strategy for NeverCovers {
 
     fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         if wallet.position(&fugazi::types::symbol("X")).amount == 0.0 {
-            let _ = wallet.set(fugazi::types::symbol("X"), Side::Sell, Size::value_frac(1.0));
+            let _ = wallet.set(
+                fugazi::types::symbol("X"),
+                Side::Sell,
+                Size::value_frac(1.0),
+            );
         }
     }
 
@@ -70,8 +74,13 @@ fn doomed_run(closes: &[Real]) -> fugazi::RunReport<Symbol> {
 fn the_curve_is_pinned_at_zero_from_the_ruin_bar_on() {
     let report = doomed_run(&DOOMED);
 
-    let ruin = report.ruin_bar.expect("a fully-invested short into a 6x rise is ruin");
-    assert!(ruin < DOOMED.len() - 1, "ruin must leave bars to assert about");
+    let ruin = report
+        .ruin_bar
+        .expect("a fully-invested short into a 6x rise is ruin");
+    assert!(
+        ruin < DOOMED.len() - 1,
+        "ruin must leave bars to assert about"
+    );
 
     // The invariant `run` documents at src/backtest.rs — one entry per input
     // snapshot — survives: the tail is pinned, not truncated.
@@ -116,10 +125,15 @@ fn the_book_is_liquidated_at_ruin_when_the_account_can_afford_it() {
     // take a maintenance-margin model that liquidates before zero, which is
     // deliberately out of scope.
     let report = doomed_run(&[100.0, 100.0, 150.0, 200.0, 300.0, 400.0]);
-    let ruin = report.ruin_bar.expect("100 -> 200 against a fully-invested short is exactly ruin");
+    let ruin = report
+        .ruin_bar
+        .expect("100 -> 200 against a fully-invested short is exactly ruin");
 
     assert!(
-        report.fills.iter().any(|f| f.bar == ruin && f.order.side == Side::Buy),
+        report
+            .fills
+            .iter()
+            .any(|f| f.bar == ruin && f.order.side == Side::Buy),
         "the short must be covered at ruin: {:?}",
         report.fills
     );
@@ -192,10 +206,8 @@ fn the_return_series_never_turns_a_loss_into_a_gain() {
     // First, the arithmetic that motivates the whole fix, stated directly.
     // `per_bar_returns` is a public function over a caller-supplied series, and
     // on a curve that goes negative it does exactly what the formula says:
-    let inverted = fugazi::metrics::per_bar_returns(
-        &[100.0, 60.0, 20.0, -20.0, -60.0, -100.0, -140.0],
-        100.0,
-    );
+    let inverted =
+        fugazi::metrics::per_bar_returns(&[100.0, 60.0, 20.0, -20.0, -60.0, -100.0, -140.0], 100.0);
     // (index 0 is the seed bar, `(100 - 100) / 100`; the crossing is at 3.)
     assert!(
         inverted[4] > 0.0 && inverted[5] > 0.0,
@@ -238,7 +250,10 @@ fn a_ruined_run_reports_minus_100_percent_and_a_100_percent_drawdown() {
     let report = doomed_run(&DOOMED);
     let m = reduce(&report);
 
-    assert_eq!(m.run.ruin_bar, report.ruin_bar, "the field must survive the reduction");
+    assert_eq!(
+        m.run.ruin_bar, report.ruin_bar,
+        "the field must survive the reduction"
+    );
     assert_eq!(m.run.final_equity, 0.0);
     common::bars::assert_close(m.returns.total_pct, -100.0, 1e-12, "total return");
     common::bars::assert_close(m.drawdown.max_pct, 100.0, 1e-12, "max drawdown");
@@ -259,7 +274,10 @@ fn cagr_distinguishes_ruin_from_too_little_data() {
     // Ruin: a definite -100% per annum, not a blank cell.
     let ruined = reduce(&doomed_run(&DOOMED));
     common::bars::assert_close(
-        ruined.returns.cagr_pct.expect("ruin has a defined CAGR: -100%"),
+        ruined
+            .returns
+            .cagr_pct
+            .expect("ruin has a defined CAGR: -100%"),
         -100.0,
         1e-12,
         "CAGR on a ruined run",
@@ -270,7 +288,10 @@ fn cagr_distinguishes_ruin_from_too_little_data() {
     // `run.ruin_bar` is absent. Before this the two rendered as the same empty
     // CSV cell and a reader had to guess which they were looking at.
     let degenerate = metrics::from_report(&doomed_run(&[100.0, 90.0]), 0.0, 0.0, None);
-    assert_eq!(degenerate.returns.cagr_pct, None, "no bars-per-year to annualize against");
+    assert_eq!(
+        degenerate.returns.cagr_pct, None,
+        "no bars-per-year to annualize against"
+    );
     assert_eq!(
         degenerate.run.ruin_bar, None,
         "absent CAGR here means `undefined`, not `wiped out`"
@@ -288,7 +309,9 @@ fn max_drawdown_never_exceeds_100_percent_over_random_paths() {
     // reproducible from the seed printed in the message.
     let mut state: u64 = 0x5eed_1234_9876_abcd;
     let mut next = move || {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         ((state >> 33) as Real) / ((1u64 << 31) as Real)
     };
 
@@ -348,7 +371,11 @@ fn a_slice_can_always_say_whether_it_is_after_ruin() {
     // the same fact as being ruined on its first bar, and reads that way in the
     // metrics (a flat zero curve). A fold here is pure fiction otherwise.
     let after = metrics::report_slice(&report, (ruin + 1)..DOOMED.len());
-    assert_eq!(after.ruin_bar, Some(0), "a post-ruin window must not look merely flat");
+    assert_eq!(
+        after.ruin_bar,
+        Some(0),
+        "a post-ruin window must not look merely flat"
+    );
     assert!(after.equity_curve.iter().all(|&e| e == 0.0));
     assert!(after.fills.is_empty());
 }
@@ -391,8 +418,15 @@ fn flatten_does_not_resurrect_a_ruined_curve() {
     // The book was already liquidated at ruin, so there is nothing to finalize
     // — and overwriting the final point would replace the pinned `0.0` with the
     // account's true negative balance, un-bounding every metric below it.
-    assert_eq!(report.equity_curve, before, "`--flatten` must not un-pin a ruined tail");
-    assert_eq!(report.fills.len(), fills_before, "nothing left open to close");
+    assert_eq!(
+        report.equity_curve, before,
+        "`--flatten` must not un-pin a ruined tail"
+    );
+    assert_eq!(
+        report.fills.len(),
+        fills_before,
+        "nothing left open to close"
+    );
 }
 
 #[test]
@@ -415,7 +449,9 @@ fn a_portfolio_is_ruined_on_the_accounts_equity_not_a_childs() {
     // Same driver, same site, no per-shape special case: `backtest.rs` is the
     // sole producer of a backtest equity curve, and a portfolio is an ordinary
     // strategy trading the wallet it was handed.
-    let ruin = report.ruin_bar.expect("both children short the same doomed series");
+    let ruin = report
+        .ruin_bar
+        .expect("both children short the same doomed series");
     assert!(report.equity_curve[ruin..].iter().all(|&e| e == 0.0));
     assert!(report.fills.iter().all(|f| f.bar <= ruin));
     assert!(reduce(&report).drawdown.max_pct <= 100.0);
@@ -501,7 +537,10 @@ fn a_ruined_cell_does_not_win_best_by() {
         let mut lines = text.lines();
         let header = lines.next().expect("header").to_string();
         let rows: Vec<&str> = lines.collect();
-        assert!(rows.len() > 1, "need a solvent cell to out-rank the ruined one");
+        assert!(
+            rows.len() > 1,
+            "need a solvent cell to out-rank the ruined one"
+        );
 
         // Some cell must actually have been ruined, or the test proves nothing.
         let ruined: Vec<&&str> = rows
@@ -525,15 +564,23 @@ fn a_ruined_cell_does_not_win_best_by() {
         );
         // And each ruined cell reports the bound rather than a fantasy number.
         for r in ruined {
-            let dd: Real = column(&header, r, "drawdown.max_pct").parse().unwrap_or(0.0);
-            assert!(dd <= 100.0 + 1e-9, "drawdown {dd} exceeds the account:\n{r}");
+            let dd: Real = column(&header, r, "drawdown.max_pct")
+                .parse()
+                .unwrap_or(0.0);
+            assert!(
+                dd <= 100.0 + 1e-9,
+                "drawdown {dd} exceeds the account:\n{r}"
+            );
         }
     }
 }
 
 #[test]
 fn run_reports_ruin_rather_than_leaving_it_to_be_inferred() {
-    let (spec, _) = scratch_file("ruin_run_strategy.yml", &SWEEPABLE_SHORT.replace("!param LEVERAGE", "2"));
+    let (spec, _) = scratch_file(
+        "ruin_run_strategy.yml",
+        &SWEEPABLE_SHORT.replace("!param LEVERAGE", "2"),
+    );
     let (csv_in, _) = scratch_file("ruin_run_series.csv", &doomed_csv());
 
     let out = Cmd::new("run")
@@ -711,7 +758,9 @@ fn no_rankable_metric_prefers_a_ruined_run_to_a_solvent_profitable_one() {
 
     let mut checked = 0;
     for (path, _) in metrics::flatten(&solvent) {
-        let Some(direction) = direction_for(path) else { continue };
+        let Some(direction) = direction_for(path) else {
+            continue;
+        };
         checked += 1;
 
         let solvent_key = ranking_value(&whole(solvent.clone()), path, direction, 0.0);
@@ -733,8 +782,7 @@ fn no_rankable_metric_prefers_a_ruined_run_to_a_solvent_profitable_one() {
         }
     }
     assert_eq!(
-        checked,
-        39,
+        checked, 39,
         "the direction table changed size — re-read the rule in `ranking_lookup` and \
          check the new entries against it rather than adjusting this number"
     );
@@ -770,14 +818,31 @@ fn ruin_is_unrankable_but_its_numbers_are_still_reported() {
         "the fixture must reproduce the defect — a *positive* Sharpe on a wiped-out \
          account — or it pins nothing: got {sharpe}"
     );
-    assert_eq!(m.risk_adjusted.sharpe, Some(sharpe), "the document keeps the number");
-    assert_eq!(m.run.ruin_bar, Some(RANKING_BARS - 1), "and says it is a dead account");
-    assert_eq!(m.returns.cagr_pct, Some(-100.0), "the terminal-wealth metrics still read ruin");
+    assert_eq!(
+        m.risk_adjusted.sharpe,
+        Some(sharpe),
+        "the document keeps the number"
+    );
+    assert_eq!(
+        m.run.ruin_bar,
+        Some(RANKING_BARS - 1),
+        "and says it is a dead account"
+    );
+    assert_eq!(
+        m.returns.cagr_pct,
+        Some(-100.0),
+        "the terminal-wealth metrics still read ruin"
+    );
 
     // Same document, asked as a ranking key rather than as a description.
     assert_eq!(ranking_lookup(&m, "risk_adjusted.sharpe"), None);
     assert_eq!(
-        ranking_value(&whole(m), "risk_adjusted.sharpe", Direction::Descending, 0.0),
+        ranking_value(
+            &whole(m),
+            "risk_adjusted.sharpe",
+            Direction::Descending,
+            0.0
+        ),
         None
     );
 }
@@ -830,7 +895,13 @@ fn a_windowed_row_is_unrankable_if_any_window_was_ruined() {
     ]);
     assert_eq!(all_alive.ruin_bar(), None);
     assert!(
-        ranking_value(&all_alive, "risk_adjusted.sharpe", Direction::Descending, 0.0).is_some(),
+        ranking_value(
+            &all_alive,
+            "risk_adjusted.sharpe",
+            Direction::Descending,
+            0.0
+        )
+        .is_some(),
         "a row that never died must stay rankable under -w"
     );
 
@@ -847,7 +918,12 @@ fn a_windowed_row_is_unrankable_if_any_window_was_ruined() {
         "the absolute bar, not the window-relative one"
     );
     assert_eq!(
-        ranking_value(&died_midway, "risk_adjusted.sharpe", Direction::Descending, 0.0),
+        ranking_value(
+            &died_midway,
+            "risk_adjusted.sharpe",
+            Direction::Descending,
+            0.0
+        ),
         None
     );
 }
@@ -891,7 +967,11 @@ fn ruined_with_drift(drift: Real) -> metrics::Metrics {
 }
 
 fn row_of(m: metrics::Metrics) -> Row {
-    Row { values: Vec::new(), eval: whole(m), smoothed: None }
+    Row {
+        values: Vec::new(),
+        eval: whole(m),
+        smoothed: None,
+    }
 }
 
 /// **The decision.** DSR corrects for the fact that a maximum was taken over a
@@ -908,8 +988,7 @@ fn a_ruined_row_is_not_a_dsr_trial() {
     // Ten candidates spanning a realistic Sharpe spread, and one dead account
     // whose pre-ruin Sharpe sits in the middle of them.
     let drifts: Vec<Real> = (0..10).map(|i| 0.0004 + i as Real * 0.0002).collect();
-    let solvent: Vec<metrics::Metrics> =
-        drifts.iter().copied().map(solvent_with_drift).collect();
+    let solvent: Vec<metrics::Metrics> = drifts.iter().copied().map(solvent_with_drift).collect();
     let dead = ruined_with_drift(0.00306);
 
     let sharpes: Vec<Real> = solvent
@@ -989,7 +1068,10 @@ fn a_ruined_row_still_gets_a_dsr_cell() {
     .expect("two solvent cells is a population");
 
     let (sharpe, skew, kurt, n_returns, bpy) = row_dsr_inputs(&row_of(dead.clone()));
-    assert_eq!(sharpe, dead.risk_adjusted.sharpe, "the row keeps its own summary stats");
+    assert_eq!(
+        sharpe, dead.risk_adjusted.sharpe,
+        "the row keeps its own summary stats"
+    );
     assert!(
         fugazi::metrics::deflated_sharpe_from_stats(
             sharpe, skew, kurt, n_returns, bpy, context.0, context.1
@@ -1077,7 +1159,9 @@ fn ma_series(noise_bars: usize) -> String {
     // Deterministic pseudo-noise — an LCG, so the fixture is a constant.
     let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
     let mut noise = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) as Real / (1u64 << 31) as Real) * 2.0 - 1.0
     };
     let mut shock: Real = 0.0;
@@ -1100,7 +1184,11 @@ fn ma_series(noise_bars: usize) -> String {
         px *= 0.999;
         closes.push(px);
     }
-    assert_eq!(closes.len(), 1858, "the fixture is 1 858 bars whatever the ruin bar");
+    assert_eq!(
+        closes.len(),
+        1858,
+        "the fixture is 1 858 bars whatever the ruin bar"
+    );
 
     let mut out = String::from("time,symbol,open,high,low,close,volume\n");
     for (i, px) in closes.iter().enumerate() {
@@ -1132,7 +1220,11 @@ fn ma_sweep(extra: &[&str], tag: &str) -> (String, String, Vec<String>) {
     let mut lines = text.lines();
     let header = lines.next().expect("header").to_string();
     let rows: Vec<String> = lines.map(str::to_string).collect();
-    (format!("{}{}", outcome.stdout, outcome.stderr), header, rows)
+    (
+        format!("{}{}", outcome.stdout, outcome.stderr),
+        header,
+        rows,
+    )
 }
 
 fn is_ruined(header: &str, row: &str) -> bool {
@@ -1140,7 +1232,9 @@ fn is_ruined(header: &str, row: &str) -> bool {
 }
 
 fn sharpe_of(header: &str, row: &str) -> Real {
-    column(header, row, "risk_adjusted.sharpe").parse().expect("a Sharpe cell")
+    column(header, row, "risk_adjusted.sharpe")
+        .parse()
+        .expect("a Sharpe cell")
 }
 
 /// The reproduction, end to end: the grid's Sharpe-*optimal* cell is a wiped-out
@@ -1157,7 +1251,10 @@ fn the_sharpe_optimal_cell_can_be_a_dead_account_and_still_not_win() {
 
     let ruined: Vec<&String> = rows.iter().filter(|r| is_ruined(&header, r)).collect();
     let solvent: Vec<&String> = rows.iter().filter(|r| !is_ruined(&header, r)).collect();
-    assert!(!ruined.is_empty() && !solvent.is_empty(), "need both kinds:\n{rows:#?}");
+    assert!(
+        !ruined.is_empty() && !solvent.is_empty(),
+        "need both kinds:\n{rows:#?}"
+    );
     for row in &ruined {
         assert_eq!(
             column(&header, row, "run.ruin_bar"),
@@ -1232,7 +1329,11 @@ fn a_ruined_cell_keeps_its_metrics_in_the_csv() {
 fn the_dsr_column_is_built_from_the_candidates_and_written_for_everyone() {
     let (_console, header, rows) = ma_sweep(&["--best-by", "sharpe"], "dsr");
     let solvent = rows.iter().filter(|r| !is_ruined(&header, r)).count();
-    assert!(solvent >= 2 && solvent < rows.len(), "need a mixed grid: {solvent}/{}", rows.len());
+    assert!(
+        solvent >= 2 && solvent < rows.len(),
+        "need a mixed grid: {solvent}/{}",
+        rows.len()
+    );
 
     assert!(
         header.contains("selection.deflated_sharpe"),
@@ -1260,7 +1361,10 @@ fn optimize_names_ruin_for_a_ruined_row_and_for_a_ruined_winner() {
     let n_ruined = rows.iter().filter(|r| is_ruined(&header, r)).count();
     assert!(n_ruined > 0 && n_ruined < rows.len());
     assert!(
-        console.contains(&format!("{n_ruined} of {} grid points ended in ruin", rows.len())),
+        console.contains(&format!(
+            "{n_ruined} of {} grid points ended in ruin",
+            rows.len()
+        )),
         "a correctly-ranked sweep must still name its dead rows:\n{console}"
     );
     assert!(
@@ -1323,7 +1427,9 @@ fn smoothing_gives_a_ruined_cell_no_weight_and_says_so_in_support() {
     let header = lines.next().expect("header").to_string();
     let rows: Vec<String> = lines.map(str::to_string).collect();
     let support = |row: &str| -> Real {
-        column(&header, row, "risk_adjusted.sharpe_support").parse().expect("a support cell")
+        column(&header, row, "risk_adjusted.sharpe_support")
+            .parse()
+            .expect("a support cell")
     };
 
     for row in &rows {
@@ -1340,7 +1446,8 @@ fn smoothing_gives_a_ruined_cell_no_weight_and_says_so_in_support() {
     // A cell whose neighbourhood contains a dead one must say its average rests
     // on less: full support on this stencil is 1.0.
     assert!(
-        rows.iter().any(|r| !is_ruined(&header, r) && support(r) < 1.0),
+        rows.iter()
+            .any(|r| !is_ruined(&header, r) && support(r) < 1.0),
         "a solvent cell next to a ruined one should carry reduced support:\n{text}"
     );
 }
@@ -1406,11 +1513,19 @@ fn a_fold_neither_picks_a_cell_that_died_in_sample_nor_hides_one_that_died_out()
         let end: usize = column(&header, r, "is_end").parse().unwrap_or(0);
         (start..end).contains(&WF_RUIN_BAR)
     });
-    assert!(straddles, "no fold's in-sample slice covers bar {WF_RUIN_BAR}:\n{text}");
+    assert!(
+        straddles,
+        "no fold's in-sample slice covers bar {WF_RUIN_BAR}:\n{text}"
+    );
 
     // The other half: a fold whose winner died out of sample says so.
-    let died_oos = rows.iter().any(|r| !column(&header, r, "run.ruin_bar_oos").is_empty());
-    assert!(died_oos, "the fixture should ruin some fold's winner out of sample:\n{text}");
+    let died_oos = rows
+        .iter()
+        .any(|r| !column(&header, r, "run.ruin_bar_oos").is_empty());
+    assert!(
+        died_oos,
+        "the fixture should ruin some fold's winner out of sample:\n{text}"
+    );
     let console = format!("{}{}", outcome.stdout, outcome.stderr);
     assert!(
         console.contains("ruined oos@"),

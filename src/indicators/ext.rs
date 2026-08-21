@@ -488,19 +488,27 @@ mod tests {
     #[test]
     fn boolean_combinators() {
         assert_eq!(
-            ValueBool::<()>::new(true).and(ValueBool::new(true)).update(()),
+            ValueBool::<()>::new(true)
+                .and(ValueBool::new(true))
+                .update(()),
             Some(true)
         );
         assert_eq!(
-            ValueBool::<()>::new(true).and(ValueBool::new(false)).update(()),
+            ValueBool::<()>::new(true)
+                .and(ValueBool::new(false))
+                .update(()),
             Some(false)
         );
         assert_eq!(
-            ValueBool::<()>::new(false).or(ValueBool::new(true)).update(()),
+            ValueBool::<()>::new(false)
+                .or(ValueBool::new(true))
+                .update(()),
             Some(true)
         );
         assert_eq!(
-            ValueBool::<()>::new(true).xor(ValueBool::new(false)).update(()),
+            ValueBool::<()>::new(true)
+                .xor(ValueBool::new(false))
+                .update(()),
             Some(true)
         );
         assert_eq!(ValueBool::<()>::new(false).not().update(()), Some(true));

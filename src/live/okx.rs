@@ -68,13 +68,17 @@ use sha2::Sha256;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 use crate::types::Symbol;
 use crate::types::{Candle, Real};
-use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError};
+use crate::wallet::{
+    Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
+};
+use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
-use super::venue::{decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query};
+use super::venue::{
+    decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+};
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
 /// The margin / quote currency a linear USDⓈ-M swap settles in — the balance
@@ -278,8 +282,12 @@ impl OkxWallet {
             }
         }
 
-        let positions =
-            self.signed(Method::GET, "/api/v5/account/positions", &[("instType", "SWAP".into())], None)?;
+        let positions = self.signed(
+            Method::GET,
+            "/api/v5/account/positions",
+            &[("instType", "SWAP".into())],
+            None,
+        )?;
         let rows = ok_data(&positions)?;
         self.positions.clear();
         for p in &rows {
@@ -298,7 +306,8 @@ impl OkxWallet {
                     continue;
                 }
             };
-            self.positions.insert(crate::types::symbol(inst), contracts * ct_val);
+            self.positions
+                .insert(crate::types::symbol(inst), contracts * ct_val);
         }
         Ok(())
     }
@@ -323,7 +332,10 @@ impl OkxWallet {
         if let Some(s) = self.specs.get(symbol) {
             return Ok(*s);
         }
-        let params = vec![("instType", "SWAP".to_string()), ("instId", symbol.to_string())];
+        let params = vec![
+            ("instType", "SWAP".to_string()),
+            ("instId", symbol.to_string()),
+        ];
         let value = self.public_get("/api/v5/public/instruments", params)?;
         let spec = parse_instrument_spec(&value, symbol)
             .ok_or_else(|| LiveError::Decode(format!("no instrument spec for {symbol}")))?;
@@ -368,9 +380,20 @@ impl OkxWallet {
                 Some(id) => id,
                 None => self.mint(),
             };
-            let kind = self.order_kind.get(&t.ord_id).copied().unwrap_or(OrderKind::Market);
-            let order = Order::new(crate::types::symbol(symbol), t.side, t.contracts * ct_val, t.price, kind, local)
-                .with_commission(t.commission);
+            let kind = self
+                .order_kind
+                .get(&t.ord_id)
+                .copied()
+                .unwrap_or(OrderKind::Market);
+            let order = Order::new(
+                crate::types::symbol(symbol),
+                t.side,
+                t.contracts * ct_val,
+                t.price,
+                kind,
+                local,
+            )
+            .with_commission(t.commission);
             out.push(order);
         }
         self.trade_cursor.insert(crate::types::symbol(symbol), max);
@@ -391,7 +414,13 @@ impl OkxWallet {
     /// for a submission the strategy expected to place — an entry the venue
     /// rejects leaves the strategy flat when it wanted a position, a rejected
     /// protective leg leaves it holding one it wanted out of.
-    fn refuse(&mut self, symbol: &str, id: OrderId, kind: OrderKind, err: LiveError) -> WalletError {
+    fn refuse(
+        &mut self,
+        symbol: &str,
+        id: OrderId,
+        kind: OrderKind,
+        err: LiveError,
+    ) -> WalletError {
         self.errors.push(err);
         self.rejections.push(Rejection {
             symbol: crate::types::symbol(symbol),
@@ -415,7 +444,9 @@ impl OkxWallet {
         body: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, LiveError> {
         let body_str = match body {
-            Some(v) => Some(serde_json::to_string(&v).map_err(|e| LiveError::Decode(e.to_string()))?),
+            Some(v) => {
+                Some(serde_json::to_string(&v).map_err(|e| LiveError::Decode(e.to_string()))?)
+            }
             None => None,
         };
         let request_path = with_query(path, query);
@@ -439,7 +470,11 @@ impl OkxWallet {
         path: &str,
         params: Vec<(&str, String)>,
     ) -> Result<serde_json::Value, LiveError> {
-        let url = format!("{}{}", self.base_url.trim_end_matches('/'), with_query(path, &params));
+        let url = format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            with_query(path, &params)
+        );
         let fut = async {
             let resp = self
                 .client
@@ -455,7 +490,10 @@ impl OkxWallet {
     /// Fetch the recent fills for `symbol` (the venue's default window). The
     /// caller keeps only those past its per-symbol `billId` cursor.
     fn fetch_fills(&self, symbol: &str) -> Result<Vec<Fill>, LiveError> {
-        let params = vec![("instType", "SWAP".to_string()), ("instId", symbol.to_string())];
+        let params = vec![
+            ("instType", "SWAP".to_string()),
+            ("instId", symbol.to_string()),
+        ];
         let value = self.signed(Method::GET, "/api/v5/trade/fills", &params, None)?;
         let rows = ok_data(&value)?;
         rows.iter().map(parse_fill).collect()
@@ -487,13 +525,22 @@ impl OkxWallet {
             Ok(value) => {
                 // Business-level failure rides in `code` / `data[].sCode`; the
                 // "order does not exist" codes are the success-equivalents.
-                if let Some(row) = value.get("data").and_then(|d| d.as_array()).and_then(|a| a.first())
+                if let Some(row) = value
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .and_then(|a| a.first())
                     && let Some(s_code) = row.get("sCode").and_then(|c| c.as_str())
                     && s_code != "0"
                     && !is_gone_code(s_code)
                 {
-                    let msg = row.get("sMsg").and_then(|m| m.as_str()).unwrap_or("cancel failed");
-                    return Err(self.fail(LiveError::Http { status: 200, body: msg.to_string() }));
+                    let msg = row
+                        .get("sMsg")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("cancel failed");
+                    return Err(self.fail(LiveError::Http {
+                        status: 200,
+                        body: msg.to_string(),
+                    }));
                 }
                 Ok(())
             }
@@ -562,7 +609,12 @@ impl OkxWallet {
             Err(e) => return Err(self.refuse(symbol, local, kind, e)),
         };
         self.map_order(local, &algo_id, kind);
-        Ok(RestingLeg { trigger, contracts, algo_id, local })
+        Ok(RestingLeg {
+            trigger,
+            contracts,
+            algo_id,
+            local,
+        })
     }
 
     /// Rest a protective leg with idempotent dedup: an unchanged trigger + size
@@ -868,7 +920,13 @@ impl Wallet<Symbol> for OkxWallet {
         self.map_order(local, &ord_id, OrderKind::Limit);
         self.limits.insert(
             symbol,
-            RestingLimit { limit: price, contracts, side: order_side, ord_id, local },
+            RestingLimit {
+                limit: price,
+                contracts,
+                side: order_side,
+                ord_id,
+                local,
+            },
         );
         Ok(Ack::Working(local))
     }
@@ -902,9 +960,11 @@ impl Wallet<Symbol> for OkxWallet {
         };
         // Locate the resting record this id belongs to (a working market order
         // fills near-instantly and isn't tracked for cancel).
-        if let Some(symbol) = self.limits.iter().find_map(|(sym, l)| {
-            (l.local == id).then(|| sym.clone())
-        }) {
+        if let Some(symbol) = self
+            .limits
+            .iter()
+            .find_map(|(sym, l)| (l.local == id).then(|| sym.clone()))
+        {
             self.cancel_order(&symbol, &venue_id)?;
             self.limits.remove(&symbol);
             return Ok(());
@@ -939,9 +999,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// The current UTC time in OKX's ISO-8601-with-millis form
 /// (`2020-12-08T09:08:57.715Z`), for the `OK-ACCESS-TIMESTAMP` header.
 fn now_iso() -> String {
-    let fmt = format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-    );
+    let fmt =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
     OffsetDateTime::now_utc().format(&fmt).unwrap_or_default()
 }
 
@@ -966,7 +1025,6 @@ fn side_token(side: Side) -> &'static str {
         Side::Sell => "sell",
     }
 }
-
 
 /// Build, sign, and send a private request, returning the parsed JSON body.
 ///
@@ -1005,16 +1063,25 @@ async fn signed_request(
     if let Some(body) = body {
         req = req.body(body);
     }
-    let resp = req.send().await.map_err(|e| LiveError::Network(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| LiveError::Network(e.to_string()))?;
     read_json(resp).await
 }
 
 /// Read a response body, mapping a non-2xx status into [`LiveError::Http`].
 async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveError> {
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| LiveError::Network(e.to_string()))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| LiveError::Network(e.to_string()))?;
     if !status.is_success() {
-        return Err(LiveError::Http { status: status.as_u16(), body });
+        return Err(LiveError::Http {
+            status: status.as_u16(),
+            body,
+        });
     }
     if body.is_empty() {
         return Ok(serde_json::Value::Null);
@@ -1027,8 +1094,15 @@ async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveErr
 fn ok_data(value: &serde_json::Value) -> Result<Vec<serde_json::Value>, LiveError> {
     let code = value.get("code").and_then(|c| c.as_str()).unwrap_or("0");
     if code != "0" {
-        let msg = value.get("msg").and_then(|m| m.as_str()).unwrap_or("").to_string();
-        return Err(LiveError::Http { status: 200, body: format!("code {code}: {msg}") });
+        let msg = value
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Err(LiveError::Http {
+            status: 200,
+            body: format!("code {code}: {msg}"),
+        });
     }
     Ok(value
         .get("data")
@@ -1044,13 +1118,21 @@ fn ok_data(value: &serde_json::Value) -> Result<Vec<serde_json::Value>, LiveErro
 fn order_result_id(value: &serde_json::Value, id_field: &str) -> Result<String, LiveError> {
     let rows = ok_data(value)?;
     let Some(row) = rows.first() else {
-        return Err(LiveError::Decode("order response carried no data row".into()));
+        return Err(LiveError::Decode(
+            "order response carried no data row".into(),
+        ));
     };
     if let Some(s_code) = row.get("sCode").and_then(|c| c.as_str())
         && s_code != "0"
     {
-        let msg = row.get("sMsg").and_then(|m| m.as_str()).unwrap_or("order rejected");
-        return Err(LiveError::Http { status: 200, body: format!("sCode {s_code}: {msg}") });
+        let msg = row
+            .get("sMsg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("order rejected");
+        return Err(LiveError::Http {
+            status: 200,
+            body: format!("sCode {s_code}: {msg}"),
+        });
     }
     row.get(id_field)
         .and_then(|v| v.as_str())
@@ -1065,15 +1147,10 @@ fn is_gone_code(s_code: &str) -> bool {
     matches!(s_code, "51400" | "51401" | "51402" | "51503")
 }
 
-
 /// Read a named numeric field off a JSON object (string-or-number).
 fn num_field(value: &serde_json::Value, key: &str) -> Option<Real> {
     value.get(key).and_then(parse_num)
 }
-
-
-
-
 
 /// Pull one swap's grid + contract value out of `/api/v5/public/instruments`.
 fn parse_instrument_spec(value: &serde_json::Value, symbol: &str) -> Option<InstrumentSpec> {
@@ -1111,19 +1188,30 @@ fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
         .and_then(|x| x.as_str())
         .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| LiveError::Decode("fill missing billId".into()))?;
-    let ord_id = v.get("ordId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let ord_id = v
+        .get("ordId")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     let side = match v.get("side").and_then(|x| x.as_str()) {
         Some("buy") => Side::Buy,
         _ => Side::Sell,
     };
-    let contracts = num_field(v, "fillSz")
-        .ok_or_else(|| LiveError::Decode("fill missing fillSz".into()))?;
+    let contracts =
+        num_field(v, "fillSz").ok_or_else(|| LiveError::Decode("fill missing fillSz".into()))?;
     let price =
         num_field(v, "fillPx").ok_or_else(|| LiveError::Decode("fill missing fillPx".into()))?;
     // OKX reports `fee` as a signed number: negative when charged, positive for
     // a rebate. Book the cost as a non-negative commission.
     let commission = num_field(v, "fee").map(|f| (-f).max(0.0)).unwrap_or(0.0);
-    Ok(Fill { bill_id, ord_id, side, contracts, price, commission })
+    Ok(Fill {
+        bill_id,
+        ord_id,
+        side,
+        contracts,
+        price,
+        commission,
+    })
 }
 
 #[cfg(test)]
@@ -1150,11 +1238,16 @@ mod tests {
     fn query_string_is_built_verbatim() {
         assert_eq!(with_query("/x", &[]), "/x");
         assert_eq!(
-            with_query("/x", &[("instType", "SWAP".into()), ("instId", "BTC-USDT-SWAP".into())]),
+            with_query(
+                "/x",
+                &[
+                    ("instType", "SWAP".into()),
+                    ("instId", "BTC-USDT-SWAP".into())
+                ]
+            ),
             "/x?instType=SWAP&instId=BTC-USDT-SWAP"
         );
     }
-
 
     #[test]
     fn parses_instrument_spec_with_contract_value() {

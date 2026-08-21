@@ -14,8 +14,8 @@ use fugazi::types::{Symbol, symbol as intern};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fugazi::spec::overlay::{self, OverlayColumn};
 use fugazi::spec::SingleStrategySpec;
+use fugazi::spec::overlay::{self, OverlayColumn};
 use fugazi::{Atom, Candle, PaperWallet, Real, Schema, Snapshot, Timestamp};
 
 const DAY_MS: i64 = 86_400_000;
@@ -150,11 +150,25 @@ fn overlay_indicator_state_stays_per_series() {
     // A: (10+20)/2, (20+30)/2, … — not (10+100)/2 or similar.
     assert_eq!(
         read(&out, &schema, "A", "sma2"),
-        vec![None, Some(15.0), Some(25.0), Some(35.0), Some(45.0), Some(55.0)],
+        vec![
+            None,
+            Some(15.0),
+            Some(25.0),
+            Some(35.0),
+            Some(45.0),
+            Some(55.0)
+        ],
     );
     assert_eq!(
         read(&out, &schema, "B", "sma2"),
-        vec![None, Some(95.0), Some(85.0), Some(75.0), Some(65.0), Some(55.0)],
+        vec![
+            None,
+            Some(95.0),
+            Some(85.0),
+            Some(75.0),
+            Some(65.0),
+            Some(55.0)
+        ],
     );
 }
 
@@ -273,13 +287,19 @@ fn overlay_build_failure_is_an_error_naming_the_column_and_document() {
     // `!get` against a stream with no side channel used to abort the process
     // with a stack trace. It must come back as an ordinary error, and say
     // which column of which document is at fault.
-    let cols = vec![column("n_trades_ma", "!sma { source: !get { key: n_trades }, period: 3 }")];
+    let cols = vec![column(
+        "n_trades_ma",
+        "!sma { source: !get { key: n_trades }, period: 3 }",
+    )];
     let err = overlay::compute_snapshots(&Schema::empty(), &cols, &stream())
         .expect_err("unknown !get key must not build");
     let msg = format!("{err:#}");
     assert!(msg.contains("n_trades_ma"), "names the column: {msg}");
     assert!(msg.contains("(test)"), "names the source document: {msg}");
-    assert!(msg.contains("no overlay side channel"), "keeps the diagnosis: {msg}");
+    assert!(
+        msg.contains("no overlay side channel"),
+        "keeps the diagnosis: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +346,11 @@ fn single_strategy_enters_on_another_symbols_price() {
         "symbol: A\nlong:\n  enter: !lt { lhs: !close { source: !pick { symbol: B } }, rhs: !value 75 }\n  exit: !never\n",
     );
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
-    assert_eq!(fills[0].order.symbol.as_ref(), "A", "must trade A, not the symbol it read");
+    assert_eq!(
+        fills[0].order.symbol.as_ref(),
+        "A",
+        "must trade A, not the symbol it read"
+    );
     assert_eq!(fills[0].bar, 4);
     assert_eq!(
         fills[0].order.price, 50.0,
@@ -345,7 +369,10 @@ fn single_strategy_mixes_its_own_price_with_another_symbols() {
     let fills = run_spec(
         "symbol: A\nlong:\n  enter: !gt { lhs: !close, rhs: !close { source: !pick { symbol: B } } }\n  exit: !never\n",
     );
-    assert!(fills.is_empty(), "signal fires on the final bar, so nothing fills: {fills:?}");
+    assert!(
+        fills.is_empty(),
+        "signal fires on the final bar, so nothing fills: {fills:?}"
+    );
 
     // Same comparison one bar earlier in effect: A's close over B's *lagged*
     // close. Lagged B is -,100,90,80,70,60; A first exceeds it on bar 5

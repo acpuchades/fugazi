@@ -48,14 +48,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
 use crate::prelude::*;
+use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use serde_json::Value;
 
+use crate::spec::SingleStrategySpec;
 use crate::spec::metrics;
 use crate::spec::params;
-use crate::spec::SingleStrategySpec;
 use crate::types::Symbol;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
@@ -70,7 +70,6 @@ pub enum Direction {
 pub type Axis = (String, Vec<Value>);
 /// A fixed (scalar) params table + the sweep axes carved out of it.
 type Partition = (HashMap<String, Value>, Vec<Axis>);
-
 
 /// Params for the probe spec: subgrid's fixed scalars + the first value of each
 /// of its axes. When the subgrid has no axes this is just the fixed map.
@@ -117,7 +116,9 @@ where
     // without a key to rank by there is nothing to average. (Enforced by clap
     // for the CLI; this catches the library and Python callers.)
     if smooth.is_some() && best_by.is_none() {
-        bail!("--smooth needs --best-by: there is no ranking key to average over the neighbourhood");
+        bail!(
+            "--smooth needs --best-by: there is no ranking key to average over the neighbourhood"
+        );
     }
     // `run` has already validated the subgrid list; `optimize` still asserts
     // the invariants it relies on (non-empty list, non-empty combos in each).
@@ -367,7 +368,11 @@ pub fn compute_union_columns(subgrids: &[Subgrid]) -> Vec<String> {
 /// Project a subgrid's (fixed scalars, axis combo) onto the union columns
 /// index. Populated from the axis first (per-combo value) then the fixed map;
 /// `None` when the subgrid doesn't touch the name.
-pub fn project_row(subgrid: &Subgrid, combo: &[Value], union_columns: &[String]) -> Vec<Option<Value>> {
+pub fn project_row(
+    subgrid: &Subgrid,
+    combo: &[Value],
+    union_columns: &[String],
+) -> Vec<Option<Value>> {
     let axis_lookup: HashMap<&str, &Value> = subgrid
         .axes
         .iter()
@@ -1008,14 +1013,22 @@ fn compare_keys(a: Option<Real>, b: Option<Real>, direction: Direction) -> std::
 /// neighbourhood average sorts through the identical permutation machinery
 /// rather than a second comparator that could drift from it.
 pub fn sort_by_keys(rows: &mut Vec<Row>, keys: &[Option<Real>], direction: Direction) {
-    assert_eq!(keys.len(), rows.len(), "sort_by_keys: key vector must be parallel to rows");
+    assert_eq!(
+        keys.len(),
+        rows.len(),
+        "sort_by_keys: key vector must be parallel to rows"
+    );
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&i, &j| compare_keys(keys[i], keys[j], direction));
     // Apply the permutation in-place with an `Option` scratch buffer — cheap
     // and avoids cloning the (~50-field) Metrics documents held in each Row.
     let mut slots: Vec<Option<Row>> = std::mem::take(rows).into_iter().map(Some).collect();
     for i in order {
-        rows.push(slots[i].take().expect("permutation visits each row exactly once"));
+        rows.push(
+            slots[i]
+                .take()
+                .expect("permutation visits each row exactly once"),
+        );
     }
 }
 
@@ -1032,7 +1045,9 @@ pub fn argbest(keys: &[Option<Real>], direction: Direction) -> Option<usize> {
         .enumerate()
         .filter_map(|(i, k)| k.map(|k| (i, k)))
         .fold(None::<(usize, Real)>, |acc, (i, k)| match acc {
-            Some((bi, bk)) if compare_keys(Some(k), Some(bk), direction) == std::cmp::Ordering::Greater => {
+            Some((bi, bk))
+                if compare_keys(Some(k), Some(bk), direction) == std::cmp::Ordering::Greater =>
+            {
                 Some((bi, bk))
             }
             _ => Some((i, k)),
@@ -1146,15 +1161,12 @@ pub fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Rea
     }
     match eval {
         Evaluation::Whole(m) => lookup(m, path),
-        Evaluation::Windowed(ws) => {
-            lookup_windowed(ws, path).map(|(mean, std)| match direction {
-                Direction::Descending => mean - k * std,
-                Direction::Ascending => mean + k * std,
-            })
-        }
+        Evaluation::Windowed(ws) => lookup_windowed(ws, path).map(|(mean, std)| match direction {
+            Direction::Descending => mean - k * std,
+            Direction::Ascending => mean + k * std,
+        }),
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Neighbourhood smoothing
@@ -1237,7 +1249,10 @@ impl SmoothScales {
 
     /// Pin every axis to one scale.
     pub fn all(scale: AxisScale) -> Self {
-        SmoothScales { default: Some(scale), per_axis: HashMap::new() }
+        SmoothScales {
+            default: Some(scale),
+            per_axis: HashMap::new(),
+        }
     }
 
     /// Pin one axis by name, leaving the rest as they were.
@@ -1297,8 +1312,11 @@ impl SmoothScales {
         let mut unmatched: Vec<&str> = Vec::new();
         let mut inert: Vec<String> = Vec::new();
         for name in self.per_axis.keys() {
-            let mut matches =
-                subgrids.iter().flat_map(|sg| &sg.axes).filter(|a| a.0 == *name).peekable();
+            let mut matches = subgrids
+                .iter()
+                .flat_map(|sg| &sg.axes)
+                .filter(|a| a.0 == *name)
+                .peekable();
             if matches.peek().is_none() {
                 unmatched.push(name);
             } else if !matches.any(axis_is_numeric) {
@@ -1311,8 +1329,11 @@ impl SmoothScales {
         }
         if !unmatched.is_empty() {
             unmatched.sort_unstable();
-            let mut available: Vec<&str> =
-                subgrids.iter().flat_map(|sg| &sg.axes).map(|a| a.0.as_str()).collect();
+            let mut available: Vec<&str> = subgrids
+                .iter()
+                .flat_map(|sg| &sg.axes)
+                .map(|a| a.0.as_str())
+                .collect();
             available.sort_unstable();
             available.dedup();
             let available = if available.is_empty() {
@@ -1322,8 +1343,16 @@ impl SmoothScales {
             };
             bail!(
                 "--smooth-scale pins {} that {} no swept axis: {} — {available}",
-                if unmatched.len() == 1 { "a name" } else { "names" },
-                if unmatched.len() == 1 { "matches" } else { "match" },
+                if unmatched.len() == 1 {
+                    "a name"
+                } else {
+                    "names"
+                },
+                if unmatched.len() == 1 {
+                    "matches"
+                } else {
+                    "match"
+                },
                 unmatched.join(", "),
             );
         }
@@ -1437,13 +1466,25 @@ impl SmoothKernel {
         let reach = self.radius() as Real + DISTANCE_TOLERANCE;
         match self {
             SmoothKernel::Box { .. } => {
-                if a <= reach { 1.0 } else { 0.0 }
+                if a <= reach {
+                    1.0
+                } else {
+                    0.0
+                }
             }
             SmoothKernel::Triangle { radius } => {
-                if a <= reach { 1.0 - a / (*radius as Real + 1.0) } else { 0.0 }
+                if a <= reach {
+                    1.0 - a / (*radius as Real + 1.0)
+                } else {
+                    0.0
+                }
             }
             SmoothKernel::Gaussian { bandwidth } => {
-                if a <= reach { (-(a * a) / (2.0 * bandwidth * bandwidth)).exp() } else { 0.0 }
+                if a <= reach {
+                    (-(a * a) / (2.0 * bandwidth * bandwidth)).exp()
+                } else {
+                    0.0
+                }
             }
         }
     }
@@ -1476,9 +1517,9 @@ impl std::str::FromStr for SmoothKernel {
         let radius = |default: usize| -> std::result::Result<usize, String> {
             match arg {
                 None => Ok(default),
-                Some(a) => a
-                    .parse::<usize>()
-                    .map_err(|_| format!("`{name}` takes a whole-number radius in grid steps, got `{a}`")),
+                Some(a) => a.parse::<usize>().map_err(|_| {
+                    format!("`{name}` takes a whole-number radius in grid steps, got `{a}`")
+                }),
             }
         };
         match name {
@@ -1487,12 +1528,14 @@ impl std::str::FromStr for SmoothKernel {
             "gaussian" => {
                 let bandwidth = match arg {
                     None => 1.0,
-                    Some(a) => a
-                        .parse::<Real>()
-                        .map_err(|_| format!("`gaussian` takes a bandwidth in grid steps, got `{a}`"))?,
+                    Some(a) => a.parse::<Real>().map_err(|_| {
+                        format!("`gaussian` takes a bandwidth in grid steps, got `{a}`")
+                    })?,
                 };
                 if !(bandwidth > 0.0 && bandwidth.is_finite()) {
-                    return Err(format!("`gaussian` bandwidth must be > 0 (got {bandwidth})"));
+                    return Err(format!(
+                        "`gaussian` bandwidth must be > 0 (got {bandwidth})"
+                    ));
                 }
                 Ok(SmoothKernel::Gaussian { bandwidth })
             }
@@ -1536,7 +1579,11 @@ impl Smoothing {
         if !(0.0..=1.0).contains(&min_support) {
             bail!("--smooth-min-support must be in 0..=1 (got {min_support})");
         }
-        Ok(Smoothing { kernel, min_support, scales: SmoothScales::auto() })
+        Ok(Smoothing {
+            kernel,
+            min_support,
+            scales: SmoothScales::auto(),
+        })
     }
 
     /// Pin the per-axis distance scales (`--smooth-scale`).
@@ -1646,7 +1693,11 @@ fn choose_axis_scale(sorted: &[Real]) -> AxisScale {
     let Some(cv_log) = coefficient_of_variation(&successive_gaps(&logs)) else {
         return AxisScale::Linear;
     };
-    if cv_log <= LOG_SCALE_MARGIN * cv_linear { AxisScale::Log } else { AxisScale::Linear }
+    if cv_log <= LOG_SCALE_MARGIN * cv_linear {
+        AxisScale::Log
+    } else {
+        AxisScale::Linear
+    }
 }
 
 /// One smoothed axis, reduced to what the walk needs: the resolved scale and,
@@ -1696,7 +1747,10 @@ fn axis_geometry(
     let raw: Vec<Real> = axis
         .1
         .iter()
-        .map(|v| v.as_f64().expect("axis_is_numeric guarantees every value is a JSON number"))
+        .map(|v| {
+            v.as_f64()
+                .expect("axis_is_numeric guarantees every value is a JSON number")
+        })
         .collect();
     let len = raw.len();
 
@@ -1724,7 +1778,9 @@ fn axis_geometry(
     };
     let mut sorted_t: Vec<usize> = (0..len).collect();
     sorted_t.sort_by(|&a, &b| {
-        transformed[a].partial_cmp(&transformed[b]).unwrap_or(std::cmp::Ordering::Equal)
+        transformed[a]
+            .partial_cmp(&transformed[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     let sorted_vals: Vec<Real> = sorted_t.iter().map(|&p| transformed[p]).collect();
 
@@ -1736,12 +1792,18 @@ fn axis_geometry(
     // are all equal, and so is the degenerate all-same-value axis (median 0),
     // which has no spacing to normalize by and falls back to rank distance.
     let regular = median <= 0.0
-        || gaps.iter().all(|g| (g - median).abs() <= REGULAR_SPACING_TOLERANCE * median.abs());
+        || gaps
+            .iter()
+            .all(|g| (g - median).abs() <= REGULAR_SPACING_TOLERANCE * median.abs());
 
     // Coordinates the kernel actually sees. Regular → exact integer ranks.
     let mut coord = vec![0.0; len];
     for (rank, &p) in sorted_t.iter().enumerate() {
-        coord[p] = if regular { rank as Real } else { transformed[p] / median };
+        coord[p] = if regular {
+            rank as Real
+        } else {
+            transformed[p] / median
+        };
     }
 
     // Sliding window over the sorted order: both bounds advance monotonically,
@@ -1868,8 +1930,9 @@ pub fn smooth_keys(
         let strides = sg.strides();
         // Numeric, non-degenerate axes are the ones that smooth; every other
         // axis keeps its offset at zero and therefore partitions the lattice.
-        let numeric: Vec<usize> =
-            (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        let numeric: Vec<usize> = (0..sg.axes.len())
+            .filter(|&j| axis_is_numeric(&sg.axes[j]))
+            .collect();
         let geoms: Vec<AxisGeometry> = numeric
             .iter()
             .map(|&j| axis_geometry(&sg.axes[j], kernel, smoothing.scales.pinned(&sg.axes[j].0)))
@@ -1901,7 +1964,10 @@ pub fn smooth_keys(
             } else {
                 lists.clear();
                 lists.extend(
-                    geoms.iter().enumerate().map(|(slot, g)| g.neighbours[digits[numeric[slot]]].as_slice()),
+                    geoms
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, g)| g.neighbours[digits[numeric[slot]]].as_slice()),
                 );
                 cursor.iter_mut().for_each(|c| *c = 0);
                 'walk: loop {
@@ -2059,8 +2125,9 @@ pub fn plateau_size(
         let n = sg.points();
         let lens = sg.axis_lens();
         let strides = sg.strides();
-        let numeric: Vec<usize> =
-            (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+        let numeric: Vec<usize> = (0..sg.axes.len())
+            .filter(|&j| axis_is_numeric(&sg.axes[j]))
+            .collect();
         // Per smoothed axis: declared positions in ascending value order, and
         // each declared position's rank in that order.
         let steps: Vec<(Vec<usize>, Vec<usize>)> = numeric
@@ -2069,10 +2136,15 @@ pub fn plateau_size(
                 let axis = &sg.axes[j];
                 let mut order: Vec<usize> = (0..axis.1.len()).collect();
                 if scales.pinned(&axis.0) != Some(AxisScale::Index) {
-                    let vals: Vec<Real> =
-                        axis.1.iter().map(|v| v.as_f64().unwrap_or(Real::NAN)).collect();
+                    let vals: Vec<Real> = axis
+                        .1
+                        .iter()
+                        .map(|v| v.as_f64().unwrap_or(Real::NAN))
+                        .collect();
                     order.sort_by(|&a, &b| {
-                        vals[a].partial_cmp(&vals[b]).unwrap_or(std::cmp::Ordering::Equal)
+                        vals[a]
+                            .partial_cmp(&vals[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
                 }
                 let mut rank = vec![0usize; order.len()];
@@ -2141,7 +2213,6 @@ pub fn format_number(v: Real) -> String {
     format!("{v}")
 }
 
-
 /// One fold's bar ranges — same layout across every grid row (fold boundaries
 /// are grid-wide, not per-row, so per-fold metrics are directly comparable).
 pub struct FoldLayout {
@@ -2151,7 +2222,6 @@ pub struct FoldLayout {
     /// reduction.
     pub oos: std::ops::Range<usize>,
 }
-
 
 /// Compute the per-fold ranges. Fold `k` occupies IS
 /// `[prefix + k*oos, prefix + k*oos + is)` and OOS
@@ -2187,9 +2257,7 @@ pub fn walkforward_layout(
     }
     let n_folds = (usable - is) / oos;
     if n_folds == 0 {
-        bail!(
-            "walkforward: no full fold fits (usable={usable}, IS={is}, OS={oos})"
-        );
+        bail!("walkforward: no full fold fits (usable={usable}, IS={is}, OS={oos})");
     }
     let mut out = Vec::with_capacity(n_folds);
     for k in 0..n_folds {
@@ -2308,7 +2376,10 @@ where
     P: Fn(&HashMap<String, Value>) -> Result<usize> + Sync,
     R: Fn(&HashMap<String, Value>) -> Result<crate::RunReport<Symbol>> + Sync,
 {
-    assert!(!subgrids.is_empty(), "walkforward: called with zero subgrids");
+    assert!(
+        !subgrids.is_empty(),
+        "walkforward: called with zero subgrids"
+    );
     // Same precondition [`optimize`] applies, and for the same reason — checked
     // before the pre-scan so a typo'd pin costs no backtests.
     if let Some(cfg) = smooth {
@@ -2450,8 +2521,10 @@ where
         let mut winner_smoothed: Option<SmoothedKey> = None;
         let winner_idx: usize = match &best_by {
             Some((_, path, direction)) => {
-                let keys: Vec<Option<Real>> =
-                    per_row.iter().map(|(is_m, _)| ranking_lookup(is_m, path)).collect();
+                let keys: Vec<Option<Real>> = per_row
+                    .iter()
+                    .map(|(is_m, _)| ranking_lookup(is_m, path))
+                    .collect();
                 let ranked: Vec<Option<Real>> = match smooth {
                     // This is the selection rule whose out-of-sample behaviour
                     // the composite measures — so smoothing it changes what the
@@ -2656,7 +2729,10 @@ mod tests {
             direction_for("risk_adjusted.sharpe"),
             Some(Direction::Descending)
         );
-        assert_eq!(direction_for("drawdown.max_pct"), Some(Direction::Ascending));
+        assert_eq!(
+            direction_for("drawdown.max_pct"),
+            Some(Direction::Ascending)
+        );
         assert_eq!(
             direction_for("returns.cagr_pct"),
             Some(Direction::Descending)
@@ -2688,15 +2764,21 @@ mod tests {
     /// A subgrid with `fixed` from a merged (baseline + grid) map, `axes`
     /// sorted by name, and cartesian combos over those axes.
     fn subgrid(fixed: &[(&str, Value)], axes: &[(&str, Vec<Value>)]) -> Subgrid {
-        let fixed: HashMap<String, Value> =
-            fixed.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect();
+        let fixed: HashMap<String, Value> = fixed
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
         let mut axes: Vec<Axis> = axes
             .iter()
             .map(|(name, values)| ((*name).to_string(), values.clone()))
             .collect();
         axes.sort_by(|a, b| a.0.cmp(&b.0));
         let combos = cartesian(&axes);
-        Subgrid { fixed, axes, combos }
+        Subgrid {
+            fixed,
+            axes,
+            combos,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2720,7 +2802,10 @@ mod tests {
     /// hold exactly. A stride swap here mis-smooths every 2-D grid silently.
     #[test]
     fn subgrid_index_space_is_mixed_radix() {
-        let sg = subgrid(&[], &[("A", nums(&[1, 2, 3])), ("B", nums(&[10, 20, 30, 40]))]);
+        let sg = subgrid(
+            &[],
+            &[("A", nums(&[1, 2, 3])), ("B", nums(&[10, 20, 30, 40]))],
+        );
         assert_eq!(sg.axis_lens(), vec![3, 4]);
         // Last axis varies fastest, so B's stride is 1 and A's is 4.
         assert_eq!(sg.strides(), vec![4, 1]);
@@ -2741,15 +2826,24 @@ mod tests {
         let tied_low = vec![Some(9.0), Some(1.0), Some(4.0), Some(1.0)];
         assert_eq!(argbest(&tied_low, Direction::Ascending), Some(3));
         // `None` keys are skipped, not ranked last-but-selectable.
-        assert_eq!(argbest(&[None, Some(2.0), None], Direction::Descending), Some(1));
+        assert_eq!(
+            argbest(&[None, Some(2.0), None], Direction::Descending),
+            Some(1)
+        );
         assert_eq!(argbest(&[None, None], Direction::Descending), None);
     }
 
     #[test]
     fn smooth_kernel_parses_every_documented_form() {
         use std::str::FromStr;
-        assert_eq!(SmoothKernel::from_str("box:2").unwrap(), SmoothKernel::Box { radius: 2 });
-        assert_eq!(SmoothKernel::from_str("box").unwrap(), SmoothKernel::Box { radius: 1 });
+        assert_eq!(
+            SmoothKernel::from_str("box:2").unwrap(),
+            SmoothKernel::Box { radius: 2 }
+        );
+        assert_eq!(
+            SmoothKernel::from_str("box").unwrap(),
+            SmoothKernel::Box { radius: 1 }
+        );
         assert_eq!(
             SmoothKernel::from_str("triangle:3").unwrap(),
             SmoothKernel::Triangle { radius: 3 }
@@ -2760,7 +2854,10 @@ mod tests {
         );
         // Round-trips through Display, so the console echo is re-parseable.
         for spelling in ["box:1", "triangle:2", "gaussian:1.5"] {
-            assert_eq!(SmoothKernel::from_str(spelling).unwrap().to_string(), spelling);
+            assert_eq!(
+                SmoothKernel::from_str(spelling).unwrap().to_string(),
+                spelling
+            );
         }
         // A bandwidth of zero has no neighbourhood — refuse rather than divide by it.
         assert!(SmoothKernel::from_str("gaussian:0").is_err());
@@ -2775,8 +2872,10 @@ mod tests {
     fn a_lone_spike_loses_to_a_broad_plateau() {
         let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]);
         //             spike at index 2 ─┐        plateau over 6..=8 ─────┐
-        let keys: Vec<Option<Real>> =
-            [1.0, 1.0, 9.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 1.0].iter().map(|v| Some(*v)).collect();
+        let keys: Vec<Option<Real>> = [1.0, 1.0, 9.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 1.0]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
         let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
 
         let raw_argmax = rank_positions(&keys, Direction::Descending)
@@ -2803,17 +2902,23 @@ mod tests {
     fn an_ascending_metric_smooths_identically() {
         let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]);
         // Mirror of the descending case: lower is better.
-        let keys: Vec<Option<Real>> =
-            [9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 5.0, 5.0, 5.0, 9.0].iter().map(|v| Some(*v)).collect();
+        let keys: Vec<Option<Real>> = [9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 5.0, 5.0, 5.0, 9.0]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
         let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
         let values: Vec<Option<Real>> = smoothed.iter().map(|s| s.value).collect();
         assert_eq!(
-            rank_positions(&keys, Direction::Ascending).iter().position(|&r| r == 1),
+            rank_positions(&keys, Direction::Ascending)
+                .iter()
+                .position(|&r| r == 1),
             Some(2),
             "the raw argmin is the spike"
         );
         assert_eq!(
-            rank_positions(&values, Direction::Ascending).iter().position(|&r| r == 1),
+            rank_positions(&values, Direction::Ascending)
+                .iter()
+                .position(|&r| r == 1),
             Some(7),
             "smoothing picks the plateau centre under Ascending too"
         );
@@ -2890,7 +2995,10 @@ mod tests {
         let keys: Vec<Option<Real>> = (0..9).map(|_| Some(1.0)).collect();
         let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
         // 3x3 lattice, box:1 → ideal is 3*3 = 9 weight units.
-        assert!((smoothed[4].support - 1.0).abs() < 1e-12, "the centre is fully interior");
+        assert!(
+            (smoothed[4].support - 1.0).abs() < 1e-12,
+            "the centre is fully interior"
+        );
         for corner in [0usize, 2, 6, 8] {
             assert!(
                 (smoothed[corner].support - 4.0 / 9.0).abs() < 1e-12,
@@ -2902,7 +3010,11 @@ mod tests {
             assert!((smoothed[edge].support - 6.0 / 9.0).abs() < 1e-12);
         }
         // Every value is still exactly 1.0 — renormalization, not zero-padding.
-        assert!(smoothed.iter().all(|s| (s.value.unwrap() - 1.0).abs() < 1e-12));
+        assert!(
+            smoothed
+                .iter()
+                .all(|s| (s.value.unwrap() - 1.0).abs() < 1e-12)
+        );
     }
 
     #[test]
@@ -2916,7 +3028,11 @@ mod tests {
             .filter(|(_, s)| s.value.is_some())
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(kept, vec![4], "only the fully interior centre clears min-support 1.0");
+        assert_eq!(
+            kept,
+            vec![4],
+            "only the fully interior centre clears min-support 1.0"
+        );
         // Support is still reported for the dropped rows — that is the diagnostic.
         assert!(smoothed.iter().all(|s| s.support > 0.0));
     }
@@ -2928,9 +3044,17 @@ mod tests {
     fn a_min_support_that_discards_everything_is_an_error() {
         let sg = subgrid(&[], &[("A", nums(&[1, 2]))]);
         let keys = vec![Some(1.0), Some(2.0)];
-        let err = smooth_keys(&[sg], &keys, &box1(1.0)).unwrap_err().to_string();
-        assert!(err.contains("discarded every grid point"), "unhelpful error: {err}");
-        assert!(err.contains("0.667"), "the error should name the best realized support: {err}");
+        let err = smooth_keys(&[sg], &keys, &box1(1.0))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("discarded every grid point"),
+            "unhelpful error: {err}"
+        );
+        assert!(
+            err.contains("0.667"),
+            "the error should name the best realized support: {err}"
+        );
     }
 
     /// A `None` neighbour is *absent evidence*, not evidence of zero. It leaves
@@ -2946,7 +3070,10 @@ mod tests {
         assert!((smoothed[2].support - 2.0 / 3.0).abs() < 1e-12);
         // A row whose *own* key is None stays None however healthy its neighbours.
         assert_eq!(smoothed[3].value, None);
-        assert!(smoothed[3].support > 0.0, "support is still measured for it");
+        assert!(
+            smoothed[3].support > 0.0,
+            "support is still measured for it"
+        );
     }
 
     #[test]
@@ -2975,13 +3102,19 @@ mod tests {
         let w1 = (-0.5f64).exp();
         let w2 = (-2.0f64).exp();
         let expected = (0.0 * w2 + 0.0 * w1 + 3.0 * 1.0) / (w2 + w1 + 1.0);
-        assert!((out[2].value.unwrap() - expected).abs() < 1e-12, "{:?}", out[2]);
+        assert!(
+            (out[2].value.unwrap() - expected).abs() < 1e-12,
+            "{:?}",
+            out[2]
+        );
     }
 
     #[test]
     fn smooth_keys_refuses_a_key_vector_that_is_not_the_grid() {
         let sg = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
-        let err = smooth_keys(&[sg], &[Some(1.0)], &box1(0.0)).unwrap_err().to_string();
+        let err = smooth_keys(&[sg], &[Some(1.0)], &box1(0.0))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("1 ranking keys for 3 grid points"), "{err}");
     }
 
@@ -3028,17 +3161,24 @@ mod tests {
             SmoothKernel::Gaussian { bandwidth: 1.5 },
         ] {
             let cfg = Smoothing::new(kernel, 0.0).unwrap();
-            let a = smooth_keys(&[subgrid(&[], &[("FAST", sorted.clone())])], &keys_sorted, &cfg)
-                .unwrap();
+            let a = smooth_keys(
+                &[subgrid(&[], &[("FAST", sorted.clone())])],
+                &keys_sorted,
+                &cfg,
+            )
+            .unwrap();
             let b = smooth_keys(
                 &[subgrid(&[], &[("FAST", scrambled.clone())])],
                 &keys_scrambled,
                 &cfg,
             )
             .unwrap();
-            let c =
-                smooth_keys(&[subgrid(&[], &[("FAST", reversed.clone())])], &keys_reversed, &cfg)
-                    .unwrap();
+            let c = smooth_keys(
+                &[subgrid(&[], &[("FAST", reversed.clone())])],
+                &keys_reversed,
+                &cfg,
+            )
+            .unwrap();
             assert_eq!(
                 by_value(&sorted, &a),
                 by_value(&scrambled, &b),
@@ -3056,10 +3196,18 @@ mod tests {
         let cfg = Smoothing::new(SmoothKernel::Box { radius: 1 }, 0.0)
             .unwrap()
             .with_scales(SmoothScales::all(AxisScale::Index));
-        let a =
-            smooth_keys(&[subgrid(&[], &[("FAST", sorted.clone())])], &keys_sorted, &cfg).unwrap();
-        let b = smooth_keys(&[subgrid(&[], &[("FAST", scrambled.clone())])], &keys_scrambled, &cfg)
-            .unwrap();
+        let a = smooth_keys(
+            &[subgrid(&[], &[("FAST", sorted.clone())])],
+            &keys_sorted,
+            &cfg,
+        )
+        .unwrap();
+        let b = smooth_keys(
+            &[subgrid(&[], &[("FAST", scrambled.clone())])],
+            &keys_scrambled,
+            &cfg,
+        )
+        .unwrap();
         assert_ne!(by_value(&sorted, &a), by_value(&scrambled, &b));
     }
 
@@ -3096,11 +3244,14 @@ mod tests {
             SmoothKernel::Gaussian { bandwidth: 1.5 },
         ];
         for values in &axes {
-            let keys: Vec<Option<Real>> =
-                (0..values.len()).map(|i| Some(1.0 / (i as Real + 3.0))).collect();
+            let keys: Vec<Option<Real>> = (0..values.len())
+                .map(|i| Some(1.0 / (i as Real + 3.0)))
+                .collect();
             for kernel in kernels {
                 let auto = Smoothing::new(kernel, 0.0).unwrap();
-                let index = auto.clone().with_scales(SmoothScales::all(AxisScale::Index));
+                let index = auto
+                    .clone()
+                    .with_scales(SmoothScales::all(AxisScale::Index));
                 let sg = || vec![subgrid(&[], &[("P", values.clone())])];
                 assert_eq!(
                     smooth_keys(&sg(), &keys, &auto).unwrap(),
@@ -3115,12 +3266,17 @@ mod tests {
         let sg = || {
             vec![subgrid(
                 &[],
-                &[("A", floats(&[1.0, 1.5, 2.0, 2.5])), ("B", nums(&[10, 20, 30, 40, 50]))],
+                &[
+                    ("A", floats(&[1.0, 1.5, 2.0, 2.5])),
+                    ("B", nums(&[10, 20, 30, 40, 50])),
+                ],
             )]
         };
         let keys: Vec<Option<Real>> = (0..20).map(|i| Some((i as Real).sin())).collect();
         let auto = Smoothing::new(SmoothKernel::Triangle { radius: 2 }, 0.0).unwrap();
-        let index = auto.clone().with_scales(SmoothScales::all(AxisScale::Index));
+        let index = auto
+            .clone()
+            .with_scales(SmoothScales::all(AxisScale::Index));
         assert_eq!(
             smooth_keys(&sg(), &keys, &auto).unwrap(),
             smooth_keys(&sg(), &keys, &index).unwrap()
@@ -3140,16 +3296,30 @@ mod tests {
         let from_200 = vec![Some(0.0), Some(0.0), Some(0.0), Some(1.0)];
         let cfg = box1(0.0);
 
-        let near = smooth_keys(&axis(), &from_10, &cfg).unwrap()[1].value.unwrap();
-        let far = smooth_keys(&axis(), &from_200, &cfg).unwrap()[2].value.unwrap();
-        assert!(near > far, "10 should reach 20 ({near}) harder than 200 reaches 50 ({far})");
-        assert!((far - 0.0).abs() < 1e-12, "200 is more than one typical step from 50");
+        let near = smooth_keys(&axis(), &from_10, &cfg).unwrap()[1]
+            .value
+            .unwrap();
+        let far = smooth_keys(&axis(), &from_200, &cfg).unwrap()[2]
+            .value
+            .unwrap();
+        assert!(
+            near > far,
+            "10 should reach 20 ({near}) harder than 200 reaches 50 ({far})"
+        );
+        assert!(
+            (far - 0.0).abs() < 1e-12,
+            "200 is more than one typical step from 50"
+        );
 
         // Index space is exactly the claim being refuted: there the two pairs
         // are one declared step apart each, and the bleed is identical.
         let idx = cfg.clone().with_scales(SmoothScales::all(AxisScale::Index));
-        let near = smooth_keys(&axis(), &from_10, &idx).unwrap()[1].value.unwrap();
-        let far = smooth_keys(&axis(), &from_200, &idx).unwrap()[2].value.unwrap();
+        let near = smooth_keys(&axis(), &from_10, &idx).unwrap()[1]
+            .value
+            .unwrap();
+        let far = smooth_keys(&axis(), &from_200, &idx).unwrap()[2]
+            .value
+            .unwrap();
         assert!((near - far).abs() < 1e-12, "index space: {near} vs {far}");
         assert!((near - 1.0 / 3.0).abs() < 1e-12);
     }
@@ -3174,15 +3344,28 @@ mod tests {
         assert_eq!(scale_of(nums(&[10, 20, 30, 45])), AxisScale::Linear);
         // Log is only admissible where every value is strictly positive.
         assert_eq!(scale_of(floats(&[0.0, 1.0, 2.0, 8.0])), AxisScale::Linear);
-        assert_eq!(scale_of(floats(&[-4.0, -2.0, -1.0, -0.5])), AxisScale::Linear);
+        assert_eq!(
+            scale_of(floats(&[-4.0, -2.0, -1.0, -0.5])),
+            AxisScale::Linear
+        );
 
         // On an exactly geometric axis log recovers *uniform* spacing, so the
         // surface is the one an evenly spaced axis of the same length gives —
         // bit for bit, via the regular fast path.
         let keys = vec![Some(1.0), Some(2.0), Some(4.0), Some(8.0), Some(16.0)];
         let cfg = box1(0.0);
-        let geometric = smooth_keys(&[subgrid(&[], &[("P", nums(&[10, 20, 40, 80, 160]))])], &keys, &cfg).unwrap();
-        let regular = smooth_keys(&[subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5]))])], &keys, &cfg).unwrap();
+        let geometric = smooth_keys(
+            &[subgrid(&[], &[("P", nums(&[10, 20, 40, 80, 160]))])],
+            &keys,
+            &cfg,
+        )
+        .unwrap();
+        let regular = smooth_keys(
+            &[subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5]))])],
+            &keys,
+            &cfg,
+        )
+        .unwrap();
         assert_eq!(geometric, regular);
         assert!((geometric[2].value.unwrap() - (2.0 + 4.0 + 8.0) / 3.0).abs() < 1e-12);
 
@@ -3195,9 +3378,15 @@ mod tests {
             out.iter().all(|s| s.support >= 2.0 / 3.0 - 1e-12),
             "log spacing should leave every point a neighbour: {out:?}"
         );
-        let linear = cfg.clone().with_scales(SmoothScales::all(AxisScale::Linear));
+        let linear = cfg
+            .clone()
+            .with_scales(SmoothScales::all(AxisScale::Linear));
         let out = smooth_keys(&[subgrid(&[], &[("P", rough)])], &keys, &linear).unwrap();
-        assert!((out[4].support - 1.0 / 3.0).abs() < 1e-12, "linear strands 200: {:?}", out[4]);
+        assert!(
+            (out[4].support - 1.0 / 3.0).abs() < 1e-12,
+            "linear strands 200: {:?}",
+            out[4]
+        );
 
         // And an explicit `log` pin on an axis that reaches zero is an error,
         // not a silent fallback — the user asked for something undefined.
@@ -3205,7 +3394,9 @@ mod tests {
             .unwrap()
             .with_scales(SmoothScales::default().with_axis("P", AxisScale::Log));
         let sg = subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0]))]);
-        let err = smooth_keys(&[sg], &[Some(1.0); 3], &pinned).unwrap_err().to_string();
+        let err = smooth_keys(&[sg], &[Some(1.0); 3], &pinned)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("non-positive"), "{err}");
     }
 
@@ -3218,19 +3409,40 @@ mod tests {
     fn a_pinned_axis_does_not_dilute_support() {
         let keys: Vec<Option<Real>> = (0..7).map(|i| Some(i as Real)).collect();
         let cfg = box1(0.0);
-        let scalar = subgrid(&[("SLOW", Value::from(20))], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9]))]);
-        let listed = subgrid(&[], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("SLOW", nums(&[20]))]);
+        let scalar = subgrid(
+            &[("SLOW", Value::from(20))],
+            &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9]))],
+        );
+        let listed = subgrid(
+            &[],
+            &[
+                ("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])),
+                ("SLOW", nums(&[20])),
+            ],
+        );
         let a = smooth_keys(&[scalar], &keys, &cfg).unwrap();
         let b = smooth_keys(&[listed], &keys, &cfg).unwrap();
-        assert_eq!(a, b, "the two spellings of a pinned axis must smooth identically");
+        assert_eq!(
+            a, b,
+            "the two spellings of a pinned axis must smooth identically"
+        );
         // Smoothed *values* never moved — only the denominator did.
         assert!((a[3].value.unwrap() - 3.0).abs() < 1e-12);
-        assert!((a[3].support - 1.0).abs() < 1e-12, "an interior point reaches 1.0");
-        assert!((a[0].support - 2.0 / 3.0).abs() < 1e-12, "the edge is still an edge");
+        assert!(
+            (a[3].support - 1.0).abs() < 1e-12,
+            "an interior point reaches 1.0"
+        );
+        assert!(
+            (a[0].support - 2.0 / 3.0).abs() < 1e-12,
+            "the edge is still an edge"
+        );
         // Same for the degenerate axis a categorical one shadows.
         let mixed = subgrid(
             &[],
-            &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("MODE", strs(&["atr"]))],
+            &[
+                ("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])),
+                ("MODE", strs(&["atr"])),
+            ],
         );
         assert_eq!(smooth_keys(&[mixed], &keys, &cfg).unwrap(), a);
     }
@@ -3242,11 +3454,25 @@ mod tests {
     #[test]
     fn min_support_ignores_pinned_axes() {
         let keys: Vec<Option<Real>> = (0..7).map(|i| Some(i as Real)).collect();
-        let sg = subgrid(&[], &[("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])), ("SLOW", nums(&[20]))]);
+        let sg = subgrid(
+            &[],
+            &[
+                ("FAST", nums(&[3, 4, 5, 6, 7, 8, 9])),
+                ("SLOW", nums(&[20])),
+            ],
+        );
         let out = smooth_keys(&[sg], &keys, &box1(1.0)).unwrap();
-        let kept: Vec<usize> =
-            out.iter().enumerate().filter(|(_, s)| s.value.is_some()).map(|(i, _)| i).collect();
-        assert_eq!(kept, vec![1, 2, 3, 4, 5], "only the two FAST edges fall short");
+        let kept: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.value.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            kept,
+            vec![1, 2, 3, 4, 5],
+            "only the two FAST edges fall short"
+        );
     }
 
     /// `support` stays a fraction of `Π_j Σ_{d=−R..R} w(d)` — the weight a point
@@ -3267,7 +3493,10 @@ mod tests {
         let sg = subgrid(&[], &[("P", values)]);
         let keys = vec![Some(1.0); 5];
         let out = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
-        assert!((out[2].support - 1.0).abs() < 1e-12, "a regular interior point is fully supported");
+        assert!(
+            (out[2].support - 1.0).abs() < 1e-12,
+            "a regular interior point is fully supported"
+        );
         // The far point has no neighbour within one median gap: itself only.
         assert!((out[4].support - 1.0 / 3.0).abs() < 1e-12, "{:?}", out[4]);
         // Its inward neighbour is an interior *position* but sits on the edge
@@ -3285,7 +3514,10 @@ mod tests {
         // `min_support` is a floor, so an over-supported point clears it either
         // way — nothing downstream depended on the clamp.
         let floored = smooth_keys(
-            &[subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0, 3.0, 3.1, 3.2]))])],
+            &[subgrid(
+                &[],
+                &[("P", floats(&[0.0, 1.0, 2.0, 3.0, 3.1, 3.2]))],
+            )],
             &[Some(1.0); 6],
             &box1(1.0),
         )
@@ -3296,7 +3528,10 @@ mod tests {
     #[test]
     fn smooth_scales_parses_every_documented_form() {
         use std::str::FromStr;
-        assert_eq!(SmoothScales::from_str("index").unwrap(), SmoothScales::all(AxisScale::Index));
+        assert_eq!(
+            SmoothScales::from_str("index").unwrap(),
+            SmoothScales::all(AxisScale::Index)
+        );
         assert_eq!(
             SmoothScales::from_str("PERIOD:log,ATR_MULT:linear").unwrap(),
             SmoothScales::default()
@@ -3311,7 +3546,10 @@ mod tests {
         assert_eq!(SmoothScales::auto().pinned("FAST"), None);
         // Round-trips through Display, so the echo is re-parseable.
         for spelling in ["index", "linear,PERIOD:log", "ATR_MULT:linear,PERIOD:log"] {
-            assert_eq!(SmoothScales::from_str(spelling).unwrap().to_string(), spelling);
+            assert_eq!(
+                SmoothScales::from_str(spelling).unwrap().to_string(),
+                spelling
+            );
         }
         assert!(SmoothScales::from_str("quadratic").is_err());
         assert!(SmoothScales::from_str("P:quadratic").is_err());
@@ -3333,7 +3571,10 @@ mod tests {
         assert!(err.contains("FASTT") && err.contains("SLOWW"), "{err}");
         // And it says what *is* available, since a stacked grid often has more
         // axes in play than the user is holding in their head.
-        assert!(err.contains("FAST,") || err.contains("axes are: FAST"), "{err}");
+        assert!(
+            err.contains("FAST,") || err.contains("axes are: FAST"),
+            "{err}"
+        );
 
         // A scalar is not an axis: pinning `SLOW` is the same silent no-op.
         let scales = SmoothScales::default().with_axis("SLOW", AxisScale::Log);
@@ -3341,13 +3582,19 @@ mod tests {
 
         // The correctly spelled pin validates clean, and reports no warning.
         let scales = SmoothScales::default().with_axis("FAST", AxisScale::Linear);
-        assert_eq!(scales.validate_against(&[sg()]).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            scales.validate_against(&[sg()]).unwrap(),
+            Vec::<String>::new()
+        );
 
         // Matching *somewhere* is enough — `SLOW` is a scalar in the first
         // subgrid and an axis in the second, which is a legitimate stack.
         let other = subgrid(&[("FAST", Value::from(3))], &[("SLOW", nums(&[6, 8, 10]))]);
         let scales = SmoothScales::default().with_axis("SLOW", AxisScale::Index);
-        assert_eq!(scales.validate_against(&[sg(), other]).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            scales.validate_against(&[sg(), other]).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     /// The bare grid-wide form names no axis, so there is nothing to match it
@@ -3357,7 +3604,9 @@ mod tests {
         let categorical = || subgrid(&[], &[("MODE", strs(&["a", "b"]))]);
         for scale in [AxisScale::Linear, AxisScale::Log, AxisScale::Index] {
             assert_eq!(
-                SmoothScales::all(scale).validate_against(&[categorical()]).unwrap(),
+                SmoothScales::all(scale)
+                    .validate_against(&[categorical()])
+                    .unwrap(),
                 Vec::<String>::new()
             );
         }
@@ -3375,14 +3624,22 @@ mod tests {
         let sg = || subgrid(&[], &[("MODE", strs(&["a", "b"])), ("SOLO", nums(&[9]))]);
         for name in ["MODE", "SOLO"] {
             let scales = SmoothScales::default().with_axis(name, AxisScale::Log);
-            let warnings = scales.validate_against(&[sg()]).expect("inert, not invalid");
+            let warnings = scales
+                .validate_against(&[sg()])
+                .expect("inert, not invalid");
             assert_eq!(warnings.len(), 1, "{warnings:?}");
-            assert!(warnings[0].contains(name) && warnings[0].contains("no effect"), "{warnings:?}");
+            assert!(
+                warnings[0].contains(name) && warnings[0].contains("no effect"),
+                "{warnings:?}"
+            );
         }
         // Numeric in one subgrid is enough to make the pin live, so no warning.
         let swept = subgrid(&[], &[("SOLO", nums(&[9, 10, 11]))]);
         let scales = SmoothScales::default().with_axis("SOLO", AxisScale::Log);
-        assert_eq!(scales.validate_against(&[sg(), swept]).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            scales.validate_against(&[sg(), swept]).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     /// A repeated value double-counts itself as its own distance-0 neighbour,
@@ -3395,7 +3652,9 @@ mod tests {
             split_axes(&table)
         };
         assert!(axis(serde_json::json!([4, 5, 6])).is_ok());
-        let err = axis(serde_json::json!([4, 5, 5, 6])).unwrap_err().to_string();
+        let err = axis(serde_json::json!([4, 5, 5, 6]))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("FAST") && err.contains('5'), "{err}");
         // Categorical repeats waste exactly the same evaluations.
         assert!(axis(serde_json::json!(["none", "none", "atr"])).is_err());
@@ -3405,7 +3664,10 @@ mod tests {
         assert!(err.contains("`20`") && err.contains("`20.0`"), "{err}");
         // Distinct values that merely *look* close stay distinct.
         assert!(axis(serde_json::json!([20, 20.5, 21])).is_ok());
-        assert!(axis(serde_json::json!(["20", 20])).is_ok(), "a string is not the number");
+        assert!(
+            axis(serde_json::json!(["20", 20])).is_ok(),
+            "a string is not the number"
+        );
     }
 
     /// The grid's shape is the result; its maximum is not.
@@ -3416,10 +3678,19 @@ mod tests {
         // 0 is inside the 5% band but isolated.
         let smoothed: Vec<SmoothedKey> = [4.99, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 1.0]
             .iter()
-            .map(|v| SmoothedKey { value: Some(*v), support: 1.0 })
+            .map(|v| SmoothedKey {
+                value: Some(*v),
+                support: 1.0,
+            })
             .collect();
         assert_eq!(
-            plateau_size(&[sg], &smoothed, Direction::Descending, 0.05, &SmoothScales::auto()),
+            plateau_size(
+                &[sg],
+                &smoothed,
+                Direction::Descending,
+                0.05,
+                &SmoothScales::auto()
+            ),
             3
         );
     }
@@ -3430,13 +3701,24 @@ mod tests {
     #[test]
     fn plateau_adjacency_follows_value_order_not_declaration_order() {
         let smoothed = |vs: &[Real]| -> Vec<SmoothedKey> {
-            vs.iter().map(|v| SmoothedKey { value: Some(*v), support: 1.0 }).collect()
+            vs.iter()
+                .map(|v| SmoothedKey {
+                    value: Some(*v),
+                    support: 1.0,
+                })
+                .collect()
         };
         // Declared scrambled: values 1,5,2,4,3. The plateau is at values 3,4,5.
         let sg = subgrid(&[], &[("P", nums(&[1, 5, 2, 4, 3]))]);
         let keys = smoothed(&[1.0, 5.0, 1.0, 5.0, 5.0]);
         assert_eq!(
-            plateau_size(&[sg], &keys, Direction::Descending, 0.05, &SmoothScales::auto()),
+            plateau_size(
+                &[sg],
+                &keys,
+                Direction::Descending,
+                0.05,
+                &SmoothScales::auto()
+            ),
             3,
             "values 3, 4 and 5 are consecutive however they were typed"
         );
@@ -3444,7 +3726,10 @@ mod tests {
         // where the same three cells are not connected.
         let sg = subgrid(&[], &[("P", nums(&[1, 5, 2, 4, 3]))]);
         let index = SmoothScales::all(AxisScale::Index);
-        assert_eq!(plateau_size(&[sg], &keys, Direction::Descending, 0.05, &index), 2);
+        assert_eq!(
+            plateau_size(&[sg], &keys, Direction::Descending, 0.05, &index),
+            2
+        );
     }
 
     #[test]
@@ -3463,7 +3748,10 @@ mod tests {
         let cols = compute_union_columns(&[a, b]);
         // Name-sorted: X (differing scalar), Y (axis in 1), Z (axis in 2).
         // SYM shared across both → not a column.
-        assert_eq!(cols, vec!["X".to_string(), "Y".to_string(), "Z".to_string()]);
+        assert_eq!(
+            cols,
+            vec!["X".to_string(), "Y".to_string(), "Z".to_string()]
+        );
     }
 
     #[test]
@@ -3474,7 +3762,10 @@ mod tests {
         let a = subgrid(&[("M", Value::from(1))], &[("Y", vec![Value::from(1)])]);
         let b = subgrid(&[], &[("Z", vec![Value::from(10)])]);
         let cols = compute_union_columns(&[a, b]);
-        assert_eq!(cols, vec!["M".to_string(), "Y".to_string(), "Z".to_string()]);
+        assert_eq!(
+            cols,
+            vec!["M".to_string(), "Y".to_string(), "Z".to_string()]
+        );
     }
 
     #[test]
@@ -3487,7 +3778,10 @@ mod tests {
         // Combo picks Y=2 (second axis value); Z is absent → empty cell.
         let combo = vec![Value::from(2)];
         let row = project_row(&a, &combo, &cols);
-        assert_eq!(row, vec![Some(Value::from("A")), Some(Value::from(2)), None]);
+        assert_eq!(
+            row,
+            vec![Some(Value::from("A")), Some(Value::from(2)), None]
+        );
     }
 
     #[test]
@@ -3526,7 +3820,9 @@ mod tests {
         let mut e = 100.0_f64;
         let mut s: u64 = 0xdead_beef;
         for _ in 0..1_000 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let n = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
             e *= 1.0 + 0.0002 + 0.01 * n;
             equity.push(e);
@@ -3561,7 +3857,12 @@ mod tests {
             // Baseline: what optimize::sort_by_metric actually does.
             let mut rows = make_rows();
             let t = Instant::now();
-            sort_by_metric(&mut rows, "risk_adjusted.sharpe", Direction::Descending, 0.0);
+            sort_by_metric(
+                &mut rows,
+                "risk_adjusted.sharpe",
+                Direction::Descending,
+                0.0,
+            );
             let baseline = t.elapsed().as_secs_f64();
             let _ = std::hint::black_box(rows.len());
 
@@ -3571,7 +3872,12 @@ mod tests {
             let mut keyed: Vec<(usize, Option<Real>)> = rows
                 .iter()
                 .enumerate()
-                .map(|(i, r)| (i, ranking_value(&r.eval, "risk_adjusted.sharpe", Direction::Descending, 0.0)))
+                .map(|(i, r)| {
+                    (
+                        i,
+                        ranking_value(&r.eval, "risk_adjusted.sharpe", Direction::Descending, 0.0),
+                    )
+                })
                 .collect();
             keyed.sort_by(|a, b| match (a.1, b.1) {
                 (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
@@ -3609,7 +3915,9 @@ mod tests {
         let mut e = 100.0_f64;
         let mut s: u64 = 0xf00d_f00d;
         for _ in 0..1_000 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let n = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
             e *= 1.0 + 0.0002 + 0.01 * n;
             equity.push(e);

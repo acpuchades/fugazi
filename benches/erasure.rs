@@ -153,8 +153,14 @@ fn main() {
     let n: usize = 200_000;
     let closes: Vec<Real> = synth_candles(n).iter().map(|c| c.close).collect();
 
-    println!("size_of::<PayloadValue>()    = {} B", std::mem::size_of::<DynValue>());
-    println!("size_of::<Option<Real>>()    = {} B\n", std::mem::size_of::<Option<Real>>());
+    println!(
+        "size_of::<PayloadValue>()    = {} B",
+        std::mem::size_of::<DynValue>()
+    );
+    println!(
+        "size_of::<Option<Real>>()    = {} B\n",
+        std::mem::size_of::<Option<Real>>()
+    );
 
     // ---- baseline: no erasure at all ---------------------------------------
     let concrete_2 = bench(n, || {
@@ -185,7 +191,8 @@ fn main() {
     // used, kept as the *floor*: the least an erased scalar boundary can cost.
     let narrow_2 = bench(n, || {
         let inner = NarrowSource(Box::new(NarrowAdapter(Identity::<Real>::new())));
-        let mut ind: Box<dyn NarrowReal> = black_box(Box::new(NarrowAdapter(Sma::new(inner, SMA_P))));
+        let mut ind: Box<dyn NarrowReal> =
+            black_box(Box::new(NarrowAdapter(Sma::new(inner, SMA_P))));
         for &p in &closes {
             black_box(ind.update(p));
         }

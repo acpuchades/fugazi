@@ -36,9 +36,9 @@
 //! for multi-asset).
 
 use crate::types::Snapshot;
+use crate::types::Symbol;
 use crate::wallet::Rejection;
 use crate::{Order, Real, Strategy, Wallet};
-use crate::types::Symbol;
 
 /// One booked order stamped with the bar index it filled on.
 ///
@@ -137,11 +137,7 @@ pub struct RunReport<Sym> {
 /// **untagged** size-1 snapshot via `Atom::from`, which the strategy sees
 /// but the wallet skips). The size hint (when available) pre-sizes the
 /// equity curve.
-pub fn run<Sym, S, W, I, A>(
-    strategy: &mut S,
-    wallet: &mut W,
-    snapshots: I,
-) -> RunReport<Sym>
+pub fn run<Sym, S, W, I, A>(strategy: &mut S, wallet: &mut W, snapshots: I) -> RunReport<Sym>
 where
     Sym: Clone + PartialEq,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
@@ -389,10 +385,7 @@ pub fn flatten_open_positions<S, W>(
 /// A caller who only wants the sequential [`run`] primitive doesn't need
 /// rayon and can disable the feature (`default-features = false`).
 #[cfg(feature = "parallel")]
-pub fn run_many<Sym, S, W>(
-    runs: &mut [(S, W)],
-    snapshots: &[Snapshot<Sym>],
-) -> Vec<RunReport<Sym>>
+pub fn run_many<Sym, S, W>(runs: &mut [(S, W)], snapshots: &[Snapshot<Sym>]) -> Vec<RunReport<Sym>>
 where
     Sym: Clone + PartialEq + Send + Sync,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + Send,

@@ -6,13 +6,13 @@ use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 // Not glob-imported from the prelude: `errors::WalletError` would shadow
 // `fugazi_core::wallet::WalletError`, so the exception types are named where used.
 use crate::errors::FetchError;
@@ -28,7 +28,8 @@ use crate::errors::FetchError;
 /// Process-wide tokio runtime, lazily built on first use. Sharing one runtime
 /// across fetch calls avoids the ~10ms startup cost of building a fresh one
 /// per call and keeps the fetcher thread pool warm.
-pub(crate) static SOURCES_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+pub(crate) static SOURCES_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
 
 pub(crate) fn sources_runtime() -> &'static tokio::runtime::Runtime {
     SOURCES_RUNTIME.get_or_init(|| {
@@ -113,7 +114,10 @@ pub(crate) fn parse_interval_token(s: &str) -> PyResult<Interval> {
 
 // -- Date parser (`today` / `yesterday` / `Nd ago` / ISO / EU) --------------
 
-pub(crate) fn parse_date_token(input: &str, now: time::OffsetDateTime) -> PyResult<time::OffsetDateTime> {
+pub(crate) fn parse_date_token(
+    input: &str,
+    now: time::OffsetDateTime,
+) -> PyResult<time::OffsetDateTime> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     if lower == "today" {
@@ -159,7 +163,10 @@ pub(crate) fn parse_absolute(s: &str) -> Option<time::Date> {
     if parts.len() != 3 {
         return None;
     }
-    if !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+    if !parts
+        .iter()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     let first_len = parts[0].len();
@@ -617,7 +624,11 @@ impl PyYahoo {
     /// `User-Agent` header Yahoo's chart endpoint requires.
     #[new]
     #[pyo3(signature = (*, adjusted = true, base_url = None, user_agent = None))]
-    pub(crate) fn new(adjusted: bool, base_url: Option<String>, user_agent: Option<String>) -> Self {
+    pub(crate) fn new(
+        adjusted: bool,
+        base_url: Option<String>,
+        user_agent: Option<String>,
+    ) -> Self {
         let mut inner = Yahoo::new().with_adjusted(adjusted);
         if let Some(url) = base_url {
             inner = inner.with_base_url(url);
@@ -898,11 +909,35 @@ pub(crate) fn fetch(
     let (since_ts, until_ts) = resolve_since_until(since, until)?;
     let out = CandlesOutput::from_kwarg(output)?;
     match provider {
-        "binance" => fetch_frame(py, &Binance::new(), out, symbol, interval, since_ts, until_ts),
+        "binance" => fetch_frame(
+            py,
+            &Binance::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         "okx" => fetch_frame(py, &Okx::new(), out, symbol, interval, since_ts, until_ts),
-        "coinbase" => fetch_frame(py, &Coinbase::new(), out, symbol, interval, since_ts, until_ts),
+        "coinbase" => fetch_frame(
+            py,
+            &Coinbase::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         "yfinance" => fetch_frame(py, &Yahoo::new(), out, symbol, interval, since_ts, until_ts),
-        "cg" => fetch_frame(py, &CoinGecko::new(), out, symbol, interval, since_ts, until_ts),
+        "cg" => fetch_frame(
+            py,
+            &CoinGecko::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         "binance-vision" => fetch_frame(
             py,
             &BinanceVision::new(),
@@ -927,4 +962,3 @@ pub(crate) fn fetch(
         ))),
     }
 }
-

@@ -187,7 +187,10 @@ fn atr_manual(candles: &[fugazi::market::Candle], period: usize) -> usize {
     let mut seen = 0usize;
     for c in candles {
         let tr = match prev_close {
-            Some(pc) => max2(max2(c.high - c.low, (c.high - pc).abs()), (c.low - pc).abs()),
+            Some(pc) => max2(
+                max2(c.high - c.low, (c.high - pc).abs()),
+                (c.low - pc).abs(),
+            ),
             None => c.high - c.low,
         };
         prev_close = Some(c.close);
@@ -456,7 +459,8 @@ fn main() {
                 .len()
         }
         "macd_rust" => {
-            let mut s = fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
+            let mut s =
+                fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             fugazi::backtest::run(&mut s, &mut w, snaps().iter().cloned())
                 .equity_curve
@@ -544,10 +548,15 @@ fn main() {
         //
         // `sma_scalar_none` is the control (same loop, no indicator); the other
         // two are the identical computation monomorphised and erased.
-        "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased"
-        | "sma_scalar_fused" | "sma_scalar_fused_batched"
-        | "sma_scalar_boxed_local" | "sma_scalar_boxed_producer"
-        | "sma_scalar_chunked_local" | "stddev_scan" => {
+        "sma_scalar_none"
+        | "sma_scalar_direct"
+        | "sma_scalar_erased"
+        | "sma_scalar_fused"
+        | "sma_scalar_fused_batched"
+        | "sma_scalar_boxed_local"
+        | "sma_scalar_boxed_producer"
+        | "sma_scalar_chunked_local"
+        | "stddev_scan" => {
             let xs: Vec<Real> = (0..BARS).map(|i| 100.0 + (i % 97) as Real * 0.5).collect();
             match workload.as_str() {
                 "sma_scalar_none" => {
@@ -748,12 +757,12 @@ fn main() {
             match workload.as_str() {
                 // Exactly what `benches/three_tier.rs` times, `Atom` clone included.
                 "atr_atom" => {
-                    let atoms: Vec<fugazi::types::Atom> =
-                        candles.iter().map(|c| fugazi::types::Atom::new(*c)).collect();
-                    let mut ind = fugazi::indicators::Atr::new(
-                        fugazi::indicators::CurrentBar::new(),
-                        14,
-                    );
+                    let atoms: Vec<fugazi::types::Atom> = candles
+                        .iter()
+                        .map(|c| fugazi::types::Atom::new(*c))
+                        .collect();
+                    let mut ind =
+                        fugazi::indicators::Atr::new(fugazi::indicators::CurrentBar::new(), 14);
                     for a in &atoms {
                         black_box(ind.update(a.clone()));
                     }

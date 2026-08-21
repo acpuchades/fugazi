@@ -26,18 +26,43 @@ import fugazi as ta
 # logic and the edge primitive hang off `Signal`. Value is the method name.
 METHOD_BOUND = {
     # Indicator
-    "add": "add", "sub": "sub", "mul": "mul", "div": "div",
-    "lag": "lag", "diff": "diff", "ratio": "ratio", "roc": "roc",
-    "rolling_max": "rolling_max", "rolling_min": "rolling_min",
-    "pow": "pow", "max": "max", "min": "min", "clamp": "clamp",
-    "abs": "abs", "sign": "sign", "sqrt": "sqrt",
-    "tanh": "tanh", "sigmoid": "sigmoid",
-    "cum_sum": "cum_sum", "cum_max": "cum_max", "cum_min": "cum_min",
-    "gt": "gt", "lt": "lt", "ge": "ge", "le": "le", "eq": "eq", "ne": "ne",
-    "above": "above", "below": "below",
-    "crosses_above": "crosses_above", "crosses_below": "crosses_below",
+    "add": "add",
+    "sub": "sub",
+    "mul": "mul",
+    "div": "div",
+    "lag": "lag",
+    "diff": "diff",
+    "ratio": "ratio",
+    "roc": "roc",
+    "rolling_max": "rolling_max",
+    "rolling_min": "rolling_min",
+    "pow": "pow",
+    "max": "max",
+    "min": "min",
+    "clamp": "clamp",
+    "abs": "abs",
+    "sign": "sign",
+    "sqrt": "sqrt",
+    "tanh": "tanh",
+    "sigmoid": "sigmoid",
+    "cum_sum": "cum_sum",
+    "cum_max": "cum_max",
+    "cum_min": "cum_min",
+    "gt": "gt",
+    "lt": "lt",
+    "ge": "ge",
+    "le": "le",
+    "eq": "eq",
+    "ne": "ne",
+    "above": "above",
+    "below": "below",
+    "crosses_above": "crosses_above",
+    "crosses_below": "crosses_below",
     # Signal (trailing underscore where the name is a Python keyword)
-    "and": "and_", "or": "or_", "xor": "xor_", "not": "not_",
+    "and": "and_",
+    "or": "or_",
+    "xor": "xor_",
+    "not": "not_",
     "changed": "changed",
 }
 
@@ -299,13 +324,30 @@ def test_constructor_signatures_match_the_descriptor():
 # --------------------------------------------------------------------------
 
 WALLET_BOUND = {
-    "funds", "position", "positions", "price", "equity", "can_short", "quote_ccy",
-    "update", "set", "set_position", "close",
-    "set_stop", "set_take_profit", "cancel_protective",
-    "set_limit", "cancel_limit", "cancel",
-    "adjust_funds", "poll_fills", "set_costs_for",
+    "funds",
+    "position",
+    "positions",
+    "price",
+    "equity",
+    "can_short",
+    "quote_ccy",
+    "update",
+    "set",
+    "set_position",
+    "close",
+    "set_stop",
+    "set_take_profit",
+    "cancel_protective",
+    "set_limit",
+    "cancel_limit",
+    "cancel",
+    "adjust_funds",
+    "poll_fills",
+    "set_costs_for",
     # Inherent PaperWallet extras, not trait methods.
-    "orders", "reset", "retention",
+    "orders",
+    "reset",
+    "retention",
     # A loop over `set_costs_for`, not a mirror of Rust's `with_costs` — see the
     # method docs for why a single pre-resolved bundle cannot be built here.
     "set_costs_for_all",
@@ -332,7 +374,9 @@ def test_wallet_surface_matches_the_ledger():
     actual = {n for n in dir(ta.PaperWallet) if not n.startswith("_")}
     missing = WALLET_BOUND - actual
     extra = actual - WALLET_BOUND - set(WALLET_NOT_BOUND)
-    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not missing, (
+        f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    )
     assert not extra, (
         f"PaperWallet gained methods the ledger doesn't record: {sorted(extra)} — "
         "add them to WALLET_BOUND, or to WALLET_NOT_BOUND with a reason"
@@ -347,15 +391,30 @@ def test_wallet_surface_matches_the_ledger():
 
 OKX_WALLET_BOUND = {
     # Constructors (staticmethods).
-    "demo", "mainnet",
+    "demo",
+    "mainnet",
     # Wallet reads.
-    "funds", "position", "price", "equity", "can_short", "quote_ccy",
+    "funds",
+    "position",
+    "price",
+    "equity",
+    "can_short",
+    "quote_ccy",
     # Order flow.
-    "update", "set", "set_position", "close",
-    "set_stop", "set_take_profit", "cancel_protective",
-    "set_limit", "cancel_limit", "cancel", "poll_fills",
+    "update",
+    "set",
+    "set_position",
+    "close",
+    "set_stop",
+    "set_take_profit",
+    "cancel_protective",
+    "set_limit",
+    "cancel_limit",
+    "cancel",
+    "poll_fills",
     # Live-only extras.
-    "refresh_account", "errors",
+    "refresh_account",
+    "errors",
 }
 
 OKX_WALLET_NOT_BOUND = {
@@ -377,7 +436,9 @@ def test_okx_wallet_surface_matches_the_ledger():
     actual = {n for n in dir(ta.OkxWallet) if not n.startswith("_")}
     missing = OKX_WALLET_BOUND - actual
     extra = actual - OKX_WALLET_BOUND - set(OKX_WALLET_NOT_BOUND)
-    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not missing, (
+        f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    )
     assert not extra, (
         f"OkxWallet gained methods the ledger doesn't record: {sorted(extra)} — "
         "add them to OKX_WALLET_BOUND, or to OKX_WALLET_NOT_BOUND with a reason"
@@ -394,13 +455,27 @@ COINBASE_WALLET_BOUND = {
     # Constructor (staticmethod). No `demo`: Coinbase has no demo environment.
     "mainnet",
     # Wallet reads.
-    "funds", "position", "price", "equity", "can_short", "quote_ccy",
+    "funds",
+    "position",
+    "price",
+    "equity",
+    "can_short",
+    "quote_ccy",
     # Order flow.
-    "update", "set", "set_position", "close",
-    "set_stop", "set_take_profit", "cancel_protective",
-    "set_limit", "cancel_limit", "cancel", "poll_fills",
+    "update",
+    "set",
+    "set_position",
+    "close",
+    "set_stop",
+    "set_take_profit",
+    "cancel_protective",
+    "set_limit",
+    "cancel_limit",
+    "cancel",
+    "poll_fills",
     # Live-only extras.
-    "refresh_account", "errors",
+    "refresh_account",
+    "errors",
 }
 
 COINBASE_WALLET_NOT_BOUND = {
@@ -422,7 +497,9 @@ def test_coinbase_wallet_surface_matches_the_ledger():
     actual = {n for n in dir(ta.CoinbaseWallet) if not n.startswith("_")}
     missing = COINBASE_WALLET_BOUND - actual
     extra = actual - COINBASE_WALLET_BOUND - set(COINBASE_WALLET_NOT_BOUND)
-    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not missing, (
+        f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    )
     assert not extra, (
         f"CoinbaseWallet gained methods the ledger doesn't record: {sorted(extra)} — "
         "add them to COINBASE_WALLET_BOUND, or to COINBASE_WALLET_NOT_BOUND with a reason"
@@ -565,7 +642,10 @@ def test_the_wallet_abc_claims_only_what_all_three_have():
     # The converse: anything all three share should be claimed, or the list is
     # quietly incomplete.
     shared = set.intersection(
-        *({n for n in dir(getattr(ta, c)) if not n.startswith("_")} for c in WALLET_CLASSES)
+        *(
+            {n for n in dir(getattr(ta, c)) if not n.startswith("_")}
+            for c in WALLET_CLASSES
+        )
     )
     assert not shared - claimed, (
         f"all three wallets share {sorted(shared - claimed)} but ta.Wallet does "

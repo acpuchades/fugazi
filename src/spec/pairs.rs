@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::indicators::{Book, Position};
 use crate::indicators::logic::ValueBool;
+use crate::indicators::{Book, Position};
 use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
@@ -276,7 +276,9 @@ impl PairsStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<AnyChain, String> {
         match side {
-            Some(s) => s.enter.try_build(anchor, book, None, schema, Root::ambiguous("pairs")),
+            Some(s) => s
+                .enter
+                .try_build(anchor, book, None, schema, Root::ambiguous("pairs")),
             None => Ok(crate::runtime::any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
@@ -342,26 +344,40 @@ impl PairsStrategySpec {
             );
         }
         if let Some(sl) = long.and_then(|s| s.stop_loss.as_ref()) {
-            strat =
-                strat.long_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
+            strat = strat.long_spread_stop_loss(
+                (sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_real()?,
+            );
         }
         if let Some(tp) = long.and_then(|s| s.take_profit.as_ref()) {
-            strat =
-                strat.long_spread_take_profit((tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
+            strat = strat.long_spread_take_profit(
+                (tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_real()?,
+            );
         }
         if let Some(sl) = short.and_then(|s| s.stop_loss.as_ref()) {
-            strat =
-                strat.short_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
+            strat = strat.short_spread_stop_loss(
+                (sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_real()?,
+            );
         }
         if let Some(tp) = short.and_then(|s| s.take_profit.as_ref()) {
-            strat =
-                strat.short_spread_take_profit((tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
+            strat = strat.short_spread_take_profit(
+                (tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_real()?,
+            );
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
+            strat = strat.position_sizing(
+                (sizing.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_real()?,
+            );
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_bool()?);
+            strat = strat.rebalance_on(
+                (rebalance.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?)
+                    .into_bool()?,
+            );
         }
         Ok(DynPairsStrategy { inner: strat })
     }
@@ -460,11 +476,9 @@ mod tests {
             stop_loss: !value -50.0
             take_profit: !value 50.0
         "#;
-        let spec = PairsStrategySpec::from_text_with_params(
-            yaml,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap();
+        let spec =
+            PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+                .unwrap();
         assert_eq!(spec.left, "BTC");
         assert_eq!(spec.right, "ETH");
         assert!(spec.stop_loss.is_some());
@@ -479,11 +493,9 @@ mod tests {
             right: ETH
             enter: !value true
         "#;
-        let spec = PairsStrategySpec::from_text_with_params(
-            yaml,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap();
+        let spec =
+            PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+                .unwrap();
         assert!(spec.exit.is_none() && spec.stop_loss.is_none() && spec.take_profit.is_none());
         let _built = spec.build(1_000.0, &Schema::empty());
     }
@@ -509,7 +521,10 @@ mod tests {
                 .unwrap();
         assert!(spec.long_spread.is_some());
         assert!(spec.short_spread.is_some());
-        assert!(spec.enter.is_none(), "flat keys unused when blocks are given");
+        assert!(
+            spec.enter.is_none(),
+            "flat keys unused when blocks are given"
+        );
         let _built = spec.build(10_000.0, &Schema::empty());
     }
 
@@ -571,11 +586,9 @@ mod tests {
             enter: !value true
             sizing: !drawdown_throttle { max_drawdown: 0.20 }
         "#;
-        let spec = PairsStrategySpec::from_text_with_params(
-            yaml,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap();
+        let spec =
+            PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+                .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(10_000.0, &Schema::empty());
     }
@@ -677,5 +690,4 @@ sizing: !drawdown_throttle { max_drawdown: 0.20 }
         spec.try_build(10_000.0, &Schema::empty())
             .expect("a book leaf reads no asset");
     }
-
 }

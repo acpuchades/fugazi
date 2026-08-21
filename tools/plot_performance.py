@@ -76,9 +76,9 @@ W = 780
 LEFT, RIGHT, TOP = 78, 40, 76
 BAR_H, GAP = 11, 3
 ROW_H = len(SERIES) * (BAR_H + GAP) + 15
-HEAD_H = 22               # vertical space a group heading takes
+HEAD_H = 22  # vertical space a group heading takes
 
-INK = "#8b949e"          # legible on white and on #0d1117
+INK = "#8b949e"  # legible on white and on #0d1117
 
 # One bar clips at this scale — `bbands` through the bindings, at ~10.8x — and it
 # reads as clipped (caret, true value in the label) rather than as exactly XMAX.
@@ -107,9 +107,11 @@ def percentile(sorted_vals: list[float], p: float) -> float:
 def render_row(add, stat, name: str, y0: float) -> None:
     """Emit one indicator's label and its four bars, top-left at `y0`."""
     base = stat["talib_c"][name][0]
-    add(f'<text x="{LEFT - 10}" y="{y0 + 2 * (BAR_H + GAP) + 2}" fill="{INK}" '
+    add(
+        f'<text x="{LEFT - 10}" y="{y0 + 2 * (BAR_H + GAP) + 2}" fill="{INK}" '
         f'text-anchor="end" font-family="ui-monospace,SFMono-Regular,'
-        f'Consolas,monospace">{name}</text>')
+        f'Consolas,monospace">{name}</text>'
+    )
 
     for j, (key, _, colour) in enumerate(SERIES):
         if name not in stat[key]:
@@ -118,29 +120,39 @@ def render_row(add, stat, name: str, y0: float) -> None:
         val = lo / base
         by = y0 + j * (BAR_H + GAP)
         w = max(x(val) - LEFT, 1.0)
-        add(f'<rect x="{LEFT}" y="{by}" width="{w:.1f}" height="{BAR_H}" '
-            f'rx="2" fill="{colour}"/>')
+        add(
+            f'<rect x="{LEFT}" y="{by}" width="{w:.1f}" height="{BAR_H}" '
+            f'rx="2" fill="{colour}"/>'
+        )
 
         # Upward whisker to the 25th percentile, drawn only when it is wide
         # enough to mean anything at this scale.
         wx = x(p25 / base)
         if wx - (LEFT + w) > 1.5:
             cy = by + BAR_H / 2
-            add(f'<line x1="{LEFT + w:.1f}" y1="{cy:.1f}" x2="{wx:.1f}" y2="{cy:.1f}" '
-                f'stroke="{INK}" stroke-width="1" opacity="0.8"/>')
-            add(f'<line x1="{wx:.1f}" y1="{by + 2:.1f}" x2="{wx:.1f}" '
+            add(
+                f'<line x1="{LEFT + w:.1f}" y1="{cy:.1f}" x2="{wx:.1f}" y2="{cy:.1f}" '
+                f'stroke="{INK}" stroke-width="1" opacity="0.8"/>'
+            )
+            add(
+                f'<line x1="{wx:.1f}" y1="{by + 2:.1f}" x2="{wx:.1f}" '
                 f'y2="{by + BAR_H - 2:.1f}" stroke="{INK}" stroke-width="1" '
-                f'opacity="0.8"/>')
+                f'opacity="0.8"/>'
+            )
 
         clipped = val > XMAX
-        text = f'{val:.2f}x{" &#8250;" if clipped else ""}'
+        text = f"{val:.2f}x{' &#8250;' if clipped else ''}"
         # Inside the bar when it is wide enough, outside when it is not.
         if w > 52:
-            add(f'<text x="{LEFT + w - 5:.1f}" y="{by + BAR_H - 1}" '
-                f'fill="#ffffff" text-anchor="end" font-size="11">{text}</text>')
+            add(
+                f'<text x="{LEFT + w - 5:.1f}" y="{by + BAR_H - 1}" '
+                f'fill="#ffffff" text-anchor="end" font-size="11">{text}</text>'
+            )
         else:
-            add(f'<text x="{max(wx, LEFT + w) + 5:.1f}" y="{by + BAR_H - 1}" '
-                f'fill="{INK}" font-size="11">{text}</text>')
+            add(
+                f'<text x="{max(wx, LEFT + w) + 5:.1f}" y="{by + BAR_H - 1}" '
+                f'fill="{INK}" font-size="11">{text}</text>'
+            )
 
 
 def main() -> int:
@@ -190,10 +202,12 @@ def main() -> int:
     p: list[str] = []
     add = p.append
 
-    add(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
+    add(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
         f'viewBox="0 0 {W} {H}" font-family="-apple-system,BlinkMacSystemFont,'
-        f'Segoe UI,Helvetica,Arial,sans-serif" font-size="12">')
-    add('<title>fugazi vs TA-Lib throughput, lower is better</title>')
+        f'Segoe UI,Helvetica,Arial,sans-serif" font-size="12">'
+    )
+    add("<title>fugazi vs TA-Lib throughput, lower is better</title>")
 
     # Legend: two rows of two. Four on one line does not fit at this width.
     for i, (_, label, colour) in enumerate(SERIES):
@@ -210,10 +224,14 @@ def main() -> int:
     # the same fact twice, so it is an ordinary gridline now.
     for g in range(1, int(XMAX) + 1):
         gx = x(g)
-        add(f'<line x1="{gx:.1f}" y1="{TOP - 8}" x2="{gx:.1f}" y2="{H - 30}" '
-            f'stroke="{INK}" stroke-width="0.5" opacity="0.35"/>')
-        add(f'<text x="{gx:.1f}" y="{H - 14}" fill="{INK}" '
-            f'text-anchor="middle">{g}.0x</text>')
+        add(
+            f'<line x1="{gx:.1f}" y1="{TOP - 8}" x2="{gx:.1f}" y2="{H - 30}" '
+            f'stroke="{INK}" stroke-width="0.5" opacity="0.35"/>'
+        )
+        add(
+            f'<text x="{gx:.1f}" y="{H - 14}" fill="{INK}" '
+            f'text-anchor="middle">{g}.0x</text>'
+        )
 
     y0 = TOP - HEAD_H
     for title, group in groups:
@@ -222,15 +240,19 @@ def main() -> int:
         # label gutter: these titles are sentences, and anchoring them `end` at
         # `LEFT - 10` runs them off the left of the viewBox. The divider sits
         # above the title so the title reads as belonging to the rows below it.
-        add(f'<line x1="{LEFT}" y1="{y0 - 18}" x2="{W - RIGHT}" y2="{y0 - 18}" '
-            f'stroke="{INK}" stroke-width="0.5" opacity="0.25"/>')
-        add(f'<text x="{LEFT}" y="{y0 - 5}" fill="{INK}" '
-            f'font-size="11" opacity="0.85">{title}</text>')
+        add(
+            f'<line x1="{LEFT}" y1="{y0 - 18}" x2="{W - RIGHT}" y2="{y0 - 18}" '
+            f'stroke="{INK}" stroke-width="0.5" opacity="0.25"/>'
+        )
+        add(
+            f'<text x="{LEFT}" y="{y0 - 5}" fill="{INK}" '
+            f'font-size="11" opacity="0.85">{title}</text>'
+        )
         for name in group:
             render_row(add, stat, name, y0)
             y0 += ROW_H
 
-    add('</svg>')
+    add("</svg>")
 
     with open(OUT, "w") as f:
         f.write("\n".join(p) + "\n")
@@ -243,7 +265,9 @@ def main() -> int:
     for name in rows:
         line = f"{name:10s}"
         for key, _, _ in SERIES:
-            line += f"{stat[key][name][0]:16.2f}" if name in stat[key] else f"{'--':>16s}"
+            line += (
+                f"{stat[key][name][0]:16.2f}" if name in stat[key] else f"{'--':>16s}"
+            )
         print(line)
     print()
     print(f"{'indicator':10s}{'rs vs C':>10s}{'py vs py':>10s}")

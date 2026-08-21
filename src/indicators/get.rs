@@ -215,8 +215,7 @@ impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
 
     fn update(&mut self, input: S::Input) -> Option<Real> {
         self.value = self.source.update(input).and_then(|atom| {
-            read_slot(&self.schema, atom.overlays.as_ref())
-                .and_then(|ov| ov.get_real(self.index))
+            read_slot(&self.schema, atom.overlays.as_ref()).and_then(|ov| ov.get_real(self.index))
         });
         self.value
     }
@@ -316,8 +315,7 @@ impl<S: Indicator<Output = Atom>> Indicator for GetBool<S> {
 
     fn update(&mut self, input: S::Input) -> Option<bool> {
         self.value = self.source.update(input).and_then(|atom| {
-            read_slot(&self.schema, atom.overlays.as_ref())
-                .and_then(|ov| ov.get_bool(self.index))
+            read_slot(&self.schema, atom.overlays.as_ref()).and_then(|ov| ov.get_bool(self.index))
         });
         self.value
     }

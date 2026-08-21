@@ -369,7 +369,11 @@ impl WindowStats {
             }
         } else {
             let at = self.head + self.len;
-            let at = if at >= self.period { at - self.period } else { at };
+            let at = if at >= self.period {
+                at - self.period
+            } else {
+                at
+            };
             self.buf[at] = x;
             self.len += 1;
         }
@@ -382,10 +386,18 @@ impl WindowStats {
     /// rather than a re-accumulation of it.
     fn push(&mut self, x: Real) {
         let at = self.head + self.len;
-        let at = if at >= self.period { at - self.period } else { at };
+        let at = if at >= self.period {
+            at - self.period
+        } else {
+            at
+        };
         self.buf[at] = x;
         if self.len == self.period {
-            self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+            self.head = if self.head + 1 == self.period {
+                0
+            } else {
+                self.head + 1
+            };
         } else {
             self.len += 1;
         }
@@ -529,10 +541,7 @@ impl WindowStats {
     /// `downside_risk`), so it backs the rolling [`Sortino`](super::Sortino).
     /// Only meaningful once [`is_full`](Self::is_full).
     pub fn downside_dev(&self, threshold: Real) -> Real {
-        let sum_sq: Real = self
-            .iter()
-            .map(|x| (x - threshold).min(0.0).powi(2))
-            .sum();
+        let sum_sq: Real = self.iter().map(|x| (x - threshold).min(0.0).powi(2)).sum();
         (sum_sq / self.period as Real).sqrt()
     }
 
@@ -1176,7 +1185,11 @@ impl<Op> WindowExtreme<Op> {
     #[inline]
     fn slot(&self, i: usize) -> usize {
         let at = self.head + i;
-        if at >= self.period { at - self.period } else { at }
+        if at >= self.period {
+            at - self.period
+        } else {
+            at
+        }
     }
 
     #[inline]
@@ -1191,7 +1204,10 @@ impl<Op> WindowExtreme<Op> {
 
     #[inline]
     fn push_back(&mut self, e: (usize, Real)) {
-        debug_assert!(self.len < self.period, "monotonic deque cannot exceed the window");
+        debug_assert!(
+            self.len < self.period,
+            "monotonic deque cannot exceed the window"
+        );
         let at = self.slot(self.len);
         self.buf[at] = e;
         self.len += 1;
@@ -1206,7 +1222,11 @@ impl<Op> WindowExtreme<Op> {
     #[inline]
     fn pop_front(&mut self) {
         debug_assert!(self.len > 0);
-        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+        self.head = if self.head + 1 == self.period {
+            0
+        } else {
+            self.head + 1
+        };
         self.len -= 1;
     }
 
@@ -1286,7 +1306,6 @@ impl<Op: ExtremeOp> WindowExtreme<Op> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,8 +1324,8 @@ mod tests {
     /// sorted view's duplicate handling are exercised), a run of equal values
     /// (dispersion-free windows), negatives, and a jump.
     const STREAM: [Real; 24] = [
-        3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0, 5.0, 5.0, 5.0, -2.0, -7.0, 0.0,
-        0.0, 8.0, 8.0, 8.0, 1.0, -1.0, 100.0,
+        3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0, 5.0, 5.0, 5.0, -2.0, -7.0, 0.0, 0.0,
+        8.0, 8.0, 8.0, 1.0, -1.0, 100.0,
     ];
 
     /// The trailing `period` samples ending at `end` (inclusive), or `None`
@@ -1579,7 +1598,9 @@ mod tests {
         let mut cov = WindowCovariance::new(period);
         for i in 0..STREAM.len() {
             cov.update(STREAM[i], ys[i]);
-            let Some(xs) = window(i, period) else { continue };
+            let Some(xs) = window(i, period) else {
+                continue;
+            };
             let yw = &ys[i + 1 - period..=i];
             let (mx, my) = (naive_mean(xs), naive_mean(yw));
             let vx = naive_variance(xs);
@@ -1594,7 +1615,12 @@ mod tests {
                 .map(|(x, y)| (x - mx) * (y - my))
                 .sum::<Real>()
                 / period as Real;
-            close(cov.moments().correlation(), c / (vx * vy).sqrt(), "correlation", i);
+            close(
+                cov.moments().correlation(),
+                c / (vx * vy).sqrt(),
+                "correlation",
+                i,
+            );
         }
     }
 
@@ -1604,10 +1630,8 @@ mod tests {
     #[test]
     fn correlation_of_a_series_with_itself_and_its_negation_saturates() {
         let period = 5;
-        let (mut same, mut opposite) = (
-            WindowCovariance::new(period),
-            WindowCovariance::new(period),
-        );
+        let (mut same, mut opposite) =
+            (WindowCovariance::new(period), WindowCovariance::new(period));
         for &x in &STREAM[..period] {
             same.update(x, x);
             opposite.update(x, -x);
@@ -1640,7 +1664,12 @@ mod tests {
                             .map(|(k, x)| (k + 1) as Real * x)
                             .sum::<Real>()
                             / denom;
-                        close(got.expect("full window"), want, &format!("wma(p={period})"), i);
+                        close(
+                            got.expect("full window"),
+                            want,
+                            &format!("wma(p={period})"),
+                            i,
+                        );
                     }
                 }
             }
@@ -1856,7 +1885,12 @@ mod tests {
         assert_eq!(cov.moments().correlation(), 1.0);
 
         // A zero period would panic in `Ring::new`; it is bad data, not a bug.
-        assert!(serde_json::from_str::<WmaState>(r#"{"period":0,"window":[],"sum":0.0,"weighted":0.0}"#).is_err());
+        assert!(
+            serde_json::from_str::<WmaState>(
+                r#"{"period":0,"window":[],"sum":0.0,"weighted":0.0}"#
+            )
+            .is_err()
+        );
     }
 
     /// Round-tripping mid-warm-up is the case the capacity rule exists for:

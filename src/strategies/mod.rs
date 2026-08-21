@@ -45,15 +45,15 @@
 //! * [`composite`] — multi-condition (trend gated by strength, dip-in-uptrend).
 
 pub mod basket;
-pub mod selection;
-pub mod universe;
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
 pub mod multi_asset;
 pub mod pairs;
+pub mod selection;
 pub mod single_asset;
 pub mod trend;
+pub mod universe;
 pub mod volume;
 
 pub use basket::BasketStrategy;
@@ -61,9 +61,9 @@ pub use multi_asset::MultiAssetStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
+use crate::Indicator;
 use crate::indicators::{Close, CurrentBar, High, Low, Pick, Position};
 use crate::types::{Real, Snapshot};
-use crate::Indicator;
 
 /// A boxed real-valued chain over a per-bar snapshot — what a per-symbol
 /// factory produces.
@@ -97,24 +97,28 @@ where
 /// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).
 /// The empty-selector [`Pick`] unpacks a size-1 snapshot on the single-series
 /// hot path and matches by symbol at the strategy layer otherwise.
-pub(crate) fn self_close<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Close<Pick<Sym>> {
+pub(crate) fn self_close<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>()
+-> Close<Pick<Sym>> {
     Close::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `High::of(Pick::<Sym>::new())` — see [`self_close`].
-pub(crate) fn self_high<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> High<Pick<Sym>> {
+pub(crate) fn self_high<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>()
+-> High<Pick<Sym>> {
     High::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `Low::of(Pick::<Sym>::new())` — see [`self_close`].
-pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Low<Pick<Sym>> {
+pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>()
+-> Low<Pick<Sym>> {
     Low::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `CurrentBar::of(Pick::<Sym>::new())` — read the strategy's
 /// own asset's whole [`Candle`](crate::types::Candle) out of the snapshot;
 /// used to root the bar indicators (`Atr`, `Adx`, `Obv`, …).
-pub(crate) fn self_bar<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> CurrentBar<Pick<Sym>> {
+pub(crate) fn self_bar<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>()
+-> CurrentBar<Pick<Sym>> {
     CurrentBar::of(Pick::<Sym>::new())
 }
 
@@ -209,9 +213,17 @@ pub(crate) fn trade_leg<Sym: Clone>(leg: &Leg<'_, Sym>, wallet: &mut dyn crate::
         (None, None)
     };
     if let Some(level) = stop {
-        let _ = wallet.set_stop(leg.symbol.clone(), Reference(level), Size::position_frac(1.0));
+        let _ = wallet.set_stop(
+            leg.symbol.clone(),
+            Reference(level),
+            Size::position_frac(1.0),
+        );
     }
     if let Some(level) = target {
-        let _ = wallet.set_take_profit(leg.symbol.clone(), Reference(level), Size::position_frac(1.0));
+        let _ = wallet.set_take_profit(
+            leg.symbol.clone(),
+            Reference(level),
+            Size::position_frac(1.0),
+        );
     }
 }

@@ -62,11 +62,19 @@ fn a_two_axis_grid_emits_one_row_per_combination() {
         &["--grid", "FAST=[2,3,4],SLOW=[6,8]", "--metrics", "sharpe"],
     );
     let lines = read_csv(&csv);
-    assert_eq!(lines.len(), 7, "header + 6 grid points, got:\n{}", lines.join("\n"));
+    assert_eq!(
+        lines.len(),
+        7,
+        "header + 6 grid points, got:\n{}",
+        lines.join("\n")
+    );
 
     let header = &lines[0];
     for axis in ["FAST", "SLOW"] {
-        assert!(header.contains(axis), "axis `{axis}` missing from header: {header}");
+        assert!(
+            header.contains(axis),
+            "axis `{axis}` missing from header: {header}"
+        );
     }
     assert!(
         header.contains("sharpe"),
@@ -110,7 +118,14 @@ fn params_supply_a_baseline_under_every_subgrid() {
     // vary. One axis of 2 => 2 rows, with SLOW pinned by --params.
     let (_, csv) = sweep(
         "fugazi_opt_params",
-        &["--params", "SLOW=9", "--grid", "FAST=[2,3]", "--metrics", "sharpe"],
+        &[
+            "--params",
+            "SLOW=9",
+            "--grid",
+            "FAST=[2,3]",
+            "--metrics",
+            "sharpe",
+        ],
     );
     let lines = read_csv(&csv);
     assert_eq!(lines.len(), 3, "header + 2 points");
@@ -166,7 +181,10 @@ fn best_by_sorts_descending_for_a_higher_is_better_metric() {
         .iter()
         .filter_map(|l| l.split(',').nth(col)?.parse::<f64>().ok())
         .collect();
-    assert!(values.len() >= 2, "need at least two comparable rows: {values:?}");
+    assert!(
+        values.len() >= 2,
+        "need at least two comparable rows: {values:?}"
+    );
     assert!(
         values.windows(2).all(|w| w[0] >= w[1]),
         "rows are not sorted best-first by sharpe: {values:?}"
@@ -432,10 +450,17 @@ fn smooth_appends_two_columns_without_reordering_the_others() {
     let sup = column(header, "returns.total_pct_support");
     let supports: Vec<f64> = lines[1..]
         .iter()
-        .map(|l| cells(l)[sup].parse::<f64>().expect("support is always defined"))
+        .map(|l| {
+            cells(l)[sup]
+                .parse::<f64>()
+                .expect("support is always defined")
+        })
         .collect();
     assert_eq!(supports.len(), 9);
-    assert!(supports.iter().all(|s| *s > 0.0 && *s <= 1.0 + 1e-12), "{supports:?}");
+    assert!(
+        supports.iter().all(|s| *s > 0.0 && *s <= 1.0 + 1e-12),
+        "{supports:?}"
+    );
     // A 3x3 box:1 lattice has exactly one fully interior cell.
     assert_eq!(
         supports.iter().filter(|s| (**s - 1.0).abs() < 1e-9).count(),
@@ -483,8 +508,14 @@ fn the_smoothed_column_is_the_neighbourhood_mean_of_the_raw_column() {
     let mut support = [[f64::NAN; 3]; 3];
     for line in &lines[1..] {
         let c = cells(line);
-        let i = fasts.iter().position(|v| *v == c[cf].parse::<f64>().unwrap()).unwrap();
-        let j = slows.iter().position(|v| *v == c[cs].parse::<f64>().unwrap()).unwrap();
+        let i = fasts
+            .iter()
+            .position(|v| *v == c[cf].parse::<f64>().unwrap())
+            .unwrap();
+        let j = slows
+            .iter()
+            .position(|v| *v == c[cs].parse::<f64>().unwrap())
+            .unwrap();
         raw[i][j] = c[craw].parse().unwrap();
         got[i][j] = c[csm].parse().unwrap();
         support[i][j] = c[csup].parse().unwrap();
@@ -524,8 +555,10 @@ fn the_smoothed_column_is_the_neighbourhood_mean_of_the_raw_column() {
     }
 
     // And the CSV really is ordered by the smoothed key, not the raw one.
-    let smoothed_in_order: Vec<f64> =
-        lines[1..].iter().map(|l| cells(l)[csm].parse().unwrap()).collect();
+    let smoothed_in_order: Vec<f64> = lines[1..]
+        .iter()
+        .map(|l| cells(l)[csm].parse().unwrap())
+        .collect();
     assert!(
         smoothed_in_order.windows(2).all(|w| w[0] >= w[1]),
         "rows are not sorted best-first by the smoothed key: {smoothed_in_order:?}"
@@ -552,8 +585,14 @@ fn min_support_empties_the_smoothed_cell_but_keeps_the_support_cell() {
     let header = &lines[0];
     let csm = column(header, "returns.total_pct_smoothed");
     let csup = column(header, "returns.total_pct_support");
-    let kept = lines[1..].iter().filter(|l| !cells(l)[csm].is_empty()).count();
-    assert_eq!(kept, 1, "only the interior cell of a 3x3 clears full support");
+    let kept = lines[1..]
+        .iter()
+        .filter(|l| !cells(l)[csm].is_empty())
+        .count();
+    assert_eq!(
+        kept, 1,
+        "only the interior cell of a 3x3 clears full support"
+    );
     assert!(
         lines[1..].iter().all(|l| !cells(l)[csup].is_empty()),
         "support must be reported even for the rows it rejected — that is the diagnostic"
@@ -566,12 +605,23 @@ fn smooth_scale_pins_the_distance_scale_and_index_restores_the_old_measure() {
     // cannot depend on declaration order; `--smooth-scale=index` is the
     // documented way back to the measure that did.
     let smoothed_by_fast = |name: &str, axis: &str, extra: &[&str]| {
-        let mut args = vec!["--grid", axis, "-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"];
+        let mut args = vec![
+            "--grid",
+            axis,
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+        ];
         args.extend_from_slice(extra);
         let (out, csv) = sweep(name, &args);
         let lines = read_csv(&csv);
         let header = &lines[0];
-        let (cf, csm) = (column(header, "FAST"), column(header, "returns.total_pct_smoothed"));
+        let (cf, csm) = (
+            column(header, "FAST"),
+            column(header, "returns.total_pct_smoothed"),
+        );
         let mut got: Vec<(String, String)> = lines[1..]
             .iter()
             .map(|l| (cells(l)[cf].to_string(), cells(l)[csm].to_string()))
@@ -598,7 +648,10 @@ fn smooth_scale_pins_the_distance_scale_and_index_restores_the_old_measure() {
         &["--smooth-scale=index"],
     );
     assert!(stdout.contains("scale FAST index"), "{stdout}");
-    assert_ne!(a, b, "`--smooth-scale=index` did not restore the index-space measure");
+    assert_ne!(
+        a, b,
+        "`--smooth-scale=index` did not restore the index-space measure"
+    );
 
     // Per-axis pins compose with a bare default, and a geometric axis is
     // detected as log without being asked.
@@ -620,7 +673,12 @@ fn smooth_scale_rejects_an_unknown_scale_and_needs_smooth() {
         .arg(&format!("@{}", path.display()))
         .series(&at("examples/candles.csv"))
         .args(&["--grid", "FAST=[2,3],SLOW=[9]"])
-        .args(&["--best-by", "total_pct", "--smooth=box:1", "--smooth-scale=quadratic"])
+        .args(&[
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+            "--smooth-scale=quadratic",
+        ])
         .args(&["--output", "/dev/null"])
         .fails();
     assert!(
@@ -648,13 +706,23 @@ fn smooth_scale_rejects_an_unknown_scale_and_needs_smooth() {
 #[test]
 fn a_one_value_axis_does_not_dilute_support() {
     let supports = |name: &str, grid: &str, params: &[&str]| {
-        let mut args =
-            vec!["--grid", grid, "-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"];
+        let mut args = vec![
+            "--grid",
+            grid,
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+        ];
         args.extend_from_slice(params);
         let (_, csv) = sweep(name, &args);
         let lines = read_csv(&csv);
         let header = &lines[0];
-        let (cf, cs) = (column(header, "FAST"), column(header, "returns.total_pct_support"));
+        let (cf, cs) = (
+            column(header, "FAST"),
+            column(header, "returns.total_pct_support"),
+        );
         let mut got: Vec<(String, String)> = lines[1..]
             .iter()
             .map(|l| (cells(l)[cf].to_string(), cells(l)[cs].to_string()))
@@ -662,11 +730,24 @@ fn a_one_value_axis_does_not_dilute_support() {
         got.sort();
         got
     };
-    let listed = supports("fugazi_opt_smooth_pin_listed", "FAST=[2,3,4,5,6],SLOW=[9]", &[]);
-    let scalar = supports("fugazi_opt_smooth_pin_scalar", "FAST=[2,3,4,5,6],SLOW=9", &[]);
-    assert_eq!(listed, scalar, "the two spellings of a pinned axis must score the same");
+    let listed = supports(
+        "fugazi_opt_smooth_pin_listed",
+        "FAST=[2,3,4,5,6],SLOW=[9]",
+        &[],
+    );
+    let scalar = supports(
+        "fugazi_opt_smooth_pin_scalar",
+        "FAST=[2,3,4,5,6],SLOW=9",
+        &[],
+    );
+    assert_eq!(
+        listed, scalar,
+        "the two spellings of a pinned axis must score the same"
+    );
     assert!(
-        listed.iter().any(|(_, s)| (s.parse::<f64>().unwrap() - 1.0).abs() < 1e-12),
+        listed
+            .iter()
+            .any(|(_, s)| (s.parse::<f64>().unwrap() - 1.0).abs() < 1e-12),
         "interior points should reach full support: {listed:?}"
     );
 
@@ -683,7 +764,10 @@ fn a_one_value_axis_does_not_dilute_support() {
         .ok();
     let lines = read_csv(&out_csv.to_string_lossy());
     let csm = column(&lines[0], "returns.total_pct_smoothed");
-    let kept = lines[1..].iter().filter(|l| !cells(l)[csm].is_empty()).count();
+    let kept = lines[1..]
+        .iter()
+        .filter(|l| !cells(l)[csm].is_empty())
+        .count();
     assert_eq!(kept, 3, "the three interior FAST points clear full support");
 }
 
@@ -699,12 +783,22 @@ fn a_smooth_scale_pin_for_an_unknown_axis_is_refused() {
             .arg(&format!("@{}", path.display()))
             .series(&at("examples/candles.csv"))
             .args(&["--grid", "FAST=[2,4,8,16],SLOW=20,SYM=BTC"])
-            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+            .args(&[
+                "-m",
+                "total_pct",
+                "--best-by",
+                "total_pct",
+                "--smooth=box:1",
+            ])
             .args(&[&format!("--smooth-scale={scale}"), "--output", "/dev/null"])
     };
 
     let out = pinned("FASTT:linear").fails();
-    assert!(out.stderr.contains("FASTT"), "the refusal should name the typo, got: {}", out.stderr);
+    assert!(
+        out.stderr.contains("FASTT"),
+        "the refusal should name the typo, got: {}",
+        out.stderr
+    );
     assert!(
         out.stderr.contains("FAST,") || out.stderr.contains("axes are: FAST"),
         "the refusal should list the axes that are available, got: {}",
@@ -731,8 +825,18 @@ fn a_smooth_scale_pin_naming_a_scalar_is_refused() {
             .arg(&format!("@{}", path.display()))
             .series(&at("examples/candles.csv"))
             .args(&["--grid", "FAST=[2,4,8,16],SLOW=20,SYM=BTC"])
-            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
-            .args(&[&format!("--smooth-scale={name}:log"), "--output", "/dev/null"])
+            .args(&[
+                "-m",
+                "total_pct",
+                "--best-by",
+                "total_pct",
+                "--smooth=box:1",
+            ])
+            .args(&[
+                &format!("--smooth-scale={name}:log"),
+                "--output",
+                "/dev/null",
+            ])
             .fails();
         assert!(
             out.stderr.contains(name),
@@ -754,7 +858,13 @@ fn a_smooth_scale_pin_is_accepted_when_any_subgrid_sweeps_it() {
         // `SLOW` sweeps in the second subgrid and is pinned flat in the first.
         .args(&["--grid", "FAST=[2,4,8,16],SLOW=9"])
         .args(&["--grid", "FAST=3,SLOW=[6,8,10]"])
-        .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+        .args(&[
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+        ])
         .args(&["--smooth-scale=SLOW:index", "--output", "/dev/null"])
         .ok();
     assert!(
@@ -776,7 +886,13 @@ fn a_repeated_axis_value_is_refused() {
             .arg(&format!("@{}", path.display()))
             .series(&at("examples/candles.csv"))
             .args(&["--grid", grid])
-            .args(&["-m", "total_pct", "--best-by", "total_pct", "--smooth=box:1"])
+            .args(&[
+                "-m",
+                "total_pct",
+                "--best-by",
+                "total_pct",
+                "--smooth=box:1",
+            ])
             .args(&["--output", "/dev/null"])
     };
 
@@ -949,7 +1065,9 @@ fn walkforward_folds_carry_the_smoothed_is_key() {
     );
     let csm = column(header, "returns.total_pct_is_smoothed");
     assert!(
-        lines[1..].iter().all(|l| cells(l)[csm].parse::<f64>().is_ok()),
+        lines[1..]
+            .iter()
+            .all(|l| cells(l)[csm].parse::<f64>().is_ok()),
         "every fold should report its smoothed IS key:\n{lines:#?}"
     );
 }

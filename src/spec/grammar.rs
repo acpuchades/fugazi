@@ -504,7 +504,11 @@ pub fn output_label(ty: crate::runtime::PayloadType) -> &'static str {
 
 /// [`output_label`] over a whole demand.
 fn demand_labels(types: Vec<crate::runtime::PayloadType>) -> Vec<String> {
-    types.into_iter().map(output_label).map(str::to_owned).collect()
+    types
+        .into_iter()
+        .map(output_label)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The fine conceptual **sub-group** of every tag, in curated order — the
@@ -531,49 +535,107 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
     (
         "bands",
         &[
-            "bb_upper", "bb_middle", "bb_lower", "keltner_upper", "keltner_middle",
-            "keltner_lower", "donchian_upper", "donchian_middle", "donchian_lower",
+            "bb_upper",
+            "bb_middle",
+            "bb_lower",
+            "keltner_upper",
+            "keltner_middle",
+            "keltner_lower",
+            "donchian_upper",
+            "donchian_middle",
+            "donchian_lower",
         ],
     ),
     (
         "bar indicators",
         &[
-            "atr", "mfi", "vwap", "true_range", "obv", "ad", "parkinson", "garman_klass",
+            "atr",
+            "mfi",
+            "vwap",
+            "true_range",
+            "obv",
+            "ad",
+            "parkinson",
+            "garman_klass",
             "rogers_satchell",
         ],
     ),
-    ("basket selection", &["everything", "top_bottom", "threshold", "quantile"]),
+    (
+        "basket selection",
+        &["everything", "top_bottom", "threshold", "quantile"],
+    ),
     ("basket universe", &["all_of", "any_of"]),
     ("boolean logic", &["and", "or", "xor", "all", "any", "not"]),
     (
         "calendar",
         &[
-            "year", "month", "day", "hour", "minute", "second", "day_of_week", "day_of_year",
-            "week_of_year", "quarter", "unix_seconds", "unix_millis", "time", "is_weekday",
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "second",
+            "day_of_week",
+            "day_of_year",
+            "week_of_year",
+            "quarter",
+            "unix_seconds",
+            "unix_millis",
+            "time",
+            "is_weekday",
             "is_weekend",
         ],
     ),
     (
         "candle leaves",
-        &["close", "high", "low", "open", "volume", "typical", "median", "current", "pick"],
+        &[
+            "close", "high", "low", "open", "volume", "typical", "median", "current", "pick",
+        ],
     ),
-    ("comparisons", &["str_eq", "str_ne", "gt", "lt", "ge", "le", "eq", "ne"]),
+    (
+        "comparisons",
+        &["str_eq", "str_ne", "gt", "lt", "ge", "le", "eq", "ne"],
+    ),
     ("conditional", &["if_else", "match"]),
     ("constants", &["value", "never", "every"]),
     ("cross-timeframe composition", &["resample", "latch"]),
     ("crossovers", &["crosses_above", "crosses_below"]),
-    ("edge detectors", &["changed", "became_true", "became_false"]),
-    ("event timing", &["bars_since", "bars_since_high", "bars_since_low"]),
+    (
+        "edge detectors",
+        &["changed", "became_true", "became_false"],
+    ),
+    (
+        "event timing",
+        &["bars_since", "bars_since_high", "bars_since_low"],
+    ),
     ("level comparisons", &["above", "below"]),
     (
         "linear regression",
-        &["linreg_slope", "linreg_intercept", "linreg_value", "linreg_r2"],
+        &[
+            "linreg_slope",
+            "linreg_intercept",
+            "linreg_value",
+            "linreg_r2",
+        ],
     ),
-    ("load-time placeholders", &["param", "arg", "import", "undefined"]),
+    (
+        "load-time placeholders",
+        &["param", "arg", "import", "undefined"],
+    ),
     ("lookback operators", &["lag", "diff", "ratio", "roc"]),
     ("macd", &["macd_line", "macd_signal", "macd_histogram"]),
     ("moving averages", &["sma", "ema", "rma", "wma", "hma"]),
-    ("oscillators", &["rsi", "stddev", "cci", "stochastic", "stoch_rsi", "williams_r"]),
+    (
+        "oscillators",
+        &[
+            "rsi",
+            "stddev",
+            "cci",
+            "stochastic",
+            "stoch_rsi",
+            "williams_r",
+        ],
+    ),
     ("overlay side channel", &["get", "has_column"]),
     ("pairwise extrema", &["min", "max", "clamp"]),
     ("portfolio weighting", &["equal_weight", "fixed"]),
@@ -582,28 +644,57 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
     (
         "rolling statistics",
         &[
-            "beta", "correlation", "covariance", "kurtosis", "percentile", "percentile_rank",
-            "skewness", "variance_ratio", "zscore",
+            "beta",
+            "correlation",
+            "covariance",
+            "kurtosis",
+            "percentile",
+            "percentile_rank",
+            "skewness",
+            "variance_ratio",
+            "zscore",
         ],
     ),
     ("running accumulators", &["cum_sum", "cum_max", "cum_min"]),
     (
         "sizing helpers",
-        &["vol_target", "atr_risk", "drawdown_throttle", "equity_vol_target", "fractional_kelly"],
+        &[
+            "vol_target",
+            "atr_risk",
+            "drawdown_throttle",
+            "equity_vol_target",
+            "fractional_kelly",
+        ],
     ),
     (
         "strategy book",
         &[
-            "equity", "equity_peak", "drawdown", "return_per_bar", "trade_pnl", "trade_return",
-            "strategy_book", "portfolio_book",
+            "equity",
+            "equity_peak",
+            "drawdown",
+            "return_per_bar",
+            "trade_pnl",
+            "trade_return",
+            "strategy_book",
+            "portfolio_book",
         ],
     ),
-    ("trailing strategy risk", &["sharpe", "sortino", "volatility", "max_drawdown", "calmar"]),
+    (
+        "trailing strategy risk",
+        &["sharpe", "sortino", "volatility", "max_drawdown", "calmar"],
+    ),
     (
         "trend / directional",
         &[
-            "adx", "plus_di", "minus_di", "dmi_plus_di", "dmi_minus_di", "aroon_up", "aroon_down",
-            "aroon_oscillator", "sar",
+            "adx",
+            "plus_di",
+            "minus_di",
+            "dmi_plus_di",
+            "dmi_minus_di",
+            "aroon_up",
+            "aroon_down",
+            "aroon_oscillator",
+            "sar",
         ],
     ),
     ("unstable pass-through", &["unstable"]),
@@ -673,13 +764,7 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             doc: doc.map(str::to_owned),
         }
     }
-    fn tag(
-        name: &str,
-        group: &str,
-        kind: &str,
-        forms: Vec<GrammarForm>,
-        doc: &str,
-    ) -> GrammarTag {
+    fn tag(name: &str, group: &str, kind: &str, forms: Vec<GrammarForm>, doc: &str) -> GrammarTag {
         GrammarTag {
             name: name.to_owned(),
             group: group.to_owned(),
@@ -721,7 +806,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
     vec![
         // --- weighting: portfolio `weights:` sugar --------------------------
         tag(
-            "fixed", "weighting", "weighting",
+            "fixed",
+            "weighting",
+            "weighting",
             vec![GrammarForm {
                 shape: "seq".to_owned(),
                 fields: Vec::new(),
@@ -735,7 +822,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
              (per-child indexed) at load.",
         ),
         tag(
-            "equal_weight", "weighting", "weighting",
+            "equal_weight",
+            "weighting",
+            "weighting",
             vec![
                 GrammarForm {
                     shape: "unit".to_owned(),
@@ -768,7 +857,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
         GrammarTag {
             host_affecting: true,
             ..tag(
-                "import", "document", "document",
+                "import",
+                "document",
+                "document",
                 vec![
                     newtype("str", None, None),
                     map(
@@ -807,7 +898,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             )
         },
         tag(
-            "param", "document", "document",
+            "param",
+            "document",
+            "document",
             vec![
                 newtype("str", None, None),
                 map(
@@ -826,7 +919,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
              table by `params::substitute` before the typed parse.",
         ),
         tag(
-            "arg", "document", "document",
+            "arg",
+            "document",
+            "document",
             vec![
                 newtype("str", Some("template"), None),
                 map(
@@ -846,7 +941,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
              deferred template body, so one written elsewhere is a parse error.",
         ),
         tag(
-            "undefined", "document", "document",
+            "undefined",
+            "document",
+            "document",
             vec![GrammarForm {
                 shape: "unit".to_owned(),
                 fields: Vec::new(),
@@ -973,8 +1070,10 @@ fn expression_defs() -> serde_json::Map<String, serde_json::Value> {
     // `!pick { symbol: !arg SYM }`: a single-key object whose key is a rewritten
     // tag. Scalar field schemas accept it (via `or_placeholder`) so authored
     // per-symbol templates validate; the build substitutes it before typing.
-    let placeholder_keys: Vec<Value> =
-        crate::spec::typecheck::REWRITTEN_TAGS.iter().map(|t| json!(t)).collect();
+    let placeholder_keys: Vec<Value> = crate::spec::typecheck::REWRITTEN_TAGS
+        .iter()
+        .map(|t| json!(t))
+        .collect();
 
     let mut defs = serde_json::Map::new();
     defs.insert("node".into(), json!({ "oneOf": node_variants }));
@@ -1122,7 +1221,11 @@ fn doc_basket() -> serde_json::Value {
         ("sizing", node_ref(), true),
         ("universe", def_ref("universe"), false),
         ("rebalance_on", node_ref(), false),
-        ("balance_sides", serde_json::json!({ "type": "boolean" }), false),
+        (
+            "balance_sides",
+            serde_json::json!({ "type": "boolean" }),
+            false,
+        ),
         ("long", def_ref("basket_side"), false),
         ("short", def_ref("basket_side"), false),
         ("meta", meta_ref(), false),
@@ -1256,7 +1359,10 @@ fn field_schema(field: &GrammarField) -> serde_json::Value {
     let mut schema = type_fragment(&field.ty);
     if let serde_json::Value::Object(map) = &mut schema {
         if let Some(doc) = &field.doc {
-            map.insert("description".to_owned(), serde_json::Value::from(doc.clone()));
+            map.insert(
+                "description".to_owned(),
+                serde_json::Value::from(doc.clone()),
+            );
         }
         let default = match &field.default {
             Some(GrammarDefault::Literal(v)) => Some(v.clone()),
@@ -1369,7 +1475,9 @@ mod tests {
             "a tag is listed under two categories: {:?}",
             {
                 let mut seen = BTreeSet::new();
-                flat.iter().filter(|t| !seen.insert(**t)).collect::<Vec<_>>()
+                flat.iter()
+                    .filter(|t| !seen.insert(**t))
+                    .collect::<Vec<_>>()
             }
         );
 
@@ -1377,8 +1485,14 @@ mod tests {
         let got: BTreeSet<String> = unique.iter().map(|s| s.to_string()).collect();
         let missing: Vec<_> = want.difference(&got).collect();
         let extra: Vec<_> = got.difference(&want).collect();
-        assert!(missing.is_empty(), "tags with no category — add each to CATEGORIES: {missing:?}");
-        assert!(extra.is_empty(), "CATEGORIES names tags the grammar doesn't have: {extra:?}");
+        assert!(
+            missing.is_empty(),
+            "tags with no category — add each to CATEGORIES: {missing:?}"
+        );
+        assert!(
+            extra.is_empty(),
+            "CATEGORIES names tags the grammar doesn't have: {extra:?}"
+        );
     }
 
     /// Sections render in table order; keeping the labels alphabetical means a
@@ -1388,7 +1502,10 @@ mod tests {
         let labels: Vec<String> = CATEGORIES.iter().map(|(l, _)| l.to_lowercase()).collect();
         let mut sorted = labels.clone();
         sorted.sort();
-        assert_eq!(labels, sorted, "CATEGORIES is not in alphabetical order of label");
+        assert_eq!(
+            labels, sorted,
+            "CATEGORIES is not in alphabetical order of label"
+        );
     }
 
     /// Every stamped record carries its category — the contract consumers rely on.
@@ -1399,6 +1516,9 @@ mod tests {
             .filter(|t| t.category.trim().is_empty())
             .map(|t| t.name)
             .collect();
-        assert!(blank.is_empty(), "records with an empty category: {blank:?}");
+        assert!(
+            blank.is_empty(),
+            "records with an empty category: {blank:?}"
+        );
     }
 }

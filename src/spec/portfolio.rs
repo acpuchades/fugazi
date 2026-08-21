@@ -47,9 +47,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::indicators::{Book, Position};
+use crate::portfolio::Portfolio;
 use crate::portfolio::policy::{EqualWeight, Fixed};
 use crate::portfolio::rebalance::{LargestFirst, Proportional};
-use crate::portfolio::Portfolio;
 use crate::prelude::*;
 use crate::types::Snapshot;
 
@@ -288,7 +288,8 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
         // `serde_norway::Value` path can't feed it) and by
         // `MultiAssetStrategySpec` (same reason). Kept consistent for pairs
         // too so all three go through one path.
-        let via_json = |v| crate::spec::convert::yaml_to_json(v).map_err(|e: anyhow::Error| e.to_string());
+        let via_json =
+            |v| crate::spec::convert::yaml_to_json(v).map_err(|e: anyhow::Error| e.to_string());
 
         match detect_shape(&v) {
             // `StrategyRef` owns the preset-name gate.
@@ -323,9 +324,7 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
 /// surface is available under `weights:`, e.g.
 /// `weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }`
 /// to throttle every child's weight by the aggregate drawdown.
-fn deserialize_weights<'de, D>(
-    d: D,
-) -> Result<Option<SpecTemplate<NodeSpec>>, D::Error>
+fn deserialize_weights<'de, D>(d: D) -> Result<Option<SpecTemplate<NodeSpec>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -714,10 +713,7 @@ impl PortfolioSpec {
         if let Some(template) = &self.weights {
             let mut shares: Vec<
                 Box<
-                    dyn crate::indicator::Indicator<
-                        Input = Snapshot<Symbol>,
-                        Output = Real,
-                    > + Send,
+                    dyn crate::indicator::Indicator<Input = Snapshot<Symbol>, Output = Real> + Send,
                 >,
             > = Vec::new();
             for (i, c) in self.children.iter().enumerate() {
@@ -739,22 +735,13 @@ impl PortfolioSpec {
                 // used to key the sub-wallet inside `Portfolio`, never
                 // exposed as an arg.
                 if let Some(name) = &c.name {
-                    args.insert(
-                        "CHILD_NAME".to_string(),
-                        Value::String(name.clone()),
-                    );
+                    args.insert("CHILD_NAME".to_string(), Value::String(name.clone()));
                 }
                 if let Some(group) = &c.group {
-                    args.insert(
-                        "CHILD_GROUP".to_string(),
-                        Value::String(group.clone()),
-                    );
+                    args.insert("CHILD_GROUP".to_string(), Value::String(group.clone()));
                 }
                 if let PortfolioChildStrategy::Single(s) = &c.strategy {
-                    args.insert(
-                        "SYM".to_string(),
-                        Value::String(s.symbol().to_string()),
-                    );
+                    args.insert("SYM".to_string(), Value::String(s.symbol().to_string()));
                 }
                 // The `child_<idx>` default is still used below as the
                 // template-build-error label for anyone chasing a
@@ -765,10 +752,8 @@ impl PortfolioSpec {
                 // child. Runs before args::substitute (which only
                 // handles `!arg`) so the typed parse below sees only
                 // scalar `!value` payloads.
-                let preprocessed_tree =
-                    rewrite_value_list_by_index(template.tree().clone(), i);
-                let per_child_template =
-                    SpecTemplate::<NodeSpec>::from_tree(preprocessed_tree);
+                let preprocessed_tree = rewrite_value_list_by_index(template.tree().clone(), i);
+                let per_child_template = SpecTemplate::<NodeSpec>::from_tree(preprocessed_tree);
                 let concrete = per_child_template.build(&args).map_err(|e| {
                     format!(
                         "PortfolioSpec::build: weight_share template failed \
@@ -817,8 +802,13 @@ impl PortfolioSpec {
             // `root: None` — a portfolio-level gate spans every child, so
             // "this series" is undefined; a price leaf inside one must name
             // its asset with `!pick { symbol: ... }`.
-            let dyn_ind: AnyChain =
-                rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, Root::sole())?;
+            let dyn_ind: AnyChain = rebalance_spec.try_build(
+                &anchor,
+                &agg_book,
+                Some(&agg_book),
+                schema,
+                Root::sole(),
+            )?;
             let signal = (dyn_ind).into_bool()?;
             max_stable = max_stable.max(signal.stable_bars());
             max_warm_up = max_warm_up.max(signal.warm_up_bars());
@@ -1027,8 +1017,14 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert_eq!(spec.children.len(), 2);
-        assert!(matches!(&spec.children[0].strategy, PortfolioChildStrategy::Single(_)));
-        assert!(matches!(&spec.children[1].strategy, PortfolioChildStrategy::Single(_)));
+        assert!(matches!(
+            &spec.children[0].strategy,
+            PortfolioChildStrategy::Single(_)
+        ));
+        assert!(matches!(
+            &spec.children[1].strategy,
+            PortfolioChildStrategy::Single(_)
+        ));
         // `!fixed [...]` lowered to `!value [...]` via sugar rewrite.
         let list = extract_top_level_value_list(spec.weights.as_ref().unwrap().tree())
             .expect("!fixed should have lowered to !value <list>");
@@ -1168,7 +1164,10 @@ mod tests {
               - strategy: { left: BTC, right: ETH, enter: !value true }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
-        assert!(matches!(&spec.children[0].strategy, PortfolioChildStrategy::Pairs(_)));
+        assert!(matches!(
+            &spec.children[0].strategy,
+            PortfolioChildStrategy::Pairs(_)
+        ));
 
         // Basket: has selection.
         let yaml = r#"
@@ -1179,7 +1178,10 @@ mod tests {
                   sizing: !equal_weight 2
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
-        assert!(matches!(&spec.children[0].strategy, PortfolioChildStrategy::Basket(_)));
+        assert!(matches!(
+            &spec.children[0].strategy,
+            PortfolioChildStrategy::Basket(_)
+        ));
 
         // Multi: no symbol, no pairs/basket keys.
         let yaml = r#"
@@ -1190,7 +1192,10 @@ mod tests {
                   sizing: !equal_weight 2
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
-        assert!(matches!(&spec.children[0].strategy, PortfolioChildStrategy::Multi(_)));
+        assert!(matches!(
+            &spec.children[0].strategy,
+            PortfolioChildStrategy::Multi(_)
+        ));
     }
 
     #[test]
@@ -1614,10 +1619,8 @@ mod tests {
               - strategy: !buy_and_hold { symbol: A }
               - strategy: !buy_and_hold { symbol: B }
         "#;
-        let spec_fixed =
-            PortfolioSpec::from_text_with_params(yaml_fixed, &HashMap::new()).unwrap();
-        let spec_value =
-            PortfolioSpec::from_text_with_params(yaml_value, &HashMap::new()).unwrap();
+        let spec_fixed = PortfolioSpec::from_text_with_params(yaml_fixed, &HashMap::new()).unwrap();
+        let spec_value = PortfolioSpec::from_text_with_params(yaml_value, &HashMap::new()).unwrap();
         assert_eq!(
             spec_fixed.weights.as_ref().unwrap().tree(),
             spec_value.weights.as_ref().unwrap().tree(),

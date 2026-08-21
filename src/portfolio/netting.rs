@@ -375,7 +375,11 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             let equity = wallet.equity().0;
             let price = self.price_of(symbol).unwrap_or(0.0);
             let submitted = if market_delta > 0.0 && amount > 0.0 && equity > 0.0 && price > 0.0 {
-                wallet.set(symbol.clone(), Side::Buy, Size::value_frac(amount * price / equity))
+                wallet.set(
+                    symbol.clone(),
+                    Side::Buy,
+                    Size::value_frac(amount * price / equity),
+                )
             } else {
                 wallet.set_position(Units {
                     symbol: symbol.clone(),
@@ -620,7 +624,12 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         market_price: Real,
         commission: Real,
     ) -> Vec<Order<Sym>> {
-        let gross_buy: Real = flow.legs.iter().filter(|l| l.delta > 0.0).map(|l| l.delta).sum();
+        let gross_buy: Real = flow
+            .legs
+            .iter()
+            .filter(|l| l.delta > 0.0)
+            .map(|l| l.delta)
+            .sum();
         let gross_sell: Real = flow
             .legs
             .iter()
@@ -629,7 +638,11 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             .sum();
         let crossed = gross_buy.min(gross_sell);
         let majority_is_buy = gross_buy >= gross_sell;
-        let gross_majority = if majority_is_buy { gross_buy } else { gross_sell };
+        let gross_majority = if majority_is_buy {
+            gross_buy
+        } else {
+            gross_sell
+        };
         // Of the majority side's flow, this share reached the market.
         let market_share = if gross_majority > POSITION_EPSILON {
             (gross_majority - crossed) / gross_majority
@@ -651,10 +664,15 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             }
             let on_majority = (leg.delta > 0.0) == majority_is_buy;
             // The minority side is entirely crossed; the majority side splits.
-            let market_part = if on_majority { delta * market_share } else { 0.0 };
+            let market_part = if on_majority {
+                delta * market_share
+            } else {
+                0.0
+            };
             let crossed_part = delta - market_part;
             let comm = if market_units > POSITION_EPSILON {
-                commission * (market_part.abs() * fraction) / (market_units * fraction).max(POSITION_EPSILON)
+                commission * (market_part.abs() * fraction)
+                    / (market_units * fraction).max(POSITION_EPSILON)
             } else {
                 0.0
             };

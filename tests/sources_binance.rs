@@ -5,7 +5,7 @@
 //! a canned two-page response, and verifies the client pages through both
 //! pages, decodes the JSON correctly, and stops at the short second page.
 
-use fugazi::sources::{Binance, SeriesSource, Interval, Timestamp};
+use fugazi::sources::{Binance, Interval, SeriesSource, Timestamp};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -34,14 +34,49 @@ async fn paginates_and_decodes_klines() {
     // Page 1: three klines, the maximum the client asked for on this request.
     // The client's next `startTime` will be `last_open_time + 1`.
     let page1: Vec<serde_json::Value> = vec![
-        kline(1_704_067_200_000, "42000.0", "42500.5", "41800.25", "42100.00", "100.0"),
-        kline(1_704_153_600_000, "42100.0", "42300.0", "42000.0", "42250.0", "80.0"),
-        kline(1_704_240_000_000, "42250.0", "42400.0", "42150.0", "42350.0", "90.0"),
+        kline(
+            1_704_067_200_000,
+            "42000.0",
+            "42500.5",
+            "41800.25",
+            "42100.00",
+            "100.0",
+        ),
+        kline(
+            1_704_153_600_000,
+            "42100.0",
+            "42300.0",
+            "42000.0",
+            "42250.0",
+            "80.0",
+        ),
+        kline(
+            1_704_240_000_000,
+            "42250.0",
+            "42400.0",
+            "42150.0",
+            "42350.0",
+            "90.0",
+        ),
     ];
     // Page 2: two klines, so a short page -> loop exit.
     let page2: Vec<serde_json::Value> = vec![
-        kline(1_704_326_400_000, "42350.0", "42500.0", "42300.0", "42450.0", "70.0"),
-        kline(1_704_412_800_000, "42450.0", "42600.0", "42400.0", "42550.0", "60.0"),
+        kline(
+            1_704_326_400_000,
+            "42350.0",
+            "42500.0",
+            "42300.0",
+            "42450.0",
+            "70.0",
+        ),
+        kline(
+            1_704_412_800_000,
+            "42450.0",
+            "42600.0",
+            "42400.0",
+            "42550.0",
+            "60.0",
+        ),
     ];
 
     Mock::given(method("GET"))
@@ -89,7 +124,10 @@ async fn paginates_and_decodes_klines() {
     }
 
     // Provider extras made it onto every atom's overlay side channel.
-    let ov = bars[0].overlays.as_ref().expect("Binance atoms carry overlays");
+    let ov = bars[0]
+        .overlays
+        .as_ref()
+        .expect("Binance atoms carry overlays");
     assert!(ov.get_by_key("quote_volume").is_some());
     assert!(ov.get_by_key("n_trades").is_some());
     assert!(ov.get_by_key("taker_buy_base_volume").is_some());
@@ -101,12 +139,10 @@ async fn maps_unknown_symbol_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v3/klines"))
-        .respond_with(
-            ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "code": -1121,
-                "msg": "Invalid symbol."
-            })),
-        )
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "code": -1121,
+            "msg": "Invalid symbol."
+        })))
         .mount(&server)
         .await;
 

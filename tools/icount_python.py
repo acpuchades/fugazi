@@ -195,7 +195,7 @@ WORKLOADS: dict[str, tuple[str, str, str | None]] = {
     ),
 }
 
-WORKER = r'''
+WORKER = r"""
 import sys
 import numpy as np
 
@@ -223,7 +223,7 @@ SETUP
 
 for _ in range(n):
     BODY
-'''
+"""
 
 
 def worker_source(setup: str, body: str) -> str:
@@ -268,10 +268,15 @@ def icount(path: str, n: int, samples: int, mode: str, reps: int) -> int:
     for _ in range(reps):
         with tempfile.NamedTemporaryFile(suffix=".out") as out:
             cmd = [
-                "valgrind", "--tool=callgrind",
+                "valgrind",
+                "--tool=callgrind",
                 f"--callgrind-out-file={out.name}",
                 "--quiet",
-                sys.executable, path, str(n), str(samples), mode,
+                sys.executable,
+                path,
+                str(n),
+                str(samples),
+                mode,
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if proc.returncode != 0:
@@ -347,9 +352,13 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     # `n` is large enough that even the cheapest workload's contribution is ~16 M
     # instructions against a ~1 M noise floor. See the module docstring.
-    ap.add_argument("--n", type=int, default=20, help="loop iterations (doubled for the second run)")
+    ap.add_argument(
+        "--n", type=int, default=20, help="loop iterations (doubled for the second run)"
+    )
     ap.add_argument("--samples", type=int, default=200_000)
-    ap.add_argument("--reps", type=int, default=2, help="runs per endpoint; the minimum is kept")
+    ap.add_argument(
+        "--reps", type=int, default=2, help="runs per endpoint; the minimum is kept"
+    )
     args = ap.parse_args()
 
     if args.list:
@@ -363,8 +372,10 @@ def main() -> int:
         raise SystemExit(f"unknown workload(s): {', '.join(unknown)}")
     check_extension_fresh()
 
-    print(f"# callgrind instructions/sample, {args.samples} samples, "
-          f"{args.n} vs {2 * args.n} iterations, best of {args.reps}")
+    print(
+        f"# callgrind instructions/sample, {args.samples} samples, "
+        f"{args.n} vs {2 * args.n} iterations, best of {args.reps}"
+    )
     print(f"{'workload':10s} {'fugazi':>10s} {'talib':>10s} {'ratio':>8s}")
     for name in names:
         setup, body, ref = WORKLOADS[name]

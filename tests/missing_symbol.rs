@@ -13,7 +13,9 @@
 //! The first is ordinary and must not fail; the second is bad input and must
 //! fail once, up front, by name.
 
-use fugazi::spec::backtest::{EvalContext, run_iteration_any, run_iteration_resumable, validate_universe};
+use fugazi::spec::backtest::{
+    EvalContext, run_iteration_any, run_iteration_resumable, validate_universe,
+};
 use fugazi::spec::costs::CostConfig;
 use fugazi::spec::preset::StrategyRef;
 use fugazi::spec::{SingleStrategySpec, StrategySpec};
@@ -47,7 +49,11 @@ fn late_listing_stream() -> Vec<Snapshot<Symbol>> {
                 if k == N_SYMS - 1 && i < LISTS_AT {
                     continue;
                 }
-                snap.push(Some(symbol(format!("S{k}USDT"))), None, atom(i, price(i, k)));
+                snap.push(
+                    Some(symbol(format!("S{k}USDT"))),
+                    None,
+                    atom(i, price(i, k)),
+                );
             }
             snap
         })
@@ -104,9 +110,18 @@ fn a_late_listing_runs_instead_of_panicking() {
     // because the other eight symbols were present and the declared one wasn't.
     let snaps = late_listing_stream();
     let costs = empty_costs();
-    let iter = run_iteration_any(&single(&doc("S8USDT")), labels(snaps.len()), &snaps, &ctx(&costs))
-        .expect("a late listing is ordinary input, not an error");
-    assert_eq!(iter.report.equity_curve.len(), BARS, "every bar is still evaluated");
+    let iter = run_iteration_any(
+        &single(&doc("S8USDT")),
+        labels(snaps.len()),
+        &snaps,
+        &ctx(&costs),
+    )
+    .expect("a late listing is ordinary input, not an error");
+    assert_eq!(
+        iter.report.equity_curve.len(),
+        BARS,
+        "every bar is still evaluated"
+    );
 }
 
 #[test]
@@ -136,8 +151,13 @@ fn the_series_does_not_advance_before_it_lists() {
     // the last known price — which, before the first quote, is the seed.
     let snaps = late_listing_stream();
     let costs = empty_costs();
-    let iter = run_iteration_any(&single(&doc("S8USDT")), labels(snaps.len()), &snaps, &ctx(&costs))
-        .expect("runs");
+    let iter = run_iteration_any(
+        &single(&doc("S8USDT")),
+        labels(snaps.len()),
+        &snaps,
+        &ctx(&costs),
+    )
+    .expect("runs");
 
     assert!(
         iter.report.fills.iter().all(|f| f.bar >= LISTS_AT),
@@ -150,15 +170,23 @@ fn the_series_does_not_advance_before_it_lists() {
         "equity moved before the declared symbol ever quoted"
     );
     // And it does eventually trade, or the assertions above are vacuous.
-    assert!(!iter.report.fills.is_empty(), "never traded at all — the test proves nothing");
+    assert!(
+        !iter.report.fills.is_empty(),
+        "never traded at all — the test proves nothing"
+    );
 }
 
 #[test]
 fn a_symbol_present_from_the_first_bar_is_unaffected() {
     let snaps = late_listing_stream();
     let costs = empty_costs();
-    let iter = run_iteration_any(&single(&doc("S0USDT")), labels(snaps.len()), &snaps, &ctx(&costs))
-        .expect("runs");
+    let iter = run_iteration_any(
+        &single(&doc("S0USDT")),
+        labels(snaps.len()),
+        &snaps,
+        &ctx(&costs),
+    )
+    .expect("runs");
     assert_eq!(iter.report.equity_curve.len(), BARS);
     assert!(!iter.report.fills.is_empty());
 }
@@ -176,12 +204,20 @@ fn a_symbol_absent_from_the_whole_stream_is_refused() {
         .map(|i| Snapshot::single(symbol("BTCUSDT"), atom(i, price(i, 0))))
         .collect();
     let costs = empty_costs();
-    let err = match run_iteration_any(&single(&doc("BTCUSD")), labels(snaps.len()), &snaps, &ctx(&costs)) {
+    let err = match run_iteration_any(
+        &single(&doc("BTCUSD")),
+        labels(snaps.len()),
+        &snaps,
+        &ctx(&costs),
+    ) {
         Err(e) => e,
         Ok(_) => panic!("a symbol that is nowhere in the input is not a runnable document"),
     };
     assert!(err.contains("BTCUSD"), "names the declared symbol: {err}");
-    assert!(err.contains("BTCUSDT"), "names what the stream does carry: {err}");
+    assert!(
+        err.contains("BTCUSDT"),
+        "names what the stream does carry: {err}"
+    );
 }
 
 #[test]
@@ -189,8 +225,7 @@ fn the_check_is_over_the_stream_not_the_bar() {
     // One quote anywhere in the stream is enough — this is the line between the
     // two cases, so it gets its own test.
     let snaps = late_listing_stream();
-    validate_universe(&single(&doc("S8USDT")), &snaps)
-        .expect("present on bar 120 is present");
+    validate_universe(&single(&doc("S8USDT")), &snaps).expect("present on bar 120 is present");
     validate_universe(&single(&doc("S9USDT")), &snaps)
         .expect_err("present on no bar at all is absent");
 }
@@ -205,27 +240,36 @@ fn a_resumed_chunk_may_not_quote_the_symbol() {
 
     // Chunk 1: bars LISTS_AT.. — the symbol quotes, so this is a valid cold start.
     let warm: Vec<Snapshot<Symbol>> = full[LISTS_AT..].to_vec();
-    let (_, state) = run_iteration_resumable(
-        &spec,
-        labels(warm.len()),
-        &warm,
-        &ctx(&costs),
-        None,
-        false,
-    )
-    .expect("cold chunk runs");
+    let (_, state) =
+        run_iteration_resumable(&spec, labels(warm.len()), &warm, &ctx(&costs), None, false)
+            .expect("cold chunk runs");
 
     // Chunk 2: bars in which S8USDT does not appear at all.
     let quiet: Vec<Snapshot<Symbol>> = full[..LISTS_AT].to_vec();
     assert!(
-        run_iteration_resumable(&spec, labels(quiet.len()), &quiet, &ctx(&costs), Some(&state), false)
-            .is_ok(),
+        run_iteration_resumable(
+            &spec,
+            labels(quiet.len()),
+            &quiet,
+            &ctx(&costs),
+            Some(&state),
+            false
+        )
+        .is_ok(),
         "a resumed chunk is not required to quote the symbol"
     );
 
     // The same chunk cold *is* refused — the resume is what makes it legal.
     assert!(
-        run_iteration_resumable(&spec, labels(quiet.len()), &quiet, &ctx(&costs), None, false).is_err(),
+        run_iteration_resumable(
+            &spec,
+            labels(quiet.len()),
+            &quiet,
+            &ctx(&costs),
+            None,
+            false
+        )
+        .is_err(),
         "cold, that chunk never sees the declared symbol"
     );
 }
@@ -261,7 +305,10 @@ fn a_pairs_document_declares_both_legs() {
     )
     .expect("parses");
     let spec = StrategySpec::Pairs(Box::new(spec));
-    assert_eq!(spec.declared_symbols(), vec!["S0USDT".to_string(), "S9USDT".to_string()]);
+    assert_eq!(
+        spec.declared_symbols(),
+        vec!["S0USDT".to_string(), "S9USDT".to_string()]
+    );
     let err = validate_universe(&spec, &late_listing_stream())
         .expect_err("S9USDT is in no bar of that stream");
     assert!(

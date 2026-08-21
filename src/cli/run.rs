@@ -45,7 +45,6 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::backtest::{self, EvalContext, IterationResult};
-use fugazi::spec::StrategySpec;
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
@@ -56,6 +55,7 @@ use crate::spec::{
     BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, StrategyRef,
 };
 use crate::style;
+use fugazi::spec::StrategySpec;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
 /// Held by the `run` subcommand's driver; never enters [`crate::backtest`],
@@ -159,15 +159,9 @@ fn iterate(
         return backtest::run_iteration_any(spec, bars, snapshots, inputs)
             .map_err(backtest::build_error);
     }
-    let (iter, state) = backtest::run_iteration_resumable(
-        spec,
-        bars,
-        snapshots,
-        inputs,
-        opts.resume,
-        opts.flatten,
-    )
-    .map_err(backtest::build_error)?;
+    let (iter, state) =
+        backtest::run_iteration_resumable(spec, bars, snapshots, inputs, opts.resume, opts.flatten)
+            .map_err(backtest::build_error)?;
     if let Some(path) = opts.save_state {
         let json = serde_json::to_string_pretty(&state).context("serializing run state")?;
         std::fs::write(path, json)
@@ -237,7 +231,10 @@ fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
         section.seed,
         section.ci_level * 100.0
     );
-    let fmt = |v: Option<Real>| v.map(|x| format!("{x:.4}")).unwrap_or_else(|| "—".to_string());
+    let fmt = |v: Option<Real>| {
+        v.map(|x| format!("{x:.4}"))
+            .unwrap_or_else(|| "—".to_string())
+    };
     for m in &section.metrics {
         let mut line = format!(
             "  {:<28} obs {:>10}  CI [{}, {}]",
@@ -318,7 +315,11 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     if !opts.quiet {
         let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
         style::print_header("run", "backtest a strategy over CSV series");
-        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
+        style::print_warns(&style::collect_warnings(
+            &skipped_overlay_columns,
+            no_cost_warning,
+            "results",
+        ));
         print_inputs_block(opts, &sliced, costs_active);
     }
 
@@ -348,7 +349,8 @@ pub fn run_pairs(
     let started = SystemTime::now();
     let left_series = frame.atoms(&spec.left)?;
     let right_series = frame.atoms(&spec.right)?;
-    let (bars, left_atoms, right_atoms) = join_pair_by_time(&left_series.atoms, &right_series.atoms);
+    let (bars, left_atoms, right_atoms) =
+        join_pair_by_time(&left_series.atoms, &right_series.atoms);
 
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
@@ -364,7 +366,9 @@ pub fn run_pairs(
         });
     let bars_per_year =
         calendar::pick_bars_per_year(opts.bars_per_year, &spec.left, effective_freq)
-            .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq))
+            .or_else(|| {
+                calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq)
+            })
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
@@ -386,7 +390,11 @@ pub fn run_pairs(
     // say — joins onto the legs' *inner-joined* timeline. Neither leg is
     // privileged here, so `!pick` is already mandatory on every leaf; this only
     // widens which assets one can name.
-    let read_only = read_only_series(frame, &[spec.left.as_str(), spec.right.as_str()], opts.reads)?;
+    let read_only = read_only_series(
+        frame,
+        &[spec.left.as_str(), spec.right.as_str()],
+        opts.reads,
+    )?;
     attach_read_series(&bars, &mut snapshots, &read_only);
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
     // The slice lands on the *joined* timeline, so two partially-overlapping
@@ -447,7 +455,9 @@ fn run_universe(
     // Interned once per distinct symbol for the whole run.
     let universe: Vec<Symbol> = traded.iter().map(fugazi::types::symbol).collect();
     if universe.is_empty() {
-        anyhow::bail!("no symbols found in the input series — {noun} needs at least one traded asset");
+        anyhow::bail!(
+            "no symbols found in the input series — {noun} needs at least one traded asset"
+        );
     }
     // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
     // BTreeMap so ascending order is guaranteed by construction).
@@ -730,7 +740,12 @@ fn emit_run(
 
     if let Some(ws) = iter.windowed.as_deref() {
         let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
+        write_windowed_csv(
+            ws,
+            &iter.bars,
+            dsr_context,
+            &opts.out_dir.join("metrics.csv"),
+        )?;
     }
     if let Some(rs) = iter.rolling.as_deref() {
         write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
@@ -1183,7 +1198,15 @@ fn print_pairs_inputs_block(
 fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     let mut w = writer(path)?;
     let header: &[&str] = if iter.costs_active {
-        &["time", "symbol", "side", "units", "price", "kind", "commission"]
+        &[
+            "time",
+            "symbol",
+            "side",
+            "units",
+            "price",
+            "kind",
+            "commission",
+        ]
     } else {
         &["time", "symbol", "side", "units", "price", "kind"]
     };
@@ -1520,7 +1543,11 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
     style::field("started", &style::format_utc(started));
     style::field(
         "finished",
-        &format!("{} ({})", style::format_utc(finished), style::format_elapsed(elapsed)),
+        &format!(
+            "{} ({})",
+            style::format_utc(finished),
+            style::format_elapsed(elapsed)
+        ),
     );
 }
 
@@ -1541,8 +1568,14 @@ fn print_metrics_block(
         style::field("measured", measured);
     }
     if let Some(g) = gross {
-        let net = m.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
-        let gross = g.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
+        let net = m
+            .returns
+            .cagr_pct
+            .map_or("—".to_string(), |v| format!("{v:+.2}%"));
+        let gross = g
+            .returns
+            .cagr_pct
+            .map_or("—".to_string(), |v| format!("{v:+.2}%"));
         style::field("cagr", &format!("net {net} · gross {gross}"));
     }
     style::field(
@@ -1736,10 +1769,7 @@ where
 /// `+M.MM ± S.SS%` — signed mean (returns can be negative), unsigned stddev,
 /// unit suffix once at the end.
 fn format_ms_signed_pct(pair: Option<(Real, Real)>) -> String {
-    pair.map_or_else(
-        || "—".to_string(),
-        |(m, s)| format!("{m:+.2} ± {s:.2}%"),
-    )
+    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:+.2} ± {s:.2}%"))
 }
 
 /// `M.MM ± S.SS%` — unsigned mean (magnitudes, ratios in percent form).
@@ -1760,6 +1790,3 @@ fn format_ms_count(pair: Option<(Real, Real)>, precision: usize) -> String {
         |(m, s)| format!("{m:.*} ± {s:.*}", precision, precision),
     )
 }
-
-
-

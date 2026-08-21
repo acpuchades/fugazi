@@ -197,7 +197,8 @@ fn a_fragmented_run_universe_warns() {
         .ok();
 
     assert!(
-        out.stderr.contains("at most 2 of 4 symbols ever share a bar"),
+        out.stderr
+            .contains("at most 2 of 4 symbols ever share a bar"),
         "no fragmentation warning on stderr:\n{}",
         out.stderr
     );
@@ -230,9 +231,14 @@ fn the_run_warning_survives_quiet() {
         .output_dir("quiet_run")
         .ok();
 
-    assert!(out.stdout.is_empty(), "--quiet still printed:\n{}", out.stdout);
     assert!(
-        out.stderr.contains("at most 1 of 2 symbols ever share a bar"),
+        out.stdout.is_empty(),
+        "--quiet still printed:\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stderr
+            .contains("at most 1 of 2 symbols ever share a bar"),
         "--quiet swallowed the warning:\n{}",
         out.stderr
     );
@@ -284,7 +290,11 @@ fn a_single_asset_run_says_nothing_about_overlap() {
         .output_dir("single_run")
         .ok();
 
-    assert!(!out.stderr.contains("ever share a bar"), "warned:\n{}", out.stderr);
+    assert!(
+        !out.stderr.contains("ever share a bar"),
+        "warned:\n{}",
+        out.stderr
+    );
     assert!(
         !out.stdout.contains("overlap"),
         "overlap field on a single-asset run:\n{}",
@@ -320,7 +330,8 @@ sizing: !equal_weight 2
         .ok();
 
     assert!(
-        out.stderr.contains("at most 1 of 2 symbols ever share a bar"),
+        out.stderr
+            .contains("at most 1 of 2 symbols ever share a bar"),
         "no fragmentation warning on stderr:\n{}",
         out.stderr
     );

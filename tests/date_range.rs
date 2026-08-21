@@ -235,7 +235,10 @@ fn strict_from_starts_cold_and_reports_no_warmup() {
 
     // Only the warmed run consumed a prefix.
     assert!(
-        field(&warmed, "warmup_bars").parse::<usize>().expect("a count") > 0,
+        field(&warmed, "warmup_bars")
+            .parse::<usize>()
+            .expect("a count")
+            > 0,
         "a warmed slice must report the prefix it consumed"
     );
     assert_eq!(

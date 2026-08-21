@@ -25,7 +25,7 @@ use serde::Deserialize;
 
 use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{SeriesSource, Interval, SourceError, Timestamp};
+use super::{Interval, SeriesSource, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://query1.finance.yahoo.com";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (compatible; fugazi)";
@@ -367,7 +367,9 @@ fn percent_encode_path_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => {
                 out.push('%');
                 out.push_str(&format!("{b:02X}"));
@@ -550,7 +552,10 @@ mod tests {
             },
         };
         let out = decode_result(result, true).unwrap();
-        assert_eq!(out[0].candle.unwrap(), Candle::new(100.0, 120.0, 90.0, 110.0, 1_000.0));
+        assert_eq!(
+            out[0].candle.unwrap(),
+            Candle::new(100.0, 120.0, 90.0, 110.0, 1_000.0)
+        );
     }
 
     #[test]
@@ -576,9 +581,15 @@ mod tests {
 
     #[tokio::test]
     async fn tickers_reports_unsupported_by_default() {
-        let err = Yahoo::new().tickers().await.expect_err("expected Unsupported");
+        let err = Yahoo::new()
+            .tickers()
+            .await
+            .expect_err("expected Unsupported");
         match err {
-            SourceError::Unsupported { operation, provider } => {
+            SourceError::Unsupported {
+                operation,
+                provider,
+            } => {
                 assert_eq!(provider, "yfinance");
                 assert_eq!(operation, "ticker enumeration");
             }

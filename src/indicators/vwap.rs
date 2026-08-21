@@ -1,4 +1,3 @@
-
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;

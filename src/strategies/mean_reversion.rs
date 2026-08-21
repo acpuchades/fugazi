@@ -1,8 +1,8 @@
 //! Mean-reversion strategies: fade an extreme, exit as price returns to normal.
 
 use crate::indicators::{Bollinger, Mfi, Rsi, Sma, StdDev, Stochastic, Value};
-use crate::wallet::POSITION_EPSILON;
 use crate::prelude::*;
+use crate::wallet::POSITION_EPSILON;
 
 use super::SingleAssetStrategy;
 
@@ -35,7 +35,13 @@ pub fn rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Se
 /// Buys when the close crosses below the lower band and exits when it crosses
 /// back above the middle band (the moving average). Fades the bands rather than
 /// chasing the breakout.
-pub fn bollinger_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, period: usize, k: Real) -> SingleAssetStrategy<Sym> {
+pub fn bollinger_reversion<
+    Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync,
+>(
+    symbol: Sym,
+    period: usize,
+    k: Real,
+) -> SingleAssetStrategy<Sym> {
     let bands = Bollinger::new(super::self_close::<Sym>(), period, k).shared();
     SingleAssetStrategy::new(symbol).long_on(
         super::self_close::<Sym>().crosses_below(bands.lower()),
@@ -48,7 +54,9 @@ pub fn bollinger_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'stat
 /// The stochastic ranges `0..1` here, so `oversold`/`overbought` are fractions
 /// (e.g. 0.2 / 0.8). Buys when %K crosses down through `oversold`, exits when it
 /// crosses up through `overbought`.
-pub fn stochastic_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
+pub fn stochastic_reversal<
+    Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync,
+>(
     symbol: Sym,
     period: usize,
     oversold: Real,
@@ -72,7 +80,12 @@ pub fn stoch_rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'stati
     oversold: Real,
     overbought: Real,
 ) -> SingleAssetStrategy<Sym> {
-    let stoch_rsi = || Stochastic::new(Rsi::new(super::self_close::<Sym>(), rsi_period), stoch_period);
+    let stoch_rsi = || {
+        Stochastic::new(
+            Rsi::new(super::self_close::<Sym>(), rsi_period),
+            stoch_period,
+        )
+    };
     SingleAssetStrategy::new(symbol).long_on(
         stoch_rsi().crosses_below(Value::new(oversold)),
         stoch_rsi().crosses_above(Value::new(overbought)),
@@ -126,7 +139,9 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> ZSco
     }
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy for ZScoreReversion<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy
+    for ZScoreReversion<Sym>
+{
     type Input = crate::types::Snapshot<Sym>;
     type Symbol = Sym;
 

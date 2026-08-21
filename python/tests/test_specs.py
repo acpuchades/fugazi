@@ -9,10 +9,7 @@ import fugazi as ta
 
 def _snaps_single(symbol, closes, volume=1000.0):
     """Build one-symbol snapshots (flat OHLC bars)."""
-    return [
-        ta.Snapshot({symbol: ta.Candle(v, v, v, v, volume)})
-        for v in closes
-    ]
+    return [ta.Snapshot({symbol: ta.Candle(v, v, v, v, volume)}) for v in closes]
 
 
 def _snaps_multi(series, volume=1000.0):
@@ -85,10 +82,12 @@ def test_load_pairs_and_run():
     assert spec.kind == "pairs"
 
     # BTC up, ETH down — expect entry with both legs active.
-    snaps = _snaps_multi({
-        "BTC": [90, 91, 92, 93, 95, 100, 105, 110, 112, 115],
-        "ETH": [110, 108, 107, 105, 103, 100, 98, 96, 94, 92],
-    })
+    snaps = _snaps_multi(
+        {
+            "BTC": [90, 91, 92, 93, 95, 100, 105, 110, 112, 115],
+            "ETH": [110, 108, 107, 105, 103, 100, 98, 96, 94, 92],
+        }
+    )
     wallet = ta.PaperWallet(1000.0)
     rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -103,10 +102,12 @@ def test_load_basket_and_run():
     spec = ta.load_spec(yaml)
     assert spec.kind == "basket"
 
-    snaps = _snaps_multi({
-        "BTC": [100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122],
-        "ETH": [100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78],
-    })
+    snaps = _snaps_multi(
+        {
+            "BTC": [100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122],
+            "ETH": [100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78],
+        }
+    )
     wallet = ta.PaperWallet(1000.0)
     rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -145,10 +146,12 @@ def test_load_multi_and_run():
     spec = ta.load_spec(yaml)
     assert spec.kind == "multi"
 
-    snaps = _snaps_multi({
-        "BTC": [100, 101, 102, 103, 104, 105],
-        "ETH": [200, 201, 202, 203, 204, 205],
-    })
+    snaps = _snaps_multi(
+        {
+            "BTC": [100, 101, 102, 103, 104, 105],
+            "ETH": [200, 201, 202, 203, 204, 205],
+        }
+    )
     wallet = ta.PaperWallet(1000.0)
     rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -165,10 +168,12 @@ def test_load_portfolio_and_run():
     spec = ta.load_spec(yaml)
     assert spec.kind == "portfolio"
 
-    snaps = _snaps_multi({
-        "BTC": [100, 101, 102, 103, 104, 105],
-        "ETH": [200, 201, 202, 203, 204, 205],
-    })
+    snaps = _snaps_multi(
+        {
+            "BTC": [100, 101, 102, 103, 104, 105],
+            "ETH": [200, 201, 202, 203, 204, 205],
+        }
+    )
     wallet = ta.PaperWallet(1000.0)
     rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -320,10 +325,12 @@ def test_a_misspelled_field_is_still_an_error():
 
 def test_trading_costs_from_dict():
     """The wrapper accepts a flat leg mapping (auto-hoisted to default)."""
-    c = ta.TradingCostsConfig({
-        "commission": {"percentage": {"rate": 0.001}},
-        "spread": {"bps": {"bps": 5}},
-    })
+    c = ta.TradingCostsConfig(
+        {
+            "commission": {"percentage": {"rate": 0.001}},
+            "spread": {"bps": {"bps": 5}},
+        }
+    )
     assert "TradingCostsConfig" in repr(c)
 
 
@@ -335,12 +342,14 @@ def test_trading_costs_empty_is_zero_cost():
 
 def test_trading_costs_scoped_shape():
     """The `default:` / `by_symbol:` structured shape also works."""
-    c = ta.TradingCostsConfig({
-        "commission": {
-            "default": {"percentage": {"rate": 0.001}},
-            "by_symbol": {"BTC": {"percentage": {"rate": 0.0005}}},
-        },
-    })
+    c = ta.TradingCostsConfig(
+        {
+            "commission": {
+                "default": {"percentage": {"rate": 0.001}},
+                "by_symbol": {"BTC": {"percentage": {"rate": 0.0005}}},
+            },
+        }
+    )
     assert "scoped=1" in repr(c) or "defaults=true" in repr(c)
 
 
@@ -350,7 +359,10 @@ def test_optimize_with_cost_config_lowers_equity():
     snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
     baseline = ta.optimize(yaml, snaps, cash=1000.0, grid=[{}])
     with_cost = ta.optimize(
-        yaml, snaps, cash=1000.0, grid=[{}],
+        yaml,
+        snaps,
+        cash=1000.0,
+        grid=[{}],
         costs={"commission": {"percentage": {"rate": 0.001}}},
     )
     # Higher cost → lower final metric value (total_return dips).
@@ -558,6 +570,7 @@ def test_optimize_repeated_axis_value_is_refused():
         metric_names=["returns.total_pct"],
         best_by="returns.total_pct",
     )
+
     def swept(fast):
         return ta.optimize(
             _trend_yaml(), _trend_snaps(), grid=[{"FAST": fast, "SLOW": 15}], **common
@@ -582,10 +595,17 @@ def test_optimize_support_ignores_a_single_value_axis():
         smooth="box:1",
     )
     listed = ta.optimize(
-        _trend_yaml(), _trend_snaps(), grid=[{"FAST": [3, 5, 7, 9, 11], "SLOW": [15]}], **common
+        _trend_yaml(),
+        _trend_snaps(),
+        grid=[{"FAST": [3, 5, 7, 9, 11], "SLOW": [15]}],
+        **common,
     )
     scalar = ta.optimize(
-        _trend_yaml(), _trend_snaps(), grid=[{"FAST": [3, 5, 7, 9, 11]}], params={"SLOW": 15}, **common
+        _trend_yaml(),
+        _trend_snaps(),
+        grid=[{"FAST": [3, 5, 7, 9, 11]}],
+        params={"SLOW": 15},
+        **common,
     )
     assert [r.support for r in listed.rows] == [r.support for r in scalar.rows]
     assert max(r.support for r in listed.rows) == pytest.approx(1.0)
@@ -916,6 +936,7 @@ long:
 
 def _wobbly(n):
     import math
+
     return [100.0 + 10.0 * math.sin(i * 0.35) + 0.05 * i for i in range(n)]
 
 
@@ -926,7 +947,9 @@ def test_run_resumable_matches_uninterrupted_run():
     split = 30
 
     # Uninterrupted 60-bar run.
-    whole_rep, _ = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+    whole_rep, _ = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps
+    )
 
     # First half → capture the state JSON.
     _first, state = spec.run_resumable(ta.PaperWallet(1000.0), snaps[:split])
@@ -997,6 +1020,7 @@ children:
 
 def _wobbly_b(n):
     import math
+
     return [100.0 + 8.0 * math.cos(i * 0.27) + 0.03 * i for i in range(n)]
 
 
@@ -1092,10 +1116,12 @@ def test_warm_up_advances_state_without_trading():
     warmed, _ = ta.load_spec(_RESUME_YAML).run_resumable(
         ta.PaperWallet(1000.0), snaps[30:], resume=state
     )
-    cold, _ = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps[30:])
-    assert len(warmed.fills) != len(cold.fills) or warmed.equity_curve != cold.equity_curve, (
-        "a warmed resume should differ from a cold start over the same bars"
+    cold, _ = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps[30:]
     )
+    assert (
+        len(warmed.fills) != len(cold.fills) or warmed.equity_curve != cold.equity_curve
+    ), "a warmed resume should differ from a cold start over the same bars"
 
 
 def test_run_resumable_rejects_a_stale_format_version():
@@ -1103,7 +1129,9 @@ def test_run_resumable_rejects_a_stale_format_version():
     import json
 
     snaps = _snaps_single("X", _wobbly(20))
-    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps
+    )
     stale = json.loads(state)
     stale["format_version"] += 1
 
@@ -1116,7 +1144,9 @@ def test_run_resumable_rejects_a_stale_format_version():
 def test_run_resumable_rejects_mismatched_shape():
     """Resuming a single-shape state into a pairs spec is rejected."""
     snaps = _snaps_single("X", _wobbly(20))
-    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps
+    )
 
     pairs = ta.load_spec(
         """
@@ -1161,7 +1191,9 @@ def test_evaluate_embeds_montecarlo_block():
     cfg = ta.MonteCarloConfig(
         permutations=200, scheme="stationary", block=8.0, seed=7, null="rerun"
     )
-    m = spec.evaluate(ta.PaperWallet(1000.0), snaps, bars_per_year=365.0, montecarlo=cfg)
+    m = spec.evaluate(
+        ta.PaperWallet(1000.0), snaps, bars_per_year=365.0, montecarlo=cfg
+    )
 
     assert "montecarlo" in m
     mc = m["montecarlo"]
@@ -1192,7 +1224,9 @@ def test_evaluate_without_montecarlo_has_no_block():
 def test_montecarlo_reproducible_across_calls():
     spec = ta.load_spec(_MC_YAML)
     snaps = _snaps_single("X", _wobbly(100))
-    cfg = ta.MonteCarloConfig(permutations=150, seed=42, null="rerun", metrics=["sharpe"])
+    cfg = ta.MonteCarloConfig(
+        permutations=150, seed=42, null="rerun", metrics=["sharpe"]
+    )
     a = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     b = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     assert a["metrics"][0]["ci_lower"] == b["metrics"][0]["ci_lower"]
@@ -1205,12 +1239,18 @@ def test_montecarlo_reproducible_across_calls():
 
 
 def test_resample_index_matrix_shape_range_and_determinism():
-    a = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=3)
-    b = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=3)
+    a = ta.montecarlo.resample_index_matrix(
+        50, 10, scheme="stationary", block=8.0, seed=3
+    )
+    b = ta.montecarlo.resample_index_matrix(
+        50, 10, scheme="stationary", block=8.0, seed=3
+    )
     assert a == b, "same seed must reproduce the whole matrix"
     assert len(a) == 10 and all(len(row) == 50 for row in a)
     assert all(0 <= i < 50 for row in a for i in row)
-    c = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=4)
+    c = ta.montecarlo.resample_index_matrix(
+        50, 10, scheme="stationary", block=8.0, seed=4
+    )
     assert c != a, "a different seed must diverge"
     # The scalar draw is permutation 0 of the matrix with the same arguments.
     scalar = ta.montecarlo.resample_indices(50, scheme="stationary", block=8.0, seed=3)
@@ -1234,13 +1274,19 @@ def test_resample_index_matrix_reproduces_bootstrap_ci_paths():
     returns = ta.metrics.per_bar_returns(rep.equity_curve, rep.initial_equity)
 
     cfg = ta.MonteCarloConfig(
-        permutations=perms, scheme="stationary", block=block, seed=seed,
-        null="none", metrics=["returns.total_pct"],
+        permutations=perms,
+        scheme="stationary",
+        block=block,
+        seed=seed,
+        null="none",
+        metrics=["returns.total_pct"],
     )
     mc = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     samples = mc["samples"]
     col = samples["metric_names"].index("returns.total_pct")
-    ci_rows = next(s["rows"] for s in samples["sets"] if s["estimator"] == "bootstrap_ci")
+    ci_rows = next(
+        s["rows"] for s in samples["sets"] if s["estimator"] == "bootstrap_ci"
+    )
 
     idx = ta.montecarlo.resample_index_matrix(
         len(returns), perms, scheme="stationary", block=block, seed=seed
@@ -1516,7 +1562,9 @@ def test_optimize_reports_ruin_but_never_selects_it():
 
     assert dead.ruined and dead.ruin_bar is not None, "the 3x short must be wiped out"
     assert not alive.ruined and alive.ruin_bar is None
-    assert dead.ruin_bar == dead.metrics["run.ruin_bar"], "the property and the column agree"
+    assert dead.ruin_bar == dead.metrics["run.ruin_bar"], (
+        "the property and the column agree"
+    )
 
     # The number survives — both cells report a var_95, and the dead one's is
     # the better of the two on raw arithmetic.
@@ -1564,7 +1612,9 @@ def test_errors_subclass_value_error_so_old_handlers_still_catch():
 
 
 def test_a_document_that_will_not_build_raises_spec_error():
-    bad = "symbol: BTC\nlong:\n  enter: !gt { lhs: !get { key: absent }, rhs: !value 1 }"
+    bad = (
+        "symbol: BTC\nlong:\n  enter: !gt { lhs: !get { key: absent }, rhs: !value 1 }"
+    )
     with pytest.raises(ta.SpecError):
         ta.load_spec(bad).run(ta.PaperWallet(1000.0), _trend_snaps())
     # ...and the `!tag > ` breadcrumb still reaches the message.
@@ -1681,21 +1731,29 @@ def test_a_long_sweep_can_be_interrupted():
 
     def sweep():
         return ta.optimize(
-            _trend_yaml(), snaps, grid=grid, best_by="risk_adjusted.sharpe",
+            _trend_yaml(),
+            snaps,
+            grid=grid,
+            best_by="risk_adjusted.sharpe",
         )
 
     started = time.monotonic()
     sweep()
     uninterrupted = time.monotonic() - started
     if uninterrupted < 1.0:
-        pytest.skip(f"machine too fast to time a sweep interrupt ({uninterrupted:.2f}s)")
+        pytest.skip(
+            f"machine too fast to time a sweep interrupt ({uninterrupted:.2f}s)"
+        )
 
     fire_at = uninterrupted / 4
-    killer = subprocess.Popen([
-        sys.executable, "-c",
-        f"import os,signal,time; time.sleep({fire_at}); "
-        f"os.kill({os.getpid()}, signal.SIGINT)",
-    ])
+    killer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import os,signal,time; time.sleep({fire_at}); "
+            f"os.kill({os.getpid()}, signal.SIGINT)",
+        ]
+    )
     started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -1722,8 +1780,11 @@ def test_a_sweep_still_parallelises_after_the_watchdog():
     def timed(jobs):
         started = time.monotonic()
         rows = ta.optimize(
-            _trend_yaml(), snaps, grid=grid,
-            best_by="risk_adjusted.sharpe", jobs=jobs,
+            _trend_yaml(),
+            snaps,
+            grid=grid,
+            best_by="risk_adjusted.sharpe",
+            jobs=jobs,
         )
         return time.monotonic() - started, rows
 
@@ -1772,11 +1833,14 @@ def test_a_long_run_can_be_interrupted():
         pytest.skip(f"machine too fast to time an interrupt ({uninterrupted:.2f}s run)")
 
     fire_at = uninterrupted / 4
-    killer = subprocess.Popen([
-        sys.executable, "-c",
-        f"import os,signal,time; time.sleep({fire_at}); "
-        f"os.kill({os.getpid()}, signal.SIGINT)",
-    ])
+    killer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import os,signal,time; time.sleep({fire_at}); "
+            f"os.kill({os.getpid()}, signal.SIGINT)",
+        ]
+    )
     started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):

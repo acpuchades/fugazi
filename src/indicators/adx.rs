@@ -1,8 +1,8 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
-use crate::indicators::smoothing::WilderState;
 use crate::indicators::Dmi;
+use crate::indicators::smoothing::WilderState;
 use crate::types::{Candle, Real};
 
 /// The directional outputs of [`Adx`].

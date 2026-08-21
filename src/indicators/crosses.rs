@@ -105,11 +105,7 @@ where
         // clamped to 1 so a `warm_up = 0` operand (e.g. a `ValueBool`) still
         // needs one update before the prev slot can be compared against,
         // plus 1 for the edge detection.
-        self.lhs
-            .warm_up_bars()
-            .max(self.rhs.warm_up_bars())
-            .max(1)
-            + 1
+        self.lhs.warm_up_bars().max(self.rhs.warm_up_bars()).max(1) + 1
     }
 
     fn unstable_bars(&self) -> usize {
@@ -238,9 +234,7 @@ mod tests {
             )
         };
 
-        let samples = [
-            1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 3.0, 4.0, 5.0,
-        ];
+        let samples = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 3.0, 4.0, 5.0];
         assert_equivalent(native_form(2, 3.0), composed_form(2, 3.0), &samples);
     }
 
@@ -258,20 +252,15 @@ mod tests {
             )
         };
 
-        let samples = [
-            5.0, 4.0, 3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0,
-        ];
+        let samples = [5.0, 4.0, 3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0];
         assert_equivalent(native_form(2, 3.0), composed_form(2, 3.0), &samples);
     }
 
     #[test]
     fn epsilon_override_prevents_spurious_flip() {
         // With a huge epsilon, `2.0 > 1.5` reads as false, so no cross fires.
-        let mut xa = CrossesAbove::with_epsilon(
-            Identity::<Real>::new(),
-            Value::<Real>::new(1.5),
-            10.0,
-        );
+        let mut xa =
+            CrossesAbove::with_epsilon(Identity::<Real>::new(), Value::<Real>::new(1.5), 10.0);
         for &x in &[1.0, 2.0, 3.0, 4.0] {
             let out = xa.update(x);
             assert_ne!(out, Some(true), "no cross expected at {x} with huge eps");

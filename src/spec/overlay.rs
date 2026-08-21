@@ -75,11 +75,7 @@ impl OverlayColumn {
     ///
     /// `root` is the blessed series this instantiation reads for any
     /// `source:`-omitted leaf — see the module docs.
-    pub fn build(
-        &self,
-        schema: &Arc<Schema>,
-        root: Root<'_>,
-    ) -> Result<Box<dyn PayloadIndicator>> {
+    pub fn build(&self, schema: &Arc<Schema>, root: Root<'_>) -> Result<Box<dyn PayloadIndicator>> {
         build_overlay(&self.spec, schema, root)
             .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
     }
@@ -388,7 +384,10 @@ fn drive(
             // scalar-input carrier) gets the atom as a best effort.
             _ => PayloadValue::Atom(atom.clone()),
         };
-        let produced = pc.ind.update(input).and_then(|dv| to_overlay_value(pc.ty, dv));
+        let produced = pc
+            .ind
+            .update(input)
+            .and_then(|dv| to_overlay_value(pc.ty, dv));
         slots.push(produced);
     }
 
@@ -441,13 +440,12 @@ mod tests {
     #[test]
     fn columns_from_value_preserves_order_and_rejects_empty_name() {
         let c = cols("a: !sma { period: 2 }\nz: !ema { period: 3 }\n");
-        assert_eq!(c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a", "z"]);
+        assert_eq!(
+            c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
 
-        let err = columns_from_value(
-            serde_json::json!({ "": 1 }),
-            "(test)",
-        )
-        .unwrap_err();
+        let err = columns_from_value(serde_json::json!({ "": 1 }), "(test)").unwrap_err();
         assert!(format!("{err:#}").contains("empty column name"));
     }
 
@@ -530,9 +528,15 @@ mod tests {
         assert_eq!(augmented[0].overlays.as_ref().unwrap().get_real(idx), None);
         assert_eq!(augmented[1].overlays.as_ref().unwrap().get_real(idx), None);
         // Third bar: SMA(10,20,30) = 20.
-        assert_eq!(augmented[2].overlays.as_ref().unwrap().get_real(idx), Some(20.0));
+        assert_eq!(
+            augmented[2].overlays.as_ref().unwrap().get_real(idx),
+            Some(20.0)
+        );
         // Fourth bar: SMA(20,30,40) = 30.
-        assert_eq!(augmented[3].overlays.as_ref().unwrap().get_real(idx), Some(30.0));
+        assert_eq!(
+            augmented[3].overlays.as_ref().unwrap().get_real(idx),
+            Some(30.0)
+        );
     }
 
     #[test]
@@ -553,7 +557,13 @@ mod tests {
 
         let c = cols("sma3: !sma { period: 3 }");
         let (out_schema, mut prepared) = prepare(&existing, &c).unwrap();
-        let augmented = compute_series(Some("BTC"), &atoms, &out_schema, existing.len(), &mut prepared);
+        let augmented = compute_series(
+            Some("BTC"),
+            &atoms,
+            &out_schema,
+            existing.len(),
+            &mut prepared,
+        );
 
         let vol_i = out_schema.index_of("vol").unwrap();
         let sma_i = out_schema.index_of("sma3").unwrap();
@@ -565,14 +575,20 @@ mod tests {
             assert_eq!(ov.get_real(vol_i), Some(i as Real));
         }
         // New column: None until warm, then the SMA.
-        assert_eq!(augmented[0].overlays.as_ref().unwrap().get_real(sma_i), None);
-        assert_eq!(augmented[2].overlays.as_ref().unwrap().get_real(sma_i), Some(20.0));
+        assert_eq!(
+            augmented[0].overlays.as_ref().unwrap().get_real(sma_i),
+            None
+        );
+        assert_eq!(
+            augmented[2].overlays.as_ref().unwrap().get_real(sma_i),
+            Some(20.0)
+        );
     }
 
     #[test]
     fn compute_series_round_trips_through_get_real() {
-        use crate::indicators::GetReal;
         use crate::Indicator;
+        use crate::indicators::GetReal;
 
         let atoms = bare_atoms(&[10.0, 20.0, 30.0, 40.0]);
         let c = cols("sma3: !sma { period: 3 }");

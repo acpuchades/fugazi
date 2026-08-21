@@ -142,8 +142,8 @@ fn split_scope(text: &str) -> Result<(Scope, &str)> {
                 }
                 let scope_text = text[..i].trim();
                 let body = &text[i + 1..];
-                let scope = calendar::parse_scope(scope_text)
-                    .map_err(|e| anyhow!("cost scope: {e}"))?;
+                let scope =
+                    calendar::parse_scope(scope_text).map_err(|e| anyhow!("cost scope: {e}"))?;
                 return Ok((scope, body));
             }
             _ => {}
@@ -207,7 +207,6 @@ fn split_top_commas(s: &str) -> Result<Vec<String>> {
 // Folding: multiple CostSpec → one Value tree → typed CostConfig
 // ---------------------------------------------------------------------------
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,8 +237,7 @@ mod tests {
     fn a_scope_symbol_carrying_an_equals_needs_no_escape() {
         // Nothing in a scope *symbol* is `=`-delimited: the `=` that matters
         // opens the `key=value` term, and it comes after the `:`.
-        let spec =
-            CostSpec::from_str("EURUSD=X:commission=!percentage { rate: 0.0002 }").unwrap();
+        let spec = CostSpec::from_str("EURUSD=X:commission=!percentage { rate: 0.0002 }").unwrap();
         let (scope, key) = spec.first_set();
         assert_eq!(scope.symbol.as_deref(), Some("EURUSD=X"));
         assert_eq!(key, vec!["commission".to_string()]);

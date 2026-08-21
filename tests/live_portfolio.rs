@@ -17,11 +17,11 @@
 //! Behind the off-by-default `live` feature, so this file is empty without it.
 #![cfg(feature = "live")]
 
-use fugazi::types::{Symbol, symbol as intern};
 use fugazi::Wallet;
 use fugazi::live::OkxWallet;
 use fugazi::portfolio::Portfolio;
 use fugazi::strategies::SingleAssetStrategy;
+use fugazi::types::{Symbol, symbol as intern};
 
 fn two_child_portfolio() -> Portfolio<Symbol> {
     Portfolio::builder()

@@ -39,12 +39,12 @@
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
-#[cfg(feature = "sources")]
-use anyhow::bail;
-use anyhow::Result;
 use crate::prelude::*;
 #[cfg(feature = "sources")]
 use crate::sources::Interval;
+use anyhow::Result;
+#[cfg(feature = "sources")]
+use anyhow::bail;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
@@ -144,7 +144,8 @@ pub fn parse_interval(s: &str) -> Result<Interval> {
     let n: u32 = if num.is_empty() {
         1
     } else {
-        num.parse().map_err(|_| anyhow::anyhow!("bad interval {s:?}"))?
+        num.parse()
+            .map_err(|_| anyhow::anyhow!("bad interval {s:?}"))?
     };
     if n == 0 {
         bail!("interval {s:?}: multiplier must be positive");
@@ -213,9 +214,7 @@ impl FromStr for WindowSpec {
             Ok(WindowSpec::Duration(freq))
         } else {
             let n: NonZeroUsize = s.parse().map_err(|_| {
-                format!(
-                    "`{s}`: expected a positive bar count or a duration like `1d`/`1w`/`1M`"
-                )
+                format!("`{s}`: expected a positive bar count or a duration like `1d`/`1w`/`1M`")
             })?;
             Ok(WindowSpec::Bars(n))
         }
@@ -259,8 +258,8 @@ impl WindowSpec {
                         format_freq(win),
                     )
                 })?;
-                let bars = class.trading_seconds_per_bar(win)
-                    / class.trading_seconds_per_bar(bar_freq);
+                let bars =
+                    class.trading_seconds_per_bar(win) / class.trading_seconds_per_bar(bar_freq);
                 let n = bars.round() as usize;
                 NonZeroUsize::new(n).ok_or_else(|| {
                     format!(
@@ -318,14 +317,12 @@ impl FromStr for WalkForwardSpec {
                 if parts.len() == 1 { "" } else { "s" },
             ));
         }
-        let is = WindowSpec::from_str(parts[0])
-            .map_err(|e| format!("`--walkforward` IS: {e}"))?;
-        let oos = WindowSpec::from_str(parts[1])
-            .map_err(|e| format!("`--walkforward` OS: {e}"))?;
+        let is = WindowSpec::from_str(parts[0]).map_err(|e| format!("`--walkforward` IS: {e}"))?;
+        let oos = WindowSpec::from_str(parts[1]).map_err(|e| format!("`--walkforward` OS: {e}"))?;
         let embargo = match parts.get(2) {
-            Some(t) => Some(
-                WindowSpec::from_str(t).map_err(|e| format!("`--walkforward` Embargo: {e}"))?,
-            ),
+            Some(t) => {
+                Some(WindowSpec::from_str(t).map_err(|e| format!("`--walkforward` Embargo: {e}"))?)
+            }
             None => None,
         };
         Ok(Self { is, oos, embargo })
@@ -358,11 +355,7 @@ impl WalkForwardSpec {
 /// 3. one side of the pair alone — the missing side falls back to a sensible
 ///    default (class = [`AssetClass::Stocks`], freq = daily);
 /// 4. nothing set — returns 252, matching the legacy default.
-pub fn resolve(
-    explicit: Option<Real>,
-    class: Option<AssetClass>,
-    freq: Option<Frequency>,
-) -> Real {
+pub fn resolve(explicit: Option<Real>, class: Option<AssetClass>, freq: Option<Frequency>) -> Real {
     if let Some(v) = explicit {
         return v;
     }
@@ -396,9 +389,7 @@ pub fn detect_frequency_from_atoms<'a>(
 /// [`detect_frequency_from_atoms`]; also directly consumed by tests that want
 /// to exercise the string-parse vocabulary via [`parse_time_to_millis`]
 /// without constructing atoms.
-pub fn detect_frequency_from_millis(
-    stamps: impl IntoIterator<Item = i64>,
-) -> Option<Frequency> {
+pub fn detect_frequency_from_millis(stamps: impl IntoIterator<Item = i64>) -> Option<Frequency> {
     let stamps: Vec<i64> = stamps.into_iter().collect();
     if stamps.len() < 2 {
         return None;
@@ -433,7 +424,11 @@ pub fn parse_time_to_millis(raw: &str) -> Option<i64> {
     if let Ok(n) = s.parse::<i64>() {
         // A stamp much larger than "seconds since epoch could plausibly be" is
         // almost certainly milliseconds — 10^11 seconds is ~year 5138.
-        return Some(if n.abs() > 100_000_000_000 { n } else { n * 1000 });
+        return Some(if n.abs() > 100_000_000_000 {
+            n
+        } else {
+            n * 1000
+        });
     }
     if let Ok(dt) = time::OffsetDateTime::parse(s, &Rfc3339) {
         return Some(dt.unix_timestamp() * 1000);
@@ -519,9 +514,14 @@ pub fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), S
     let (sym_part, freq_part) = match text.find('[') {
         Some(open) => {
             if !text.ends_with(']') {
-                return Err(format!("scope `{text}`: `[freq]` bracket must close at the end"));
+                return Err(format!(
+                    "scope `{text}`: `[freq]` bracket must close at the end"
+                ));
             }
-            (text[..open].trim(), Some(text[open + 1..text.len() - 1].trim()))
+            (
+                text[..open].trim(),
+                Some(text[open + 1..text.len() - 1].trim()),
+            )
         }
         None => (text, None),
     };
@@ -708,8 +708,7 @@ impl FromStr for ScopedFrequency {
         if body.is_empty() {
             return Err(format!("`{s}`: missing frequency code after scope"));
         }
-        let value =
-            Frequency::from_str(body).map_err(|e| format!("`{s}`: {e}"))?;
+        let value = Frequency::from_str(body).map_err(|e| format!("`{s}`: {e}"))?;
         Ok(ScopedFrequency {
             symbol: scope.symbol,
             value,
@@ -735,13 +734,13 @@ pub fn pick_frequency(specs: &[ScopedFrequency], symbol: &str) -> Option<Frequen
 /// so a value equidistant in log space picks the smaller cadence.
 fn snap_seconds_to_frequency(secs: i64) -> Frequency {
     match secs.max(1) {
-        s if s < 134 => Frequency::Minute(1), // sqrt(60·300)
-        s if s < 520 => Frequency::Minute(5), // sqrt(300·900)
-        s if s < 1_273 => Frequency::Minute(15), // sqrt(900·1800)
-        s if s < 2_545 => Frequency::Minute(30), // sqrt(1800·3600)
-        s if s < 7_200 => Frequency::Hour(1), // sqrt(3600·14400)
-        s if s < 35_300 => Frequency::Hour(4), // sqrt(14400·86400)
-        s if s < 228_700 => Frequency::Day(1), // sqrt(86400·604800)
+        s if s < 134 => Frequency::Minute(1),     // sqrt(60·300)
+        s if s < 520 => Frequency::Minute(5),     // sqrt(300·900)
+        s if s < 1_273 => Frequency::Minute(15),  // sqrt(900·1800)
+        s if s < 2_545 => Frequency::Minute(30),  // sqrt(1800·3600)
+        s if s < 7_200 => Frequency::Hour(1),     // sqrt(3600·14400)
+        s if s < 35_300 => Frequency::Hour(4),    // sqrt(14400·86400)
+        s if s < 228_700 => Frequency::Day(1),    // sqrt(86400·604800)
         s if s < 1_252_000 => Frequency::Week(1), // sqrt(604800·2592000)
         _ => Frequency::Month(1),
     }
@@ -794,8 +793,14 @@ mod tests {
         assert_eq!(AssetClass::Crypto.bars_per_year(Frequency::Day(1)), 365.0);
 
         // Hourly bars — hours per trading year.
-        assert_eq!(AssetClass::Stocks.bars_per_year(Frequency::Hour(1)), 252.0 * 6.5);
-        assert_eq!(AssetClass::Crypto.bars_per_year(Frequency::Hour(1)), 365.0 * 24.0);
+        assert_eq!(
+            AssetClass::Stocks.bars_per_year(Frequency::Hour(1)),
+            252.0 * 6.5
+        );
+        assert_eq!(
+            AssetClass::Crypto.bars_per_year(Frequency::Hour(1)),
+            365.0 * 24.0
+        );
 
         // Weekly/monthly are calendar-based across all classes.
         assert_eq!(AssetClass::Stocks.bars_per_year(Frequency::Week(1)), 52.0);
@@ -806,7 +811,11 @@ mod tests {
     fn resolve_priority_explicit_wins() {
         // Explicit override beats derivation.
         assert_eq!(
-            resolve(Some(999.0), Some(AssetClass::Crypto), Some(Frequency::Day(1))),
+            resolve(
+                Some(999.0),
+                Some(AssetClass::Crypto),
+                Some(Frequency::Day(1))
+            ),
             999.0
         );
     }
@@ -855,8 +864,7 @@ mod tests {
     #[test]
     fn detect_frequency_from_epoch_seconds() {
         // 5-minute cadence in Unix seconds.
-        let times = ["1_704_067_200", "1_704_067_500", "1_704_067_800"]
-            .map(|s| s.replace('_', ""));
+        let times = ["1_704_067_200", "1_704_067_500", "1_704_067_800"].map(|s| s.replace('_', ""));
         assert_eq!(
             detect_from_strs(times.iter().map(String::as_str)),
             Some(Frequency::Minute(5))
@@ -866,8 +874,12 @@ mod tests {
     #[test]
     fn detect_frequency_from_epoch_millis() {
         // 4-hour cadence in Unix millis — same instants times 1000.
-        let times = ["1_704_067_200_000", "1_704_081_600_000", "1_704_096_000_000"]
-            .map(|s| s.replace('_', ""));
+        let times = [
+            "1_704_067_200_000",
+            "1_704_081_600_000",
+            "1_704_096_000_000",
+        ]
+        .map(|s| s.replace('_', ""));
         assert_eq!(
             detect_from_strs(times.iter().map(String::as_str)),
             Some(Frequency::Hour(4))
@@ -879,8 +891,16 @@ mod tests {
         // A weekend gap between Fri and Mon is 3 days, but four Mon-Fri gaps
         // of 1 day dominate — the median holds and the result is still daily.
         let times = [
-            "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
-            "2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12",
+            "2024-01-01",
+            "2024-01-02",
+            "2024-01-03",
+            "2024-01-04",
+            "2024-01-05",
+            "2024-01-08",
+            "2024-01-09",
+            "2024-01-10",
+            "2024-01-11",
+            "2024-01-12",
         ];
         assert_eq!(detect_from_strs(times), Some(Frequency::Day(1)));
     }
@@ -1177,10 +1197,7 @@ mod tests {
         let err = WindowSpec::Duration(Frequency::Day(1))
             .resolve(Some(Frequency::Hour(1)), None)
             .unwrap_err();
-        assert!(
-            err.contains("trading calendar"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("trading calendar"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1199,24 +1216,18 @@ mod tests {
         let err = WindowSpec::Duration(Frequency::Day(1))
             .resolve(Some(Frequency::Week(1)), Some(AssetClass::Stocks))
             .unwrap_err();
-        assert!(err.contains("shorter than one bar"), "unexpected error: {err}");
+        assert!(
+            err.contains("shorter than one bar"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn window_spec_display_roundtrips() {
         // The Display impl mirrors what the parser accepts.
-        assert_eq!(
-            format!("{}", "10".parse::<WindowSpec>().unwrap()),
-            "10"
-        );
-        assert_eq!(
-            format!("{}", "1w".parse::<WindowSpec>().unwrap()),
-            "1w"
-        );
-        assert_eq!(
-            format!("{}", "1M".parse::<WindowSpec>().unwrap()),
-            "1M"
-        );
+        assert_eq!(format!("{}", "10".parse::<WindowSpec>().unwrap()), "10");
+        assert_eq!(format!("{}", "1w".parse::<WindowSpec>().unwrap()), "1w");
+        assert_eq!(format!("{}", "1M".parse::<WindowSpec>().unwrap()), "1M");
     }
 
     #[test]

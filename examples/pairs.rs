@@ -30,9 +30,8 @@ struct DualSma {
 
 impl DualSma {
     fn new(a: &'static str, b: &'static str, fast: usize, slow: usize) -> Self {
-        let close_of = |sym: &'static str| {
-            Close::of(Pick::<&'static str>::matching(Selector::by_symbol(sym)))
-        };
+        let close_of =
+            |sym: &'static str| Close::of(Pick::<&'static str>::matching(Selector::by_symbol(sym)));
         let cross_up = |sym: &'static str| {
             Sma::new(close_of(sym), fast).crosses_above(Sma::new(close_of(sym), slow))
         };
@@ -136,11 +135,7 @@ fn main() {
 
 /// Two deterministic price series (trend + oscillation) packed into per-bar
 /// [`Snapshot`]s tagged by symbol. A flat OHLC bar is built from each close.
-fn synthetic_snapshots(
-    n: usize,
-    a: &'static str,
-    b: &'static str,
-) -> Vec<Snapshot<&'static str>> {
+fn synthetic_snapshots(n: usize, a: &'static str, b: &'static str) -> Vec<Snapshot<&'static str>> {
     let candle = |close: Real| Candle::new(close, close, close, close, 1_000.0);
     (0..n)
         .map(|i| {

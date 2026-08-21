@@ -464,9 +464,9 @@ impl Archive {
             Archive::Premium => format!(
                 "{base}/data/{m}/monthly/premiumIndexKlines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
             ),
-            Archive::Metrics => format!(
-                "{base}/data/{m}/daily/metrics/{symbol}/{symbol}-metrics-{stamp}.zip"
-            ),
+            Archive::Metrics => {
+                format!("{base}/data/{m}/daily/metrics/{symbol}/{symbol}-metrics-{stamp}.zip")
+            }
         }
     }
 
@@ -580,10 +580,7 @@ impl Archive {
 /// Fetch one archive and return its single CSV entry as text. `Ok(None)` for a
 /// 404: an archive that does not exist is a period with no data, which is the
 /// normal shape of both the pre-listing past and the not-yet-published present.
-async fn fetch_archive(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<Option<String>, SourceError> {
+async fn fetch_archive(client: &reqwest::Client, url: &str) -> Result<Option<String>, SourceError> {
     let resp = client.get(url).send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -592,9 +589,9 @@ async fn fetch_archive(
         return Err(map_http_error(resp).await);
     }
     let bytes = resp.bytes().await?;
-    unzip_single(&bytes).map(Some).map_err(|e| {
-        SourceError::Decode(format!("{url}: {e}"))
-    })
+    unzip_single(&bytes)
+        .map(Some)
+        .map_err(|e| SourceError::Decode(format!("{url}: {e}")))
 }
 
 /// Read the one CSV entry out of an in-memory ZIP. Binance ships exactly one
@@ -698,7 +695,11 @@ async fn fetch_concurrently(
 /// falls between.
 fn to_millis(raw: i64) -> i64 {
     const MICROS_FLOOR: i64 = 100_000_000_000_000; // 1e14 — past any ms epoch
-    if raw.abs() >= MICROS_FLOOR { raw / 1_000 } else { raw }
+    if raw.abs() >= MICROS_FLOOR {
+        raw / 1_000
+    } else {
+        raw
+    }
 }
 
 /// Resolve the CSV column names to positions, whether or not the archive has a
@@ -732,9 +733,10 @@ fn resolve_columns(
     let idx = wanted
         .iter()
         .map(|name| {
-            names.iter().position(|h| h == name).ok_or_else(|| {
-                SourceError::Decode(format!("{url}: missing column `{name}`"))
-            })
+            names
+                .iter()
+                .position(|h| h == name)
+                .ok_or_else(|| SourceError::Decode(format!("{url}: missing column `{name}`")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((idx, has_header))
@@ -780,9 +782,9 @@ fn parse_archive(
             if raw.is_empty() {
                 continue;
             }
-            let value: Real = raw.parse().map_err(|e| {
-                SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}"))
-            })?;
+            let value: Real = raw
+                .parse()
+                .map_err(|e| SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}")))?;
             out.push((time, slot, value));
         }
     }
@@ -809,9 +811,8 @@ fn parse_candles(text: &str, url: &str) -> Result<Vec<(i64, Candle)>, SourceErro
         let record = record.map_err(|e| SourceError::Decode(format!("{url}: row: {e}")))?;
         let cell = |i: usize, name: &str| -> Result<Real, SourceError> {
             let raw = record.get(idx[i]).unwrap_or_default().trim();
-            raw.parse().map_err(|e| {
-                SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}"))
-            })
+            raw.parse()
+                .map_err(|e| SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}")))
         };
         let time = to_millis(cell(0, "open_time")? as i64);
         out.push((
@@ -1049,7 +1050,10 @@ mod tests {
             (Interval::Hour(12), "12h"),
             (Interval::Day(1), "1d"),
         ] {
-            assert_eq!(interval_token(Market::UsdMFutures, interval).unwrap(), token);
+            assert_eq!(
+                interval_token(Market::UsdMFutures, interval).unwrap(),
+                token
+            );
         }
 
         // Above a day the premium archive is not published at all. Admitting
@@ -1060,9 +1064,18 @@ mod tests {
 
         // Spot is klines only, so it admits the whole vocabulary — including
         // the cadences the futures premium archive does not publish.
-        assert_eq!(interval_token(Market::Spot, Interval::Minute(1)).unwrap(), "1m");
-        assert_eq!(interval_token(Market::Spot, Interval::Week(1)).unwrap(), "1w");
-        assert_eq!(interval_token(Market::Spot, Interval::Month(1)).unwrap(), "1mo");
+        assert_eq!(
+            interval_token(Market::Spot, Interval::Minute(1)).unwrap(),
+            "1m"
+        );
+        assert_eq!(
+            interval_token(Market::Spot, Interval::Week(1)).unwrap(),
+            "1w"
+        );
+        assert_eq!(
+            interval_token(Market::Spot, Interval::Month(1)).unwrap(),
+            "1mo"
+        );
     }
 
     #[test]
@@ -1112,7 +1125,10 @@ mod tests {
                        1704096000000,8,0.00027213\n";
         assert_eq!(
             parse_archive(Archive::Funding, funding, "u").unwrap(),
-            vec![(1704067200000, 4, 0.00037409), (1704096000000, 4, 0.00027213)],
+            vec![
+                (1704067200000, 4, 0.00037409),
+                (1704096000000, 4, 0.00027213)
+            ],
         );
 
         // The premium archive is kline-shaped; only `open_time` and `close`
@@ -1138,10 +1154,8 @@ mod tests {
                        2026-07-15 00:00:00,BTCUSDT,105550.985,6858675634.706254,\
                        1.28623339,1.47112400,1.19972635,1.55827200\n";
         let parsed = parse_archive(Archive::Metrics, metrics, "u").unwrap();
-        let at = Timestamp::from_datetime(
-            time::macros::datetime!(2026-07-15 00:00:00).assume_utc(),
-        )
-        .0;
+        let at =
+            Timestamp::from_datetime(time::macros::datetime!(2026-07-15 00:00:00).assume_utc()).0;
         assert_eq!(
             parsed,
             vec![

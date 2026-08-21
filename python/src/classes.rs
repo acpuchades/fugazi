@@ -4,15 +4,15 @@ use crate::prelude::*;
 #[allow(unused_imports)]
 use crate::carriers::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
-#[allow(unused_imports)]
-use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
 #[allow(unused_imports)]
+use crate::sources::*;
+#[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 
 // ---------------------------------------------------------------------------
 // Python classes
@@ -65,13 +65,17 @@ impl PyCandle {
     /// `module = "fugazi"`; pickle stores a type by `module.qualname` and every
     /// pyclass here used to answer `builtins`.
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        reduce_with(py, py.get_type::<PyCandle>(), (
-            self.open(),
-            self.high(),
-            self.low(),
-            self.close(),
-            self.volume(),
-        ))
+        reduce_with(
+            py,
+            py.get_type::<PyCandle>(),
+            (
+                self.open(),
+                self.high(),
+                self.low(),
+                self.close(),
+                self.volume(),
+            ),
+        )
     }
 
     pub(crate) fn typical(&self) -> f64 {
@@ -175,7 +179,11 @@ impl PySchema {
             .inner
             .keys()
             .map(|k| {
-                let ty = self.inner.type_of_key(k).map(overlay_type_name).unwrap_or("?");
+                let ty = self
+                    .inner
+                    .type_of_key(k)
+                    .map(overlay_type_name)
+                    .unwrap_or("?");
                 format!("{k}:{ty}")
             })
             .collect();
@@ -270,18 +278,17 @@ impl PySchemaBuilder {
     pub(crate) fn __len__(&self) -> PyResult<usize> {
         self.inner
             .as_ref()
-            .ok_or_else(|| {
-                PyValueError::new_err("SchemaBuilder has already been finished")
-            })
+            .ok_or_else(|| PyValueError::new_err("SchemaBuilder has already been finished"))
             .map(|b| b.len())
     }
 
     /// Freeze into an immutable [`Schema`]. The builder is consumed — further
     /// calls raise `ValueError`.
     pub(crate) fn finish(&mut self) -> PyResult<PySchema> {
-        let builder = self.inner.take().ok_or_else(|| {
-            PyValueError::new_err("SchemaBuilder has already been finished")
-        })?;
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("SchemaBuilder has already been finished"))?;
         Ok(PySchema {
             inner: builder.finish(),
         })
@@ -303,9 +310,10 @@ impl PySchemaBuilder {
     where
         F: FnOnce(&mut SchemaBuilder) -> usize + std::panic::UnwindSafe,
     {
-        let builder = self.inner.as_mut().ok_or_else(|| {
-            PyValueError::new_err("SchemaBuilder has already been finished")
-        })?;
+        let builder = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("SchemaBuilder has already been finished"))?;
         // The library asserts on a type-mismatch re-registration; catch it so
         // Python sees a normal ValueError instead of a hard abort.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(builder))) {
@@ -419,7 +427,9 @@ impl PyOverlayInfo {
     /// (`float` for `Real`, `bool` for `Bool`, `str` for `Str`), or `None` if
     /// the index is out of bounds.
     pub(crate) fn get(&self, py: Python<'_>, index: usize) -> Option<Py<PyAny>> {
-        self.inner.get(index).and_then(|v| overlay_to_python(py, v).ok())
+        self.inner
+            .get(index)
+            .and_then(|v| overlay_to_python(py, v).ok())
     }
 
     /// Read the value by column name (`None` if the key isn't registered).
@@ -498,7 +508,11 @@ pub(crate) fn is_python_bool(bound: &Bound<'_, PyAny>) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn slot_type_error(slot: usize, declared: OverlayType, bound: &Bound<'_, PyAny>) -> PyErr {
+pub(crate) fn slot_type_error(
+    slot: usize,
+    declared: OverlayType,
+    bound: &Bound<'_, PyAny>,
+) -> PyErr {
     let got = bound
         .get_type()
         .name()
@@ -615,11 +629,7 @@ impl PyAtom {
                 ov.values(),
                 t,
             ),
-            (Some(ov), None) => format!(
-                "Atom(candle={:?}, overlays={:?})",
-                candle,
-                ov.values(),
-            ),
+            (Some(ov), None) => format!("Atom(candle={:?}, overlays={:?})", candle, ov.values(),),
             (None, Some(t)) => format!("Atom(candle={:?}, time={})", candle, t),
             (None, None) => format!("Atom(candle={:?})", candle),
         }
@@ -776,7 +786,11 @@ impl PySelector {
     }
 
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        reduce_with(py, py.get_type::<PySelector>(), (self.symbol(), self.freq()))
+        reduce_with(
+            py,
+            py.get_type::<PySelector>(),
+            (self.symbol(), self.freq()),
+        )
     }
 
     /// True when both fields are `None` — the `Pick` no-query case.
@@ -921,12 +935,15 @@ impl PySnapshot {
     /// with `key`'s `(symbol, freq)` tag and `atom` as the value. Matches
     /// Python's expectation that assignment overwrites the entry rather
     /// than accumulating duplicates.
-    pub(crate) fn __setitem__(&mut self, key: &Bound<'_, PyAny>, atom: PyRef<'_, PyAtom>) -> PyResult<()> {
+    pub(crate) fn __setitem__(
+        &mut self,
+        key: &Bound<'_, PyAny>,
+        atom: PyRef<'_, PyAtom>,
+    ) -> PyResult<()> {
         let sel = coerce_selector(key)?;
         // Remove exact matches on the key's tag pattern, then push.
         self.inner.remove_matching(&sel);
-        self.inner
-            .push(sel.symbol, sel.freq, atom.inner.clone());
+        self.inner.push(sel.symbol, sel.freq, atom.inner.clone());
         Ok(())
     }
 
@@ -942,11 +959,7 @@ impl PySnapshot {
     /// Non-raising variant of `snap[key]` — returns `None` on a miss.
     pub(crate) fn get(&self, key: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
         let sel = coerce_selector(key)?;
-        Ok(self
-            .inner
-            .find(&sel)
-            .cloned()
-            .map(|inner| PyAtom { inner }))
+        Ok(self.inner.find(&sel).cloned().map(|inner| PyAtom { inner }))
     }
 
     /// Append a tagged atom to the snapshot. `key` supplies the `(symbol,
@@ -954,14 +967,9 @@ impl PySnapshot {
     /// allowed and future `snap[query]` reads return the first-inserted
     /// match. Rust's `push` semantics — for the dedup-on-write behaviour
     /// use `__setitem__` (i.e. `snap[key] = atom`).
-    pub(crate) fn push(
-        &mut self,
-        key: &Bound<'_, PyAny>,
-        atom: PyRef<'_, PyAtom>,
-    ) -> PyResult<()> {
+    pub(crate) fn push(&mut self, key: &Bound<'_, PyAny>, atom: PyRef<'_, PyAtom>) -> PyResult<()> {
         let sel = coerce_selector(key)?;
-        self.inner
-            .push(sel.symbol, sel.freq, atom.inner.clone());
+        self.inner.push(sel.symbol, sel.freq, atom.inner.clone());
         Ok(())
     }
 
@@ -969,11 +977,7 @@ impl PySnapshot {
     /// or `None`.
     pub(crate) fn find(&self, query: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
         let sel = coerce_selector(query)?;
-        Ok(self
-            .inner
-            .find(&sel)
-            .cloned()
-            .map(|inner| PyAtom { inner }))
+        Ok(self.inner.find(&sel).cloned().map(|inner| PyAtom { inner }))
     }
 
     /// The list of `(symbol, freq)` selectors present in this snapshot, in
@@ -1694,9 +1698,7 @@ impl PyIndicator {
     #[pyo3(signature = (base = std::f64::consts::E))]
     pub(crate) fn log(&self, base: f64) -> PyResult<PyIndicator> {
         ensure_log_base(base)?;
-        Ok(PyIndicator::wrap(
-            map_rooted!(self, |s| Log::new(s, base))
-        ))
+        Ok(PyIndicator::wrap(map_rooted!(self, |s| Log::new(s, base))))
     }
 
     /// Exponential of `self` in `base` — `base^x`, the inverse of `log`
@@ -1705,9 +1707,7 @@ impl PyIndicator {
     #[pyo3(signature = (base = std::f64::consts::E))]
     pub(crate) fn exp(&self, base: f64) -> PyResult<PyIndicator> {
         ensure_exp_base(base)?;
-        Ok(PyIndicator::wrap(
-            map_rooted!(self, |s| Exp::new(s, base))
-        ))
+        Ok(PyIndicator::wrap(map_rooted!(self, |s| Exp::new(s, base))))
     }
 
     /// Passthrough that forces this indicator's reported `unstable_bars()` to
@@ -1750,13 +1750,11 @@ impl PySignal {
                 .candle
                 .and_then(|c| Indicator::update(s, c))
                 .unwrap_or(false)),
-            AnySignal::Atom(s) => {
-                Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false))
-            }
+            AnySignal::Atom(s) => Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false)),
             AnySignal::Real(s) => Ok(Indicator::update(s, extract_real(sample)?).unwrap_or(false)),
-            AnySignal::Snapshot(s) => Ok(
-                Indicator::update(s, extract_snapshot(sample)?).unwrap_or(false),
-            ),
+            AnySignal::Snapshot(s) => {
+                Ok(Indicator::update(s, extract_snapshot(sample)?).unwrap_or(false))
+            }
         }
     }
 
@@ -1932,9 +1930,11 @@ impl PyStrSource {
     pub(crate) fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
         Ok(match str_pair(self.src.clone(), rhs)? {
-            StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
-                Combine::<_, _, StrEqOp>::new(l, r),
-            ))),
+            StrPair::Atom(l, r) => {
+                PySignal::wrap(AnySignal::Atom(SignalBox::new(
+                    Combine::<_, _, StrEqOp>::new(l, r),
+                )))
+            }
             StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
                 Combine::<_, _, StrEqOp>::new(l, r),
             ))),
@@ -1945,9 +1945,11 @@ impl PyStrSource {
     pub(crate) fn ne(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
         Ok(match str_pair(self.src.clone(), rhs)? {
-            StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
-                Combine::<_, _, StrNeOp>::new(l, r),
-            ))),
+            StrPair::Atom(l, r) => {
+                PySignal::wrap(AnySignal::Atom(SignalBox::new(
+                    Combine::<_, _, StrNeOp>::new(l, r),
+                )))
+            }
             StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
                 Combine::<_, _, StrNeOp>::new(l, r),
             ))),
@@ -2129,7 +2131,7 @@ impl PyMulti {
                     multi: m.0.clone_box(),
                     generation: 0,
                     last_output: Vec::new(),
-                last_valid: false,
+                    last_valid: false,
                 })))
             }
         };
@@ -2276,7 +2278,6 @@ impl PySharedMulti {
         format!("SharedMultiIndicator(fields={names:?})")
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Unpickling entry points

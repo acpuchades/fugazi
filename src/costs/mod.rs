@@ -33,8 +33,8 @@
 //! byte-identical to the pre-costs release (zero deductions, `Order::commission
 //! == 0.0`, and `Order::price` equal to the theoretical price).
 
-use crate::wallet::{OrderKind, Side};
 use crate::types::{Candle, Real};
+use crate::wallet::{OrderKind, Side};
 
 /// A per-fill commission charge, in the wallet's reference currency.
 ///
@@ -308,7 +308,10 @@ impl CompositeCommission {
 
 impl CommissionModel for CompositeCommission {
     fn commission(&self, notional: Real, units: Real) -> Real {
-        self.parts.iter().map(|p| p.commission(notional, units)).sum()
+        self.parts
+            .iter()
+            .map(|p| p.commission(notional, units))
+            .sum()
     }
     fn clone_box(&self) -> Box<dyn CommissionModel> {
         Box::new(self.clone())
@@ -568,8 +571,7 @@ impl IsNoOp for dyn CommissionModel {
         // input. This is a slight over-detection (`FixedCommission { amount: 0 }`
         // reads as no-op too), which is deliberate — a zero fixed fee should
         // not print the "no cost model set" warning.
-        self.commission(1.0, 1.0) == 0.0
-            && self.commission(1_000_000.0, 1_000.0) == 0.0
+        self.commission(1.0, 1.0) == 0.0 && self.commission(1_000_000.0, 1_000.0) == 0.0
     }
 }
 
@@ -612,7 +614,9 @@ mod tests {
         assert_eq!(costs.commission.commission(1_000.0, 1.0), 0.0);
         assert_eq!(costs.spread.half_spread(100.0, &b), 0.0);
         assert_eq!(
-            costs.slippage.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market),
+            costs
+                .slippage
+                .adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market),
             100.0
         );
         assert_eq!(
@@ -706,7 +710,10 @@ mod tests {
         // NaN/Infinity but a no-slippage fill.
         let s = VolumeParticipationSlippage::new(1.0);
         let b = bar(100.0, 0.0);
-        assert_eq!(s.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market), 100.0);
+        assert_eq!(
+            s.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market),
+            100.0
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{SeriesSource, Interval, SourceError, Timestamp};
+use super::{Interval, SeriesSource, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://www.okx.com";
 // `history-candles` caps a page at 100 rows.
@@ -163,7 +163,10 @@ impl SeriesSource for Okx {
             let mut out: Vec<Atom> = Vec::new();
             let since_ms = since.0;
             let until_ms = until.map(|t| t.0).unwrap_or(i64::MAX);
-            let url = format!("{}/api/v5/market/history-candles", base_url.trim_end_matches('/'));
+            let url = format!(
+                "{}/api/v5/market/history-candles",
+                base_url.trim_end_matches('/')
+            );
 
             // OKX returns candles newest-first, so we page backward: `after`
             // asks for rows strictly older than the cursor. The first page has
@@ -213,10 +216,7 @@ impl SeriesSource for Okx {
                 let mut min_ts = i64::MAX;
                 for row in &body.data {
                     let atom = decode_row(row, &schema)?;
-                    let ts = atom
-                        .time
-                        .expect("OKX atoms always carry a time")
-                        .0;
+                    let ts = atom.time.expect("OKX atoms always carry a time").0;
                     min_ts = min_ts.min(ts);
                     if ts >= since_ms && ts < until_ms {
                         out.push(atom);
@@ -463,7 +463,10 @@ mod tests {
         assert_eq!(atom.candle.unwrap().close, 27050.75);
         assert_eq!(atom.candle.unwrap().volume, 12.345);
         let overlays = atom.overlays.expect("OKX atoms carry overlays");
-        assert_eq!(overlays.get_by_key("vol_ccy"), Some(&OverlayValue::Real(334000.00)));
+        assert_eq!(
+            overlays.get_by_key("vol_ccy"),
+            Some(&OverlayValue::Real(334000.00))
+        );
         assert_eq!(
             overlays.get_by_key("quote_volume"),
             Some(&OverlayValue::Real(333900.00))

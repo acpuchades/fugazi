@@ -71,11 +71,7 @@ pub trait PositionRebalancer<Sym>: Send + Sync {
     /// own logic (book-anchored sizing recipes naturally respect the
     /// post-rebalance equity; hard-target strategies may re-enter on
     /// the next bar).
-    fn plan_scaledowns(
-        &self,
-        positions: &[PositionInfo<Sym>],
-        shortfall: Real,
-    ) -> Vec<Units<Sym>>;
+    fn plan_scaledowns(&self, positions: &[PositionInfo<Sym>], shortfall: Real) -> Vec<Units<Sym>>;
 }
 
 /// The **proportional** position-phase policy — scales every held
@@ -90,11 +86,7 @@ pub trait PositionRebalancer<Sym>: Send + Sync {
 pub struct Proportional;
 
 impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for Proportional {
-    fn plan_scaledowns(
-        &self,
-        positions: &[PositionInfo<Sym>],
-        shortfall: Real,
-    ) -> Vec<Units<Sym>> {
+    fn plan_scaledowns(&self, positions: &[PositionInfo<Sym>], shortfall: Real) -> Vec<Units<Sym>> {
         // Total invested value = Σ |units_i| * price_i, summed in a
         // **canonical order** rather than `positions`' order — which comes
         // from a `HashMap` walk over the child's ledger and so varies with
@@ -105,8 +97,7 @@ impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for Proportional {
         //
         // A shortfall of zero or a fully-cash contributor produces no orders.
         let invested: Real = {
-            let mut values: Vec<Real> =
-                positions.iter().map(|p| p.units.abs() * p.price).collect();
+            let mut values: Vec<Real> = positions.iter().map(|p| p.units.abs() * p.price).collect();
             values.sort_by(|a, b| a.total_cmp(b));
             values.iter().sum()
         };
@@ -145,11 +136,7 @@ impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for Proportional {
 pub struct LargestFirst;
 
 impl<Sym: Clone + Send + Sync + Ord> PositionRebalancer<Sym> for LargestFirst {
-    fn plan_scaledowns(
-        &self,
-        positions: &[PositionInfo<Sym>],
-        shortfall: Real,
-    ) -> Vec<Units<Sym>> {
+    fn plan_scaledowns(&self, positions: &[PositionInfo<Sym>], shortfall: Real) -> Vec<Units<Sym>> {
         if shortfall <= 0.0 || positions.is_empty() {
             return Vec::new();
         }
@@ -258,14 +245,21 @@ mod tests {
         // A = 50, B = 30, C = 20. Shortfall = 70 → close A (raises 50,
         // remaining 20), close B (raises 30, overshoots by 10 — keep
         // 33.33% of B). C untouched.
-        let positions = [pos("A", 5.0, 10.0), pos("B", 3.0, 10.0), pos("C", 2.0, 10.0)];
+        let positions = [
+            pos("A", 5.0, 10.0),
+            pos("B", 3.0, 10.0),
+            pos("C", 2.0, 10.0),
+        ];
         let out = LargestFirst.plan_scaledowns(&positions, 70.0);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].symbol, "A");
         assert!(out[0].amount.abs() < 1e-9, "A fully closed");
         assert_eq!(out[1].symbol, "B");
         // (30 - 20)/30 = 1/3 kept → 3 * 1/3 = 1.0 target.
-        assert!((out[1].amount - 1.0).abs() < 1e-9, "B partially closed to 1 unit");
+        assert!(
+            (out[1].amount - 1.0).abs() < 1e-9,
+            "B partially closed to 1 unit"
+        );
     }
 
     #[test]

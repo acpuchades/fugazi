@@ -28,22 +28,22 @@ use crate::indicators::{
     Bollinger, BollingerValue, Book, Cci, Component, Correlation, Covariance, CumMax, CumMin,
     CumSum, Dmi, DmiValue, Donchian, DonchianValue, Ema, Exp, GarmanKlass, GetBool, GetReal,
     GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, LinReg, Log, Macd, MacdValue,
-    Match as MatchIndicator, Max as MaxOf, Mfi,
-    Min as MinOf, Obv, Parkinson, Percentile, PercentileRank, Pick, PickAny, Position, Pow,
-    Resample, Rma, RogersSatchell, Rsi, Sar, Sigmoid, Sign, Skewness, Sma, Sqrt, StdDev, StochRsi,
-    Stochastic, Tanh, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
+    Match as MatchIndicator, Max as MaxOf, Mfi, Min as MinOf, Obv, Parkinson, Percentile,
+    PercentileRank, Pick, PickAny, Position, Pow, Resample, Rma, RogersSatchell, Rsi, Sar, Sigmoid,
+    Sign, Skewness, Sma, Sqrt, StdDev, StochRsi, Stochastic, Tanh, TrueRange, Value, ValueStr,
+    VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use crate::prelude::*;
 use crate::types::Snapshot;
 
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::indicators::compare;
+use crate::runtime::{AnyChain, AtomChain, BoolChain, CandleChain, RealChain, StrChain, any};
 use crate::spec::dyn_indicator::PayloadType;
-use crate::runtime::{any, AnyChain, AtomChain, BoolChain, CandleChain, RealChain, StrChain};
 
+use crate::types::Symbol;
 use crate::{Frequency, Selector};
 use std::str::FromStr;
-use crate::types::Symbol;
 
 /// Where a `source:`-omitted leaf reads from — the **blessed series** of the
 /// context doing the build, or the reason there isn't one.
@@ -310,7 +310,8 @@ fn stoch_rsi_rsi_period_default() -> NonZeroUsize {
     NonZeroUsize::new(STOCH_RSI_RSI_PERIOD).expect("STOCH_RSI_RSI_PERIOD is a non-zero constant")
 }
 fn stoch_rsi_stoch_period_default() -> NonZeroUsize {
-    NonZeroUsize::new(STOCH_RSI_STOCH_PERIOD).expect("STOCH_RSI_STOCH_PERIOD is a non-zero constant")
+    NonZeroUsize::new(STOCH_RSI_STOCH_PERIOD)
+        .expect("STOCH_RSI_STOCH_PERIOD is a non-zero constant")
 }
 
 /// The right-hand operand of `!str_eq` / `!str_ne`.
@@ -350,9 +351,9 @@ impl StrOperand {
         root: Root<'_>,
     ) -> Result<AnyChain, String> {
         match self {
-            StrOperand::Literal(s) => Ok(any(
-                ValueStr::<crate::types::Snapshot<Symbol>>::new(s.as_str()),
-            )),
+            StrOperand::Literal(s) => Ok(any(ValueStr::<crate::types::Snapshot<Symbol>>::new(
+                s.as_str(),
+            ))),
             StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
         }
     }
@@ -533,9 +534,11 @@ impl TryFrom<serde_norway::Value> for ValueLit {
                 for (i, item) in seq.into_iter().enumerate() {
                     let n = match item {
                         serde_norway::Value::Number(n) => n,
-                        other => return Err(format!(
-                            "!value list element {i}: expected number, got {other:?}"
-                        )),
+                        other => {
+                            return Err(format!(
+                                "!value list element {i}: expected number, got {other:?}"
+                            ));
+                        }
                     };
                     let f = n.as_f64().ok_or_else(|| {
                         format!("!value list element {i}: {n} is not a finite number")
@@ -2227,7 +2230,6 @@ pub enum NodeSpec {
 // Denying produces serde's "unknown field `els`, expected one of ..." instead.
 #[serde(deny_unknown_fields)]
 enum NodeSpecRaw {
-
     // --- atom-input leaves (candle fields) ---
     Close {
         #[serde(default)]
@@ -3272,11 +3274,17 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::BarsSinceLow { source, period } => {
                 NodeSpec::BarsSinceLow { source, period }
             }
-            NodeSpecRaw::Correlation { lhs, rhs, period } => NodeSpec::Correlation { lhs, rhs, period },
-            NodeSpecRaw::Covariance { lhs, rhs, period } => NodeSpec::Covariance { lhs, rhs, period },
+            NodeSpecRaw::Correlation { lhs, rhs, period } => {
+                NodeSpec::Correlation { lhs, rhs, period }
+            }
+            NodeSpecRaw::Covariance { lhs, rhs, period } => {
+                NodeSpec::Covariance { lhs, rhs, period }
+            }
             NodeSpecRaw::Beta { lhs, rhs, period } => NodeSpec::Beta { lhs, rhs, period },
             NodeSpecRaw::LinregSlope { source, period } => NodeSpec::LinregSlope { source, period },
-            NodeSpecRaw::LinregIntercept { source, period } => NodeSpec::LinregIntercept { source, period },
+            NodeSpecRaw::LinregIntercept { source, period } => {
+                NodeSpec::LinregIntercept { source, period }
+            }
             NodeSpecRaw::LinregValue { source, period } => NodeSpec::LinregValue { source, period },
             NodeSpecRaw::LinregR2 { source, period } => NodeSpec::LinregR2 { source, period },
             NodeSpecRaw::VarianceRatio {
@@ -3290,19 +3298,99 @@ impl From<NodeSpecRaw> for NodeSpec {
             },
             NodeSpecRaw::Cci { source, period } => NodeSpec::Cci { source, period },
             NodeSpecRaw::Stochastic { source, period } => NodeSpec::Stochastic { source, period },
-            NodeSpecRaw::StochRsi { source, rsi_period, stoch_period } => NodeSpec::StochRsi { source, rsi_period, stoch_period },
-            NodeSpecRaw::MacdLine { source, fast, slow, signal } => NodeSpec::MacdLine { source, fast, slow, signal },
-            NodeSpecRaw::MacdSignal { source, fast, slow, signal } => NodeSpec::MacdSignal { source, fast, slow, signal },
-            NodeSpecRaw::MacdHistogram { source, fast, slow, signal } => NodeSpec::MacdHistogram { source, fast, slow, signal },
+            NodeSpecRaw::StochRsi {
+                source,
+                rsi_period,
+                stoch_period,
+            } => NodeSpec::StochRsi {
+                source,
+                rsi_period,
+                stoch_period,
+            },
+            NodeSpecRaw::MacdLine {
+                source,
+                fast,
+                slow,
+                signal,
+            } => NodeSpec::MacdLine {
+                source,
+                fast,
+                slow,
+                signal,
+            },
+            NodeSpecRaw::MacdSignal {
+                source,
+                fast,
+                slow,
+                signal,
+            } => NodeSpec::MacdSignal {
+                source,
+                fast,
+                slow,
+                signal,
+            },
+            NodeSpecRaw::MacdHistogram {
+                source,
+                fast,
+                slow,
+                signal,
+            } => NodeSpec::MacdHistogram {
+                source,
+                fast,
+                slow,
+                signal,
+            },
             NodeSpecRaw::BbUpper { source, period, k } => NodeSpec::BbUpper { source, period, k },
             NodeSpecRaw::BbMiddle { source, period, k } => NodeSpec::BbMiddle { source, period, k },
             NodeSpecRaw::BbLower { source, period, k } => NodeSpec::BbLower { source, period, k },
-            NodeSpecRaw::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier },
-            NodeSpecRaw::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier },
-            NodeSpecRaw::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier },
-            NodeSpecRaw::DonchianUpper { high, low, period } => NodeSpec::DonchianUpper { high, low, period },
-            NodeSpecRaw::DonchianMiddle { high, low, period } => NodeSpec::DonchianMiddle { high, low, period },
-            NodeSpecRaw::DonchianLower { high, low, period } => NodeSpec::DonchianLower { high, low, period },
+            NodeSpecRaw::KeltnerUpper {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            } => NodeSpec::KeltnerUpper {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            },
+            NodeSpecRaw::KeltnerMiddle {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            } => NodeSpec::KeltnerMiddle {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            },
+            NodeSpecRaw::KeltnerLower {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            } => NodeSpec::KeltnerLower {
+                source,
+                candle_source,
+                ema_period,
+                atr_period,
+                multiplier,
+            },
+            NodeSpecRaw::DonchianUpper { high, low, period } => {
+                NodeSpec::DonchianUpper { high, low, period }
+            }
+            NodeSpecRaw::DonchianMiddle { high, low, period } => {
+                NodeSpec::DonchianMiddle { high, low, period }
+            }
+            NodeSpecRaw::DonchianLower { high, low, period } => {
+                NodeSpec::DonchianLower { high, low, period }
+            }
             NodeSpecRaw::Adx { source, period } => NodeSpec::Adx { source, period },
             NodeSpecRaw::PlusDi { source, period } => NodeSpec::PlusDi { source, period },
             NodeSpecRaw::MinusDi { source, period } => NodeSpec::MinusDi { source, period },
@@ -3310,7 +3398,9 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::DmiMinusDi { source, period } => NodeSpec::DmiMinusDi { source, period },
             NodeSpecRaw::AroonUp { source, period } => NodeSpec::AroonUp { source, period },
             NodeSpecRaw::AroonDown { source, period } => NodeSpec::AroonDown { source, period },
-            NodeSpecRaw::AroonOscillator { source, period } => NodeSpec::AroonOscillator { source, period },
+            NodeSpecRaw::AroonOscillator { source, period } => {
+                NodeSpec::AroonOscillator { source, period }
+            }
             NodeSpecRaw::Atr { source, period } => NodeSpec::Atr { source, period },
             NodeSpecRaw::Parkinson { source, period } => NodeSpec::Parkinson { source, period },
             NodeSpecRaw::GarmanKlass { source, period } => NodeSpec::GarmanKlass { source, period },
@@ -3324,16 +3414,102 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Ad { source } => NodeSpec::Ad { source },
             NodeSpecRaw::TrueRange { source } => NodeSpec::TrueRange { source },
             NodeSpecRaw::Sar { source, step, max } => NodeSpec::Sar { source, step, max },
-            NodeSpecRaw::VolTarget { source, target, window, bars_per_year } => NodeSpec::VolTarget { source, target, window, bars_per_year },
-            NodeSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => NodeSpec::AtrRisk { source, risk_frac, period, atr_multiple },
-            NodeSpecRaw::DrawdownThrottle { source, max_drawdown } => NodeSpec::DrawdownThrottle { source, max_drawdown },
-            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year, seed } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year, seed },
-            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window, seed } => NodeSpec::FractionalKelly { source, kelly_fraction, window, seed },
-            NodeSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
-            NodeSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
-            NodeSpecRaw::Volatility { strategy, period, bars_per_year } => NodeSpec::Volatility { strategy, period, bars_per_year },
-            NodeSpecRaw::MaxDrawdown { strategy, period } => NodeSpec::MaxDrawdown { strategy, period },
-            NodeSpecRaw::Calmar { strategy, period, bars_per_year } => NodeSpec::Calmar { strategy, period, bars_per_year },
+            NodeSpecRaw::VolTarget {
+                source,
+                target,
+                window,
+                bars_per_year,
+            } => NodeSpec::VolTarget {
+                source,
+                target,
+                window,
+                bars_per_year,
+            },
+            NodeSpecRaw::AtrRisk {
+                source,
+                risk_frac,
+                period,
+                atr_multiple,
+            } => NodeSpec::AtrRisk {
+                source,
+                risk_frac,
+                period,
+                atr_multiple,
+            },
+            NodeSpecRaw::DrawdownThrottle {
+                source,
+                max_drawdown,
+            } => NodeSpec::DrawdownThrottle {
+                source,
+                max_drawdown,
+            },
+            NodeSpecRaw::EquityVolTarget {
+                source,
+                target,
+                window,
+                bars_per_year,
+                seed,
+            } => NodeSpec::EquityVolTarget {
+                source,
+                target,
+                window,
+                bars_per_year,
+                seed,
+            },
+            NodeSpecRaw::FractionalKelly {
+                source,
+                kelly_fraction,
+                window,
+                seed,
+            } => NodeSpec::FractionalKelly {
+                source,
+                kelly_fraction,
+                window,
+                seed,
+            },
+            NodeSpecRaw::Sharpe {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            } => NodeSpec::Sharpe {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            },
+            NodeSpecRaw::Sortino {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            } => NodeSpec::Sortino {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            },
+            NodeSpecRaw::Volatility {
+                strategy,
+                period,
+                bars_per_year,
+            } => NodeSpec::Volatility {
+                strategy,
+                period,
+                bars_per_year,
+            },
+            NodeSpecRaw::MaxDrawdown { strategy, period } => {
+                NodeSpec::MaxDrawdown { strategy, period }
+            }
+            NodeSpecRaw::Calmar {
+                strategy,
+                period,
+                bars_per_year,
+            } => NodeSpec::Calmar {
+                strategy,
+                period,
+                bars_per_year,
+            },
             NodeSpecRaw::Add { lhs, rhs } => NodeSpec::Add { lhs, rhs },
             NodeSpecRaw::Sub { lhs, rhs } => NodeSpec::Sub { lhs, rhs },
             NodeSpecRaw::Mul { lhs, rhs } => NodeSpec::Mul { lhs, rhs },
@@ -3341,7 +3517,15 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Pow { lhs, rhs } => NodeSpec::Pow { lhs, rhs },
             NodeSpecRaw::Max { lhs, rhs } => NodeSpec::Max { lhs, rhs },
             NodeSpecRaw::Min { lhs, rhs } => NodeSpec::Min { lhs, rhs },
-            NodeSpecRaw::Clamp { source, lower, upper } => NodeSpec::Clamp { source, lower, upper },
+            NodeSpecRaw::Clamp {
+                source,
+                lower,
+                upper,
+            } => NodeSpec::Clamp {
+                source,
+                lower,
+                upper,
+            },
             NodeSpecRaw::Abs { source } => NodeSpec::Abs { source },
             NodeSpecRaw::Sign { source } => NodeSpec::Sign { source },
             NodeSpecRaw::Sqrt { source } => NodeSpec::Sqrt { source },
@@ -3359,15 +3543,7 @@ impl From<NodeSpecRaw> for NodeSpec {
                 then,
                 otherwise,
             },
-            NodeSpecRaw::Match {
-                on,
-                cases,
-                default,
-            } => NodeSpec::Match {
-                on,
-                cases,
-                default,
-            },
+            NodeSpecRaw::Match { on, cases, default } => NodeSpec::Match { on, cases, default },
             NodeSpecRaw::Lag { source, period } => NodeSpec::Lag { source, period },
             NodeSpecRaw::Diff { source, period } => NodeSpec::Diff { source, period },
             NodeSpecRaw::Ratio { source, period } => NodeSpec::Ratio { source, period },
@@ -3377,7 +3553,15 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Log { source, base } => NodeSpec::Log { source, base },
             NodeSpecRaw::Exp { source, base } => NodeSpec::Exp { source, base },
             NodeSpecRaw::Latch { source } => NodeSpec::Latch { source },
-            NodeSpecRaw::Resample { every, inner, source } => NodeSpec::Resample { every, inner, source },
+            NodeSpecRaw::Resample {
+                every,
+                inner,
+                source,
+            } => NodeSpec::Resample {
+                every,
+                inner,
+                source,
+            },
             NodeSpecRaw::Unstable { source } => NodeSpec::Unstable { source },
             NodeSpecRaw::Year { source } => NodeSpec::Year { source },
             NodeSpecRaw::Month { source } => NodeSpec::Month { source },
@@ -3523,9 +3707,7 @@ impl NodeSpec {
                 // Serde's derived Deserialize expects `unit` content for a
                 // unit variant, so collapse the empty-map form to null too.
                 match v {
-                    serde_norway::Value::Mapping(m) if m.is_empty() => {
-                        serde_norway::Value::Null
-                    }
+                    serde_norway::Value::Mapping(m) if m.is_empty() => serde_norway::Value::Null,
                     other => other,
                 }
             } else if matches!(v, serde_norway::Value::Null) {
@@ -3581,22 +3763,18 @@ impl NodeSpec {
             // constant 70". Removes the `!value` boilerplate from the
             // most common comparison shape (`!gt { lhs: !close, rhs: 70 }`
             // instead of `rhs: !value 70`).
-            serde_norway::Value::Number(n) => {
-                serde_norway::Value::Tagged(Box::new(TaggedValue {
-                    tag: Tag::new("value"),
-                    value: serde_norway::Value::Number(n),
-                }))
-            }
+            serde_norway::Value::Number(n) => serde_norway::Value::Tagged(Box::new(TaggedValue {
+                tag: Tag::new("value"),
+                value: serde_norway::Value::Number(n),
+            })),
             // Bare bool literal — auto-wrap as `!value true|false`. Bools are
             // never leaf names, so this is unambiguous: `enter: true` means the
             // constant-true signal. Subsumes the former signal-layer `!value
             // <bool>` / `!never` boilerplate.
-            serde_norway::Value::Bool(b) => {
-                serde_norway::Value::Tagged(Box::new(TaggedValue {
-                    tag: Tag::new("value"),
-                    value: serde_norway::Value::Bool(b),
-                }))
-            }
+            serde_norway::Value::Bool(b) => serde_norway::Value::Tagged(Box::new(TaggedValue {
+                tag: Tag::new("value"),
+                value: serde_norway::Value::Bool(b),
+            })),
             // Bare list of numbers — auto-wrap as `!value [...]`. Only
             // meaningful inside a portfolio weight-share template
             // (`weights: [0.4, 0.6]` for the per-child fixed-weights
@@ -3673,11 +3851,9 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
         let name = tag_str.strip_prefix('!').unwrap_or(&tag_str);
         if name == "equal_weight" {
             let n = match &value {
-                serde_norway::Value::Number(n) => n
-                    .as_u64()
-                    .ok_or_else(|| format!(
-                        "!equal_weight: expected a positive integer leg count, got {n}"
-                    ))?,
+                serde_norway::Value::Number(n) => n.as_u64().ok_or_else(|| {
+                    format!("!equal_weight: expected a positive integer leg count, got {n}")
+                })?,
                 other => {
                     return Err(format!(
                         "!equal_weight: expected a positive integer leg count, got {other:?}"
@@ -3685,9 +3861,7 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
                 }
             };
             if n == 0 {
-                return Err(
-                    "!equal_weight: leg count must be strictly positive".to_string()
-                );
+                return Err("!equal_weight: leg count must be strictly positive".to_string());
             }
             let weight = 1.0_f64 / n as f64;
             return Ok(serde_norway::Value::Tagged(Box::new(TaggedValue {
@@ -3769,9 +3943,7 @@ struct WrapperInner {
 /// - **bare word** — `!changed close`, a plain string.
 fn extract_wrapper_inner(v: &serde_norway::Value, wanted: &str) -> Option<WrapperInner> {
     let inner_payload = match v {
-        serde_norway::Value::Tagged(tv)
-            if tv.tag.to_string().trim_start_matches('!') == wanted =>
-        {
+        serde_norway::Value::Tagged(tv) if tv.tag.to_string().trim_start_matches('!') == wanted => {
             &tv.value
         }
         _ => return None,
@@ -3871,7 +4043,8 @@ fn build_polymorphic_eq(
         PayloadType::Real => {
             let l = lhs_built.into_real()?;
             let r = (rhs.try_build(anchor, book, portfolio_book, schema, root)?)
-                .into_real().map_err(|e| trail(rhs, e))?;
+                .into_real()
+                .map_err(|e| trail(rhs, e))?;
             let e = eps(&epsilon);
             if negate {
                 any(compare::Ne::with_tolerance(l, r, e))
@@ -3882,7 +4055,8 @@ fn build_polymorphic_eq(
         PayloadType::Str => {
             let l = lhs_built.into_str()?;
             let r = (rhs.try_build(anchor, book, portfolio_book, schema, root)?)
-                .into_str().map_err(|e| trail(rhs, e))?;
+                .into_str()
+                .map_err(|e| trail(rhs, e))?;
             if negate {
                 any(compare::StrNe::new(l, r))
             } else {
@@ -3932,9 +4106,11 @@ fn build_match(
     root: Root<'_>,
 ) -> Result<AnyChain, String> {
     if cases.is_empty() {
-        return Err("`cases` must not be empty (use `!if_else` for a single branch, \
+        return Err(
+            "`cases` must not be empty (use `!if_else` for a single branch, \
                     or reduce to `default` if there's nothing to match)"
-            .to_string());
+                .to_string(),
+        );
     }
 
     // Sniff the pattern type once — every case must agree, else the
@@ -4005,11 +4181,7 @@ fn build_match(
                 Ok((pattern, as_real_branch(&c.value)?))
             })
             .collect::<Result<_, String>>()?;
-        Ok(any(MatchIndicator::new(
-            on_ind,
-            pairs,
-            default_ind,
-        )))
+        Ok(any(MatchIndicator::new(on_ind, pairs, default_ind)))
     } else {
         let on_ind = as_real_branch(on)?;
         let pairs: Vec<(Real, RealChain)> = cases
@@ -4022,11 +4194,7 @@ fn build_match(
                 Ok((pattern, as_real_branch(&c.value)?))
             })
             .collect::<Result<_, String>>()?;
-        Ok(any(MatchIndicator::new(
-            on_ind,
-            pairs,
-            default_ind,
-        )))
+        Ok(any(MatchIndicator::new(on_ind, pairs, default_ind)))
     }
 }
 
@@ -4271,9 +4439,7 @@ impl NodeSpec {
             Value(ValueLit::Bool(b)) => {
                 any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(*b))
             }
-            Value(ValueLit::Str(s)) => {
-                any(ValueStr::<Snapshot<Symbol>>::new(s.as_str()))
-            }
+            Value(ValueLit::Str(s)) => any(ValueStr::<Snapshot<Symbol>>::new(s.as_str())),
             Value(ValueLit::List(_)) => {
                 return Err("a list literal is only meaningful in a \
                             portfolio weight-share template — the per-child \
@@ -4331,18 +4497,10 @@ impl NodeSpec {
             Wma { source, period } => any(self::Wma::new(real(source)?, period.get())),
             Hma { source, period } => any(self::Hma::new(real(source)?, period.get())),
             Rsi { source, period } => any(self::Rsi::new(real(source)?, period.get())),
-            StdDev { source, period } => {
-                any(self::StdDev::new(real(source)?, period.get()))
-            }
-            Skewness { source, period } => {
-                any(self::Skewness::new(real(source)?, period.get()))
-            }
-            Kurtosis { source, period } => {
-                any(self::Kurtosis::new(real(source)?, period.get()))
-            }
-            ZScore { source, period } => {
-                any(self::ZScore::new(real(source)?, period.get()))
-            }
+            StdDev { source, period } => any(self::StdDev::new(real(source)?, period.get())),
+            Skewness { source, period } => any(self::Skewness::new(real(source)?, period.get())),
+            Kurtosis { source, period } => any(self::Kurtosis::new(real(source)?, period.get())),
+            ZScore { source, period } => any(self::ZScore::new(real(source)?, period.get())),
             Percentile {
                 source,
                 period,
@@ -4372,23 +4530,15 @@ impl NodeSpec {
             Covariance { lhs, rhs, period } => {
                 any(self::Covariance::new(real(lhs)?, real(rhs)?, period.get()))
             }
-            Beta { lhs, rhs, period } => {
-                any(self::Beta::new(real(lhs)?, real(rhs)?, period.get()))
-            }
+            Beta { lhs, rhs, period } => any(self::Beta::new(real(lhs)?, real(rhs)?, period.get())),
             // The four regression readings share one fit, and each names which
             // end of it it wants. `NonZeroUsize` gets `period` past 0; the fit
             // needs a second point before a slope exists at all, which no type
             // here can express — so it is a build error, as `!variance_ratio`'s
             // relational bound is.
-            LinregSlope { source, period } => {
-                any(linreg(real(source)?, *period)?.slope())
-            }
-            LinregIntercept { source, period } => {
-                any(linreg(real(source)?, *period)?.intercept())
-            }
-            LinregValue { source, period } => {
-                any(linreg(real(source)?, *period)?.value())
-            }
+            LinregSlope { source, period } => any(linreg(real(source)?, *period)?.slope()),
+            LinregIntercept { source, period } => any(linreg(real(source)?, *period)?.intercept()),
+            LinregValue { source, period } => any(linreg(real(source)?, *period)?.value()),
             LinregR2 { source, period } => any(linreg(real(source)?, *period)?.r2()),
             VarianceRatio {
                 source,
@@ -4576,14 +4726,10 @@ impl NodeSpec {
                 any(self::WilliamsR::new(candle(source)?, period.get()))
             }
             Obv { source } => any(self::Obv::new(candle(source)?)),
-            Vwap { source, period } => {
-                any(self::Vwap::new(candle(source)?, period.get()))
-            }
+            Vwap { source, period } => any(self::Vwap::new(candle(source)?, period.get())),
             Ad { source } => any(self::Ad::new(candle(source)?)),
             TrueRange { source } => any(self::TrueRange::new(candle(source)?)),
-            Sar { source, step, max } => {
-                any(self::Sar::new(candle(source)?, *step, *max))
-            }
+            Sar { source, step, max } => any(self::Sar::new(candle(source)?, *step, *max)),
 
             VolTarget {
                 source,
@@ -4631,15 +4777,13 @@ impl NodeSpec {
                 seed,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                any(
-                    crate::indicators::sizing::equity_vol_target::<Symbol>(
-                        b,
-                        *target,
-                        window.get(),
-                        *bars_per_year,
-                        *seed,
-                    ),
-                )
+                any(crate::indicators::sizing::equity_vol_target::<Symbol>(
+                    b,
+                    *target,
+                    window.get(),
+                    *bars_per_year,
+                    *seed,
+                ))
             }
             FractionalKelly {
                 source,
@@ -4754,19 +4898,22 @@ impl NodeSpec {
                 let f_ind = real(otherwise)?;
                 any(self::IfElse::new(cond_ind, t_ind, f_ind))
             }
-            Match { on, cases, default } => {
-                build_match(on, cases, default, anchor, book, portfolio_book, schema, root)?
-            }
+            Match { on, cases, default } => build_match(
+                on,
+                cases,
+                default,
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+                root,
+            )?,
             Lag { source, period } => any(real(source)?.lag(period.get())),
             Diff { source, period } => any(real(source)?.diff(period.get())),
             Ratio { source, period } => any(real(source)?.ratio(period.get())),
             Roc { source, period } => any(real(source)?.roc(period.get())),
-            RollingMax { source, period } => {
-                any(real(source)?.rolling_max(period.get()))
-            }
-            RollingMin { source, period } => {
-                any(real(source)?.rolling_min(period.get()))
-            }
+            RollingMax { source, period } => any(real(source)?.rolling_max(period.get())),
+            RollingMin { source, period } => any(real(source)?.rolling_min(period.get())),
             Log { source, base } => any(self::Log::new(real(source)?, checked_base(*base)?)),
             Exp { source, base } => any(self::Exp::new(real(source)?, checked_base(*base)?)),
             Latch { source } => {
@@ -4867,10 +5014,26 @@ impl NodeSpec {
                 eps(epsilon),
             )),
             Eq { lhs, rhs, epsilon } => build_polymorphic_eq(
-                lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema, root,
+                lhs,
+                rhs,
+                *epsilon,
+                false,
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+                root,
             )?,
             Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
-                lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema, root,
+                lhs,
+                rhs,
+                *epsilon,
+                true,
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+                root,
             )?,
             Above { source, level } => any(real(source)?.above(*level)),
             Below { source, level } => any(real(source)?.below(*level)),
@@ -4927,23 +5090,17 @@ impl NodeSpec {
             }
             BecameTrue(inner) => any(boolean(inner)?.became_true()),
             BecameFalse(inner) => any(boolean(inner)?.became_false()),
-            StrEq { lhs, rhs } => {
-                any(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?))
-            }
-            StrNe { lhs, rhs } => {
-                any(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?))
-            }
-            Never => {
-                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
-            }
-            Every(n) => {
-                any(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get()))
-            }
+            StrEq { lhs, rhs } => any(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?)),
+            StrNe { lhs, rhs } => any(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?)),
+            Never => any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false)),
+            Every(n) => any(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get())),
             IsWeekday => any(crate::indicators::IsWeekday::of(pick_any_root())),
             IsWeekend => any(crate::indicators::IsWeekend::of(pick_any_root())),
             HasColumn { name } => {
                 let exists = schema.index_of(name.as_str()).is_some();
-                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(exists))
+                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(
+                    exists,
+                ))
             }
         })
     }
@@ -4983,9 +5140,9 @@ fn build_pick(
         .map(crate::types::symbol)
         .or_else(|| root.selector().and_then(|r| r.symbol.clone()));
     let f = match freq {
-        Some(s) => Some(Frequency::from_str(s).map_err(|e| {
-            format!("invalid frequency {s:?}: {e}")
-        })?),
+        Some(s) => {
+            Some(Frequency::from_str(s).map_err(|e| format!("invalid frequency {s:?}: {e}"))?)
+        }
         None => None,
     };
     let selector = Selector::<Symbol> {
@@ -5019,11 +5176,7 @@ fn build_pick(
 /// distinguishes the empty-schema case ("no overlay side channel — feed
 /// `--series` or `file:` data with additional columns to attach overlays")
 /// from the non-empty case ("registered: a, b, c").
-fn build_get(
-    schema: &Arc<Schema>,
-    key: &str,
-    source: AtomChain,
-) -> Result<AnyChain, String> {
+fn build_get(schema: &Arc<Schema>, key: &str, source: AtomChain) -> Result<AnyChain, String> {
     match schema.type_of_key(key) {
         Some(OverlayType::Real) => Ok(any(GetReal::of(schema, key, source))),
         Some(OverlayType::Bool) => Ok(any(GetBool::of(schema, key, source))),

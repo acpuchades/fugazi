@@ -97,8 +97,15 @@ def test_stubs_are_valid_types(tmp_path):
     exists and the diff would happily agree with itself."""
     pytest.importorskip("mypy")
     result = subprocess.run(
-        [sys.executable, "-m", "mypy", "--strict", "--cache-dir", str(tmp_path),
-         *(str(STUB_DIR / name) for name in STUBS)],
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--strict",
+            "--cache-dir",
+            str(tmp_path),
+            *(str(STUB_DIR / name) for name in STUBS),
+        ],
         capture_output=True,
         text=True,
         cwd=ROOT,

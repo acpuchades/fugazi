@@ -128,14 +128,11 @@ mod tests {
     fn all_of_restricts_discovery_to_listed_symbols() {
         // Universe = {A, B}. Snapshot carries A, B, C — C should never get
         // a chain built.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .all_of(["A", "B"]);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .all_of(["A", "B"]);
         strat.update(snap(&[("A", 100.0), ("B", 50.0), ("C", 200.0)]));
         assert!(strat.position(&"A").is_some());
         assert!(strat.position(&"B").is_some());
@@ -148,14 +145,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "strict universe requires")]
     fn all_of_panics_when_listed_symbol_absent() {
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .all_of(["A", "B"]);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .all_of(["A", "B"]);
         // B is missing from the snapshot — strict-erroring convention.
         strat.update(snap(&[("A", 100.0)]));
     }
@@ -165,18 +159,17 @@ mod tests {
         // Score = SMA-3 so the first two bars score None for every symbol.
         // Under !all_of, is_ready must stay false until every listed
         // symbol has settled.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    crate::indicators::Sma::new(
-                        Close::of(Pick::matching(Selector::by_symbol(*sym))),
-                        3,
-                    )
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .all_of(["A", "B"]);
-        assert!(!strat.is_ready(), "empty basket cannot be ready under all_of");
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| {
+                crate::indicators::Sma::new(Close::of(Pick::matching(Selector::by_symbol(*sym))), 3)
+            })
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .all_of(["A", "B"]);
+        assert!(
+            !strat.is_ready(),
+            "empty basket cannot be ready under all_of"
+        );
         strat.update(snap(&[("A", 100.0), ("B", 50.0)]));
         assert!(!strat.is_ready(), "first bar: SMA-3 not warmed for either");
         strat.update(snap(&[("A", 101.0), ("B", 51.0)]));
@@ -191,14 +184,11 @@ mod tests {
     #[test]
     fn any_of_ignores_absent_symbols() {
         // Universe = {A, B} lax. B is missing on this bar — must not panic.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .any_of(["A", "B"]);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .any_of(["A", "B"]);
         strat.update(snap(&[("A", 100.0)]));
         assert!(strat.position(&"A").is_some());
         // No B in the snapshot: no chain built yet (it hasn't been seen).
@@ -212,14 +202,11 @@ mod tests {
         // Same shape as the all_of restriction test, but without the
         // presence-required panic. C in the snapshot must still be
         // filtered out at discovery.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .any_of(["A", "B"]);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .any_of(["A", "B"]);
         strat.update(snap(&[("A", 100.0), ("B", 50.0), ("C", 200.0)]));
         assert!(strat.position(&"A").is_some());
         assert!(strat.position(&"B").is_some());
@@ -230,8 +217,7 @@ mod tests {
     fn floating_universe_is_ready_by_default() {
         // Sanity: the default (no all_of / no any_of) leaves is_ready as
         // the trait default.
-        let strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0);
+        let strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0);
         assert!(strat.is_ready());
     }
 
@@ -252,14 +238,11 @@ mod tests {
             }
         }
 
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .universe(PrefixUniverse('B'));
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .universe(PrefixUniverse('B'));
         // Only 'B'-prefixed symbols get chains built.
         strat.update(snap(&[("BTC", 100.0), ("ETH", 200.0), ("BNB", 300.0)]));
         assert!(strat.position(&"BTC").is_some());

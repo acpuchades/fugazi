@@ -19,9 +19,7 @@ use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
-use crate::indicators::{
-    Atr, Book, Close, CurrentBar, IndicatorExt, Log, Pick, StdDev, Value,
-};
+use crate::indicators::{Atr, Book, Close, CurrentBar, IndicatorExt, Log, Pick, StdDev, Value};
 use crate::types::{Atom, Real, Snapshot};
 
 /// **Equal-weight sizing.**
@@ -90,7 +88,12 @@ pub fn vol_target<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
     window: usize,
     bars_per_year: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
-    vol_target_of(Pick::<Sym>::new(), target_annualized_vol, window, bars_per_year)
+    vol_target_of(
+        Pick::<Sym>::new(),
+        target_annualized_vol,
+        window,
+        bars_per_year,
+    )
 }
 
 /// [`vol_target`] with a caller-supplied atom source — the basket-safe
@@ -297,7 +300,10 @@ pub fn fractional_kelly<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>
     seed: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(kelly_fraction > 0.0, "kelly_fraction must be > 0");
-    assert!(window >= 2, "window must be >= 2 (variance needs 2+ samples)");
+    assert!(
+        window >= 2,
+        "window must be >= 2 (variance needs 2+ samples)"
+    );
     // Kelly needs `window` *closed trades*, and nothing closes until something
     // opens — so without a seed the recipe holds every entry forever. `seed`
     // is the size until the window has filled.
@@ -691,11 +697,21 @@ mod tests {
         book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
         book.update([("X", Candle::new(90.0, 90.0, 90.0, 90.0, 0.0))]);
         // Drawdown = -0.1, max_drawdown = 0.2, throttle = 1 + (-0.1)/0.2 = 0.5.
-        assert!((ind.update(Snapshot::of_atom(Candle::new(90.0, 90.0, 90.0, 90.0, 0.0).into())).unwrap() - 0.5).abs() < 1e-12);
+        assert!(
+            (ind.update(Snapshot::of_atom(
+                Candle::new(90.0, 90.0, 90.0, 90.0, 0.0).into()
+            ))
+            .unwrap()
+                - 0.5)
+                .abs()
+                < 1e-12
+        );
         // A deeper 30% drawdown clamps to 0.
         book.update([("X", Candle::new(70.0, 70.0, 70.0, 70.0, 0.0))]);
         assert_eq!(
-            ind.update(Snapshot::of_atom(Candle::new(70.0, 70.0, 70.0, 70.0, 0.0).into())),
+            ind.update(Snapshot::of_atom(
+                Candle::new(70.0, 70.0, 70.0, 70.0, 0.0).into()
+            )),
             Some(0.0)
         );
     }
@@ -720,13 +736,20 @@ mod tests {
         // alternating +1% and -1% (approximately — depends on prev equity).
         book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
         book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
-        ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+        ind.update(Snapshot::of_atom(
+            Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into(),
+        ));
         for close in [101.0, 100.0, 101.0, 100.0, 101.0].iter().copied() {
             book.update([("X", Candle::new(close, close, close, close, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(close, close, close, close, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(close, close, close, close, 0.0).into(),
+            ));
         }
         // Once the window has enough per-bar returns, the multiplier is well-defined.
-        assert!(ind.value().is_some(), "vol target should be Some once window is full");
+        assert!(
+            ind.value().is_some(),
+            "vol target should be Some once window is full"
+        );
         // And positive.
         assert!(ind.value().unwrap() > 0.0);
     }
@@ -743,7 +766,9 @@ mod tests {
         let mut ind = equity_vol_target::<&'static str>(&book, 0.20, 10, 252.0, 0.25);
         for _ in 0..5 {
             book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into(),
+            ));
         }
         assert_eq!(
             ind.value(),
@@ -766,17 +791,29 @@ mod tests {
         for (side, units, entry, exit) in trades {
             book.apply_fill(&"X", side, units, entry);
             book.update([("X", Candle::new(entry, entry, entry, entry, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(entry, entry, entry, entry, 0.0).into()));
-            let opp = if side == Side::Buy { Side::Sell } else { Side::Buy };
+            ind.update(Snapshot::of_atom(
+                Candle::new(entry, entry, entry, entry, 0.0).into(),
+            ));
+            let opp = if side == Side::Buy {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
             book.apply_fill(&"X", opp, units, exit);
             book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(exit, exit, exit, exit, 0.0).into(),
+            ));
             // Next bar drains the trade-close accessor.
             book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(exit, exit, exit, exit, 0.0).into(),
+            ));
         }
         // After 3 closed trades, Kelly should be Some and non-negative.
-        let k = ind.value().expect("Kelly should be Some after window fills");
+        let k = ind
+            .value()
+            .expect("Kelly should be Some after window fills");
         assert!(k >= 0.0);
     }
 
@@ -791,7 +828,9 @@ mod tests {
         // No trades yet.
         for _ in 0..10 {
             book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into(),
+            ));
         }
         assert_eq!(
             ind.value(),
@@ -812,13 +851,19 @@ mod tests {
         for exit in [110.0, 130.0] {
             book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
             book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into(),
+            ));
             book.apply_fill(&"X", Side::Sell, 10.0, exit);
             book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(exit, exit, exit, exit, 0.0).into(),
+            ));
             // Next bar drains the trade-close accessor.
             book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
-            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            ind.update(Snapshot::of_atom(
+                Candle::new(exit, exit, exit, exit, 0.0).into(),
+            ));
         }
         let settled = ind.value().expect("two closed trades fill the window");
         assert_ne!(

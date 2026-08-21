@@ -15,7 +15,8 @@ use std::sync::OnceLock;
 /// Whether to emit escape codes — `NO_COLOR` unset and stdout is a terminal.
 fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
+    *ENABLED
+        .get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
 }
 
 /// Wrap `s` in the SGR `code` (e.g. `"1"`, `"32"`), or return it unchanged when

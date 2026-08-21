@@ -419,7 +419,10 @@ mod tolerance_tests {
     /// (`!gt { lhs: !macd_line, rhs: !value 0 }`).
     #[test]
     fn comparing_against_a_literal_zero_still_has_a_band() {
-        assert!(Tolerance::relative(1e-9).band(0.0, 0.0) == 0.0, "precondition");
+        assert!(
+            Tolerance::relative(1e-9).band(0.0, 0.0) == 0.0,
+            "precondition"
+        );
         assert!(DEFAULT_TOLERANCE.band(0.0, 0.0) > 0.0);
         assert!(!gt(1e-15, 0.0), "sub-floor noise is not a positive reading");
         assert!(gt(1e-6, 0.0), "a real positive value still reads as one");
@@ -449,12 +452,18 @@ mod tolerance_tests {
         let price = 50_000.0;
         let inside = price + DEFAULT_TOLERANCE.band(price, price) * 0.5;
 
-        let mut g: Gt<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
-        let mut l: Lt<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
-        let mut ge: Ge<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
-        let mut le: Le<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
-        let mut e: Eq<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
-        let mut n: Ne<Identity<Real>, Value<Real>> = Combine::new(Identity::new(), Value::new(price));
+        let mut g: Gt<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
+        let mut l: Lt<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
+        let mut ge: Ge<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
+        let mut le: Le<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
+        let mut e: Eq<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
+        let mut n: Ne<Identity<Real>, Value<Real>> =
+            Combine::new(Identity::new(), Value::new(price));
 
         assert_eq!(g.update(inside), Some(false));
         assert_eq!(l.update(inside), Some(false));
@@ -478,7 +487,11 @@ mod tolerance_tests {
         // Sit just below, then wobble to just above by less than the band.
         cross.update(price - noise);
         let fired = (0..8).any(|i| {
-            let x = if i % 2 == 0 { price + noise } else { price - noise };
+            let x = if i % 2 == 0 {
+                price + noise
+            } else {
+                price - noise
+            };
             cross.update(x).unwrap_or(false)
         });
         assert!(!fired, "noise below the band must not look like a crossing");

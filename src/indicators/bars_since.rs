@@ -229,7 +229,7 @@ impl<S: Indicator<Output = Real>, Op: ExtremeOp> Indicator for BarsSinceExtreme<
 mod tests {
     use super::*;
     use crate::indicators::ext::{BoolIndicatorExt, IndicatorExt};
-    use crate::indicators::{ValueBool, Identity};
+    use crate::indicators::{Identity, ValueBool};
 
     /// A signal that fires whenever the input exceeds 10.
     fn spike() -> impl Indicator<Input = Real, Output = bool> {

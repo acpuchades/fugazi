@@ -138,7 +138,9 @@ impl CoinGecko {
             client: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
             vs_currency: "usd".to_string(),
-            api_key: std::env::var(API_KEY_ENV).ok().filter(|k| !k.trim().is_empty()),
+            api_key: std::env::var(API_KEY_ENV)
+                .ok()
+                .filter(|k| !k.trim().is_empty()),
             user_agent: DEFAULT_USER_AGENT.to_string(),
             min_delay_between_requests: Duration::from_millis(DEFAULT_MIN_DELAY_MS),
         }
@@ -409,7 +411,8 @@ fn fill(dst: &mut BTreeMap<i64, Real>, series: &[[f64; 2]], interval: Interval) 
         if !ts.is_finite() || !value.is_finite() {
             continue;
         }
-        dst.entry(floor_to_bucket(ts as i64, interval)).or_insert(value);
+        dst.entry(floor_to_bucket(ts as i64, interval))
+            .or_insert(value);
     }
 }
 

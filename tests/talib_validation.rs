@@ -78,10 +78,39 @@ const CONVERGED_TOL: Real = 2e-2;
 /// indicator is *stale*, which skips (or fails) with the same regenerate hint as
 /// an absent one — never a mid-run panic on a missing column.
 const REQUIRED: &[&str] = &[
-    "sma10", "ema10", "rsi14", "atr14", "stddev10", "bb_upper", "bb_mid", "bb_lower", "max10_high",
-    "min10_low", "macd", "macd_signal", "macd_hist", "adx14", "plus_di14", "minus_di14", "trange",
-    "stochf_k14", "obv", "ad", "mfi14", "wma10", "hma16", "roc10", "willr14", "cci20", "aroon_up14",
-    "aroon_dn14", "aroon_osc14", "kc_upper", "kc_mid", "kc_lower", "sar",
+    "sma10",
+    "ema10",
+    "rsi14",
+    "atr14",
+    "stddev10",
+    "bb_upper",
+    "bb_mid",
+    "bb_lower",
+    "max10_high",
+    "min10_low",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "adx14",
+    "plus_di14",
+    "minus_di14",
+    "trange",
+    "stochf_k14",
+    "obv",
+    "ad",
+    "mfi14",
+    "wma10",
+    "hma16",
+    "roc10",
+    "willr14",
+    "cci20",
+    "aroon_up14",
+    "aroon_dn14",
+    "aroon_osc14",
+    "kc_upper",
+    "kc_mid",
+    "kc_lower",
+    "sar",
 ];
 
 const HINT: &str = "  pixi run gen-talib\n  \
@@ -145,7 +174,13 @@ fn load() -> Option<Comparison> {
     let mut cci = Cci::new(Current::typical(), CCI_P);
     let mut aroon = Aroon::new(Current::candle(), AROON_P);
     let mut dmi = Dmi::new(Current::candle(), DMI_P);
-    let mut kc = Keltner::new(Current::close(), Current::candle(), KC_EMA_P, KC_ATR_P, KC_MULT);
+    let mut kc = Keltner::new(
+        Current::close(),
+        Current::candle(),
+        KC_EMA_P,
+        KC_ATR_P,
+        KC_MULT,
+    );
     let mut sar = Sar::new(Current::candle(), SAR_STEP, SAR_MAX);
 
     let mut out: BTreeMap<&'static str, Vec<Option<Real>>> = BTreeMap::new();
@@ -183,7 +218,11 @@ fn load() -> Option<Comparison> {
         push(&mut out, "minus_di14", adx.minus_di);
         push(&mut out, "trange", tr.update(atom.clone()));
         // fugazi yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
-        push(&mut out, "stochf_k14", stoch.update(close[i]).map(|v| v * 100.0));
+        push(
+            &mut out,
+            "stochf_k14",
+            stoch.update(close[i]).map(|v| v * 100.0),
+        );
         push(&mut out, "obv", obv.update(atom.clone()));
         push(&mut out, "ad", ad.update(atom.clone()));
         push(&mut out, "mfi14", mfi.update(atom.clone()));
@@ -356,7 +395,8 @@ fn every_required_column_is_produced_by_the_generator() {
     .expect("tools/gen_talib_fixtures.py is committed");
     for column in REQUIRED {
         assert!(
-            generator.contains(&format!("\"{column}\"")) || generator.contains(&format!("'{column}'")),
+            generator.contains(&format!("\"{column}\""))
+                || generator.contains(&format!("'{column}'")),
             "`{column}` is required by the test but never written by \
              tools/gen_talib_fixtures.py"
         );

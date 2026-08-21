@@ -7,7 +7,7 @@
 //! millisecond `Timestamp`s, skips null bars, and maps `Not Found` / `429`
 //! into the right `SourceError` variants.
 
-use fugazi::sources::{SeriesSource, Interval, Timestamp, Yahoo};
+use fugazi::sources::{Interval, SeriesSource, Timestamp, Yahoo};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -46,7 +46,9 @@ async fn decodes_chart_response() {
 
     // Raw mode: the candle is the untouched print and the adjusted close rides
     // along as an `adj_close` overlay.
-    let client = Yahoo::new().with_adjusted(false).with_base_url(server.uri());
+    let client = Yahoo::new()
+        .with_adjusted(false)
+        .with_base_url(server.uri());
 
     let bars = client
         .atoms(
@@ -69,7 +71,10 @@ async fn decodes_chart_response() {
     }
 
     // adj_close made it onto every atom's overlay side channel.
-    let ov = bars[0].overlays.as_ref().expect("Yahoo atoms carry overlays");
+    let ov = bars[0]
+        .overlays
+        .as_ref()
+        .expect("Yahoo atoms carry overlays");
     assert_eq!(
         ov.get_by_key("adj_close"),
         Some(&fugazi::OverlayValue::Real(468.0))
@@ -128,7 +133,10 @@ async fn decodes_chart_response_adjusted_by_default() {
     assert_eq!(c.low, 90.0);
     assert_eq!(c.close, 100.0);
     assert_eq!(c.volume, 2_000_000.0);
-    let ov = bars[0].overlays.as_ref().expect("Yahoo atoms carry overlays");
+    let ov = bars[0]
+        .overlays
+        .as_ref()
+        .expect("Yahoo atoms carry overlays");
     assert_eq!(
         ov.get_by_key("raw_close"),
         Some(&fugazi::OverlayValue::Real(200.0))
@@ -185,17 +193,15 @@ async fn maps_unknown_symbol_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v8/finance/chart/NOTASYMBOL"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "chart": {
-                    "result": null,
-                    "error": {
-                        "code": "Not Found",
-                        "description": "No data found, symbol may be delisted"
-                    }
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "chart": {
+                "result": null,
+                "error": {
+                    "code": "Not Found",
+                    "description": "No data found, symbol may be delisted"
                 }
-            })),
-        )
+            }
+        })))
         .mount(&server)
         .await;
 
@@ -254,17 +260,15 @@ async fn maps_inline_error_on_success_status() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v8/finance/chart/NOTASYMBOL"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "chart": {
-                    "result": null,
-                    "error": {
-                        "code": "Not Found",
-                        "description": "No data found"
-                    }
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "chart": {
+                "result": null,
+                "error": {
+                    "code": "Not Found",
+                    "description": "No data found"
                 }
-            })),
-        )
+            }
+        })))
         .mount(&server)
         .await;
 
@@ -278,5 +282,8 @@ async fn maps_inline_error_on_success_status() {
         )
         .await
         .expect_err("expected UnknownSymbol");
-    assert!(matches!(err, fugazi::sources::SourceError::UnknownSymbol(_)));
+    assert!(matches!(
+        err,
+        fugazi::sources::SourceError::UnknownSymbol(_)
+    ));
 }

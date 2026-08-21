@@ -1,8 +1,8 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
-use crate::num::max_finite;
 use crate::indicators::smoothing::WilderState;
+use crate::num::max_finite;
 use crate::types::Real;
 
 /// Relative Strength Index of a source (Wilder's smoothing).

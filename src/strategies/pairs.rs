@@ -18,7 +18,7 @@
 
 use std::sync::OnceLock;
 
-use crate::indicators::{Book, Close, ValueBool, Pick, Position, Value};
+use crate::indicators::{Book, Close, Pick, Position, Value, ValueBool};
 
 /// The rebalance-gate signal type — a boolean over the pair's snapshot.
 type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
@@ -34,7 +34,10 @@ type Spread<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Sen
 /// Fetch a matching atom out of a per-bar [`Snapshot`], for the [`Position`]
 /// tracker's own view. Returns `None` on a miss (the pair leg is absent on this
 /// bar); the caller then simply skips the position fold for that side.
-fn find_atom<Sym: PartialEq + Clone + Eq + std::hash::Hash>(snap: &Snapshot<Sym>, symbol: &Sym) -> Option<Atom> {
+fn find_atom<Sym: PartialEq + Clone + Eq + std::hash::Hash>(
+    snap: &Snapshot<Sym>,
+    symbol: &Sym,
+) -> Option<Atom> {
     let query = Selector::by_symbol(symbol.clone());
     snap.find(&query).cloned()
 }
@@ -207,8 +210,9 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     /// Panics if `initial_equity` is not strictly positive.
     pub fn with_initial_equity(left: Sym, right: Sym, initial_equity: Real) -> Self {
         let spread: Spread<Sym> = Box::new(
-            Close::of(Pick::matching(Selector::by_symbol(left.clone())))
-                .sub(Close::of(Pick::matching(Selector::by_symbol(right.clone())))),
+            Close::of(Pick::matching(Selector::by_symbol(left.clone()))).sub(Close::of(
+                Pick::matching(Selector::by_symbol(right.clone())),
+            )),
         );
         Self {
             left,
@@ -503,7 +507,14 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
 #[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym> PairsStrategy<Sym>
 where
-    Sym: Clone + std::hash::Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+    Sym: Clone
+        + std::hash::Hash
+        + Eq
+        + 'static
+        + Send
+        + Sync
+        + serde::Serialize
+        + serde::de::DeserializeOwned,
 {
     /// Serialize the pair's full runtime state for run resuming — both leg
     /// signal chains, the spread source, the protective / sizing chains, both
@@ -540,39 +551,61 @@ where
             .ok_or_else(|| format!("pairs: expected a state object, got {state}"))?;
         let null = serde_json::Value::Null;
         let get = |k: &str| obj.get(k).unwrap_or(&null);
-        self.long_enter.load_state(get("long_enter")).map_err(|e| format!("long_enter > {e}"))?;
-        self.long_exit.load_state(get("long_exit")).map_err(|e| format!("long_exit > {e}"))?;
-        self.short_enter.load_state(get("short_enter")).map_err(|e| format!("short_enter > {e}"))?;
-        self.short_exit.load_state(get("short_exit")).map_err(|e| format!("short_exit > {e}"))?;
-        self.spread.load_state(get("spread")).map_err(|e| format!("spread > {e}"))?;
+        self.long_enter
+            .load_state(get("long_enter"))
+            .map_err(|e| format!("long_enter > {e}"))?;
+        self.long_exit
+            .load_state(get("long_exit"))
+            .map_err(|e| format!("long_exit > {e}"))?;
+        self.short_enter
+            .load_state(get("short_enter"))
+            .map_err(|e| format!("short_enter > {e}"))?;
+        self.short_exit
+            .load_state(get("short_exit"))
+            .map_err(|e| format!("short_exit > {e}"))?;
+        self.spread
+            .load_state(get("spread"))
+            .map_err(|e| format!("spread > {e}"))?;
         if let Some(l) = self.long_stop.as_mut() {
-            l.load_state(get("long_stop")).map_err(|e| format!("long_stop > {e}"))?;
+            l.load_state(get("long_stop"))
+                .map_err(|e| format!("long_stop > {e}"))?;
         }
         if let Some(l) = self.long_target.as_mut() {
-            l.load_state(get("long_target")).map_err(|e| format!("long_target > {e}"))?;
+            l.load_state(get("long_target"))
+                .map_err(|e| format!("long_target > {e}"))?;
         }
         if let Some(l) = self.short_stop.as_mut() {
-            l.load_state(get("short_stop")).map_err(|e| format!("short_stop > {e}"))?;
+            l.load_state(get("short_stop"))
+                .map_err(|e| format!("short_stop > {e}"))?;
         }
         if let Some(l) = self.short_target.as_mut() {
-            l.load_state(get("short_target")).map_err(|e| format!("short_target > {e}"))?;
+            l.load_state(get("short_target"))
+                .map_err(|e| format!("short_target > {e}"))?;
         }
-        self.sizing.load_state(get("sizing")).map_err(|e| format!("sizing > {e}"))?;
-        self.rebalance.load_state(get("rebalance")).map_err(|e| format!("rebalance > {e}"))?;
+        self.sizing
+            .load_state(get("sizing"))
+            .map_err(|e| format!("sizing > {e}"))?;
+        self.rebalance
+            .load_state(get("rebalance"))
+            .map_err(|e| format!("rebalance > {e}"))?;
         self.left_position
             .restore(get("left_position"))
             .map_err(|e| format!("left_position > {e}"))?;
         self.right_position
             .restore(get("right_position"))
             .map_err(|e| format!("right_position > {e}"))?;
-        self.book.restore_state(get("book")).map_err(|e| format!("book > {e}"))?;
+        self.book
+            .restore_state(get("book"))
+            .map_err(|e| format!("book > {e}"))?;
         self.bars_seen = serde_json::from_value(get("bars_seen").clone())
             .map_err(|e| format!("bars_seen: {e}"))?;
         Ok(())
     }
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy for PairsStrategy<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy
+    for PairsStrategy<Sym>
+{
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 
@@ -589,8 +622,14 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         // Feed the book both legs' closes in one call so aggregate
         // mark-to-market and per-bar return are computed correctly.
         let marks: Vec<(Sym, Candle)> = [
-            left_atom.as_ref().and_then(|a| a.candle).map(|c| (self.left.clone(), c)),
-            right_atom.as_ref().and_then(|a| a.candle).map(|c| (self.right.clone(), c)),
+            left_atom
+                .as_ref()
+                .and_then(|a| a.candle)
+                .map(|c| (self.left.clone(), c)),
+            right_atom
+                .as_ref()
+                .and_then(|a| a.candle)
+                .map(|c| (self.right.clone(), c)),
         ]
         .into_iter()
         .flatten()
@@ -740,8 +779,8 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
 mod tests {
     use super::*;
     use crate::indicators::Value;
-    use crate::wallet::PaperWallet;
     use crate::types::Snapshot;
+    use crate::wallet::PaperWallet;
 
     /// Build a size-2 snapshot with left/right atoms tagged by symbol.
     fn snap(l_price: Real, r_price: Real) -> Snapshot<&'static str> {

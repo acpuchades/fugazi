@@ -21,9 +21,9 @@ fn candle(ts: i64, o: &str, h: &str, l: &str, c: &str, v: &str) -> serde_json::V
         l,
         c,
         v,
-        "0",   // volCcy
-        "0",   // volCcyQuote
-        "1"    // confirm
+        "0", // volCcy
+        "0", // volCcyQuote
+        "1"  // confirm
     ])
 }
 
@@ -39,14 +39,49 @@ async fn paginates_backward_and_decodes_candles() {
     // `after` cursor. Page 1 (after = until) yields the three newest bars in
     // the window, descending; its oldest timestamp becomes page 2's cursor.
     let page1 = vec![
-        candle(1_704_412_800_000, "42450.0", "42600.0", "42400.0", "42550.0", "60.0"),
-        candle(1_704_326_400_000, "42350.0", "42500.0", "42300.0", "42450.0", "70.0"),
-        candle(1_704_240_000_000, "42250.0", "42400.0", "42150.0", "42350.0", "90.0"),
+        candle(
+            1_704_412_800_000,
+            "42450.0",
+            "42600.0",
+            "42400.0",
+            "42550.0",
+            "60.0",
+        ),
+        candle(
+            1_704_326_400_000,
+            "42350.0",
+            "42500.0",
+            "42300.0",
+            "42450.0",
+            "70.0",
+        ),
+        candle(
+            1_704_240_000_000,
+            "42250.0",
+            "42400.0",
+            "42150.0",
+            "42350.0",
+            "90.0",
+        ),
     ];
     // Page 2: two candles, so a short page -> loop exit.
     let page2 = vec![
-        candle(1_704_153_600_000, "42100.0", "42300.0", "42000.0", "42250.0", "80.0"),
-        candle(1_704_067_200_000, "42000.0", "42500.5", "41800.25", "42100.00", "100.0"),
+        candle(
+            1_704_153_600_000,
+            "42100.0",
+            "42300.0",
+            "42000.0",
+            "42250.0",
+            "80.0",
+        ),
+        candle(
+            1_704_067_200_000,
+            "42000.0",
+            "42500.5",
+            "41800.25",
+            "42100.00",
+            "100.0",
+        ),
     ];
 
     Mock::given(method("GET"))
@@ -67,7 +102,9 @@ async fn paginates_backward_and_decodes_candles() {
         .mount(&server)
         .await;
 
-    let client = Okx::new().with_base_url(server.uri()).with_max_per_request(3);
+    let client = Okx::new()
+        .with_base_url(server.uri())
+        .with_max_per_request(3);
 
     let bars = client
         .atoms(

@@ -121,28 +121,40 @@ BY_PARAM = {
 #: appear here or in one of the prefix rules below — see `classify_return`.
 RETURNS = {
     # --- leaves -----------------------------------------------------------
-    **{n: "Indicator" for n in (
-        "open high low close volume typical median identity value sma ema rma wma hma rsi "
-        "stddev skewness kurtosis zscore correlation percentile percentile_rank bars_since "
-        "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
-        "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
-        "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
-        "week_of_year quarter unix_seconds unix_millis covariance beta"
-    ).split()},
-    **{n: "Signal" for n in "is_weekday is_weekend every str_eq str_ne get_bool".split()},
-    **{n: "MultiIndicator" for n in
-       "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi linreg".split()},
+    **{
+        n: "Indicator"
+        for n in (
+            "open high low close volume typical median identity value sma ema rma wma hma rsi "
+            "stddev skewness kurtosis zscore correlation percentile percentile_rank bars_since "
+            "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
+            "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
+            "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
+            "week_of_year quarter unix_seconds unix_millis covariance beta"
+        ).split()
+    },
+    **{
+        n: "Signal"
+        for n in "is_weekday is_weekend every str_eq str_ne get_bool".split()
+    },
+    **{
+        n: "MultiIndicator"
+        for n in "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi linreg".split()
+    },
     "value_str": "StrSource",
     "get_str": "StrSource",
     "get": "Indicator | Signal | StrSource",
     "pick": "AtomSource",
     "compute_overlays": "Any",
     # --- strategy presets and selection ------------------------------------
-    **{n: "Strategy" for n in
-       "buy_and_hold ma_crossover rsi_reversal donchian_breakout keltner_breakout".split()},
+    **{
+        n: "Strategy"
+        for n in "buy_and_hold ma_crossover rsi_reversal donchian_breakout keltner_breakout".split()
+    },
     **{n: "Selection" for n in "everything top_bottom threshold quantile".split()},
-    **{n: "Indicator" for n in
-       "sharpe_of sortino_of volatility_of max_drawdown_of calmar_of".split()},
+    **{
+        n: "Indicator"
+        for n in "sharpe_of sortino_of volatility_of max_drawdown_of calmar_of".split()
+    },
     # --- spec / data --------------------------------------------------------
     "load_spec": "StrategySpec",
     "optimize": "Sweep | WalkForwardResult",
@@ -229,14 +241,22 @@ MEMBER_RETURNS = {
     ("StrSource", "eq"): "Signal",
     ("StrSource", "ne"): "Signal",
     # --- builder shapes that name their own class ---------------------------
-    **{("BasketStrategy", m): "BasketStrategy" for m in (
-        "all_of any_of balance_sides quantile scored_by sized_by threshold top_bottom"
-    ).split()},
-    **{("MultiAssetStrategy", m): "MultiAssetStrategy" for m in "all_of any_of".split()},
-    **{("PairsStrategy", m): "PairsStrategy" for m in (
-        "on spread_stop_loss spread_take_profit long_spread_stop_loss "
-        "long_spread_take_profit short_spread_stop_loss short_spread_take_profit"
-    ).split()},
+    **{
+        ("BasketStrategy", m): "BasketStrategy"
+        for m in (
+            "all_of any_of balance_sides quantile scored_by sized_by threshold top_bottom"
+        ).split()
+    },
+    **{
+        ("MultiAssetStrategy", m): "MultiAssetStrategy" for m in "all_of any_of".split()
+    },
+    **{
+        ("PairsStrategy", m): "PairsStrategy"
+        for m in (
+            "on spread_stop_loss spread_take_profit long_spread_stop_loss "
+            "long_spread_take_profit short_spread_stop_loss short_spread_take_profit"
+        ).split()
+    },
     # --- providers and live wallets -----------------------------------------
     ("BinanceVision", "symbols"): "list[str]",
     ("CoinGecko", "ids"): "list[str]",
@@ -265,9 +285,13 @@ MEMBER_RETURNS = {
     ("WalkForwardResult", "prefix_skip"): "int",
     # --- fugazi.metrics result types ----------------------------------------
     **{("Trade", m): "int" for m in "entry_bar exit_bar bars_held".split()},
-    **{("Trade", m): "float" for m in "entry_price exit_price pnl return_ratio".split()},
-    **{("DrawdownSegment", m): "int" for m in
-       "peak_bar trough_bar duration_bars underwater_bars".split()},
+    **{
+        ("Trade", m): "float" for m in "entry_price exit_price pnl return_ratio".split()
+    },
+    **{
+        ("DrawdownSegment", m): "int"
+        for m in "peak_bar trough_bar duration_bars underwater_bars".split()
+    },
     ("DrawdownSegment", "depth_ratio"): "float",
 }
 
@@ -335,26 +359,71 @@ MEMBER_RULES = {
 
 #: Builder methods that return a reconfigured copy of their own class.
 SELF_RETURNING = {
-    "long_on", "short_on", "position_sizing", "rebalance_on", "selection",
-    "universe", "score", "sizing", "long_spread_on", "short_spread_on",
-    "add", "weights", "weight_shares", "position_rebalancer", "unstable",
+    "long_on",
+    "short_on",
+    "position_sizing",
+    "rebalance_on",
+    "selection",
+    "universe",
+    "score",
+    "sizing",
+    "long_spread_on",
+    "short_spread_on",
+    "add",
+    "weights",
+    "weight_shares",
+    "position_rebalancer",
+    "unstable",
 }
 
 #: Classes whose builder methods are copy-on-write.
 BUILDER_CLASSES = {
-    "Strategy", "PairsStrategy", "MultiAssetStrategy", "BasketStrategy", "Portfolio",
+    "Strategy",
+    "PairsStrategy",
+    "MultiAssetStrategy",
+    "BasketStrategy",
+    "Portfolio",
 }
 
 # Indicator/Signal operator methods, whose result type is fixed by the operator.
 INDICATOR_TO_SIGNAL = {
-    "gt", "lt", "ge", "le", "eq", "ne", "above", "below",
-    "crosses_above", "crosses_below",
+    "gt",
+    "lt",
+    "ge",
+    "le",
+    "eq",
+    "ne",
+    "above",
+    "below",
+    "crosses_above",
+    "crosses_below",
 }
 INDICATOR_TO_INDICATOR = {
-    "add", "sub", "mul", "div", "pow", "lag", "diff", "ratio", "roc",
-    "rolling_max", "rolling_min", "max", "min", "clamp", "log", "exp",
-    "abs", "sign", "sqrt", "tanh", "sigmoid",
-    "cum_sum", "cum_max", "cum_min", "unstable",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "pow",
+    "lag",
+    "diff",
+    "ratio",
+    "roc",
+    "rolling_max",
+    "rolling_min",
+    "max",
+    "min",
+    "clamp",
+    "log",
+    "exp",
+    "abs",
+    "sign",
+    "sqrt",
+    "tanh",
+    "sigmoid",
+    "cum_sum",
+    "cum_max",
+    "cum_min",
+    "unstable",
 }
 SIGNAL_TO_SIGNAL = {"and_", "or_", "xor_", "not_", "changed", "unstable"}
 
@@ -429,7 +498,11 @@ def param_type(owner: str, func: str, name: str) -> str:
         return "Signal"
     if name == "source":
         # A leaf takes an AtomSource (`pick(...)`); a wrapper takes an Indicator.
-        return "AtomSource | None" if func in RETURNS and func in LEAF_NAMES else "Indicator"
+        return (
+            "AtomSource | None"
+            if func in RETURNS and func in LEAF_NAMES
+            else "Indicator"
+        )
     if name in ("lhs", "rhs"):
         return OPERAND
     if name == "sample":
@@ -507,8 +580,17 @@ def member_return(cls_name: str, name: str) -> tuple[str, bool]:
         return "Indicator", True
     if cls_name in BUILDER_CLASSES and name in SELF_RETURNING:
         return cls_name, True
-    if cls_name in ("Sweep", "SweepRow", "WalkForwardResult", "WalkForwardFold") and name in (
-        "values", "metrics", "is_metrics", "oos_metrics", "composite_metrics",
+    if cls_name in (
+        "Sweep",
+        "SweepRow",
+        "WalkForwardResult",
+        "WalkForwardFold",
+    ) and name in (
+        "values",
+        "metrics",
+        "is_metrics",
+        "oos_metrics",
+        "composite_metrics",
     ):
         return "dict[str, Any]", True
     if name in MEMBER_RULES:
@@ -576,10 +658,18 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
     """Operator/protocol dunders worth stating — the ones a checker uses."""
     out: list[tuple[str, str]] = []
     binary_ind = {
-        "__add__": "Indicator", "__sub__": "Indicator", "__mul__": "Indicator",
-        "__truediv__": "Indicator", "__radd__": "Indicator", "__rsub__": "Indicator",
-        "__rmul__": "Indicator", "__rtruediv__": "Indicator",
-        "__gt__": "Signal", "__lt__": "Signal", "__ge__": "Signal", "__le__": "Signal",
+        "__add__": "Indicator",
+        "__sub__": "Indicator",
+        "__mul__": "Indicator",
+        "__truediv__": "Indicator",
+        "__radd__": "Indicator",
+        "__rsub__": "Indicator",
+        "__rmul__": "Indicator",
+        "__rtruediv__": "Indicator",
+        "__gt__": "Signal",
+        "__lt__": "Signal",
+        "__ge__": "Signal",
+        "__le__": "Signal",
     }
     if cls_name == "Indicator":
         for d, r in binary_ind.items():
@@ -589,7 +679,9 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
         # fit the binary shape above; the extension rejects a non-`None` one.
         for d in ("__pow__", "__rpow__"):
             if hasattr(cls, d):
-                out.append((d, f"(self, other: {OPERAND}, modulo: Any = ...) -> Indicator"))
+                out.append(
+                    (d, f"(self, other: {OPERAND}, modulo: Any = ...) -> Indicator")
+                )
         if hasattr(cls, "__abs__"):
             out.append(("__abs__", "(self) -> Indicator"))
     if cls_name == "Signal":
@@ -599,8 +691,15 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
         if hasattr(cls, "__invert__"):
             out.append(("__invert__", "(self) -> Signal"))
     if cls_name == "Snapshot":
-        out.append(("__getitem__", "(self, key: str | Selector | tuple[str, str]) -> Atom"))
-        out.append(("__setitem__", "(self, key: str | Selector | tuple[str, str], atom: Atom) -> None"))
+        out.append(
+            ("__getitem__", "(self, key: str | Selector | tuple[str, str]) -> Atom")
+        )
+        out.append(
+            (
+                "__setitem__",
+                "(self, key: str | Selector | tuple[str, str], atom: Atom) -> None",
+            )
+        )
     if cls_name == "Sweep":
         out.append(("__getitem__", "(self, index: int | slice) -> Any"))
     if cls_name == "WalkForwardResult":
@@ -622,7 +721,9 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
     return out
 
 
-def emit_module(mod, names: list[str], returns: dict[str, str], owner: str) -> tuple[list[str], list[str]]:
+def emit_module(
+    mod, names: list[str], returns: dict[str, str], owner: str
+) -> tuple[list[str], list[str]]:
     lines: list[str] = []
     unknown: list[str] = []
     for name in names:
@@ -648,16 +749,24 @@ def main() -> int:
     global LEAF_NAMES
     # A "leaf" takes an optional `AtomSource`; a wrapper takes an `Indicator`.
     LEAF_NAMES = {
-        n for n in RETURNS
+        n
+        for n in RETURNS
         if (sig := try_sig(getattr(ta, n, None))) is not None
         and "source" in sig.parameters
         and sig.parameters["source"].default is not inspect.Parameter.empty
     }
 
-    classes = sorted(n for n in ta.__all__ if isinstance(getattr(ta, n), type)
-                     and not issubclass(getattr(ta, n), BaseException))
-    functions = sorted(n for n in ta.__all__
-                       if callable(getattr(ta, n)) and not isinstance(getattr(ta, n), type))
+    classes = sorted(
+        n
+        for n in ta.__all__
+        if isinstance(getattr(ta, n), type)
+        and not issubclass(getattr(ta, n), BaseException)
+    )
+    functions = sorted(
+        n
+        for n in ta.__all__
+        if callable(getattr(ta, n)) and not isinstance(getattr(ta, n), type)
+    )
 
     out = [HEADER]
     unclassified: list[str] = []
@@ -695,10 +804,13 @@ def main() -> int:
     # declared here — importing them from `.` would be a redefinition and a lie
     # about where they come from. `Fill` genuinely lives on the parent.
     metric_members = [
-        n for n in dir(ta_metrics)
+        n
+        for n in dir(ta_metrics)
         if not n.startswith("_") and callable(getattr(ta_metrics, n))
     ]
-    metric_classes = sorted(n for n in metric_members if isinstance(getattr(ta_metrics, n), type))
+    metric_classes = sorted(
+        n for n in metric_members if isinstance(getattr(ta_metrics, n), type)
+    )
     metric_names = sorted(n for n in metric_members if n not in metric_classes)
     metric_returns = {n: metrics_return(n) for n in metric_names}
 
@@ -727,12 +839,11 @@ def main() -> int:
         return 1
 
     mc_names = sorted(
-        n for n in dir(ta_montecarlo)
+        n
+        for n in dir(ta_montecarlo)
         if not n.startswith("_") and callable(getattr(ta_montecarlo, n))
     )
-    lines, _ = emit_module(
-        ta_montecarlo, mc_names, {n: "Any" for n in mc_names}, ""
-    )
+    lines, _ = emit_module(ta_montecarlo, mc_names, {n: "Any" for n in mc_names}, "")
     MONTECARLO_OUT.write_text(
         '"""Type stubs for `fugazi.montecarlo`. GENERATED — see tools/gen_python_stubs.py."""\n\n'
         "from typing import Any\n\n" + "\n".join(lines) + "\n"
@@ -758,10 +869,12 @@ def emit_wallet_protocol() -> str:
     derived from the same source: the members come off `PaperWallet`, and the set
     is whatever all three share, so this cannot claim more than they implement.
     """
-    shared = set.intersection(*(
-        {m for m in dir(getattr(ta, c)) if not m.startswith("_")}
-        for c in ("PaperWallet", "OkxWallet", "CoinbaseWallet")
-    ))
+    shared = set.intersection(
+        *(
+            {m for m in dir(getattr(ta, c)) if not m.startswith("_")}
+            for c in ("PaperWallet", "OkxWallet", "CoinbaseWallet")
+        )
+    )
     lines = [
         "class Wallet(Protocol):",
         indent_doc(

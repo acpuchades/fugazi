@@ -35,7 +35,7 @@ use super::basket::BasketStrategySpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
-use crate::runtime::{any, AnyChain};
+use crate::runtime::{AnyChain, any};
 use crate::types::Symbol;
 
 /// The wallet / book seed for every embedded strategy. Arbitrary and positive

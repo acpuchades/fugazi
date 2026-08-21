@@ -16,10 +16,10 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
-use crate::{Fill, Rejected};
 use crate::backtest::RunReport;
 use crate::prelude::*;
+use crate::{Fill, Rejected};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 /// The metrics document written to `metrics.yml`, grouped by theme so the file
@@ -474,9 +474,7 @@ pub fn from_report<Sym: PartialEq>(
             count: crate::metrics::drawdown_count(&segments),
             time_in_drawdown_pct: crate::metrics::time_in_drawdown_ratio(&segments, bars) * 100.0,
             recovery_factor: crate::metrics::recovery_factor_with_max_drawdown(
-                equity,
-                initial,
-                max_dd,
+                equity, initial, max_dd,
             ),
         },
         costs: None,
@@ -776,7 +774,10 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ("returns.stddev_bar", real(m.returns.stddev_bar)),
         ("returns.best_bar", real(m.returns.best_bar)),
         ("returns.worst_bar", real(m.returns.worst_bar)),
-        ("returns.positive_bars_pct", real(m.returns.positive_bars_pct)),
+        (
+            "returns.positive_bars_pct",
+            real(m.returns.positive_bars_pct),
+        ),
         ("returns.skewness", m.returns.skewness),
         ("returns.kurtosis", m.returns.kurtosis),
         ("returns.var_95", real(m.returns.var_95)),
@@ -794,7 +795,10 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ("risk_adjusted.sortino", m.risk_adjusted.sortino),
         ("risk_adjusted.calmar", m.risk_adjusted.calmar),
         ("risk_adjusted.omega", m.risk_adjusted.omega),
-        ("risk_adjusted.ulcer_index", real(m.risk_adjusted.ulcer_index)),
+        (
+            "risk_adjusted.ulcer_index",
+            real(m.risk_adjusted.ulcer_index),
+        ),
         (
             "risk_adjusted.ulcer_performance_index",
             m.risk_adjusted.ulcer_performance_index,
@@ -805,7 +809,10 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ),
         ("drawdown.max", real(m.drawdown.max)),
         ("drawdown.max_pct", real(m.drawdown.max_pct)),
-        ("drawdown.max_duration_bars", count(m.drawdown.max_duration_bars)),
+        (
+            "drawdown.max_duration_bars",
+            count(m.drawdown.max_duration_bars),
+        ),
         ("drawdown.avg", m.drawdown.avg),
         ("drawdown.avg_pct", m.drawdown.avg_pct),
         ("drawdown.avg_duration_bars", m.drawdown.avg_duration_bars),
@@ -907,11 +914,8 @@ pub fn costs_section<Sym: Clone + PartialEq>(
             net_report.initial_equity,
             bars_per_year,
         );
-        let gross_cagr = crate::metrics::cagr(
-            &gross.equity_curve,
-            gross.initial_equity,
-            bars_per_year,
-        );
+        let gross_cagr =
+            crate::metrics::cagr(&gross.equity_curve, gross.initial_equity, bars_per_year);
         let drag = match (gross_cagr, net_cagr) {
             (Some(g), Some(n)) => Some((g - n) * 100.0),
             _ => None,
@@ -1053,7 +1057,6 @@ fn resolve_metric_path(sample: &Metrics, name: &str) -> Result<Vec<String>> {
     )
 }
 
-
 /// Look up a dotted path against `root` and return its numeric value if all
 /// segments exist and the leaf is a number; `None` when any segment is missing
 /// (an omitted metric) or the leaf isn't numeric.
@@ -1067,9 +1070,9 @@ fn lookup_number(root: &serde_json::Value, path: &[String]) -> Option<Real> {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::Symbol;
     use super::*;
     use crate::Fill;
+    use crate::types::Symbol;
 
     fn order(side: Side, units: Real, price: Real) -> Order<Symbol> {
         Order::new(
@@ -1321,7 +1324,9 @@ mod tests {
         let mut e = 100.0_f64;
         let mut s: u64 = 0xabad_beef_ca55_e77e;
         for _ in 0..n {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let noise = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
             e *= 1.0 + 0.0002 + 0.01 * noise;
             equity.push(e);

@@ -143,7 +143,11 @@ fn the_mirror_has_every_variant() {
         "`NodeSpecRaw` has {extra:?}, which `NodeSpec` doesn't. A removed \
          variant has to leave both.",
     );
-    assert!(spec.len() > 100, "sanity: parsed only {} variants", spec.len());
+    assert!(
+        spec.len() > 100,
+        "sanity: parsed only {} variants",
+        spec.len()
+    );
 }
 
 #[test]
@@ -166,7 +170,11 @@ fn the_mirror_repeats_every_serde_default() {
         }
     }
 
-    assert!(wrong.is_empty(), "serde defaults drifted:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "serde defaults drifted:\n  {}",
+        wrong.join("\n  ")
+    );
     assert!(
         spec.len() > 50,
         "sanity: parsed only {} defaulted fields",
@@ -255,7 +263,10 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
         let start = PY
             .find("def _dummy(ty):")
             .expect("test_spec_json_schema.py must define _dummy");
-        let end = PY[start..].find("}[ty]").expect("_dummy must end in `}[ty]`") + start;
+        let end = PY[start..]
+            .find("}[ty]")
+            .expect("_dummy must end in `}[ty]`")
+            + start;
         &PY[start..end]
     };
     let known: BTreeSet<&str> = body
@@ -274,7 +285,12 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
             continue;
         }
         for form in &tag.forms {
-            needed.extend(form.fields.iter().filter(|f| f.required).map(|f| f.ty.as_str()));
+            needed.extend(
+                form.fields
+                    .iter()
+                    .filter(|f| f.required)
+                    .map(|f| f.ty.as_str()),
+            );
             if let Some(p) = form.payload.as_deref() {
                 needed.insert(p);
             }
@@ -319,7 +335,10 @@ fn the_cli_doc_lists_exactly_the_providers_get_accepts() {
         .filter_map(|rest| rest.split_once('"'))
         .map(|(name, _)| name)
         .collect();
-    assert!(!known.is_empty(), "parsed no provider names out of KNOWN_PROVIDERS");
+    assert!(
+        !known.is_empty(),
+        "parsed no provider names out of KNOWN_PROVIDERS"
+    );
 
     let documented: BTreeSet<&str> = {
         let start = CLI_MD

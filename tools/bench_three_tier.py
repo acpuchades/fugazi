@@ -131,7 +131,11 @@ def check_extension_fresh() -> int:
     so = fz.__file__
     pkg = os.path.dirname(so)
     built = max(
-        (os.path.getmtime(os.path.join(pkg, f)) for f in os.listdir(pkg) if f.endswith(".so")),
+        (
+            os.path.getmtime(os.path.join(pkg, f))
+            for f in os.listdir(pkg)
+            if f.endswith(".so")
+        ),
         default=0.0,
     )
     newest, where = newest_source_mtime()
@@ -205,17 +209,23 @@ def talib_native(n: int) -> dict[str, float]:
         exe = os.path.join(tmp, "talib_native")
         build = subprocess.run(
             [cc, "-O2", "-o", exe, src, f"-I{inc}", f"-L{lib}", "-lta_lib", "-lm"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if build.returncode != 0:
-            print("native TA-Lib tier did not build:\n", build.stderr[-800:],
-                  file=sys.stderr)
+            print(
+                "native TA-Lib tier did not build:\n",
+                build.stderr[-800:],
+                file=sys.stderr,
+            )
             return {}
         env = dict(os.environ)
         env["LD_LIBRARY_PATH"] = lib + os.pathsep + env.get("LD_LIBRARY_PATH", "")
         run = subprocess.run([exe, f"--n={n}"], capture_output=True, text=True, env=env)
         if run.returncode != 0:
-            print("native TA-Lib tier did not run:\n", run.stderr[-800:], file=sys.stderr)
+            print(
+                "native TA-Lib tier did not run:\n", run.stderr[-800:], file=sys.stderr
+            )
             return {}
 
     out: dict[str, list[float]] = {}
@@ -255,7 +265,10 @@ def rust_tier(n: int) -> dict[str, float]:
     env["FUGAZI_THREE_TIER_N"] = str(n)
     proc = subprocess.run(
         ["cargo", "bench", "--bench", "three_tier", "--", "--emit-json"],
-        cwd=ROOT, capture_output=True, text=True, env=env,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     out: dict[str, list[float]] = {}
     for line in proc.stdout.splitlines():
@@ -289,7 +302,9 @@ def python_tier(which: str, n: int) -> dict[str, list[float]]:
     """
     proc = subprocess.run(
         [sys.executable, os.path.abspath(__file__), f"--tier={which}", f"--n={n}"],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
     out: dict[str, list[float]] = {}
     for line in proc.stdout.splitlines():
@@ -298,7 +313,9 @@ def python_tier(which: str, n: int) -> dict[str, list[float]]:
             rec = json.loads(line)
             out[rec["name"]] = rec.get("samples") or [rec["ns_per_sample"]]
     if not out:
-        print(f"could not read the {which} tier:\n", proc.stderr[-2000:], file=sys.stderr)
+        print(
+            f"could not read the {which} tier:\n", proc.stderr[-2000:], file=sys.stderr
+        )
     return out
 
 
@@ -323,21 +340,32 @@ def talib_py_tier(c, h, lo) -> dict[str, float]:
         # which is what a caller wanting a slope actually pays.
         "linreg_slope": timed_samples(lambda: talib.LINEARREG_SLOPE(c, LINREG_P)),
         # One call, every line — the shape a fugazi multi-output `update` has.
-        "macd": timed_samples(lambda: talib.MACD(
-            c, fastperiod=MACD_FAST, slowperiod=MACD_SLOW, signalperiod=MACD_SIGNAL)),
-        "bbands": timed_samples(lambda: talib.BBANDS(
-            c, timeperiod=BBANDS_P, nbdevup=BBANDS_K, nbdevdn=BBANDS_K, matype=0)),
+        "macd": timed_samples(
+            lambda: talib.MACD(
+                c, fastperiod=MACD_FAST, slowperiod=MACD_SLOW, signalperiod=MACD_SIGNAL
+            )
+        ),
+        "bbands": timed_samples(
+            lambda: talib.BBANDS(
+                c, timeperiod=BBANDS_P, nbdevup=BBANDS_K, nbdevdn=BBANDS_K, matype=0
+            )
+        ),
         "aroon": timed_samples(lambda: talib.AROON(h, lo, AROON_P)),
         # TA-Lib has no combined DI pair and no combined ADX triple, so a caller
         # who wants them pays for each call — and each re-derives the same
         # Wilder-smoothed true range. `Dmi`/`Adx` carry one set of Wilder states
         # and emit the lines together. Timing both calls is the comparison, not
         # a distortion of it; see the note in tools/bench_talib_native.c.
-        "dmi": timed_samples(lambda: (
-            talib.PLUS_DI(h, lo, c, DMI_P), talib.MINUS_DI(h, lo, c, DMI_P))),
-        "adx": timed_samples(lambda: (
-            talib.PLUS_DI(h, lo, c, DMI_P), talib.MINUS_DI(h, lo, c, DMI_P),
-            talib.ADX(h, lo, c, DMI_P))),
+        "dmi": timed_samples(
+            lambda: (talib.PLUS_DI(h, lo, c, DMI_P), talib.MINUS_DI(h, lo, c, DMI_P))
+        ),
+        "adx": timed_samples(
+            lambda: (
+                talib.PLUS_DI(h, lo, c, DMI_P),
+                talib.MINUS_DI(h, lo, c, DMI_P),
+                talib.ADX(h, lo, c, DMI_P),
+            )
+        ),
     }
 
 
@@ -357,6 +385,7 @@ def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
     def scalar(build):
         def run():
             build().feed(c)
+
         return run
 
     frame = {"open": o, "high": h, "low": lo, "close": c}
@@ -375,10 +404,12 @@ def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
         ),
         # `PyMulti.feed` returns every line as its own column from one pass, so
         # these are the same unit of work as the `talib` calls above.
-        "macd": timed_samples(lambda: fz.macd(
-            fz.identity(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).feed(c)),
-        "bbands": timed_samples(lambda: fz.bollinger(
-            fz.identity(), BBANDS_P, BBANDS_K).feed(c)),
+        "macd": timed_samples(
+            lambda: fz.macd(fz.identity(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).feed(c)
+        ),
+        "bbands": timed_samples(
+            lambda: fz.bollinger(fz.identity(), BBANDS_P, BBANDS_K).feed(c)
+        ),
         "aroon": timed_samples(lambda: fz.aroon(AROON_P).feed(frame)),
         "dmi": timed_samples(lambda: fz.dmi(DMI_P).feed(frame)),
         "adx": timed_samples(lambda: fz.adx(DMI_P).feed(frame)),
@@ -469,16 +500,21 @@ def main() -> int:
 
     o, h, lo, c = synth(N)
 
-    print(f"n = {N:,} samples, {REPS} reps x >= {repeat} passes, reporting the "
-          f"minimum\nsampling until no cell improves by > {TOL:.0%} for "
-          f"{STABLE_PASSES} consecutive passes\n")
+    print(
+        f"n = {N:,} samples, {REPS} reps x >= {repeat} passes, reporting the "
+        f"minimum\nsampling until no cell improves by > {TOL:.0%} for "
+        f"{STABLE_PASSES} consecutive passes\n"
+    )
     print(f"load average at start: {open('/proc/loadavg').read().split()[0]}\n")
 
     # Round-robin, not tier-by-tier: the machine drifts on a timescale of
     # minutes, so measuring all of one tier and then all of another compares two
     # different machines. Interleaving puts every tier in the same conditions.
     passes: dict[str, list[dict[str, list[float]]]] = {
-        "talib_c": [], "talib_py": [], "fugazi_rs": [], "fugazi_py": [],
+        "talib_c": [],
+        "talib_py": [],
+        "fugazi_rs": [],
+        "fugazi_py": [],
     }
 
     def minima() -> dict[str, float]:
@@ -493,9 +529,10 @@ def main() -> int:
     prev = {}
     while taken < max_passes:
         taken += 1
-        print(f"  pass {taken}"
-              f"{f' (stable {stable}/{STABLE_PASSES})' if stable else ''}",
-              file=sys.stderr)
+        print(
+            f"  pass {taken}{f' (stable {stable}/{STABLE_PASSES})' if stable else ''}",
+            file=sys.stderr,
+        )
         passes["talib_c"].append(talib_native(N))
         passes["fugazi_rs"].append(rust_tier(N))
         passes["talib_py"].append(python_tier("talib_py", N))
@@ -506,8 +543,11 @@ def main() -> int:
             # Relative improvement of the worst-moving cell. Only cells present
             # in both snapshots count; a tier that skipped cannot destabilise it.
             moved = max(
-                ((prev[k] - v) / prev[k] for k, v in cur.items()
-                 if k in prev and prev[k] > 0),
+                (
+                    (prev[k] - v) / prev[k]
+                    for k, v in cur.items()
+                    if k in prev and prev[k] > 0
+                ),
                 default=0.0,
             )
             stable = stable + 1 if moved <= TOL else 0
@@ -518,16 +558,20 @@ def main() -> int:
 
     print(f"\nload average at end:   {open('/proc/loadavg').read().split()[0]}")
     if converged:
-        print(f"converged after {taken} passes — no cell improved by more than "
-              f"{TOL:.0%} over the last {STABLE_PASSES}.\n")
+        print(
+            f"converged after {taken} passes — no cell improved by more than "
+            f"{TOL:.0%} over the last {STABLE_PASSES}.\n"
+        )
     else:
         # Never silently. A capped run's figures are upper bounds that were still
         # falling when the loop gave up, which is a different claim from the one
         # the table normally makes.
-        print(f"*** DID NOT CONVERGE in {taken} passes (cap "
-              f"FUGAZI_BENCH_MAX_PASSES={max_passes}). The figures below are "
-              f"still falling — treat them as upper bounds, and re-run on a "
-              f"quieter machine before quoting them. ***\n")
+        print(
+            f"*** DID NOT CONVERGE in {taken} passes (cap "
+            f"FUGAZI_BENCH_MAX_PASSES={max_passes}). The figures below are "
+            f"still falling — treat them as upper bounds, and re-run on a "
+            f"quieter machine before quoting them. ***\n"
+        )
 
     pool = {tier: pooled(ps) for tier, ps in passes.items()}
     native_ns = best_of(pool["talib_c"])
@@ -544,10 +588,19 @@ def main() -> int:
     os.makedirs(os.path.dirname(raw_path), exist_ok=True)
     with open(raw_path, "w") as f:
         json.dump(
-            {"n": N, "reps": REPS, "passes": taken, "converged": converged,
-             "tol": TOL, "stable_passes": STABLE_PASSES,
-             "unit": "ns_per_sample", "samples": pool},
-            f, indent=1, sort_keys=True,
+            {
+                "n": N,
+                "reps": REPS,
+                "passes": taken,
+                "converged": converged,
+                "tol": TOL,
+                "stable_passes": STABLE_PASSES,
+                "unit": "ns_per_sample",
+                "samples": pool,
+            },
+            f,
+            indent=1,
+            sort_keys=True,
         )
     print(f"raw samples -> {os.path.relpath(raw_path, ROOT)}\n")
 
@@ -556,14 +609,20 @@ def main() -> int:
     # native C, Python against the Python bindings. Mixing them is what made
     # fugazi's ATR look like a win when it is a loss.
     if not native_ns:
-        print("native TA-Lib tier skipped (no C toolchain / TA-Lib headers);\n"
-              "the rs/C column cannot be shown, and rs must NOT be judged\n"
-              "against the Python-binding column instead.\n")
+        print(
+            "native TA-Lib tier skipped (no C toolchain / TA-Lib headers);\n"
+            "the rs/C column cannot be shown, and rs must NOT be judged\n"
+            "against the Python-binding column instead.\n"
+        )
 
-    print(f"{'':<10}{'TA-Lib C':>11}{'TA-Lib py':>11}{'fugazi rs':>11}"
-          f"{'fugazi py':>11}{'rs vs C':>10}{'py vs py':>10}")
-    print(f"{'indicator':<10}{'ns/samp':>11}{'ns/samp':>11}{'ns/samp':>11}"
-          f"{'ns/samp':>11}{'(engine)':>10}{'(bindings)':>10}")
+    print(
+        f"{'':<10}{'TA-Lib C':>11}{'TA-Lib py':>11}{'fugazi rs':>11}"
+        f"{'fugazi py':>11}{'rs vs C':>10}{'py vs py':>10}"
+    )
+    print(
+        f"{'indicator':<10}{'ns/samp':>11}{'ns/samp':>11}{'ns/samp':>11}"
+        f"{'ns/samp':>11}{'(engine)':>10}{'(bindings)':>10}"
+    )
     for k in SCALAR + MULTI:
         if k == MULTI[0]:
             print(f"{'-- multi-output ' + '-' * 48}")
@@ -580,8 +639,12 @@ def main() -> int:
     # Spread is reported next to the figures on purpose: it is what says whether
     # a difference between two of them means anything.
     print(f"\n{'':<10}{'spread (max/min over all samples)':<40}")
-    for tier, label in (("talib_c", "TA-Lib C"), ("fugazi_rs", "fugazi rs"),
-                        ("talib_py", "TA-Lib py"), ("fugazi_py", "fugazi py")):
+    for tier, label in (
+        ("talib_c", "TA-Lib C"),
+        ("fugazi_rs", "fugazi rs"),
+        ("talib_py", "TA-Lib py"),
+        ("fugazi_py", "fugazi py"),
+    ):
         worst = max((xs[-1] / xs[0]) for xs in pool[tier].values() if xs)
         print(f"{'':<10}{label:<14}up to {worst:.2f}x")
 

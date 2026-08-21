@@ -161,20 +161,19 @@ fn workload(name: &str) {
                     ))
                 }
             };
-            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
-                .long_on(
-                    {
-                        let close = close.clone();
-                        move |_: &Symbol| {
-                            fugazi::indicators::Sma::new(close(), 5)
-                                .crosses_above(fugazi::indicators::Sma::new(close(), 20))
-                        }
-                    },
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0).long_on(
+                {
+                    let close = close.clone();
                     move |_: &Symbol| {
                         fugazi::indicators::Sma::new(close(), 5)
-                            .crosses_below(fugazi::indicators::Sma::new(close(), 20))
-                    },
-                );
+                            .crosses_above(fugazi::indicators::Sma::new(close(), 20))
+                    }
+                },
+                move |_: &Symbol| {
+                    fugazi::indicators::Sma::new(close(), 5)
+                        .crosses_below(fugazi::indicators::Sma::new(close(), 20))
+                },
+            );
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
@@ -232,17 +231,16 @@ fn workload(name: &str) {
                     Selector::by_symbol(sym.clone()),
                 ))
             };
-            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
-                .long_on(
-                    move |sym: &Symbol| {
-                        fugazi::indicators::Sma::new(close(sym), 5)
-                            .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
-                    },
-                    move |sym: &Symbol| {
-                        fugazi::indicators::Sma::new(close(sym), 5)
-                            .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
-                    },
-                );
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0).long_on(
+                move |sym: &Symbol| {
+                    fugazi::indicators::Sma::new(close(sym), 5)
+                        .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
+                },
+                move |sym: &Symbol| {
+                    fugazi::indicators::Sma::new(close(sym), 5)
+                        .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
+                },
+            );
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }
@@ -259,17 +257,16 @@ fn workload(name: &str) {
                     Selector::by_symbol(sym.clone()),
                 ))
             };
-            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
-                .long_on(
-                    move |sym: &Symbol| {
-                        fugazi::indicators::Sma::new(close(sym), 5)
-                            .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
-                    },
-                    move |sym: &Symbol| {
-                        fugazi::indicators::Sma::new(close(sym), 5)
-                            .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
-                    },
-                );
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0).long_on(
+                move |sym: &Symbol| {
+                    fugazi::indicators::Sma::new(close(sym), 5)
+                        .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
+                },
+                move |sym: &Symbol| {
+                    fugazi::indicators::Sma::new(close(sym), 5)
+                        .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
+                },
+            );
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             black_box(fugazi::backtest::run(&mut strat, &mut w, snaps));
         }

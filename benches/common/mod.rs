@@ -112,11 +112,7 @@ pub mod alloc_count {
         let a0 = ALLOCS.load(Relaxed);
         let b0 = BYTES.load(Relaxed);
         let out = f();
-        (
-            out,
-            ALLOCS.load(Relaxed) - a0,
-            BYTES.load(Relaxed) - b0,
-        )
+        (out, ALLOCS.load(Relaxed) - a0, BYTES.load(Relaxed) - b0)
     }
 }
 

@@ -13,7 +13,7 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use fugazi::indicators::{
-    Atr, Bollinger, Ema, Identity, Macd, Percentile, Rsi, Sma, StdDev, CurrentBar,
+    Atr, Bollinger, CurrentBar, Ema, Identity, Macd, Percentile, Rsi, Sma, StdDev,
 };
 use fugazi::prelude::*;
 

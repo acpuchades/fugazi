@@ -28,12 +28,11 @@ use std::num::NonZeroUsize;
 
 use crate::prelude::*;
 
-use crate::spec::runnable::StrategySpec;
 use crate::spec::calendar::Frequency;
 use crate::spec::costs::CostConfig;
 use crate::spec::metrics;
+use crate::spec::runnable::StrategySpec;
 use crate::types::Symbol;
-
 
 /// Build a strategy once and discard it, turning a malformed document into an
 /// error before the run machinery — which builds through the infallible `build`
@@ -103,8 +102,6 @@ pub fn schema_from_snapshots(
         .map(|ov| ov.schema().clone())
         .unwrap_or_else(Schema::empty)
 }
-
-
 
 /// Discover the tradeable universe from a snapshot stream — the distinct
 /// symbols carried across every bar, sorted so the resulting per-symbol

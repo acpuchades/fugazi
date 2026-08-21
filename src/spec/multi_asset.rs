@@ -47,7 +47,7 @@ use super::basket::UniverseSpec;
 use super::expr::{NodeSpec, Root};
 use super::meta::Meta;
 use super::template::SpecTemplate;
-use crate::runtime::{any, AnyChain};
+use crate::runtime::{AnyChain, any};
 use crate::types::Symbol;
 
 /// One side of a [`MultiAssetStrategySpec`]: the entry condition, an
@@ -192,7 +192,12 @@ impl MultiAssetStrategySpec {
         for (side, slots) in [("long", &self.long), ("short", &self.short)] {
             let Some(side_spec) = slots else { continue };
             let (enter, exit, sl, tp) = if side == "long" {
-                ("long enter", "long exit", "long stop_loss", "long take_profit")
+                (
+                    "long enter",
+                    "long exit",
+                    "long stop_loss",
+                    "long take_profit",
+                )
             } else {
                 (
                     "short enter",
@@ -231,18 +236,30 @@ impl MultiAssetStrategySpec {
                     // decoupled from entry — that's the level layer's job), so
                     // a fresh anchor is fine.
                     let anchor = Position::new();
-                    concrete.build(&anchor, &book_l, None, &schema_l, Root::blessed(&leg_root(sym))).probed_bool("long enter")
+                    concrete
+                        .build(
+                            &anchor,
+                            &book_l,
+                            None,
+                            &schema_l,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_bool("long enter")
                 },
                 move |sym: &Symbol| {
                     let dyn_ind: AnyChain = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "long exit");
                             let anchor = Position::new();
-                            concrete.build(&anchor, &book_lx, None, &schema_lx, Root::blessed(&leg_root(sym)))
+                            concrete.build(
+                                &anchor,
+                                &book_lx,
+                                None,
+                                &schema_lx,
+                                Root::blessed(&leg_root(sym)),
+                            )
                         }
-                        None => {
-                            any(ValueBool::<Snapshot<Symbol>>::new(false))
-                        }
+                        None => any(ValueBool::<Snapshot<Symbol>>::new(false)),
                     };
                     dyn_ind.probed_bool("long exit")
                 },
@@ -253,7 +270,15 @@ impl MultiAssetStrategySpec {
                 let schema_sl = schema.clone();
                 strat = strat.long_stop_loss(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&sl, sym, "long stop_loss");
-                    concrete.build(position, &book_sl, None, &schema_sl, Root::blessed(&leg_root(sym))).probed_real("stop_loss")
+                    concrete
+                        .build(
+                            position,
+                            &book_sl,
+                            None,
+                            &schema_sl,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_real("stop_loss")
                 });
             }
             if let Some(tp) = &long.take_profit {
@@ -262,7 +287,15 @@ impl MultiAssetStrategySpec {
                 let schema_tp = schema.clone();
                 strat = strat.long_take_profit(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&tp, sym, "long take_profit");
-                    concrete.build(position, &book_tp, None, &schema_tp, Root::blessed(&leg_root(sym))).probed_real("take_profit")
+                    concrete
+                        .build(
+                            position,
+                            &book_tp,
+                            None,
+                            &schema_tp,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_real("take_profit")
                 });
             }
         }
@@ -279,18 +312,30 @@ impl MultiAssetStrategySpec {
                 move |sym: &Symbol| {
                     let concrete = build_signal(&enter_template, sym, "short enter");
                     let anchor = Position::new();
-                    concrete.build(&anchor, &book_s, None, &schema_s, Root::blessed(&leg_root(sym))).probed_bool("short enter")
+                    concrete
+                        .build(
+                            &anchor,
+                            &book_s,
+                            None,
+                            &schema_s,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_bool("short enter")
                 },
                 move |sym: &Symbol| {
                     let dyn_ind: AnyChain = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "short exit");
                             let anchor = Position::new();
-                            concrete.build(&anchor, &book_sx, None, &schema_sx, Root::blessed(&leg_root(sym)))
+                            concrete.build(
+                                &anchor,
+                                &book_sx,
+                                None,
+                                &schema_sx,
+                                Root::blessed(&leg_root(sym)),
+                            )
                         }
-                        None => {
-                            any(ValueBool::<Snapshot<Symbol>>::new(false))
-                        }
+                        None => any(ValueBool::<Snapshot<Symbol>>::new(false)),
                     };
                     dyn_ind.probed_bool("short exit")
                 },
@@ -301,7 +346,15 @@ impl MultiAssetStrategySpec {
                 let schema_sl = schema.clone();
                 strat = strat.short_stop_loss(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&sl, sym, "short stop_loss");
-                    concrete.build(position, &book_sl, None, &schema_sl, Root::blessed(&leg_root(sym))).probed_real("stop_loss")
+                    concrete
+                        .build(
+                            position,
+                            &book_sl,
+                            None,
+                            &schema_sl,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_real("stop_loss")
                 });
             }
             if let Some(tp) = &short.take_profit {
@@ -310,7 +363,15 @@ impl MultiAssetStrategySpec {
                 let schema_tp = schema.clone();
                 strat = strat.short_take_profit(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&tp, sym, "short take_profit");
-                    concrete.build(position, &book_tp, None, &schema_tp, Root::blessed(&leg_root(sym))).probed_real("take_profit")
+                    concrete
+                        .build(
+                            position,
+                            &book_tp,
+                            None,
+                            &schema_tp,
+                            Root::blessed(&leg_root(sym)),
+                        )
+                        .probed_real("take_profit")
                 });
             }
         }
@@ -326,7 +387,15 @@ impl MultiAssetStrategySpec {
                 // are symbol-agnostic magnitudes), so a fresh anchor is fine
                 // — same convention as `BasketStrategySpec::build`.
                 let anchor = Position::new();
-                concrete.build(&anchor, &book_sz, None, &schema_sz, Root::blessed(&leg_root(sym))).probed_real("sizing")
+                concrete
+                    .build(
+                        &anchor,
+                        &book_sz,
+                        None,
+                        &schema_sz,
+                        Root::blessed(&leg_root(sym)),
+                    )
+                    .probed_real("sizing")
             });
         }
 
@@ -361,11 +430,7 @@ impl MultiAssetStrategySpec {
 // message. Same policy as basket: bad YAML surfaces loud at build time.
 // ---------------------------------------------------------------------------
 
-fn build_signal(
-    template: &SpecTemplate<NodeSpec>,
-    sym: &str,
-    slot: &'static str,
-) -> NodeSpec {
+fn build_signal(template: &SpecTemplate<NodeSpec>, sym: &str, slot: &'static str) -> NodeSpec {
     try_build_signal(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -390,11 +455,7 @@ fn leg_root(sym: &str) -> Selector<Symbol> {
     Selector::by_symbol(crate::types::symbol(sym))
 }
 
-fn build_expr(
-    template: &SpecTemplate<NodeSpec>,
-    sym: &str,
-    slot: &'static str,
-) -> NodeSpec {
+fn build_expr(template: &SpecTemplate<NodeSpec>, sym: &str, slot: &'static str) -> NodeSpec {
     try_build_expr(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -429,7 +490,13 @@ fn probe_signal(
 ) -> Result<(), String> {
     let concrete = try_build_signal(template, PROBE_SYMBOL, slot)?;
     concrete
-        .try_build(anchor, book, None, schema, Root::blessed(&leg_root(PROBE_SYMBOL)))
+        .try_build(
+            anchor,
+            book,
+            None,
+            schema,
+            Root::blessed(&leg_root(PROBE_SYMBOL)),
+        )
         .map(|_| ())
 }
 
@@ -443,7 +510,13 @@ fn probe_expr(
 ) -> Result<(), String> {
     let concrete = try_build_expr(template, PROBE_SYMBOL, slot)?;
     concrete
-        .try_build(anchor, book, None, schema, Root::blessed(&leg_root(PROBE_SYMBOL)))
+        .try_build(
+            anchor,
+            book,
+            None,
+            schema,
+            Root::blessed(&leg_root(PROBE_SYMBOL)),
+        )
         .map(|_| ())
 }
 
@@ -646,7 +719,10 @@ mod tests {
             strat.update(snap_of(&[("A", 100.0), ("B", 20.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0, "A long");
+        assert!(
+            wallet.position(&crate::types::symbol("A")).amount > 0.0,
+            "A long"
+        );
         assert!(
             wallet.position(&crate::types::symbol("B")).amount.abs() < 1e-9,
             "B never triggered its own signal"

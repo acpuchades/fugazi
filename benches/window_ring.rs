@@ -42,7 +42,10 @@ struct LookbackDeque {
 
 impl LookbackDeque {
     fn new(period: usize) -> Self {
-        Self { period, buffer: VecDeque::with_capacity(period + 1) }
+        Self {
+            period,
+            buffer: VecDeque::with_capacity(period + 1),
+        }
     }
 
     fn update(&mut self, current: Option<Real>) -> Option<Real> {
@@ -69,7 +72,12 @@ struct LookbackRingOpt {
 
 impl LookbackRingOpt {
     fn new(period: usize) -> Self {
-        Self { period, buf: vec![None; period + 1].into_boxed_slice(), head: 0, len: 0 }
+        Self {
+            period,
+            buf: vec![None; period + 1].into_boxed_slice(),
+            head: 0,
+            len: 0,
+        }
     }
 
     fn update(&mut self, current: Option<Real>) -> Option<Real> {
@@ -112,7 +120,12 @@ struct LookbackRingReal {
 
 impl LookbackRingReal {
     fn new(period: usize) -> Self {
-        Self { period, buf: vec![0.0; period + 1].into_boxed_slice(), head: 0, live: 0 }
+        Self {
+            period,
+            buf: vec![0.0; period + 1].into_boxed_slice(),
+            head: 0,
+            live: 0,
+        }
     }
 
     fn update(&mut self, current: Option<Real>) -> Option<Real> {
@@ -154,7 +167,12 @@ struct WmaDeque {
 
 impl WmaDeque {
     fn new(period: usize) -> Self {
-        Self { period, window: VecDeque::with_capacity(period), sum: 0.0, weighted: 0.0 }
+        Self {
+            period,
+            window: VecDeque::with_capacity(period),
+            sum: 0.0,
+            weighted: 0.0,
+        }
     }
 
     fn update(&mut self, x: Real) -> Option<Real> {
@@ -234,7 +252,9 @@ fn walk(n: usize) -> Vec<Real> {
     let mut px = 100.0_f64;
     let mut s: u64 = 0x5eed_1234_5678_9abc;
     for _ in 0..n {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let noise = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
         px *= 1.0 + 0.0002 + 0.01 * noise;
         out.push(px);
@@ -383,7 +403,11 @@ macro_rules! window_impl {
                     }
                 } else {
                     let at = self.head + self.len;
-                    let at = if at >= self.period { at - self.period } else { at };
+                    let at = if at >= self.period {
+                        at - self.period
+                    } else {
+                        at
+                    };
                     self.buf[at] = x;
                     self.len += 1;
                 }
@@ -450,7 +474,10 @@ fn main() {
     });
     println!("control (bare sum)        {control:>8.2}\n");
 
-    println!("{:>8}{:>12}{:>12}{:>12}{:>10}{:>10}", "period", "deque", "ring<Opt>", "ring<Real>", "B/A", "C/A");
+    println!(
+        "{:>8}{:>12}{:>12}{:>12}{:>10}{:>10}",
+        "period", "deque", "ring<Opt>", "ring<Real>", "B/A", "C/A"
+    );
     for &period in &[5usize, 14, 20, 50] {
         let a = bench(N, || {
             let mut ind = LookbackDeque::new(period);
@@ -470,7 +497,11 @@ fn main() {
                 black_box(ind.update(x));
             }
         });
-        println!("{period:>8}{a:>12.2}{b:>12.2}{c:>12.2}{:>10.2}{:>10.2}", b / a, c / a);
+        println!(
+            "{period:>8}{a:>12.2}{b:>12.2}{c:>12.2}{:>10.2}{:>10.2}",
+            b / a,
+            c / a
+        );
     }
     println!("  ^ lookback (Lag / Diff / Ratio)\n");
 
@@ -543,7 +574,9 @@ fn candle_walk(n: usize) -> Vec<Candle> {
     let mut px = 100.0_f64;
     let mut s: u64 = 0x5eed_1234_5678_9abc;
     for _ in 0..n {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let noise = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
         let open = px;
         let close = px * (1.0 + 0.0002 + 0.01 * noise);

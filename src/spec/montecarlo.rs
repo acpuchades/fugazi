@@ -26,10 +26,6 @@ use crate::spec::metrics::McSection;
 
 // The `rand`/rayon-backed compute half — only compiled with the feature.
 #[cfg(feature = "montecarlo")]
-use std::collections::HashMap;
-#[cfg(feature = "montecarlo")]
-use rayon::prelude::*;
-#[cfg(feature = "montecarlo")]
 use crate::Timestamp;
 #[cfg(feature = "montecarlo")]
 use crate::market::Candle;
@@ -45,6 +41,10 @@ use crate::spec::metrics::{McMetric, MetricKey, Metrics};
 use crate::spec::runnable::StrategySpec;
 #[cfg(feature = "montecarlo")]
 use crate::types::{Snapshot, Symbol};
+#[cfg(feature = "montecarlo")]
+use rayon::prelude::*;
+#[cfg(feature = "montecarlo")]
+use std::collections::HashMap;
 
 /// The headline metrics analyzed when the caller doesn't narrow the set. Each
 /// is recomputable from a return path (so it gets a CI) and has an unambiguous
@@ -174,8 +174,9 @@ pub fn run_montecarlo(
         // re-drive in parallel — each drive builds a fresh strategy.
         let bars = observed.equity_curve.len();
         let plan = precompute_rebuild(snapshots);
-        let indices: Vec<Vec<usize>> =
-            (0..n).map(|_| resample_indices(bars, scheme, &mut rng)).collect();
+        let indices: Vec<Vec<usize>> = (0..n)
+            .map(|_| resample_indices(bars, scheme, &mut rng))
+            .collect();
         let rows: Vec<Vec<Option<Real>>> = indices
             .par_iter()
             .map(|idx| {
@@ -183,7 +184,9 @@ pub fn run_montecarlo(
                 match measured_report_any(spec, &rebuilt, ctx) {
                     Ok(report) => {
                         let m = ctx.reduce(&report);
-                        keys.iter().map(|(_, k, _)| k.resolve(&m).ok().flatten()).collect()
+                        keys.iter()
+                            .map(|(_, k, _)| k.resolve(&m).ok().flatten())
+                            .collect()
                     }
                     Err(_) => vec![None; keys.len()],
                 }
@@ -238,7 +241,9 @@ fn resampled_metric_rows(
     (0..n)
         .map(|_| {
             let m = make(rng);
-            keys.iter().map(|(_, k, _)| k.resolve(&m).ok().flatten()).collect()
+            keys.iter()
+                .map(|(_, k, _)| k.resolve(&m).ok().flatten())
+                .collect()
         })
         .collect()
 }

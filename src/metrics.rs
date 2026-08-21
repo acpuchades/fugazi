@@ -803,8 +803,8 @@ pub fn deflated_sharpe_from_stats(
     let n = n_trials as Real;
     let q1 = normal.inverse_cdf(1.0 - 1.0 / n);
     let q2 = normal.inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
-    let sr0_annualized = trial_sharpe_variance.sqrt()
-        * ((1.0 - EULER_MASCHERONI) * q1 + EULER_MASCHERONI * q2);
+    let sr0_annualized =
+        trial_sharpe_variance.sqrt() * ((1.0 - EULER_MASCHERONI) * q1 + EULER_MASCHERONI * q2);
     probabilistic_sharpe_from_stats(
         sharpe_annualized,
         skewness_biased,
@@ -941,7 +941,10 @@ pub fn flat_trades(trades: &[Trade]) -> usize {
 
 /// Count of trades entered on the long side.
 pub fn long_trades(trades: &[Trade]) -> usize {
-    trades.iter().filter(|t| matches!(t.side, Side::Buy)).count()
+    trades
+        .iter()
+        .filter(|t| matches!(t.side, Side::Buy))
+        .count()
 }
 
 /// Count of trades entered on the short side.
@@ -1061,9 +1064,7 @@ pub fn average_bars_held(trades: &[Trade]) -> Option<Real> {
     if trades.is_empty() {
         None
     } else {
-        Some(
-            trades.iter().map(|t| t.bars_held() as Real).sum::<Real>() / trades.len() as Real,
-        )
+        Some(trades.iter().map(|t| t.bars_held() as Real).sum::<Real>() / trades.len() as Real)
     }
 }
 
@@ -1381,7 +1382,7 @@ pub(crate) struct ReturnStats {
 
 #[cfg(feature = "spec")]
 impl ReturnStats {
-#[inline]
+    #[inline]
     pub(crate) fn of(returns: &[Real], threshold: Real) -> Self {
         let n = returns.len();
         if n == 0 {
@@ -1742,7 +1743,7 @@ pub(crate) struct TradeStats {
 
 #[cfg(feature = "spec")]
 impl TradeStats {
-#[inline]
+    #[inline]
     pub(crate) fn of(trades: &[Trade]) -> Self {
         let mut s = Self {
             total: trades.len(),
@@ -1861,8 +1862,8 @@ impl TradeStats {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::Symbol;
     use super::*;
+    use crate::types::Symbol;
     use crate::{Order, OrderId, OrderKind};
 
     fn order(side: Side, units: Real, price: Real) -> Order<Symbol> {
@@ -1986,7 +1987,13 @@ mod tests {
     }
 
     #[cfg(feature = "spec")]
-    fn trade(side: Side, pnl: Real, return_ratio: Real, entry_bar: usize, exit_bar: usize) -> Trade {
+    fn trade(
+        side: Side,
+        pnl: Real,
+        return_ratio: Real,
+        entry_bar: usize,
+        exit_bar: usize,
+    ) -> Trade {
         Trade {
             entry_bar,
             exit_bar,
@@ -2013,7 +2020,14 @@ mod tests {
             ("all_flat", vec![w(0.0, 2), w(0.0, 5)]),
             (
                 "mixed",
-                vec![w(5.0, 3), l(2.0, 1), l(7.0, 8), w(1.0, 0), w(4.0, 6), l(3.0, 2)],
+                vec![
+                    w(5.0, 3),
+                    l(2.0, 1),
+                    l(7.0, 8),
+                    w(1.0, 0),
+                    w(4.0, 6),
+                    l(3.0, 2),
+                ],
             ),
         ]
     }
@@ -2145,7 +2159,11 @@ mod tests {
                 kelly_fraction(&tr),
                 t.kelly_fraction(),
             );
-            same_opt(&format!("{name}/avg_win"), average_win(&tr), t.average_win());
+            same_opt(
+                &format!("{name}/avg_win"),
+                average_win(&tr),
+                t.average_win(),
+            );
             same_opt(
                 &format!("{name}/avg_loss"),
                 average_loss(&tr),
@@ -2508,7 +2526,10 @@ mod tests {
     fn psr_returns_probability_in_unit_interval() {
         let ret = psr_test_returns();
         let p = probabilistic_sharpe(&ret, 0.0, 252.0, 0.0).unwrap();
-        assert!((0.0..=1.0).contains(&p), "PSR must be a probability, got {p}");
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "PSR must be a probability, got {p}"
+        );
     }
 
     #[test]

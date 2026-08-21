@@ -44,10 +44,38 @@ async fn fetches_one_window_and_decodes_candles() {
     // Coinbase returns newest-first; a bar at `until` (day 5) must be excluded.
     let rows = vec![
         candle(DAY0 + 5 * DAY, "5", "5", "5", "5", "5"), // == until, excluded
-        candle(DAY0 + 4 * DAY, "42450.0", "42600.0", "42400.0", "42550.0", "60.0"),
-        candle(DAY0 + 3 * DAY, "42350.0", "42500.0", "42300.0", "42450.0", "70.0"),
-        candle(DAY0 + 2 * DAY, "42250.0", "42400.0", "42150.0", "42350.0", "90.0"),
-        candle(DAY0 + DAY, "42100.0", "42300.0", "42000.0", "42250.0", "80.0"),
+        candle(
+            DAY0 + 4 * DAY,
+            "42450.0",
+            "42600.0",
+            "42400.0",
+            "42550.0",
+            "60.0",
+        ),
+        candle(
+            DAY0 + 3 * DAY,
+            "42350.0",
+            "42500.0",
+            "42300.0",
+            "42450.0",
+            "70.0",
+        ),
+        candle(
+            DAY0 + 2 * DAY,
+            "42250.0",
+            "42400.0",
+            "42150.0",
+            "42350.0",
+            "90.0",
+        ),
+        candle(
+            DAY0 + DAY,
+            "42100.0",
+            "42300.0",
+            "42000.0",
+            "42250.0",
+            "80.0",
+        ),
         candle(DAY0, "42000.0", "42500.5", "41800.25", "42100.00", "100.0"),
     ];
 
@@ -116,7 +144,9 @@ async fn pages_forward_and_dedups_boundary_bars() {
             .await;
     }
 
-    let client = Coinbase::new().with_base_url(server.uri()).with_max_per_request(2);
+    let client = Coinbase::new()
+        .with_base_url(server.uri())
+        .with_max_per_request(2);
     let bars = client
         .atoms(
             "BTC-USD",

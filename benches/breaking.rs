@@ -26,8 +26,8 @@
 //! These are ceilings, not promises: the by-reference chain is monomorphic and
 //! shallow, so it also enjoys inlining a `Box<dyn Indicator>` tree would not.
 
-use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use fugazi::indicators::{Close, Pick, Sma};
 use fugazi::prelude::*;
@@ -115,14 +115,24 @@ where
     }
 }
 
-fn ref_chain(symbol: &Symbol, fast: usize, slow: usize) -> impl RefIndicator<Input = Snapshot<Symbol>> {
+fn ref_chain(
+    symbol: &Symbol,
+    fast: usize,
+    slow: usize,
+) -> impl RefIndicator<Input = Snapshot<Symbol>> {
     let sma = |p: usize| RefSma {
-        source: RefClose { symbol: symbol.clone() },
+        source: RefClose {
+            symbol: symbol.clone(),
+        },
         period: p,
         window: std::collections::VecDeque::with_capacity(p),
         sum: 0.0,
     };
-    RefCrossesAbove { lhs: sma(fast), rhs: sma(slow), prev: None }
+    RefCrossesAbove {
+        lhs: sma(fast),
+        rhs: sma(slow),
+        prev: None,
+    }
 }
 
 fn bench_input_by_reference(c: &mut Criterion) {
@@ -188,7 +198,10 @@ struct Ema3 {
 
 impl Ema3 {
     fn new(period: usize) -> Self {
-        Self { alpha: 2.0 / (period as Real + 1.0), value: None }
+        Self {
+            alpha: 2.0 / (period as Real + 1.0),
+            value: None,
+        }
     }
     #[inline]
     fn update(&mut self, x: Real) -> Real {
@@ -213,7 +226,11 @@ struct Lines {
 fn macd_step(fast: &mut Ema3, slow: &mut Ema3, sig: &mut Ema3, x: Real) -> Lines {
     let macd = fast.update(x) - slow.update(x);
     let signal = sig.update(macd);
-    Lines { macd, signal, histogram: macd - signal }
+    Lines {
+        macd,
+        signal,
+        histogram: macd - signal,
+    }
 }
 
 /// The library's shape: one `Option<Real>` per line.
@@ -229,8 +246,12 @@ struct StoredLines {
 impl StoredLines {
     fn new() -> Self {
         Self {
-            fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9),
-            macd: None, signal: None, histogram: None,
+            fast: Ema3::new(12),
+            slow: Ema3::new(26),
+            sig: Ema3::new(9),
+            macd: None,
+            signal: None,
+            histogram: None,
         }
     }
     #[inline]
@@ -245,9 +266,11 @@ impl StoredLines {
     #[inline]
     fn value(&self) -> Option<Lines> {
         match (self.macd, self.signal, self.histogram) {
-            (Some(macd), Some(signal), Some(histogram)) => {
-                Some(Lines { macd, signal, histogram })
-            }
+            (Some(macd), Some(signal), Some(histogram)) => Some(Lines {
+                macd,
+                signal,
+                histogram,
+            }),
             _ => None,
         }
     }
@@ -263,7 +286,12 @@ struct StoredStruct {
 
 impl StoredStruct {
     fn new() -> Self {
-        Self { fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9), last: None }
+        Self {
+            fast: Ema3::new(12),
+            slow: Ema3::new(26),
+            sig: Ema3::new(9),
+            last: None,
+        }
     }
     #[inline]
     fn update(&mut self, x: Real) -> Option<Lines> {
@@ -286,7 +314,11 @@ struct NoStore {
 
 impl NoStore {
     fn new() -> Self {
-        Self { fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9) }
+        Self {
+            fast: Ema3::new(12),
+            slow: Ema3::new(26),
+            sig: Ema3::new(9),
+        }
     }
     #[inline]
     fn update(&mut self, x: Real) -> Option<Lines> {

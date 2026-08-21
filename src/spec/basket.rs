@@ -395,8 +395,13 @@ impl BasketStrategySpec {
         let strat = strat.scored_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
-            let dyn_ind: AnyChain =
-                concrete.build(&anchor, &book_score, None, &schema_score, Root::blessed(&leg_root(sym)));
+            let dyn_ind: AnyChain = concrete.build(
+                &anchor,
+                &book_score,
+                None,
+                &schema_score,
+                Root::blessed(&leg_root(sym)),
+            );
             dyn_ind.probed_real("score")
         });
 
@@ -406,8 +411,13 @@ impl BasketStrategySpec {
         let strat = strat.sized_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
-            let dyn_ind: AnyChain =
-                concrete.build(&anchor, &book_sizing, None, &schema_sizing, Root::blessed(&leg_root(sym)));
+            let dyn_ind: AnyChain = concrete.build(
+                &anchor,
+                &book_sizing,
+                None,
+                &schema_sizing,
+                Root::blessed(&leg_root(sym)),
+            );
             dyn_ind.probed_real("sizing")
         });
 
@@ -448,8 +458,13 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.long_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
-                    let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
+                    let dyn_ind: AnyChain = concrete.build(
+                        pos,
+                        &book_c,
+                        None,
+                        &schema_c,
+                        Root::blessed(&leg_root(sym)),
+                    );
                     dyn_ind.probed_real("long.stop_loss")
                 });
             }
@@ -458,8 +473,13 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.long_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
-                    let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
+                    let dyn_ind: AnyChain = concrete.build(
+                        pos,
+                        &book_c,
+                        None,
+                        &schema_c,
+                        Root::blessed(&leg_root(sym)),
+                    );
                     dyn_ind.probed_real("long.take_profit")
                 });
             }
@@ -474,8 +494,13 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.short_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
-                    let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
+                    let dyn_ind: AnyChain = concrete.build(
+                        pos,
+                        &book_c,
+                        None,
+                        &schema_c,
+                        Root::blessed(&leg_root(sym)),
+                    );
                     dyn_ind.probed_real("short.stop_loss")
                 });
             }
@@ -484,8 +509,13 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.short_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
-                    let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
+                    let dyn_ind: AnyChain = concrete.build(
+                        pos,
+                        &book_c,
+                        None,
+                        &schema_c,
+                        Root::blessed(&leg_root(sym)),
+                    );
                     dyn_ind.probed_real("short.take_profit")
                 });
             }
@@ -519,11 +549,7 @@ fn leg_root(sym: &str) -> Selector<Symbol> {
 /// `SYM` from `sym`. Panics with a descriptive message on failure — the
 /// build-time template resolution is a config error, not a runtime
 /// condition to recover from, so a loud panic surfaces the bad YAML.
-fn build_per_symbol(
-    template: &SpecTemplate<NodeSpec>,
-    sym: &str,
-    slot: &'static str,
-) -> NodeSpec {
+fn build_per_symbol(template: &SpecTemplate<NodeSpec>, sym: &str, slot: &'static str) -> NodeSpec {
     try_build_per_symbol(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -567,7 +593,13 @@ fn probe_template(
 ) -> Result<(), String> {
     let concrete = try_build_per_symbol(template, PROBE_SYMBOL, slot)?;
     concrete
-        .try_build(anchor, book, None, schema, Root::blessed(&leg_root(PROBE_SYMBOL)))
+        .try_build(
+            anchor,
+            book,
+            None,
+            schema,
+            Root::blessed(&leg_root(PROBE_SYMBOL)),
+        )
         .map(|_| ())
 }
 
@@ -764,11 +796,7 @@ mod tests {
                 period: 5
             sizing: !equal_weight 4
         "#;
-        let spec = BasketStrategySpec::from_text_with_params(
-            yaml,
-            &HashMap::new(),
-        )
-        .unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.selection {
             SelectionRuleSpec::TopBottom { longs, shorts, of } => {
                 assert_eq!(longs, 2);
@@ -783,14 +811,8 @@ mod tests {
     #[test]
     fn each_selection_variant_round_trips() {
         for (yaml, expected) in [
-            (
-                "!threshold { long_min: 0.5, short_max: -0.5 }",
-                "threshold",
-            ),
-            (
-                "!quantile { long_q: 0.1, short_q: 0.1 }",
-                "quantile",
-            ),
+            ("!threshold { long_min: 0.5, short_max: -0.5 }", "threshold"),
+            ("!quantile { long_q: 0.1, short_q: 0.1 }", "quantile"),
         ] {
             let rule: SelectionRuleSpec = serde_norway::from_str(yaml).unwrap();
             match (rule, expected) {
@@ -838,8 +860,7 @@ mod tests {
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.2
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
@@ -857,13 +878,22 @@ mod tests {
             ]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0, "A long");
-        assert!(wallet.position(&crate::types::symbol("B")).amount > 0.0, "B long");
+        assert!(
+            wallet.position(&crate::types::symbol("A")).amount > 0.0,
+            "A long"
+        );
+        assert!(
+            wallet.position(&crate::types::symbol("B")).amount > 0.0,
+            "B long"
+        );
         assert!(
             wallet.position(&crate::types::symbol("C")).amount.abs() < 1e-9,
             "C gated out by threshold → flat"
         );
-        assert!(wallet.position(&crate::types::symbol("D")).amount < 0.0, "D short");
+        assert!(
+            wallet.position(&crate::types::symbol("D")).amount < 0.0,
+            "D short"
+        );
     }
 
     #[test]
@@ -877,8 +907,7 @@ mod tests {
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.5
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
@@ -920,8 +949,7 @@ mod tests {
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.25
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
 
         // Two-bar prime + fill on symbols {X, Y}; X's close > Y's, so X wins.
@@ -951,8 +979,7 @@ mod tests {
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.5
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.universe.is_none());
     }
 
@@ -964,11 +991,13 @@ mod tests {
             sizing: !value 0.5
             universe: !all_of [BTC, ETH, SOL]
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.universe {
             Some(UniverseSpec::AllOf(v)) => {
-                assert_eq!(v, vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
+                assert_eq!(
+                    v,
+                    vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]
+                );
             }
             other => panic!("expected AllOf, got {other:?}"),
         }
@@ -982,8 +1011,7 @@ mod tests {
             sizing: !value 0.5
             universe: !any_of [BTC, ETH]
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.universe {
             Some(UniverseSpec::AnyOf(v)) => {
                 assert_eq!(v, vec!["BTC".to_string(), "ETH".to_string()]);
@@ -1002,8 +1030,7 @@ mod tests {
             sizing: !value 0.5
             universe: !all_of [X, Y]
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
@@ -1020,8 +1047,14 @@ mod tests {
             strat.update(snap_of(&[("X", 200.0), ("Y", 100.0), ("Z", 500.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&crate::types::symbol("X")).amount > 0.0, "X long");
-        assert!(wallet.position(&crate::types::symbol("Y")).amount < 0.0, "Y short");
+        assert!(
+            wallet.position(&crate::types::symbol("X")).amount > 0.0,
+            "X long"
+        );
+        assert!(
+            wallet.position(&crate::types::symbol("Y")).amount < 0.0,
+            "Y short"
+        );
         assert!(
             wallet.position(&crate::types::symbol("Z")).amount.abs() < 1e-9,
             "Z is outside the declared universe: no trade"
@@ -1037,8 +1070,7 @@ mod tests {
             sizing: !value 0.5
             universe: !all_of [X, Y]
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         // Y is missing from the snapshot — strict-erroring.
         strat.update(snap_of(&[("X", 100.0)]));
@@ -1055,8 +1087,7 @@ mod tests {
             score: !close { source: !pick { symbol: !arg SYM } }
             sizing: !value 0.5
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_none());
     }
 
@@ -1070,8 +1101,7 @@ mod tests {
             sizing: !value 0.5
             rebalance_on: !every 5
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..4 {
@@ -1084,7 +1114,10 @@ mod tests {
             strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.orders().is_empty(), "no orders in the first 4 off-cycle bars");
+        assert!(
+            wallet.orders().is_empty(),
+            "no orders in the first 4 off-cycle bars"
+        );
         // Bar 5: gate fires. Bar 6: order fills.
         for _ in 0..2 {
             for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
@@ -1111,8 +1144,7 @@ mod tests {
             sizing: !value 0.5
             rebalance_on: !never
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..8 {
@@ -1144,8 +1176,7 @@ mod tests {
                 window: 3
                 bars_per_year: 252
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         // Drive a few bars over two symbols with varying prices so the
@@ -1177,8 +1208,7 @@ mod tests {
                 period: 3
                 atr_multiple: 2.0
         "#;
-        let spec =
-            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for i in 0..8 {
@@ -1208,8 +1238,7 @@ mod tests {
         assert!(spec.balance_sides, "balance_sides defaults to true");
 
         let opted_out = format!("{base}    balance_sides: false\n");
-        let spec =
-            BasketStrategySpec::from_text_with_params(&opted_out, &HashMap::new()).unwrap();
+        let spec = BasketStrategySpec::from_text_with_params(&opted_out, &HashMap::new()).unwrap();
         assert!(!spec.balance_sides);
 
         // The old spelling is now an unknown field, not a silently-ignored
@@ -1260,7 +1289,9 @@ mod tests {
         let tree = spec.score.tree();
         let period = tree.pointer("/roc/period").unwrap();
         assert_eq!(period, &Value::Number(10.into()));
-        let sym = tree.pointer("/roc/source/close/source/pick/symbol").unwrap();
+        let sym = tree
+            .pointer("/roc/source/close/source/pick/symbol")
+            .unwrap();
         assert_eq!(sym, &serde_json::json!({"arg": "SYM"}));
     }
 }

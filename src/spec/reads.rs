@@ -75,7 +75,9 @@ pub fn picked_symbols_of(
     base: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<BTreeSet<String>> {
-    Ok(picked_symbols(&super::load_value(text, params, base, label)?))
+    Ok(picked_symbols(&super::load_value(
+        text, params, base, label,
+    )?))
 }
 
 /// [`picked_symbols_of`] for a caller that disables `!import` (see

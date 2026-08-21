@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::indicators::{Book, Position};
 use crate::indicators::logic::ValueBool;
+use crate::indicators::{Book, Position};
 use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
-use crate::runtime::{any, AnyChain};
+use crate::runtime::{AnyChain, any};
 use crate::types::Symbol;
 
 // ---------------------------------------------------------------------------
@@ -58,9 +58,7 @@ impl SideSpec {
     ) -> Result<AnyChain, String> {
         match &self.exit {
             Some(s) => s.try_build(anchor, book, None, schema, root),
-            None => Ok(any(ValueBool::<
-                crate::types::Snapshot<Symbol>,
-            >::new(false))),
+            None => Ok(any(ValueBool::<crate::types::Snapshot<Symbol>>::new(false))),
         }
     }
 }
@@ -179,8 +177,10 @@ impl SingleStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
-        let mut strat =
-            SingleAssetStrategy::with_initial_equity(crate::types::symbol(&self.symbol), initial_equity);
+        let mut strat = SingleAssetStrategy::with_initial_equity(
+            crate::types::symbol(&self.symbol),
+            initial_equity,
+        );
         // One position + book per strategy, shared by every `entry`/`peak`/`trough`
         // leaf (position) and every book-anchored sizing recipe (book).
         let anchor = strat.position();
@@ -198,10 +198,14 @@ impl SingleStrategySpec {
                 (long.exit(&anchor, &book, schema, root)?).into_bool()?,
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss((sl.try_build(&anchor, &book, None, schema, root)?).into_real()?);
+                strat = strat.long_stop_loss(
+                    (sl.try_build(&anchor, &book, None, schema, root)?).into_real()?,
+                );
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit((tp.try_build(&anchor, &book, None, schema, root)?).into_real()?);
+                strat = strat.long_take_profit(
+                    (tp.try_build(&anchor, &book, None, schema, root)?).into_real()?,
+                );
             }
         }
         if let Some(short) = &self.short {
@@ -210,17 +214,25 @@ impl SingleStrategySpec {
                 (short.exit(&anchor, &book, schema, root)?).into_bool()?,
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss((sl.try_build(&anchor, &book, None, schema, root)?).into_real()?);
+                strat = strat.short_stop_loss(
+                    (sl.try_build(&anchor, &book, None, schema, root)?).into_real()?,
+                );
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit((tp.try_build(&anchor, &book, None, schema, root)?).into_real()?);
+                strat = strat.short_take_profit(
+                    (tp.try_build(&anchor, &book, None, schema, root)?).into_real()?,
+                );
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, root)?).into_real()?);
+            strat = strat.position_sizing(
+                (sizing.try_build(&anchor, &book, None, schema, root)?).into_real()?,
+            );
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, root)?).into_bool()?);
+            strat = strat.rebalance_on(
+                (rebalance.try_build(&anchor, &book, None, schema, root)?).into_bool()?,
+            );
         }
         Ok(DynSingleStrategy { inner: strat })
     }

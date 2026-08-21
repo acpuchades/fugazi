@@ -108,10 +108,7 @@ impl Shape {
     /// This shape's document with [`RICH_META`] spliced in at the right depth.
     fn with_meta(&self) -> String {
         let pad = " ".repeat(self.meta_indent);
-        let block: String = RICH_META
-            .lines()
-            .map(|l| format!("{pad}{l}\n"))
-            .collect();
+        let block: String = RICH_META.lines().map(|l| format!("{pad}{l}\n")).collect();
         format!("{}{block}", self.body)
     }
 }
@@ -125,7 +122,9 @@ fn every_shape_accepts_and_returns_meta() {
     for shape in shapes() {
         let name = shape.name;
         let spec = load(shape.kind, &shape.with_meta());
-        let meta = spec.meta().unwrap_or_else(|| panic!("{name}: meta is None"));
+        let meta = spec
+            .meta()
+            .unwrap_or_else(|| panic!("{name}: meta is None"));
 
         assert_eq!(meta["service"], json!("strategy-lab"), "{name}");
         assert_eq!(meta["revision"], json!(17), "{name}");
@@ -148,7 +147,11 @@ fn every_shape_accepts_and_returns_meta() {
 /// `meta:`, driven over the same bars, must produce byte-identical equity.
 #[test]
 fn meta_does_not_change_a_backtest() {
-    let snaps = bars::series("BTC", &[100.0, 101.0, 99.0, 104.0, 103.0, 108.0], bars::flat);
+    let snaps = bars::series(
+        "BTC",
+        &[100.0, 101.0, 99.0, 104.0, 103.0, 108.0],
+        bars::flat,
+    );
     let schema = Arc::new(Schema::empty());
 
     for shape in shapes() {
@@ -301,9 +304,7 @@ fn the_document_json_schema_allows_meta_on_every_shape() {
     let schema = fugazi::spec::grammar::spec_document_json_schema();
     for shape in ["single", "pairs", "basket", "multi", "portfolio"] {
         assert!(
-            schema["$defs"][shape]["properties"]
-                .get("meta")
-                .is_some(),
+            schema["$defs"][shape]["properties"].get("meta").is_some(),
             "the {shape} document schema is missing `meta`"
         );
         assert!(

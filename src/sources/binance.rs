@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{SeriesSource, Interval, SourceError, Timestamp};
+use super::{Interval, SeriesSource, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://api.binance.com";
 const DEFAULT_MAX_PER_REQUEST: usize = 1000;
@@ -259,10 +259,22 @@ fn decode_row(row: &serde_json::Value, schema: &Arc<Schema>) -> Result<Atom, Sou
     let volume = parse_num_str(&arr[5], "volume")?;
     // Extras land at indexes 7 / 8 / 9 / 10 (index 6 = closeTime, index 11 =
     // "ignore"). Missing or malformed → NaN, matching the schema's Real cell.
-    let quote_volume = arr.get(7).map(|v| parse_num_str(v, "quote_volume").unwrap_or(Real::NAN)).unwrap_or(Real::NAN);
-    let n_trades = arr.get(8).and_then(|v| v.as_i64().map(|n| n as Real).or_else(|| v.as_f64())).unwrap_or(Real::NAN);
-    let taker_buy_base_volume = arr.get(9).map(|v| parse_num_str(v, "taker_buy_base_volume").unwrap_or(Real::NAN)).unwrap_or(Real::NAN);
-    let taker_buy_quote_volume = arr.get(10).map(|v| parse_num_str(v, "taker_buy_quote_volume").unwrap_or(Real::NAN)).unwrap_or(Real::NAN);
+    let quote_volume = arr
+        .get(7)
+        .map(|v| parse_num_str(v, "quote_volume").unwrap_or(Real::NAN))
+        .unwrap_or(Real::NAN);
+    let n_trades = arr
+        .get(8)
+        .and_then(|v| v.as_i64().map(|n| n as Real).or_else(|| v.as_f64()))
+        .unwrap_or(Real::NAN);
+    let taker_buy_base_volume = arr
+        .get(9)
+        .map(|v| parse_num_str(v, "taker_buy_base_volume").unwrap_or(Real::NAN))
+        .unwrap_or(Real::NAN);
+    let taker_buy_quote_volume = arr
+        .get(10)
+        .map(|v| parse_num_str(v, "taker_buy_quote_volume").unwrap_or(Real::NAN))
+        .unwrap_or(Real::NAN);
     let overlays = OverlayInfo::new(
         schema.clone(),
         vec![
@@ -392,10 +404,22 @@ mod tests {
         assert_eq!(atom.candle.unwrap().close, 27050.75);
         assert_eq!(atom.candle.unwrap().volume, 12.345);
         let overlays = atom.overlays.expect("Binance atoms carry overlays");
-        assert_eq!(overlays.get_by_key("quote_volume"), Some(&OverlayValue::Real(334000.00)));
-        assert_eq!(overlays.get_by_key("n_trades"), Some(&OverlayValue::Real(42.0)));
-        assert_eq!(overlays.get_by_key("taker_buy_base_volume"), Some(&OverlayValue::Real(6.0)));
-        assert_eq!(overlays.get_by_key("taker_buy_quote_volume"), Some(&OverlayValue::Real(162500.00)));
+        assert_eq!(
+            overlays.get_by_key("quote_volume"),
+            Some(&OverlayValue::Real(334000.00))
+        );
+        assert_eq!(
+            overlays.get_by_key("n_trades"),
+            Some(&OverlayValue::Real(42.0))
+        );
+        assert_eq!(
+            overlays.get_by_key("taker_buy_base_volume"),
+            Some(&OverlayValue::Real(6.0))
+        );
+        assert_eq!(
+            overlays.get_by_key("taker_buy_quote_volume"),
+            Some(&OverlayValue::Real(162500.00))
+        );
     }
 
     #[test]

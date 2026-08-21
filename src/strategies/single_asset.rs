@@ -4,7 +4,7 @@
 use std::hash::Hash;
 use std::sync::OnceLock;
 
-use crate::indicators::{Book, ValueBool, Position, Value};
+use crate::indicators::{Book, Position, Value, ValueBool};
 use crate::prelude::*;
 use crate::types::Snapshot;
 
@@ -495,27 +495,37 @@ where
             .ok_or_else(|| format!("single: expected a state object, got {state}"))?;
         let null = serde_json::Value::Null;
         let get = |k: &str| obj.get(k).unwrap_or(&null);
-        self.long.load_state(get("long")).map_err(|e| format!("long > {e}"))?;
+        self.long
+            .load_state(get("long"))
+            .map_err(|e| format!("long > {e}"))?;
         self.close_long
             .load_state(get("close_long"))
             .map_err(|e| format!("close_long > {e}"))?;
-        self.short.load_state(get("short")).map_err(|e| format!("short > {e}"))?;
+        self.short
+            .load_state(get("short"))
+            .map_err(|e| format!("short > {e}"))?;
         self.close_short
             .load_state(get("close_short"))
             .map_err(|e| format!("close_short > {e}"))?;
         if let Some(l) = self.long_stop.as_mut() {
-            l.load_state(get("long_stop")).map_err(|e| format!("long_stop > {e}"))?;
+            l.load_state(get("long_stop"))
+                .map_err(|e| format!("long_stop > {e}"))?;
         }
         if let Some(l) = self.long_target.as_mut() {
-            l.load_state(get("long_target")).map_err(|e| format!("long_target > {e}"))?;
+            l.load_state(get("long_target"))
+                .map_err(|e| format!("long_target > {e}"))?;
         }
         if let Some(l) = self.short_stop.as_mut() {
-            l.load_state(get("short_stop")).map_err(|e| format!("short_stop > {e}"))?;
+            l.load_state(get("short_stop"))
+                .map_err(|e| format!("short_stop > {e}"))?;
         }
         if let Some(l) = self.short_target.as_mut() {
-            l.load_state(get("short_target")).map_err(|e| format!("short_target > {e}"))?;
+            l.load_state(get("short_target"))
+                .map_err(|e| format!("short_target > {e}"))?;
         }
-        self.sizing.load_state(get("sizing")).map_err(|e| format!("sizing > {e}"))?;
+        self.sizing
+            .load_state(get("sizing"))
+            .map_err(|e| format!("sizing > {e}"))?;
         self.rebalance
             .load_state(get("rebalance"))
             .map_err(|e| format!("rebalance > {e}"))?;
@@ -531,7 +541,9 @@ where
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for SingleAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
+    for SingleAssetStrategy<Sym>
+{
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 
@@ -762,8 +774,7 @@ mod tests {
         // Half-position: `value_frac(0.5) * equity / price` at entry. Seed
         // equity is 1000 and the entry fills at 100, so units = 5 (vs. 10 for
         // the default all-in).
-        let mut strat =
-            SingleAssetStrategy::buy_and_hold("X").position_sizing(Value::new(0.5));
+        let mut strat = SingleAssetStrategy::buy_and_hold("X").position_sizing(Value::new(0.5));
         let w = run(&mut strat, &[flat_bar(100.0), flat_bar(100.0)]);
         let entry = w.orders().last().unwrap();
         assert_eq!(entry.side, Side::Buy);
@@ -837,11 +848,10 @@ mod tests {
     fn book_tracks_buy_and_hold_equity_curve() {
         // Seed both wallet and book at 1000. Buy-and-hold at 100 fills on bar
         // 2 (queued bar 1). Bar 3: mark to 120 → equity should be 1200.
-        let mut strat = SingleAssetStrategy::with_initial_equity("X", 1_000.0)
-            .long_on(
-                ValueBool::<Snapshot<&'static str>>::new(true),
-                ValueBool::<Snapshot<&'static str>>::new(false),
-            );
+        let mut strat = SingleAssetStrategy::with_initial_equity("X", 1_000.0).long_on(
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
+        );
         let book = strat.book();
         let _ = run_with_capital(
             &mut strat,

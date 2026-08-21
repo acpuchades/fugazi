@@ -152,9 +152,13 @@ impl SeriesSource for Coinbase {
             // Coinbase timestamps are Unix seconds; the trait works in millis.
             let step_sec = interval.duration_ms() / 1000;
             let since_s = since.0.div_euclid(1000);
-            let until_s = until.map(|t| t.0.div_euclid(1000)).unwrap_or_else(now_seconds);
+            let until_s = until
+                .map(|t| t.0.div_euclid(1000))
+                .unwrap_or_else(now_seconds);
             // Widest window one page can cover.
-            let span = step_sec.saturating_mul(max_per_request as i64).max(step_sec);
+            let span = step_sec
+                .saturating_mul(max_per_request as i64)
+                .max(step_sec);
 
             let mut out: Vec<Atom> = Vec::new();
             let mut cursor = since_s;
@@ -368,8 +372,14 @@ mod tests {
 
     #[test]
     fn interval_tokens_map_correctly() {
-        assert_eq!(interval_to_token(Interval::Minute(1)).unwrap(), "ONE_MINUTE");
-        assert_eq!(interval_to_token(Interval::Minute(30)).unwrap(), "THIRTY_MINUTE");
+        assert_eq!(
+            interval_to_token(Interval::Minute(1)).unwrap(),
+            "ONE_MINUTE"
+        );
+        assert_eq!(
+            interval_to_token(Interval::Minute(30)).unwrap(),
+            "THIRTY_MINUTE"
+        );
         assert_eq!(interval_to_token(Interval::Hour(1)).unwrap(), "ONE_HOUR");
         assert_eq!(interval_to_token(Interval::Hour(6)).unwrap(), "SIX_HOUR");
         assert_eq!(interval_to_token(Interval::Day(1)).unwrap(), "ONE_DAY");

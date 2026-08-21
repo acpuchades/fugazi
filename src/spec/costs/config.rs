@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow, bail};
 use crate::costs::{
     CommissionModel, CompositeCommission, FixedAbsoluteSpread, FixedBpsSlippage, FixedBpsSpread,
-    FixedCommission, MaxCommission, NoCommission, NoSlippage, NoSpread, PercentageCommission,
-    PerUnitCommission, SlippageModel, SpreadModel, TradingCosts, VolumeParticipationSlippage,
+    FixedCommission, MaxCommission, NoCommission, NoSlippage, NoSpread, PerUnitCommission,
+    PercentageCommission, SlippageModel, SpreadModel, TradingCosts, VolumeParticipationSlippage,
 };
 use crate::types::Real;
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -326,7 +326,9 @@ fn check_variant(leg: &str, existing: Option<&Value>, path: &[String]) -> Result
 }
 
 fn assign_path(root: &mut Map<String, Value>, path: &[String], value: Value) {
-    let (last, prefix) = path.split_last().expect("assign_path needs at least one segment");
+    let (last, prefix) = path
+        .split_last()
+        .expect("assign_path needs at least one segment");
     let mut cur = root;
     for seg in prefix {
         let entry = cur
@@ -471,11 +473,22 @@ impl<T> LegConfig<T> {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum CommissionSpec {
     None,
-    Fixed { amount: Real },
-    Percentage { rate: Real },
-    PerUnit { rate: Real },
-    Composite { parts: Vec<CommissionSpec> },
-    Max { lhs: Box<CommissionSpec>, rhs: Box<CommissionSpec> },
+    Fixed {
+        amount: Real,
+    },
+    Percentage {
+        rate: Real,
+    },
+    PerUnit {
+        rate: Real,
+    },
+    Composite {
+        parts: Vec<CommissionSpec>,
+    },
+    Max {
+        lhs: Box<CommissionSpec>,
+        rhs: Box<CommissionSpec>,
+    },
 }
 
 impl CommissionSpec {
@@ -485,9 +498,9 @@ impl CommissionSpec {
             CommissionSpec::Fixed { amount } => Box::new(FixedCommission::new(*amount)),
             CommissionSpec::Percentage { rate } => Box::new(PercentageCommission::new(*rate)),
             CommissionSpec::PerUnit { rate } => Box::new(PerUnitCommission::new(*rate)),
-            CommissionSpec::Composite { parts } => {
-                Box::new(CompositeCommission::new(parts.iter().map(|p| p.build()).collect()))
-            }
+            CommissionSpec::Composite { parts } => Box::new(CompositeCommission::new(
+                parts.iter().map(|p| p.build()).collect(),
+            )),
             CommissionSpec::Max { lhs, rhs } => {
                 Box::new(MaxCommission::new(lhs.build(), rhs.build()))
             }
@@ -535,7 +548,10 @@ impl SlippageSpec {
     fn build(&self) -> Box<dyn SlippageModel> {
         match self {
             SlippageSpec::None => Box::new(NoSlippage),
-            SlippageSpec::Bps { bps, stop_multiplier } => {
+            SlippageSpec::Bps {
+                bps,
+                stop_multiplier,
+            } => {
                 let mut s = FixedBpsSlippage::new(*bps);
                 if let Some(m) = stop_multiplier {
                     s = s.with_stop_multiplier(*m);
@@ -564,9 +580,7 @@ impl CostConfig {
     /// Whether every leg is empty (no default, no scoped, no by-something) —
     /// what `--costs none` and an absent `--costs` flag both resolve to.
     pub fn is_none(&self) -> bool {
-        leg_is_empty(&self.commission)
-            && leg_is_empty(&self.spread)
-            && leg_is_empty(&self.slippage)
+        leg_is_empty(&self.commission) && leg_is_empty(&self.spread) && leg_is_empty(&self.slippage)
     }
 
     /// Whether a per-leg `default` exists (used by the check subcommand's

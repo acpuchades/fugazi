@@ -518,10 +518,7 @@ mod tests {
     use crate::types::Candle;
 
     fn bar_at(ms: i64) -> Atom {
-        Atom::with_time(
-            Candle::new(1.0, 1.0, 1.0, 1.0, 0.0),
-            Timestamp(ms),
-        )
+        Atom::with_time(Candle::new(1.0, 1.0, 1.0, 1.0, 0.0), Timestamp(ms))
     }
 
     fn bare_bar() -> Atom {
@@ -563,12 +560,12 @@ mod tests {
     #[test]
     fn quarter_covers_all_months() {
         for (m_ms_offset, expected_q) in [
-            (0i64, 1.0),                    // Jan 1
-            (32 * 86_400_000, 1.0),         // Feb 2
-            (60 * 86_400_000, 1.0),         // Mar 2 (non-leap 2023 window; day 60 = Mar 2 2023)
-            (91 * 86_400_000, 2.0),         // Apr 2
-            (181 * 86_400_000, 3.0),        // Jul 1
-            (274 * 86_400_000, 4.0),        // Oct 1
+            (0i64, 1.0),             // Jan 1
+            (32 * 86_400_000, 1.0),  // Feb 2
+            (60 * 86_400_000, 1.0),  // Mar 2 (non-leap 2023 window; day 60 = Mar 2 2023)
+            (91 * 86_400_000, 2.0),  // Apr 2
+            (181 * 86_400_000, 3.0), // Jul 1
+            (274 * 86_400_000, 4.0), // Oct 1
         ] {
             let base = 1_672_531_200_000; // 2023-01-01 UTC
             let atom = bar_at(base + m_ms_offset);

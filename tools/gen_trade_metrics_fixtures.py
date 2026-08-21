@@ -83,16 +83,26 @@ SEED = 20260818
 # entry; `schedule_is_non_overlapping` below enforces that rather than trusting
 # it.
 SCHEDULE = {
-    10: "long", 24: "close",
-    31: "short", 39: "close",
-    46: "long", 72: "close",
-    80: "short", 88: "close",
-    95: "long", 101: "close",
-    112: "long", 140: "close",
-    150: "short", 163: "close",
-    171: "long", 176: "close",
-    184: "short", 205: "close",
-    212: "long", 231: "close",
+    10: "long",
+    24: "close",
+    31: "short",
+    39: "close",
+    46: "long",
+    72: "close",
+    80: "short",
+    88: "close",
+    95: "long",
+    101: "close",
+    112: "long",
+    140: "close",
+    150: "short",
+    163: "close",
+    171: "long",
+    176: "close",
+    184: "short",
+    205: "close",
+    212: "long",
+    231: "close",
 }
 
 
@@ -256,7 +266,9 @@ def main() -> None:
         w.writerow(["bar", "equity", "fill_units", "fill_price"])
         for i in range(len(bars)):
             entries = by_bar.get(i, [])
-            assert len(entries) <= 1, f"bar {i}: {len(entries)} fills, schedule overlaps"
+            assert len(entries) <= 1, (
+                f"bar {i}: {len(entries)} fills, schedule overlaps"
+            )
             units, price = entries[0] if entries else ("", "")
             w.writerow(
                 [
@@ -305,7 +317,9 @@ def main() -> None:
     # 1e-9 with no reinterpretation at all.
     bt_exposure = float(stats["Exposure Time [%]"])
     fugazi_exposure = float(held.sum()) / len(bars) * 100.0
-    assert abs(bt_exposure - fugazi_exposure - len(trades) / len(bars) * 100.0) < 1e-9, (
+    assert (
+        abs(bt_exposure - fugazi_exposure - len(trades) / len(bars) * 100.0) < 1e-9
+    ), (
         "expected backtesting.py's exposure to exceed fugazi's by exactly one "
         f"bar per round trip; got {bt_exposure} vs {fugazi_exposure}"
     )

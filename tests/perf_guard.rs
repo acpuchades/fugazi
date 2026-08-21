@@ -216,7 +216,9 @@ fn performance_invariants_hold() {
     let schema = Schema::empty();
 
     assert_flat_in_bars("spec-built (YAML) strategy", |bars| {
-        let mut strat = spec.try_build(10_000.0, &schema).expect("guard spec builds");
+        let mut strat = spec
+            .try_build(10_000.0, &schema)
+            .expect("guard spec builds");
         let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let rep = fugazi::backtest::run(&mut strat, &mut w, big[..bars].iter().cloned());
         rep.equity_curve.len() as u64

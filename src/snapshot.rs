@@ -707,7 +707,11 @@ impl<Sym> Snapshot<Sym> {
         // price series and is reached deliberately, with `!pick`; it must stay
         // invisible to the implicit unpack, or attaching one would break every
         // bare `!close` in a single-asset strategy that never asked for it.
-        let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
+        let mut priceable = self
+            .entries
+            .rows
+            .iter()
+            .filter(|(_, _, a)| a.is_priceable());
         let first = priceable.next();
         match (first, priceable.count()) {
             (None, _) => Ok(None),
@@ -729,7 +733,11 @@ impl<Sym> Snapshot<Sym> {
     /// off, not abort the run. The panic is for the genuinely mis-wired case,
     /// where nothing named an asset at all.
     pub fn sole_atom_or_none(&self) -> Option<&Atom> {
-        let mut priceable = self.entries.rows.iter().filter(|(_, _, a)| a.is_priceable());
+        let mut priceable = self
+            .entries
+            .rows
+            .iter()
+            .filter(|(_, _, a)| a.is_priceable());
         match (priceable.next(), priceable.next()) {
             (Some(entry), None) => Some(&entry.2),
             _ => None,
@@ -848,7 +856,11 @@ mod overlay_only_tests {
         // price series must not break a single-asset strategy's bare `!close`,
         // which reaches its bar through the implicit no-arg unpack.
         let mut snap: Snapshot<Symbol> = Snapshot::new();
-        snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
+        snap.push(
+            Some("BTC".into()),
+            None,
+            Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)),
+        );
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
 
         let sole = snap.sole_atom_or_panic().expect("the one priceable entry");
@@ -860,8 +872,16 @@ mod overlay_only_tests {
         // The ambiguity it exists to catch is unchanged: two *priceable*
         // entries remain a programming error, not a silent arbitrary pick.
         let mut snap: Snapshot<Symbol> = Snapshot::new();
-        snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
-        snap.push(Some("ETH".into()), None, Atom::new(Candle::new(2.0, 3.0, 1.5, 2.5, 20.0)));
+        snap.push(
+            Some("BTC".into()),
+            None,
+            Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)),
+        );
+        snap.push(
+            Some("ETH".into()),
+            None,
+            Atom::new(Candle::new(2.0, 3.0, 1.5, 2.5, 20.0)),
+        );
         assert!(std::panic::catch_unwind(|| snap.sole_atom_or_panic()).is_err());
     }
 
@@ -880,7 +900,11 @@ mod overlay_only_tests {
         let mut one: Snapshot<Symbol> = Snapshot::new();
         one.push(Some("BTC".into()), None, bar(1.5));
         assert_eq!(
-            one.sole_atom_or_err().ok().flatten().and_then(|a| a.candle).map(|c| c.close),
+            one.sole_atom_or_err()
+                .ok()
+                .flatten()
+                .and_then(|a| a.candle)
+                .map(|c| c.close),
             Some(1.5)
         );
 
@@ -937,8 +961,16 @@ mod symbol_tests {
     #[test]
     fn hash_first_equality_agrees_with_the_text() {
         let names = [
-            "BTCUSDT", "ETHUSDT", "SOLUSDT", "AAPL", "MSFT", "", "A", "a",
-            "BTC-USDT-SWAP", "BTC-USDT-PERP",
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "AAPL",
+            "MSFT",
+            "",
+            "A",
+            "a",
+            "BTC-USDT-SWAP",
+            "BTC-USDT-PERP",
         ];
         for a in names {
             for b in names {
@@ -986,7 +1018,10 @@ mod symbol_tests {
     /// the literal is the point.
     #[test]
     fn a_symbol_serializes_as_a_bare_string() {
-        assert_eq!(serde_json::to_string(&symbol("BTCUSDT")).unwrap(), r#""BTCUSDT""#);
+        assert_eq!(
+            serde_json::to_string(&symbol("BTCUSDT")).unwrap(),
+            r#""BTCUSDT""#
+        );
         let back: Symbol = serde_json::from_str(r#""BTCUSDT""#).unwrap();
         assert_eq!(back, symbol("BTCUSDT"));
         // Also as a map key, which is how the run-state blobs carry it.
@@ -1039,14 +1074,21 @@ mod index_tests {
         snap.push(None, None, atom(1.0));
         for i in 0..40 {
             let s = symbol(format!("S{i:02}"));
-            snap.push(Some(s.clone()), Some(Frequency::Hour(1)), atom(100.0 + i as Real));
+            snap.push(
+                Some(s.clone()),
+                Some(Frequency::Hour(1)),
+                atom(100.0 + i as Real),
+            );
             // Every third symbol appears twice — once hourly, once daily — so
             // first-match-wins and freq-qualified lookups are both exercised.
             if i % 3 == 0 {
                 snap.push(Some(s), Some(Frequency::Day(1)), atom(900.0 + i as Real));
             }
         }
-        assert!(snap.len() >= INDEX_THRESHOLD, "test must exercise the index");
+        assert!(
+            snap.len() >= INDEX_THRESHOLD,
+            "test must exercise the index"
+        );
 
         let mut queries = vec![Selector::default(), Selector::by_freq(Frequency::Day(1))];
         for i in 0..42 {

@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::indicator::Indicator;
+use crate::types::{Atom, Candle, Real};
 use crate::wallet::POSITION_EPSILON;
 use crate::wallet::Side;
-use crate::types::{Atom, Candle, Real};
 
 /// The running state a [`Position`] shares.
 #[derive(Debug, Default, Serialize, Deserialize)]

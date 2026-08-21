@@ -72,13 +72,13 @@ pub mod costs;
 // A fast non-cryptographic hasher for the crate's internal symbol-keyed maps.
 // Not public: it is an implementation choice, not API.
 pub(crate) mod hash;
-pub(crate) mod num;
 pub mod indicator;
 pub mod indicators;
 #[cfg(feature = "live")]
 pub mod live;
 pub mod market;
 pub mod metrics;
+pub(crate) mod num;
 // The plain-data resampling vocabulary (`ResampleScheme`, config) compiles
 // unconditionally so `EvalContext` can carry a Monte Carlo config in any build;
 // the `rand`-backed resampling itself is gated on `montecarlo` *inside*.
@@ -104,7 +104,9 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 #[cfg(feature = "live")]
 pub use live::{CoinbaseWallet, OkxWallet};
-pub use market::{Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder};
+pub use market::{
+    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+};
 pub use metrics::{DrawdownSegment, Trade};
 pub use portfolio::{Portfolio, PortfolioBuilder};
 pub use signal::Signal;
@@ -112,7 +114,8 @@ pub use snapshot::{Selector, Snapshot, Symbol, symbol};
 pub use strategy::Strategy;
 pub use time::{Frequency, Timestamp};
 pub use wallet::{
-    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet,
+    WalletError,
 };
 
 /// Convenient glob-import of the core traits and types.
@@ -128,7 +131,7 @@ pub mod prelude {
     pub use crate::strategy::Strategy;
     pub use crate::time::{Frequency, Timestamp};
     pub use crate::wallet::{
-        Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet,
-        WalletError,
+        Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units,
+        Wallet, WalletError,
     };
 }

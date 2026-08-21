@@ -20,9 +20,7 @@ fn atom(close: Real) -> Atom {
     Atom::new(Candle::new(1.0, 2.0, 0.5, close, 100.0))
 }
 
-fn snap(
-    pairs: &[(Option<Symbol>, Option<Frequency>, Atom)],
-) -> Snapshot<Symbol> {
+fn snap(pairs: &[(Option<Symbol>, Option<Frequency>, Atom)]) -> Snapshot<Symbol> {
     let mut s = Snapshot::new();
     for (sym, freq, a) in pairs {
         s.push(sym.clone(), *freq, a.clone());
@@ -39,34 +37,27 @@ const T0: i64 = 1_710_506_096_000; // 2024-03-15 12:34:56 UTC — a Friday.
 #[test]
 fn pick_projects_the_named_asset() {
     let mut btc = Pick::<Symbol>::matching(Selector::by_symbol("BTC"));
-    let s_ = snap(&[
-        (s("BTC"), None, atom(100.0)),
-        (s("ETH"), None, atom(50.0)),
-    ]);
+    let s_ = snap(&[(s("BTC"), None, atom(100.0)), (s("ETH"), None, atom(50.0))]);
     let out = btc.update(s_).expect("BTC present");
     assert_eq!(out.candle.unwrap().close, 100.0);
 }
 
 #[test]
 fn close_of_pick_reads_the_projected_close() {
-    let mut btc_close =
-        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")));
-    let s_ = snap(&[
-        (s("BTC"), None, atom(101.5)),
-        (s("ETH"), None, atom(4.25)),
-    ]);
+    let mut btc_close = Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")));
+    let s_ = snap(&[(s("BTC"), None, atom(101.5)), (s("ETH"), None, atom(4.25))]);
     assert_eq!(btc_close.update(s_), Some(101.5));
 }
 
 #[test]
 fn btc_eth_close_spread_composes_from_two_picks() {
     let mut spread =
-        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")))
-            .sub(Close::of(Pick::<Symbol>::matching(Selector::by_symbol("ETH"))));
-    let s_ = snap(&[
-        (s("BTC"), None, atom(100.0)),
-        (s("ETH"), None, atom(60.0)),
-    ]);
+        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC"))).sub(Close::of(Pick::<
+            Symbol,
+        >::matching(
+            Selector::by_symbol("ETH"),
+        )));
+    let s_ = snap(&[(s("BTC"), None, atom(100.0)), (s("ETH"), None, atom(60.0))]);
     assert_eq!(spread.update(s_), Some(40.0));
 }
 
@@ -99,19 +90,18 @@ fn calendar_source_over_pick_reads_projected_time() {
 #[test]
 fn missing_asset_stays_none_downstream() {
     let mut spread =
-        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")))
-            .sub(Close::of(Pick::<Symbol>::matching(Selector::by_symbol("ETH"))));
-    let s_ = snap(&[
-        (s("SOL"), None, atom(20.0)),
-        (s("ETH"), None, atom(10.0)),
-    ]);
+        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC"))).sub(Close::of(Pick::<
+            Symbol,
+        >::matching(
+            Selector::by_symbol("ETH"),
+        )));
+    let s_ = snap(&[(s("SOL"), None, atom(20.0)), (s("ETH"), None, atom(10.0))]);
     assert_eq!(spread.update(s_), None);
 }
 
 #[test]
 fn pick_by_freq_wildcards_symbol() {
-    let mut hourly =
-        Pick::<Symbol>::matching(Selector::by_freq(Frequency::Hour(1)));
+    let mut hourly = Pick::<Symbol>::matching(Selector::by_freq(Frequency::Hour(1)));
     let s_ = snap(&[
         (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
         (s("ETH"), Some(Frequency::Day(1)), atom(50.0)),
@@ -122,15 +112,15 @@ fn pick_by_freq_wildcards_symbol() {
 
 #[test]
 fn pick_exact_disambiguates_between_frequencies() {
-    let mut btc_hour = Pick::<Symbol>::matching(Selector::exact(
-        "BTC",
-        Frequency::Hour(1),
-    ));
+    let mut btc_hour = Pick::<Symbol>::matching(Selector::exact("BTC", Frequency::Hour(1)));
     let s_ = snap(&[
         (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
         (s("BTC"), Some(Frequency::Day(1)), atom(300.0)),
     ]);
-    assert_eq!(btc_hour.update(s_).map(|a| a.candle.unwrap().close), Some(100.0));
+    assert_eq!(
+        btc_hour.update(s_).map(|a| a.candle.unwrap().close),
+        Some(100.0)
+    );
 }
 
 #[test]

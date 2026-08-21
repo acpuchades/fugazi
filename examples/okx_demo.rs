@@ -17,9 +17,9 @@
 
 use std::time::Duration;
 
-use fugazi::types::Symbol;
 use fugazi::Candle;
 use fugazi::live::OkxWallet;
+use fugazi::types::Symbol;
 use fugazi::wallet::{Units, Wallet};
 
 const SYMBOL: &str = "BTC-USDT-SWAP";
@@ -46,7 +46,9 @@ fn main() {
     let symbol = fugazi::types::symbol(SYMBOL);
     let mut wallet = OkxWallet::demo(key, secret, passphrase);
 
-    wallet.refresh_account().expect("account reachable on demo trading");
+    wallet
+        .refresh_account()
+        .expect("account reachable on demo trading");
     println!(
         "connected — funds {:.2}  equity {:.2}  {SYMBOL} position {:+.4}",
         wallet.funds().0,
@@ -58,18 +60,27 @@ fn main() {
     let target = start + QTY;
     println!("\nopening: market order to {target:+.4} {SYMBOL} …");
     wallet
-        .set_position(Units { symbol: symbol.clone(), amount: target })
+        .set_position(Units {
+            symbol: symbol.clone(),
+            amount: target,
+        })
         .expect("market order accepted");
 
     settle_to(&mut wallet, &symbol, target, "reached target");
 
     println!("\nclosing: flattening back to {start:+.4} …");
     wallet
-        .set_position(Units { symbol: symbol.clone(), amount: start })
+        .set_position(Units {
+            symbol: symbol.clone(),
+            amount: start,
+        })
         .expect("flatten accepted");
     settle_to(&mut wallet, &symbol, start, "flattened");
 
-    println!("\ndone — final {SYMBOL} position {:+.4}", wallet.position(&symbol).amount);
+    println!(
+        "\ndone — final {SYMBOL} position {:+.4}",
+        wallet.position(&symbol).amount
+    );
     for err in wallet.errors() {
         eprintln!("note: {err}");
     }
@@ -92,7 +103,10 @@ fn settle_to(wallet: &mut OkxWallet, symbol: &Symbol, want: f64, ok_msg: &str) {
             );
         }
         if (wallet.position(symbol).amount - want).abs() < 1e-6 {
-            println!("  {ok_msg}: position {:+.4}", wallet.position(symbol).amount);
+            println!(
+                "  {ok_msg}: position {:+.4}",
+                wallet.position(symbol).amount
+            );
             return;
         }
     }

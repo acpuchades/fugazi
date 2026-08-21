@@ -68,9 +68,7 @@ def test_load_spec_imports_false_rejects_import_inside_a_template_body():
 
 
 def test_load_spec_imports_false_leaves_import_free_documents_unaffected():
-    spec = ta.load_spec(
-        "symbol: BTC\nlong:\n  enter: !value true\n", imports=False
-    )
+    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n", imports=False)
     assert spec.kind == "single"
 
 

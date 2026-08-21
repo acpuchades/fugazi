@@ -122,16 +122,21 @@ impl StrategyPreset {
             StrategyPreset::BuyAndHold { symbol, .. } => {
                 SingleAssetStrategy::buy_and_hold(crate::types::symbol(symbol))
             }
-            StrategyPreset::MaCrossover { symbol, fast, slow, .. } => {
-                trend::ma_crossover(crate::types::symbol(symbol), *fast, *slow)
-            }
+            StrategyPreset::MaCrossover {
+                symbol, fast, slow, ..
+            } => trend::ma_crossover(crate::types::symbol(symbol), *fast, *slow),
             StrategyPreset::RsiReversal {
                 symbol,
                 period,
                 oversold,
                 exit,
                 ..
-            } => mean_reversion::rsi_reversal(crate::types::symbol(symbol), *period, *oversold, *exit),
+            } => mean_reversion::rsi_reversal(
+                crate::types::symbol(symbol),
+                *period,
+                *oversold,
+                *exit,
+            ),
             StrategyPreset::DonchianBreakout { symbol, period, .. } => {
                 trend::donchian_breakout(crate::types::symbol(symbol), *period)
             }
@@ -141,7 +146,12 @@ impl StrategyPreset {
                 atr_period,
                 multiplier,
                 ..
-            } => composite::keltner_breakout(crate::types::symbol(symbol), *ema_period, *atr_period, *multiplier),
+            } => composite::keltner_breakout(
+                crate::types::symbol(symbol),
+                *ema_period,
+                *atr_period,
+                *multiplier,
+            ),
         }
     }
 }
@@ -212,8 +222,7 @@ impl StrategyRef {
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
         let value = super::load_value(text, params, base, label)?;
-        serde_json::from_value(value)
-            .with_context(|| format!("building strategy from {label}"))
+        serde_json::from_value(value).with_context(|| format!("building strategy from {label}"))
     }
 }
 

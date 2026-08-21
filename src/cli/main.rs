@@ -32,7 +32,8 @@ mod style;
 // `crate::foo::bar` references in the remaining CLI files continue to resolve.
 // The moved modules now live under `fugazi::spec::*` on the library; these
 // re-exports let this binary keep its historical short paths.
-pub(crate) use fugazi::spec as spec;
+pub(crate) use fugazi::spec;
+pub(crate) use fugazi::spec::backtest;
 pub(crate) use fugazi::spec::calendar;
 pub(crate) use fugazi::spec::costs;
 pub(crate) use fugazi::spec::dyn_indicator;
@@ -40,7 +41,6 @@ pub(crate) use fugazi::spec::imports;
 pub(crate) use fugazi::spec::input;
 pub(crate) use fugazi::spec::metrics;
 pub(crate) use fugazi::spec::params;
-pub(crate) use fugazi::spec::backtest;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -197,7 +197,11 @@ struct DateRangeArgs {
 impl DateRangeArgs {
     /// Parse into the resolved form, or `None` when neither bound was given.
     fn resolve(&self) -> Result<Option<daterange::DateRange>> {
-        daterange::DateRange::parse(self.from.as_deref(), self.until.as_deref(), self.strict_from)
+        daterange::DateRange::parse(
+            self.from.as_deref(),
+            self.until.as_deref(),
+            self.strict_from,
+        )
     }
 }
 
@@ -598,7 +602,12 @@ struct OptimizeArgs {
     /// `LEN` is either a plain bar count (`10`, `252`) or a duration in the
     /// `-f/--frequency` alphabet (`1d`, `1w`, `1M`, `4h`) — see `run -w` for
     /// the resolution rules.
-    #[arg(short = 'w', long = "windowed", value_name = "LEN", group = "sweep_shape")]
+    #[arg(
+        short = 'w',
+        long = "windowed",
+        value_name = "LEN",
+        group = "sweep_shape"
+    )]
     windowed: Option<calendar::WindowSpec>,
 
     /// Rolling walk-forward optimization. `IS,OS[,Embargo]` — each component is
@@ -750,7 +759,11 @@ fn main() -> std::process::ExitCode {
 fn print_error(err: &anyhow::Error) {
     // The innermost cause carries the real message; the outer ones are the
     // `with_context` breadcrumbs ("building strategy from …").
-    let root = err.chain().last().map(|c| c.to_string()).unwrap_or_default();
+    let root = err
+        .chain()
+        .last()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
     let (trail, message) = spec::diagnostics::split_trail(&root);
 
     eprintln!("{} {message}", style::red("error:"));
@@ -824,8 +837,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // the parse, since that is what populates the observations.
     let (description, detail, parsed) = match args.strategy.kind {
         StrategyKind::Single => {
-            let strategy: spec::StrategyRef =
-                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let strategy: spec::StrategyRef = spec::undefined::from_json_value(value)
+                .map_err(anyhow::Error::new)
+                .with_context(parse_err)?;
             let detail = format!("symbol {}", strategy.symbol());
             (
                 "parse and validate a strategy spec",
@@ -834,8 +848,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             )
         }
         StrategyKind::Pairs => {
-            let parsed: spec::PairsStrategySpec =
-                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let parsed: spec::PairsStrategySpec = spec::undefined::from_json_value(value)
+                .map_err(anyhow::Error::new)
+                .with_context(parse_err)?;
             let detail = format!("pair {} / {}", parsed.left, parsed.right);
             (
                 "parse and validate a pairs strategy spec",
@@ -849,8 +864,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // `!arg`s held as holes), so an unknown tag or misspelled field
             // inside `score:` / `sizing:` is caught here rather than at the
             // first run that reaches a symbol.
-            let parsed: spec::BasketStrategySpec =
-                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let parsed: spec::BasketStrategySpec = spec::undefined::from_json_value(value)
+                .map_err(anyhow::Error::new)
+                .with_context(parse_err)?;
             let detail = format!("selection {:?}", parsed.selection);
             (
                 "parse and validate a basket strategy spec",
@@ -860,8 +876,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         }
         StrategyKind::Multi => {
             // Multi-asset parses eagerly like basket, template bodies included.
-            let spec: spec::MultiAssetStrategySpec =
-                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let spec: spec::MultiAssetStrategySpec = spec::undefined::from_json_value(value)
+                .map_err(anyhow::Error::new)
+                .with_context(parse_err)?;
             let sides: Vec<&str> = [
                 spec.long.as_ref().map(|_| "long"),
                 spec.short.as_ref().map(|_| "short"),
@@ -884,8 +901,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // Portfolio parses eagerly at the top level (children, weights);
             // each child's own spec typed-parses too, and every template body
             // under a child validates the same way it would standalone.
-            let spec: spec::PortfolioSpec =
-                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let spec: spec::PortfolioSpec = spec::undefined::from_json_value(value)
+                .map_err(anyhow::Error::new)
+                .with_context(parse_err)?;
             let n = spec.children.len();
             let detail = format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" });
             (
@@ -1019,11 +1037,7 @@ fn check_costs(args: CheckCostsArgs) -> Result<()> {
         println!();
         style::print_section("result");
         let ok = style::green("ok");
-        style::print_field(
-            "status",
-            &format!("{ok} · {default_note}; {scope_note}"),
-            8,
-        );
+        style::print_field("status", &format!("{ok} · {default_note}; {scope_note}"), 8);
     }
     Ok(())
 }
@@ -1171,28 +1185,53 @@ fn run(args: RunArgs) -> Result<()> {
     let base = args.strategy.base_dir();
     match args.strategy.kind {
         StrategyKind::Single => {
-            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &base, &strat_label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let strategy = spec::StrategyRef::from_text_with_params_in(
+                &text,
+                &param_table,
+                &base,
+                &strat_label,
+            )
+            .with_context(|| parse_error_hint(&args.strategy))?;
             run::run(&strategy, &frame, &opts)?;
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec = spec::PairsStrategySpec::from_text_with_params_in(
+                &text,
+                &param_table,
+                &base,
+                &strat_label,
+            )
+            .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_pairs(&spec, &frame, &opts)?;
         }
         StrategyKind::Basket => {
-            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec = spec::BasketStrategySpec::from_text_with_params_in(
+                &text,
+                &param_table,
+                &base,
+                &strat_label,
+            )
+            .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_basket(&spec, &frame, &opts)?;
         }
         StrategyKind::Multi => {
-            let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(
+                &text,
+                &param_table,
+                &base,
+                &strat_label,
+            )
+            .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_multi(&spec, &frame, &opts)?;
         }
         StrategyKind::Portfolio => {
-            let spec = spec::PortfolioSpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec = spec::PortfolioSpec::from_text_with_params_in(
+                &text,
+                &param_table,
+                &base,
+                &strat_label,
+            )
+            .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_portfolio(&spec, &frame, &opts)?;
         }
     }
@@ -1304,7 +1343,11 @@ fn params_label_with_holes(base: &str, n_params: usize, n_undefined: usize) -> S
 /// something a user can act on — it says exactly what each `--params` value has
 /// to look like.
 fn param_types_label(
-    observations: &[(spec::undefined::UndefinedOrigin, String, Vec<spec::undefined::RequiredType>)],
+    observations: &[(
+        spec::undefined::UndefinedOrigin,
+        String,
+        Vec<spec::undefined::RequiredType>,
+    )],
 ) -> Option<String> {
     use spec::undefined::UndefinedOrigin;
     if observations.is_empty() {
@@ -1337,7 +1380,11 @@ fn param_types_label(
 /// run whatever the user supplies. Catching it here is the whole point of
 /// inferring hole types rather than just counting them.
 fn reject_contradictory_params(
-    observations: &[(spec::undefined::UndefinedOrigin, String, Vec<spec::undefined::RequiredType>)],
+    observations: &[(
+        spec::undefined::UndefinedOrigin,
+        String,
+        Vec<spec::undefined::RequiredType>,
+    )],
 ) -> anyhow::Result<()> {
     use spec::undefined::UndefinedOrigin;
     let bad: Vec<String> = observations

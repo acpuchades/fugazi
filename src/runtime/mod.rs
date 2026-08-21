@@ -23,8 +23,8 @@
 pub mod chain;
 
 pub use chain::{
-    any, chain_over_candle, erase, AnyChain, AtomChain, BoolChain, CandleChain, Chain, ChainDomain,
-    DynIndicator, Erased, RealChain, StrChain, TimeChain,
+    AnyChain, AtomChain, BoolChain, CandleChain, Chain, ChainDomain, DynIndicator, Erased,
+    RealChain, StrChain, TimeChain, any, chain_over_candle, erase,
 };
 
 use std::fmt;
@@ -318,8 +318,7 @@ pub trait PayloadIndicator: Send + Sync {
     fn warm_up_bars(&self) -> usize;
     fn unstable_bars(&self) -> usize;
     fn stable_bars(&self) -> usize {
-        self.warm_up_bars()
-            .saturating_add(self.unstable_bars())
+        self.warm_up_bars().saturating_add(self.unstable_bars())
     }
     fn reset(&mut self);
     /// Serialize this node's mutable state for run resuming — the erased twin of
@@ -490,7 +489,10 @@ where
 /// If `outer.output_type() != inner.input_type()`, at construction. Prefer
 /// [`try_chain`] where the types come from a user-authored document and the
 /// mismatch should be reported rather than aborted.
-pub fn chain(outer: Box<dyn PayloadIndicator>, inner: Box<dyn PayloadIndicator>) -> Box<dyn PayloadIndicator> {
+pub fn chain(
+    outer: Box<dyn PayloadIndicator>,
+    inner: Box<dyn PayloadIndicator>,
+) -> Box<dyn PayloadIndicator> {
     try_chain(outer, inner).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -673,7 +675,10 @@ impl PayloadIndicator for UnstableWrap {
 /// `inner.output_type() != Out::TYPE`. Prefer [`try_new`](Self::try_new) where
 /// the types come from a user-authored document. Once construction has been
 /// checked either way, the unwrap arms in `update`/`value` are unreachable.
-pub struct As<Out>(Box<dyn PayloadIndicator>, std::marker::PhantomData<fn() -> Out>);
+pub struct As<Out>(
+    Box<dyn PayloadIndicator>,
+    std::marker::PhantomData<fn() -> Out>,
+);
 
 impl<Out: TypeOf> As<Out> {
     pub fn new(inner: Box<dyn PayloadIndicator>) -> Self {
@@ -852,10 +857,7 @@ mod tests {
     #[test]
     fn stable_bars_defaults_to_warm_up_plus_unstable() {
         let ema = wrap(Ema::new(Current::close(), 3));
-        assert_eq!(
-            ema.stable_bars(),
-            ema.warm_up_bars() + ema.unstable_bars()
-        );
+        assert_eq!(ema.stable_bars(), ema.warm_up_bars() + ema.unstable_bars());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 mod common;
 
 use fugazi::backtest;
-use fugazi::indicators::{Close, ValueBool, Pick, Sma};
+use fugazi::indicators::{Close, Pick, Sma, ValueBool};
 use fugazi::prelude::*;
 use fugazi::strategies::PairsStrategy;
 use fugazi::types::{Selector, Snapshot};
@@ -62,8 +62,7 @@ fn run_reported(
     strat: &mut PairsStrategy<&'static str>,
     bars: &[(Candle, Candle)],
 ) -> (PaperWallet<&'static str>, fugazi::RunReport<&'static str>) {
-    let snaps: Vec<Snapshot<&'static str>> =
-        bars.iter().map(|&(l, r)| snapshot(l, r)).collect();
+    let snaps: Vec<Snapshot<&'static str>> = bars.iter().map(|&(l, r)| snapshot(l, r)).collect();
     let mut wallet = PaperWallet::new(FUNDS);
     let report = backtest::run(strat, &mut wallet, snaps);
     (wallet, report)
@@ -112,10 +111,8 @@ fn a_bidirectional_pair_trades_both_tails_of_the_spread() {
         spread().sub(Sma::new(spread(), 20))
     };
 
-    let long_only = PairsStrategy::new(LEFT, RIGHT).long_spread_on(
-        gap().below(-2.0),
-        gap().above(0.0),
-    );
+    let long_only =
+        PairsStrategy::new(LEFT, RIGHT).long_spread_on(gap().below(-2.0), gap().above(0.0));
     let both = PairsStrategy::new(LEFT, RIGHT)
         .long_spread_on(gap().below(-2.0), gap().above(0.0))
         .short_spread_on(gap().above(2.0), gap().below(0.0));
@@ -246,7 +243,11 @@ fn the_opposite_entry_reverses_an_open_pair() {
         .filter(|o| o.symbol == LEFT)
         .map(|o| o.side)
         .collect();
-    assert_eq!(left_sides.first(), Some(&Side::Buy), "should open long-spread");
+    assert_eq!(
+        left_sides.first(),
+        Some(&Side::Buy),
+        "should open long-spread"
+    );
     assert!(
         left_sides.contains(&Side::Sell),
         "short-spread entry should have reversed the pair ({left_sides:?})"

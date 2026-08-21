@@ -83,7 +83,10 @@ fn snapshots(candles: &[Candle]) -> Vec<Snapshot<&'static str>> {
 }
 
 /// Drive `strat` over `candles` through the production driver.
-fn run<S>(strat: &mut S, candles: &[Candle]) -> (PaperWallet<&'static str>, fugazi::RunReport<&'static str>)
+fn run<S>(
+    strat: &mut S,
+    candles: &[Candle],
+) -> (PaperWallet<&'static str>, fugazi::RunReport<&'static str>)
 where
     S: Strategy<Input = Snapshot<&'static str>, Symbol = &'static str> + ?Sized,
 {
@@ -154,7 +157,10 @@ fn assert_catalogue_contract(name: &str, make: impl Fn() -> Box<Catalogue>, cand
 fn catalogue() -> Vec<(&'static str, Factory)> {
     macro_rules! entry {
         ($name:literal, $make:expr) => {
-            ($name, Box::new(|| Box::new($make) as Box<Catalogue>) as Factory)
+            (
+                $name,
+                Box::new(|| Box::new($make) as Box<Catalogue>) as Factory,
+            )
         };
     }
     vec![
@@ -168,8 +174,14 @@ fn catalogue() -> Vec<(&'static str, Factory)> {
         // Mean-reversion.
         entry!("rsi_reversal", rsi_reversal(SYMBOL, 14, 30.0, 50.0)),
         entry!("bollinger_reversion", bollinger_reversion(SYMBOL, 20, 2.0)),
-        entry!("stochastic_reversal", stochastic_reversal(SYMBOL, 14, 0.2, 0.8)),
-        entry!("stoch_rsi_reversal", stoch_rsi_reversal(SYMBOL, 14, 14, 0.2, 0.8)),
+        entry!(
+            "stochastic_reversal",
+            stochastic_reversal(SYMBOL, 14, 0.2, 0.8)
+        ),
+        entry!(
+            "stoch_rsi_reversal",
+            stoch_rsi_reversal(SYMBOL, 14, 14, 0.2, 0.8)
+        ),
         entry!("mfi_reversal", mfi_reversal(SYMBOL, 14, 20.0, 80.0)),
         entry!("ZScoreReversion", ZScoreReversion::new(SYMBOL, 20, 1.0)),
         // Momentum.
@@ -180,7 +192,10 @@ fn catalogue() -> Vec<(&'static str, Factory)> {
         entry!("vwap_reversion", vwap_reversion(SYMBOL, 20)),
         entry!("chaikin_ad_trend", chaikin_ad_trend(SYMBOL, 20)),
         // Composite.
-        entry!("adx_trend_filter", adx_trend_filter(SYMBOL, 5, 20, 14, 10.0)),
+        entry!(
+            "adx_trend_filter",
+            adx_trend_filter(SYMBOL, 5, 20, 14, 10.0)
+        ),
         // A Connors-style short-period RSI: a 14-period RSI rarely pulls back to
         // oversold mid-uptrend, but RSI(2) dips hard on any down-bar.
         entry!("rsi_pullback", rsi_pullback(SYMBOL, 2, 20, 15.0, 60.0)),
@@ -217,10 +232,7 @@ fn ma_crossover_goes_long_then_short() {
     let mut prices: Vec<Real> = (0..10).map(|i| 110.0 - f64::from(i) * 2.0).collect();
     prices.extend((1..=15).map(|i| 92.0 + f64::from(i) * 2.0));
     prices.extend((1..=15).map(|i| 120.0 - f64::from(i) * 2.0));
-    let candles: Vec<Candle> = prices
-        .iter()
-        .map(|&p| common::bars::flat(p))
-        .collect();
+    let candles: Vec<Candle> = prices.iter().map(|&p| common::bars::flat(p)).collect();
 
     let (wallet, _) = run(&mut ma_crossover(SYMBOL, 3, 8), &candles);
     let sides: Vec<Side> = wallet.orders().iter().map(|o| o.side).collect();
@@ -247,10 +259,7 @@ fn rsi_reversal_buys_the_dip_and_exits_flat() {
     let mut prices: Vec<Real> = (0..40).map(|i| 100.0 + f64::from(i)).collect();
     prices.extend((1..=12).map(|i| 139.0 - f64::from(i) * 4.0));
     prices.extend((1..=12).map(|i| 91.0 + f64::from(i) * 4.0));
-    let candles: Vec<Candle> = prices
-        .iter()
-        .map(|&p| common::bars::flat(p))
-        .collect();
+    let candles: Vec<Candle> = prices.iter().map(|&p| common::bars::flat(p)).collect();
 
     let (wallet, _) = run(&mut rsi_reversal(SYMBOL, 5, 30.0, 50.0), &candles);
     assert!(!wallet.orders().is_empty(), "should have bought the dip");

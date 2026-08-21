@@ -18,7 +18,11 @@ use std::process::Command;
 pub fn unique_path(name: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
-    let token = format!("{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let token = format!(
+        "{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
     let p = Path::new(name);
     let unique = match (
         p.file_stem().and_then(|s| s.to_str()),
@@ -177,7 +181,9 @@ impl Outcome {
                 self.args.join(" "),
                 path.display(),
                 std::fs::read_dir(self.dir())
-                    .map(|d| d.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>())
+                    .map(|d| d
+                        .filter_map(|e| e.ok().map(|e| e.file_name()))
+                        .collect::<Vec<_>>())
                     .unwrap_or_default()
             )
         })
@@ -190,7 +196,11 @@ impl Outcome {
 
     /// Data rows of a CSV artefact — the header line dropped.
     pub fn rows(&self, file: &str) -> Vec<String> {
-        self.read(file).lines().skip(1).map(str::to_string).collect()
+        self.read(file)
+            .lines()
+            .skip(1)
+            .map(str::to_string)
+            .collect()
     }
 
     /// The header line of a CSV artefact.

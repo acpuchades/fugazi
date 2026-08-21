@@ -175,9 +175,18 @@ fn main() {
     println!("n = {n} samples, min and median of {REPS}\n");
     println!("{:<16}{:>10}{:>10}", "workload", "min", "median");
     println!("{:<16}{:>10.2}{:>10.2}", "raw", raw.0, raw.1);
-    println!("{:<16}{:>10.2}{:>10.2}", "feed_shape", feed_shape.0, feed_shape.1);
-    println!("{:<16}{:>10.2}{:>10.2}", "  reused bufs", feed_shape_reused.0, feed_shape_reused.1);
-    println!("{:<16}{:>10.2}{:>10.2}", "  2 lines", feed_shape_2.0, feed_shape_2.1);
+    println!(
+        "{:<16}{:>10.2}{:>10.2}",
+        "feed_shape", feed_shape.0, feed_shape.1
+    );
+    println!(
+        "{:<16}{:>10.2}{:>10.2}",
+        "  reused bufs", feed_shape_reused.0, feed_shape_reused.1
+    );
+    println!(
+        "{:<16}{:>10.2}{:>10.2}",
+        "  2 lines", feed_shape_2.0, feed_shape_2.1
+    );
     black_box(cols_kept.len());
     println!(
         "\nfold + {LINES}-column scatter, fresh buffers:  {:+.2} ns/sample over raw",

@@ -25,7 +25,10 @@ fn all_examples_compile() {
         .filter_map(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .collect();
     names.sort();
-    assert!(!names.is_empty(), "expected at least one example in examples/");
+    assert!(
+        !names.is_empty(),
+        "expected at least one example in examples/"
+    );
 
     // `--examples` compiles every example target in one pass. Use the same cargo
     // that is running this test (`$CARGO`); the outer invocation has released

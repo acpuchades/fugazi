@@ -198,7 +198,11 @@ mod tests {
         assert_eq!(lr.update(3.0), None);
         let out = lr.update(5.0).unwrap();
         assert!((out.slope - 2.0).abs() < 1e-12, "slope {}", out.slope);
-        assert!((out.intercept - 1.0).abs() < 1e-12, "intercept {}", out.intercept);
+        assert!(
+            (out.intercept - 1.0).abs() < 1e-12,
+            "intercept {}",
+            out.intercept
+        );
         assert!((out.value - 5.0).abs() < 1e-12, "value {}", out.value);
         assert!((out.r2 - 1.0).abs() < 1e-12, "r2 {}", out.r2);
     }
@@ -240,7 +244,11 @@ mod tests {
         let out = lr.update(4.0).unwrap();
         assert!((out.slope - 0.5).abs() < 1e-12, "slope {}", out.slope);
         assert!((out.value - 4.5).abs() < 1e-12, "value {}", out.value);
-        assert!((out.intercept - 3.5).abs() < 1e-12, "intercept {}", out.intercept);
+        assert!(
+            (out.intercept - 3.5).abs() < 1e-12,
+            "intercept {}",
+            out.intercept
+        );
     }
 
     #[test]

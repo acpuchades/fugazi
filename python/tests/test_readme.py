@@ -68,7 +68,9 @@ def _blocks():
     cases = []
     for readme in READMES:
         for i, block in enumerate(BLOCK.findall(readme.read_text())):
-            cases.append(pytest.param(block, id=f"{readme.parent.name}/README.md#py{i}"))
+            cases.append(
+                pytest.param(block, id=f"{readme.parent.name}/README.md#py{i}")
+            )
     return cases
 
 
@@ -76,6 +78,7 @@ def _blocks():
 def test_readme_python_block_runs(block):
     pytest.importorskip("pandas")
     pytest.importorskip("numpy")
+
     # Strip Markdown blockquote markers so quoted code blocks are valid Python,
     # without touching indentation of ordinary blocks.
     def unquote(line):

@@ -1041,12 +1041,16 @@ fn reduce<Sym: PartialEq>(
 
     let r = match opts.returns {
         ReturnMode::Shipped => return_derived_shipped(&returns, risk_free_rate, bars_per_year),
-        ReturnMode::Deduped => {
-            return_derived_from_stats(&return_stats_separate(&returns, rf_bar), risk_free_rate, bars_per_year)
-        }
-        ReturnMode::Fused => {
-            return_derived_from_stats(&return_stats_fused(&returns, rf_bar), risk_free_rate, bars_per_year)
-        }
+        ReturnMode::Deduped => return_derived_from_stats(
+            &return_stats_separate(&returns, rf_bar),
+            risk_free_rate,
+            bars_per_year,
+        ),
+        ReturnMode::Fused => return_derived_from_stats(
+            &return_stats_fused(&returns, rf_bar),
+            risk_free_rate,
+            bars_per_year,
+        ),
     };
     let quantiles = quantile_reads(&returns, opts.quantiles);
 
@@ -1193,7 +1197,10 @@ fn check_equivalence() {
             }
         }
     }
-    println!("metrics_variants: all {} variants bit-identical", VARIANTS.len());
+    println!(
+        "metrics_variants: all {} variants bit-identical",
+        VARIANTS.len()
+    );
 
     // The one variant held out of the waterfall, reported rather than asserted.
     let rep = report(200_000);

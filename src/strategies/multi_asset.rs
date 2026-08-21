@@ -34,12 +34,12 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use super::{Chain, LevelFactory};
 use crate::hash::SymMap;
-use crate::indicators::{Book, ValueBool, Position, Value};
+use crate::indicators::{Book, Position, Value, ValueBool};
 use crate::prelude::*;
 use crate::strategies::universe::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
-use super::{Chain, LevelFactory};
 
 // ---------------------------------------------------------------------------
 // Chain type aliases
@@ -48,10 +48,8 @@ use super::{Chain, LevelFactory};
 /// A per-symbol boolean chain — one of the four signal slots.
 type SignalChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
-
 /// A per-symbol signal factory: `Fn(&Sym) -> SignalChain<Sym>`.
 type SignalFactory<Sym> = Box<dyn Fn(&Sym) -> SignalChain<Sym> + Send + Sync>;
-
 
 /// A per-symbol sizing factory: `Fn(&Sym) -> Chain<Sym>`. The sizing
 /// slot doesn't take a [`Position`] because a size that reads back the
@@ -604,7 +602,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for MultiAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default
+    for MultiAssetStrategy<Sym>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -680,7 +680,9 @@ where
             .as_object()
             .ok_or_else(|| format!("multi: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("book") {
-            self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
+            self.book
+                .restore_state(v)
+                .map_err(|e| format!("book > {e}"))?;
         }
         if let Some(v) = obj.get("rebalance") {
             self.rebalance
@@ -789,7 +791,9 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for MultiAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
+    for MultiAssetStrategy<Sym>
+{
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 
@@ -1111,8 +1115,12 @@ mod tests {
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(1_000.0)
                 .long_on(
-                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| {
+                        crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true)
+                    },
+                    |_sym: &&'static str| {
+                        crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false)
+                    },
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
                 .long_stop_loss(|_sym: &&'static str, pos: &Position| {
@@ -1126,7 +1134,11 @@ mod tests {
         // Bar 3: crosses through 90 (opens above, low 88).
         let s = snap(&[]);
         let mut s = s;
-        s.push(Some("A"), None, Atom::new(Candle::new(95.0, 96.0, 88.0, 89.0, 0.0)));
+        s.push(
+            Some("A"),
+            None,
+            Atom::new(Candle::new(95.0, 96.0, 88.0, 89.0, 0.0)),
+        );
         for (sym_opt, _f, atom) in s.iter() {
             let sym = sym_opt.copied().unwrap();
             let Some(candle) = atom.candle else { continue };
@@ -1151,8 +1163,12 @@ mod tests {
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(
-                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| {
+                        crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true)
+                    },
+                    |_sym: &&'static str| {
+                        crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false)
+                    },
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.25));
         let book = strat.book();
@@ -1241,7 +1257,7 @@ mod tests {
         // steady prices, the resize is idempotent — wallet.set at the
         // same target size / same side just re-affirms the target
         // without changing units.
-        use crate::indicators::{ValueBool, Every};
+        use crate::indicators::{Every, ValueBool};
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(

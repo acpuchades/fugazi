@@ -6,13 +6,13 @@ use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
 #[allow(unused_imports)]
 use crate::sources::*;
 #[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 
 // ---------------------------------------------------------------------------
 // Metrics: mirror `fugazi::metrics::*` as the `fugazi.metrics` submodule
@@ -178,7 +178,12 @@ impl PyTrade {
 /// One drawdown segment: a peak → trough → recovery-or-end stretch where the
 /// equity curve was below a prior peak. Built by
 /// [`drawdown_segments`](core_metrics::drawdown_segments). Frozen.
-#[pyclass(name = "DrawdownSegment", module = "fugazi.metrics", frozen, from_py_object)]
+#[pyclass(
+    name = "DrawdownSegment",
+    module = "fugazi.metrics",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyDrawdownSegment {
     pub(crate) inner: DrawdownSegment,
@@ -215,7 +220,8 @@ impl PyDrawdownSegment {
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         crate::classes::reduce_with(
             py,
-            py.import("fugazi.metrics")?.getattr("_rebuild_drawdown_segment")?,
+            py.import("fugazi.metrics")?
+                .getattr("_rebuild_drawdown_segment")?,
             (
                 self.peak_bar(),
                 self.trough_bar(),
@@ -364,7 +370,11 @@ pub(crate) fn total_return(equity_curve: Series, initial_equity: Real) -> Real {
 /// Compound annual growth rate as a fraction. `None` when the equity path is
 /// non-positive at either endpoint, the run is empty, or `bars_per_year <= 0`.
 #[pyfunction]
-pub(crate) fn cagr(equity_curve: Series, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn cagr(
+    equity_curve: Series,
+    initial_equity: Real,
+    bars_per_year: Real,
+) -> Option<Real> {
     core_metrics::cagr(&equity_curve, initial_equity, bars_per_year)
 }
 
@@ -398,7 +408,11 @@ pub(crate) fn sortino(returns: Series, risk_free_rate: Real, bars_per_year: Real
 
 /// Calmar ratio: `cagr / max_drawdown`. `None` when either is undefined.
 #[pyfunction]
-pub(crate) fn calmar(equity_curve: Series, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn calmar(
+    equity_curve: Series,
+    initial_equity: Real,
+    bars_per_year: Real,
+) -> Option<Real> {
     core_metrics::calmar(&equity_curve, initial_equity, bars_per_year)
 }
 
@@ -866,4 +880,3 @@ pub(crate) fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     );
     Ok(())
 }
-

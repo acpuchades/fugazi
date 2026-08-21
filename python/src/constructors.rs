@@ -6,13 +6,13 @@ use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
+use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::sources::*;
 #[allow(unused_imports)]
-use crate::metrics::*;
-#[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -245,7 +245,12 @@ impl Column {
     /// so both paths chunk and stay symmetrical. 128 samples is enough to
     /// amortise the state write-back to ~0.04 instructions/sample.
     #[inline]
-    pub(crate) fn for_each_chunk(&self, py: Python<'_>, buf: &mut [f64], mut f: impl FnMut(&[f64])) {
+    pub(crate) fn for_each_chunk(
+        &self,
+        py: Python<'_>,
+        buf: &mut [f64],
+        mut f: impl FnMut(&[f64]),
+    ) {
         match self {
             Column::Borrowed(b) => {
                 if let Some(cells) = b.as_slice(py) {
@@ -461,7 +466,13 @@ impl CandleColumns {
         match &volume {
             Some(v) => {
                 for i in 0..n {
-                    f(Candle::new(o.get(i), h.get(i), l.get(i), c.get(i), v.get(i)));
+                    f(Candle::new(
+                        o.get(i),
+                        h.get(i),
+                        l.get(i),
+                        c.get(i),
+                        v.get(i),
+                    ));
                 }
             }
             // No volume column to alias, so it reads as zero.
@@ -724,7 +735,11 @@ pub(crate) fn build_floats(
         }
         OutputKind::Polars => {
             let data = ndarray_from_values(py, &values)?;
-            Ok(py.import("polars")?.getattr("Series")?.call1((data,))?.unbind())
+            Ok(py
+                .import("polars")?
+                .getattr("Series")?
+                .call1((data,))?
+                .unbind())
         }
         OutputKind::Numpy => match ndarray_from_values(py, &values) {
             Ok(arr) => Ok(arr.unbind()),
@@ -920,7 +935,11 @@ fn numpy_bools<'py>(
 /// Python `list`, so a 200 000-bar signal materialised 200 000 `bool` objects for
 /// NumPy to immediately parse back out. The note explaining why that is wrong was
 /// already in this file, a few lines up, applied only to floats.
-pub(crate) fn build_bools(py: Python<'_>, kind: &OutputKind, values: Vec<bool>) -> PyResult<Py<PyAny>> {
+pub(crate) fn build_bools(
+    py: Python<'_>,
+    kind: &OutputKind,
+    values: Vec<bool>,
+) -> PyResult<Py<PyAny>> {
     let arr = match numpy_bools(py, values.len(), |slice| {
         for (cell, &v) in slice.iter().zip(&values) {
             cell.set(u8::from(v));
@@ -1004,9 +1023,7 @@ pub(crate) fn build_multi(
     // thrown away. Same mistake `build_bools` had; see [`numpy_filled`].
     let arrays: PyResult<Vec<_>> = columns
         .iter()
-        .map(|col| {
-            numpy_filled(py, col.len(), |out| out.copy_from_slice(col))
-        })
+        .map(|col| numpy_filled(py, col.len(), |out| out.copy_from_slice(col)))
         .collect();
 
     let data = PyDict::new(py);
@@ -1150,9 +1167,27 @@ macro_rules! atom_leaf_signal {
     };
 }
 
-bar_leaf_source!(open, BarFieldKind::Open, BarOpen, Open::of, "Source: the bar's open price.");
-bar_leaf_source!(high, BarFieldKind::High, BarHigh, High::of, "Source: the bar's high price.");
-bar_leaf_source!(low, BarFieldKind::Low, BarLow, Low::of, "Source: the bar's low price.");
+bar_leaf_source!(
+    open,
+    BarFieldKind::Open,
+    BarOpen,
+    Open::of,
+    "Source: the bar's open price."
+);
+bar_leaf_source!(
+    high,
+    BarFieldKind::High,
+    BarHigh,
+    High::of,
+    "Source: the bar's high price."
+);
+bar_leaf_source!(
+    low,
+    BarFieldKind::Low,
+    BarLow,
+    Low::of,
+    "Source: the bar's low price."
+);
 bar_leaf_source!(
     close,
     BarFieldKind::Close,
@@ -1300,7 +1335,10 @@ atom_leaf_signal!(
 /// ```
 #[pyfunction]
 #[pyo3(signature = (symbol = None, freq = None))]
-pub(crate) fn pick(symbol: Option<&Bound<'_, PyAny>>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<PyAtomSource> {
+pub(crate) fn pick(
+    symbol: Option<&Bound<'_, PyAny>>,
+    freq: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyAtomSource> {
     // Allow `pick("BTC")` alongside `pick(symbol="BTC")`: the first positional
     // arg accepts either a plain str (→ symbol) or a Selector.
     let selector = match (symbol, freq) {
@@ -1377,7 +1415,10 @@ macro_rules! src_period {
     ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
-        pub(crate) fn $name(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
+        pub(crate) fn $name(
+            source: PyRef<'_, PyIndicator>,
+            period: usize,
+        ) -> PyResult<PyIndicator> {
             ensure_period(period)?;
             Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
                 $ty::new(s, period)
@@ -1420,7 +1461,10 @@ src_period!(
 // `fugazi.metrics.*`, so the two never clash from Python.
 /// Rolling population skewness (standardized 3rd moment) of `source` over `period`.
 #[pyfunction(name = "skewness")]
-pub(crate) fn skewness_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
+pub(crate) fn skewness_indicator(
+    source: PyRef<'_, PyIndicator>,
+    period: usize,
+) -> PyResult<PyIndicator> {
     ensure_period(period)?;
     Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Skewness::new(s, period)
@@ -1429,7 +1473,10 @@ pub(crate) fn skewness_indicator(source: PyRef<'_, PyIndicator>, period: usize) 
 /// Rolling population kurtosis (raw standardized 4th moment; ~3 for normal, not
 /// excess) of `source` over `period`.
 #[pyfunction(name = "kurtosis")]
-pub(crate) fn kurtosis_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
+pub(crate) fn kurtosis_indicator(
+    source: PyRef<'_, PyIndicator>,
+    period: usize,
+) -> PyResult<PyIndicator> {
     ensure_period(period)?;
     Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Kurtosis::new(s, period)
@@ -1476,7 +1523,11 @@ src_period!(
 ///
 /// For the extremes prefer `rolling_max` / `rolling_min`, which are O(1).
 #[pyfunction]
-pub(crate) fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64) -> PyResult<PyIndicator> {
+pub(crate) fn percentile(
+    source: PyRef<'_, PyIndicator>,
+    period: usize,
+    pct: f64,
+) -> PyResult<PyIndicator> {
     ensure_period(period)?;
     if !(0.0..=1.0).contains(&pct) {
         return Err(PyValueError::new_err(format!(
@@ -1733,10 +1784,7 @@ macro_rules! bar_period_multi {
                 // `Identity<Candle>`, not `CurrentBar<Identity<Atom>>`: the bar
                 // goes straight in rather than being wrapped in an `Atom` and
                 // read back out. See `AnyMulti::Candle`.
-                inner: AnyMulti::Candle(MultiBox::new($ty::new(
-                    Identity::<Candle>::new(),
-                    period,
-                ))),
+                inner: AnyMulti::Candle(MultiBox::new($ty::new(Identity::<Candle>::new(), period))),
             })
         }
     };
@@ -1782,7 +1830,11 @@ pub(crate) fn macd(
 /// Bollinger bands of `source`: {upper, middle, lower}, `k` stddevs wide.
 #[pyfunction]
 #[pyo3(signature = (source, period = 20, k = 2.0))]
-pub(crate) fn bollinger(source: PyRef<'_, PyIndicator>, period: usize, k: f64) -> PyResult<PyMulti> {
+pub(crate) fn bollinger(
+    source: PyRef<'_, PyIndicator>,
+    period: usize,
+    k: f64,
+) -> PyResult<PyMulti> {
     ensure_period(period)?;
     Ok(PyMulti {
         inner: map_multi!(source.src.clone(), |s| Bollinger::new(s, period, k)),
@@ -1914,7 +1966,10 @@ pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResul
             // emits `None`, so the latch never fires. Return as-is.
             other @ AnySource::Const(_) => other,
         };
-        return Ok(PyIndicator::wrap(out).into_pyobject(py)?.into_any().unbind());
+        return Ok(PyIndicator::wrap(out)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind());
     }
     if let Ok(sig) = source.cast::<PySignal>() {
         let out = match sig.borrow().sig.clone() {
@@ -1974,35 +2029,40 @@ pub(crate) fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<Py
 /// domain, so a bare `otherwise=ta.value(0.0)` composes with a candle-rooted
 /// condition without extra ceremony.
 #[pyfunction]
-pub(crate) fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, otherwise: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+pub(crate) fn if_else(
+    cond: PyRef<'_, PySignal>,
+    then: PyRef<'_, PyIndicator>,
+    otherwise: PyRef<'_, PyIndicator>,
+) -> PyResult<PyIndicator> {
     // Resolve constants against each other first (via `pair`), then match
     // the pair's domain against the condition's.
     let branches = pair(then.src.clone(), otherwise.src.clone())?;
     let cond_sig = cond.sig.clone();
-    let out = match (cond_sig, branches) {
-        (AnySignal::Candle(c), Pair::Candle(t, f)) => {
-            AnySource::Candle(runtime::erase(IfElse::new(c, t, f)))
-        }
-        (AnySignal::Atom(c), Pair::Atom(t, f)) => {
-            AnySource::Atom(runtime::erase(IfElse::new(c, t, f)))
-        }
-        // The condition and the branches can land in different domains — a
-        // bar-rooted `close()` test over atom-rooted `get()` branches, say. Lift
-        // whichever side is bar-only.
-        (AnySignal::Candle(c), Pair::Atom(t, f)) => AnySource::Atom(runtime::erase(
-            IfElse::new(atom_signal_over_candle(c), t, f),
-        )),
-        (AnySignal::Atom(c), Pair::Candle(t, f)) => AnySource::Atom(runtime::erase(
-            IfElse::new(c, atom_over_candle(t), atom_over_candle(f)),
-        )),
-        (AnySignal::Real(c), Pair::Real(t, f)) => {
-            AnySource::Real(runtime::erase(IfElse::new(c, t, f)))
-        }
-        (AnySignal::Snapshot(c), Pair::Snapshot(t, f)) => {
-            AnySource::Snapshot(runtime::erase(IfElse::new(c, t, f)))
-        }
-        _ => return Err(domain_mismatch()),
-    };
+    let out =
+        match (cond_sig, branches) {
+            (AnySignal::Candle(c), Pair::Candle(t, f)) => {
+                AnySource::Candle(runtime::erase(IfElse::new(c, t, f)))
+            }
+            (AnySignal::Atom(c), Pair::Atom(t, f)) => {
+                AnySource::Atom(runtime::erase(IfElse::new(c, t, f)))
+            }
+            // The condition and the branches can land in different domains — a
+            // bar-rooted `close()` test over atom-rooted `get()` branches, say. Lift
+            // whichever side is bar-only.
+            (AnySignal::Candle(c), Pair::Atom(t, f)) => AnySource::Atom(runtime::erase(
+                IfElse::new(atom_signal_over_candle(c), t, f),
+            )),
+            (AnySignal::Atom(c), Pair::Candle(t, f)) => AnySource::Atom(runtime::erase(
+                IfElse::new(c, atom_over_candle(t), atom_over_candle(f)),
+            )),
+            (AnySignal::Real(c), Pair::Real(t, f)) => {
+                AnySource::Real(runtime::erase(IfElse::new(c, t, f)))
+            }
+            (AnySignal::Snapshot(c), Pair::Snapshot(t, f)) => {
+                AnySource::Snapshot(runtime::erase(IfElse::new(c, t, f)))
+            }
+            _ => return Err(domain_mismatch()),
+        };
     Ok(PyIndicator::wrap(out))
 }
 
@@ -2278,7 +2338,10 @@ pub(crate) fn parse_overlay_input(
 pub(crate) fn build_overlay_prepared(
     existing: &std::sync::Arc<Schema>,
     input: &OverlayInput,
-) -> PyResult<(std::sync::Arc<Schema>, Vec<fugazi_core::spec::overlay::PreparedColumn>)> {
+) -> PyResult<(
+    std::sync::Arc<Schema>,
+    Vec<fugazi_core::spec::overlay::PreparedColumn>,
+)> {
     use fugazi_core::spec::overlay as ov;
     let result = match input {
         OverlayInput::Spec(cols) => ov::prepare(existing, cols),
@@ -2489,12 +2552,16 @@ pub(crate) fn value_str(s: &str) -> PyStrSource {
 pub(crate) fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
     Ok(match str_pair(lhs.src.clone(), rhs)? {
-        StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
-            Combine::<_, _, StrEqOp>::new(l, r),
-        ))),
-        StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
-            Combine::<_, _, StrEqOp>::new(l, r),
-        ))),
+        StrPair::Atom(l, r) => {
+            PySignal::wrap(AnySignal::Atom(SignalBox::new(
+                Combine::<_, _, StrEqOp>::new(l, r),
+            )))
+        }
+        StrPair::Snapshot(l, r) => {
+            PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+                Combine::<_, _, StrEqOp>::new(l, r),
+            )))
+        }
     })
 }
 
@@ -2503,11 +2570,15 @@ pub(crate) fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySi
 pub(crate) fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
     Ok(match str_pair(lhs.src.clone(), rhs)? {
-        StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
-            Combine::<_, _, StrNeOp>::new(l, r),
-        ))),
-        StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
-            Combine::<_, _, StrNeOp>::new(l, r),
-        ))),
+        StrPair::Atom(l, r) => {
+            PySignal::wrap(AnySignal::Atom(SignalBox::new(
+                Combine::<_, _, StrNeOp>::new(l, r),
+            )))
+        }
+        StrPair::Snapshot(l, r) => {
+            PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+                Combine::<_, _, StrNeOp>::new(l, r),
+            )))
+        }
     })
 }

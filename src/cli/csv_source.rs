@@ -60,7 +60,11 @@ struct ColumnState {
 
 impl ColumnState {
     fn new() -> Self {
-        Self { bool_ok: true, real_ok: true, seen_any: false }
+        Self {
+            bool_ok: true,
+            real_ok: true,
+            seen_any: false,
+        }
     }
 
     fn observe(&mut self, value: &str) {
@@ -145,10 +149,11 @@ impl CsvSource {
 
         // Non-OHLCV column indexes, in header order — these drive the atom's
         // overlay Schema and every row's overlay values.
-        let reserved: std::collections::HashSet<&str> =
-            ["symbol", "freq", "time", "open", "high", "low", "close", "volume"]
-                .into_iter()
-                .collect();
+        let reserved: std::collections::HashSet<&str> = [
+            "symbol", "freq", "time", "open", "high", "low", "close", "volume",
+        ]
+        .into_iter()
+        .collect();
         let extra_columns: Vec<(usize, String)> = headers
             .iter()
             .enumerate()
@@ -163,8 +168,7 @@ impl CsvSource {
         let mut rows: Vec<RawRow> = Vec::new();
         for (line_no, record) in reader.records().enumerate() {
             let line = line_no + 2; // header is line 1
-            let record =
-                record.with_context(|| format!("{path}: reading row {line}"))?;
+            let record = record.with_context(|| format!("{path}: reading row {line}"))?;
             let field = |i: usize| record.get(i).unwrap_or("").trim();
             let parse_real = |i: usize, name: &str| -> Result<Real> {
                 let raw = field(i);
@@ -209,7 +213,13 @@ impl CsvSource {
                 classification[slot].observe(&raw);
                 extras.push(raw);
             }
-            rows.push(RawRow { symbol, interval, time_ms, candle, extras });
+            rows.push(RawRow {
+                symbol,
+                interval,
+                time_ms,
+                candle,
+                extras,
+            });
         }
 
         // Build the shared schema once — every atom's OverlayInfo references
@@ -256,7 +266,11 @@ impl CsvSource {
                     Atom::with_overlays_and_time(row.candle, overlays, Timestamp(row.time_ms))
                 }
             };
-            out.push(CsvBar { symbol: row.symbol, interval: row.interval, atom });
+            out.push(CsvBar {
+                symbol: row.symbol,
+                interval: row.interval,
+                atom,
+            });
         }
         Ok(out)
     }
@@ -416,7 +430,10 @@ mod tests {
         assert_eq!(find("regime"), Some(OverlayType::Str));
         let overlays = bars[0].atom.overlays.as_ref().expect("overlays present");
         assert_eq!(overlays.get_by_key("sma20"), Some(&OverlayValue::Real(1.4)));
-        assert_eq!(overlays.get_by_key("risk_on"), Some(&OverlayValue::Bool(true)));
+        assert_eq!(
+            overlays.get_by_key("risk_on"),
+            Some(&OverlayValue::Bool(true))
+        );
         assert!(matches!(
             overlays.get_by_key("regime"),
             Some(OverlayValue::Str(s)) if s.as_ref() == "bull"

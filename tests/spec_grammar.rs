@@ -134,8 +134,17 @@ fn every_tag_is_well_formed() {
 
     for tag in spec_grammar() {
         assert!(!tag.name.is_empty(), "empty tag name");
-        assert!(!tag.category.trim().is_empty(), "!{}: empty category", tag.name);
-        assert!(KINDS.contains(&tag.kind.as_str()), "!{}: bad kind {}", tag.name, tag.kind);
+        assert!(
+            !tag.category.trim().is_empty(),
+            "!{}: empty category",
+            tag.name
+        );
+        assert!(
+            KINDS.contains(&tag.kind.as_str()),
+            "!{}: bad kind {}",
+            tag.name,
+            tag.kind
+        );
         assert!(
             OUTPUTS.contains(&tag.output.as_str()),
             "!{}: bad output {}",
@@ -171,7 +180,9 @@ fn every_tag_is_well_formed() {
             }
             match form.shape.as_str() {
                 "newtype" | "seq" => assert!(
-                    form.payload.as_deref().is_some_and(|p| FIELD_TYPES.contains(&p)),
+                    form.payload
+                        .as_deref()
+                        .is_some_and(|p| FIELD_TYPES.contains(&p)),
                     "{at}: {} form needs a known payload type, got {:?}",
                     form.shape,
                     form.payload
@@ -200,7 +211,11 @@ fn every_tag_is_well_formed() {
                 );
                 // A required field never carries a default; an optional one may.
                 if f.required {
-                    assert!(f.default.is_none(), "{at}.{}: required field has a default", f.name);
+                    assert!(
+                        f.default.is_none(),
+                        "{at}.{}: required field has a default",
+                        f.name
+                    );
                 }
             }
         }
@@ -279,11 +294,19 @@ fn reflects_fields_and_defaults() {
     assert_eq!(sma.canonical().shape, "map");
     assert_eq!(sma.forms.len(), 1, "!sma has one spelling");
     assert_eq!(sma.output, "scalar");
-    let src = sma.canonical().fields.iter().find(|f| f.name == "source").unwrap();
+    let src = sma
+        .canonical()
+        .fields
+        .iter()
+        .find(|f| f.name == "source")
+        .unwrap();
     assert_eq!(src.ty, "node");
     assert!(!src.required, "sma.source has a default -> optional");
     assert!(
-        src.default.as_ref().and_then(GrammarDefault::literal).is_none(),
+        src.default
+            .as_ref()
+            .and_then(GrammarDefault::literal)
+            .is_none(),
         "a node default is not a JSON literal — that is why `default` is tagged",
     );
     assert_eq!(
@@ -303,9 +326,18 @@ fn reflects_fields_and_defaults() {
             .clone()
     };
     assert_eq!(default_fragment(&field("atr", "source")), Some("!current"));
-    assert_eq!(default_fragment(&field("donchian_upper", "high")), Some("!high"));
-    assert_eq!(default_fragment(&field("donchian_upper", "low")), Some("!low"));
-    assert_eq!(default_fragment(&field("top_bottom", "of")), Some("!everything"));
+    assert_eq!(
+        default_fragment(&field("donchian_upper", "high")),
+        Some("!high")
+    );
+    assert_eq!(
+        default_fragment(&field("donchian_upper", "low")),
+        Some("!low")
+    );
+    assert_eq!(
+        default_fragment(&field("top_bottom", "of")),
+        Some("!everything")
+    );
 
     // ... and the case that must stay silent: a candle leaf's `source:` defaults
     // to the strategy's own series, which no tag spells. `null` + `null` is the
@@ -321,8 +353,16 @@ fn reflects_fields_and_defaults() {
     // untagged `default` reported these as `Some(Value::Null)`, which
     // serialised to the same `null` a real absence did.
     let freq = field("pick", "freq");
-    assert!(!freq.required && freq.default.is_none(), "!pick.freq defaults to nothing");
-    let period = sma.canonical().fields.iter().find(|f| f.name == "period").unwrap();
+    assert!(
+        !freq.required && freq.default.is_none(),
+        "!pick.freq defaults to nothing"
+    );
+    let period = sma
+        .canonical()
+        .fields
+        .iter()
+        .find(|f| f.name == "period")
+        .unwrap();
     // A period is a `NonZeroUsize`, which the descriptor reports as
     // `positive_uint` so the generated JSON schema can say `minimum: 1`.
     assert_eq!(period.ty, "positive_uint");
@@ -330,11 +370,21 @@ fn reflects_fields_and_defaults() {
 
     // Const-backed defaults surface as literals.
     let macd = by_name("macd_line");
-    let fast = macd.canonical().fields.iter().find(|f| f.name == "fast").unwrap();
+    let fast = macd
+        .canonical()
+        .fields
+        .iter()
+        .find(|f| f.name == "fast")
+        .unwrap();
     assert!(!fast.required);
     assert_eq!(literal(fast), Some(serde_json::json!(12)));
     let bb = by_name("bb_upper");
-    let k = bb.canonical().fields.iter().find(|f| f.name == "k").unwrap();
+    let k = bb
+        .canonical()
+        .fields
+        .iter()
+        .find(|f| f.name == "k")
+        .unwrap();
     assert_eq!(literal(k), Some(serde_json::json!(2.0)));
     // The two cases are exclusive by construction — `default` is one tagged
     // value, so a literal cannot also carry a fragment.
@@ -344,8 +394,16 @@ fn reflects_fields_and_defaults() {
     let gt = by_name("gt");
     assert_eq!(gt.kind, "predicate");
     assert_eq!(gt.output, "bool");
-    let eps = gt.canonical().fields.iter().find(|f| f.name == "epsilon").unwrap();
-    assert!(!eps.required, "Option field is optional even without serde default");
+    let eps = gt
+        .canonical()
+        .fields
+        .iter()
+        .find(|f| f.name == "epsilon")
+        .unwrap();
+    assert!(
+        !eps.required,
+        "Option field is optional even without serde default"
+    );
 }
 
 /// **A `default_expr` must be equivalent to omitting the field.** The claim the
@@ -385,7 +443,10 @@ fn a_default_expr_is_equivalent_to_omitting_the_field() {
                 written.insert(f.name.clone(), fragment);
                 let omitted = tagged(&tag.name, base.clone());
                 let written = tagged(&tag.name, written);
-                match (parse_tree(&tag.group, &omitted), parse_tree(&tag.group, &written)) {
+                match (
+                    parse_tree(&tag.group, &omitted),
+                    parse_tree(&tag.group, &written),
+                ) {
                     (Ok(a), Ok(b)) if a == b => checked += 1,
                     (Ok(a), Ok(b)) => broken.push(format!(
                         "{at}: omitting the field is not `{expr}`\n      omitted: {a}\n      \
@@ -409,7 +470,10 @@ fn a_default_expr_is_equivalent_to_omitting_the_field() {
     // A floor, not a count: the point is that the walk reached the slots at all.
     // Every wrapped indicator's `source` is one, so this cannot thin out
     // quietly.
-    assert!(checked >= 60, "only {checked} default_expr claims were reachable to check");
+    assert!(
+        checked >= 60,
+        "only {checked} default_expr claims were reachable to check"
+    );
 }
 
 /// **A defaulted expression slot must name what it defaults to.** The converse
@@ -471,7 +535,10 @@ fn default_fragment(f: &GrammarField) -> Option<&str> {
 
 /// The JSON literal a field defaults to, if its default is one.
 fn literal(f: &GrammarField) -> Option<serde_json::Value> {
-    f.default.as_ref().and_then(GrammarDefault::literal).cloned()
+    f.default
+        .as_ref()
+        .and_then(GrammarDefault::literal)
+        .cloned()
 }
 
 /// The **minimal** JSON-bridge body for a `map` form: required fields filled
@@ -537,9 +604,7 @@ fn every_tag_appears_in_the_strategies_reference() {
         .iter()
         .filter(|t| t.group == "node" || t.group == "selection")
         .map(|t| t.name.as_str())
-        .filter(|name| {
-            !doc.contains(&format!("!{name}")) && !doc.contains(&format!("`{name}`"))
-        })
+        .filter(|name| !doc.contains(&format!("!{name}")) && !doc.contains(&format!("`{name}`")))
         .collect();
 
     assert!(
@@ -547,7 +612,11 @@ fn every_tag_appears_in_the_strategies_reference() {
         "docs/STRATEGIES.md documents no `!{}`{}. \
          Every tag needs a line in the reference — see docs/CONTRIBUTING.md step 9.",
         missing.join("`, no `!"),
-        if missing.len() > 1 { format!(" ({} tags)", missing.len()) } else { String::new() },
+        if missing.len() > 1 {
+            format!(" ({} tags)", missing.len())
+        } else {
+            String::new()
+        },
     );
 }
 
@@ -672,7 +741,10 @@ fn all_optional_map_tags_parse_from_a_null_body() {
         "these tags refuse an explicit null body, which the schema advertises as \
          valid: {rejected:?}",
     );
-    assert!(checked >= 30, "only {checked} all-optional map forms were reachable");
+    assert!(
+        checked >= 30,
+        "only {checked} all-optional map forms were reachable"
+    );
 }
 
 /// **A form the parser accepts must be declared.** The converse guard, and the
@@ -761,11 +833,8 @@ fn document_forms_resolve() {
     // The bare form cannot carry a default — which is the whole reason the map
     // form is declared, so pin it rather than leaving it to the prose.
     assert!(
-        fugazi::spec::params::substitute(
-            serde_json::json!({ "param": "UNSET" }),
-            &HashMap::new()
-        )
-        .is_err(),
+        fugazi::spec::params::substitute(serde_json::json!({ "param": "UNSET" }), &HashMap::new())
+            .is_err(),
         "the bare spelling has nowhere to put a default, so an unset key is an error",
     );
 
@@ -773,7 +842,10 @@ fn document_forms_resolve() {
     assert_eq!(forms_of("arg").len(), 2, "!arg has two spellings");
     let args = HashMap::from([("SYM".to_string(), serde_json::json!("BTC"))]);
     for (doc, want) in [
-        (serde_json::json!({ "arg": "SYM" }), serde_json::json!("BTC")),
+        (
+            serde_json::json!({ "arg": "SYM" }),
+            serde_json::json!("BTC"),
+        ),
         (
             serde_json::json!({ "arg": { "key": "SYM" } }),
             serde_json::json!("BTC"),
@@ -793,11 +865,17 @@ fn document_forms_resolve() {
     assert_eq!(forms_of("import").len(), 2, "!import has two spellings");
     let dir = std::env::temp_dir().join("fugazi_grammar_forms");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    std::fs::write(dir.join("frag.yml"), "period: !param { key: N, default: 7 }\n")
-        .expect("write fragment");
+    std::fs::write(
+        dir.join("frag.yml"),
+        "period: !param { key: N, default: 7 }\n",
+    )
+    .expect("write fragment");
     let bare = fugazi::spec::imports::resolve(serde_json::json!({ "import": "frag.yml" }), &dir)
         .expect("bare !import resolves");
-    assert_eq!(bare["period"], serde_json::json!({ "param": { "key": "N", "default": 7 } }));
+    assert_eq!(
+        bare["period"],
+        serde_json::json!({ "param": { "key": "N", "default": 7 } })
+    );
     let keyed = fugazi::spec::imports::resolve(
         serde_json::json!({ "import": { "path": "frag.yml", "params": { "N": 21 } } }),
         &dir,
@@ -817,7 +895,10 @@ fn document_forms_resolve() {
     assert_eq!(ew[0].shape, "unit");
     assert_eq!(ew[0].scope.as_deref(), Some("portfolio_weights"));
     assert_eq!(ew[1].shape, "newtype");
-    assert_eq!(ew[1].scope, None, "the sizing spelling goes wherever a node does");
+    assert_eq!(
+        ew[1].scope, None,
+        "the sizing spelling goes wherever a node does"
+    );
     // The sizing spelling lowers to `!value 1/N` and parses as an expression.
     assert!(
         parses(&serde_json::json!({ "equal_weight": 4 })),

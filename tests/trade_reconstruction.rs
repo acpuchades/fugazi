@@ -179,7 +179,10 @@ sizing: !value 1.0
         "both legs profit; the −4500 leg is the fabricated one\n{trades:#?}"
     );
 
-    let long = trades.iter().find(|t| t.side == "long").expect("a long leg");
+    let long = trades
+        .iter()
+        .find(|t| t.side == "long")
+        .expect("a long leg");
     let short = trades
         .iter()
         .find(|t| t.side == "short")

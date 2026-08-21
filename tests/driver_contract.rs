@@ -34,11 +34,18 @@ const SYMBOL: &str = "X";
 enum Event {
     /// `update(snap)` — carries how many entries the snapshot held, so a
     /// price-less entry can be shown to still reach the strategy.
-    Update { entries: usize },
-    Fill { side: Side, price: Real },
+    Update {
+        entries: usize,
+    },
+    Fill {
+        side: Side,
+        price: Real,
+    },
     Reject,
     /// `trade(wallet)` — carries the bar count at the time, so gating is visible.
-    Trade { bars_seen: usize },
+    Trade {
+        bars_seen: usize,
+    },
 }
 
 /// A strategy that records every callback and optionally withholds readiness.
@@ -386,7 +393,11 @@ fn bar_timestamps_pass_through_untouched() {
 fn an_empty_stream_produces_an_empty_but_well_formed_report() {
     let (mut strat, log) = Recorder::new(0, &[0]);
     let mut wallet = PaperWallet::new(250.0);
-    let report = backtest::run(&mut strat, &mut wallet, Vec::<Snapshot<&'static str>>::new());
+    let report = backtest::run(
+        &mut strat,
+        &mut wallet,
+        Vec::<Snapshot<&'static str>>::new(),
+    );
 
     assert!(report.equity_curve.is_empty());
     assert!(report.fills.is_empty());
@@ -424,7 +435,10 @@ fn warm_up_advances_state_but_never_trades() {
         .filter(|e| !matches!(e, Event::Trade { .. } | Event::Fill { .. }))
         .cloned()
         .collect();
-    assert_eq!(warmed_events, expected, "warm_up must suppress trade() only");
+    assert_eq!(
+        warmed_events, expected,
+        "warm_up must suppress trade() only"
+    );
     assert_eq!(
         warmed_events.len(),
         prices.len(),
@@ -436,7 +450,9 @@ fn warm_up_advances_state_but_never_trades() {
     assert!(warmed_wallet.positions().iter().all(|u| u.amount == 0.0));
     // The control did trade, so the comparison above is meaningful.
     assert!(
-        traded_events.iter().any(|e| matches!(e, Event::Fill { .. })),
+        traded_events
+            .iter()
+            .any(|e| matches!(e, Event::Fill { .. })),
         "the control run should have filled something"
     );
 }

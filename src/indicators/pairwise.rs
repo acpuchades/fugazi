@@ -147,12 +147,7 @@ where
         // Both legs must be warm before the covariance window starts filling, so
         // the join point is the later of the two warm-ups; the window then needs
         // `period` more samples.
-        self.lhs
-            .warm_up_bars()
-            .max(self.rhs.warm_up_bars())
-            .max(1)
-            + self.cov.period()
-            - 1
+        self.lhs.warm_up_bars().max(self.rhs.warm_up_bars()).max(1) + self.cov.period() - 1
     }
 
     fn unstable_bars(&self) -> usize {

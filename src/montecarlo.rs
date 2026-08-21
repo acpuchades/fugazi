@@ -174,8 +174,16 @@ mod tests {
 
     #[test]
     fn same_seed_gives_identical_indices() {
-        let a = resample_indices(50, ResampleScheme::Stationary { mean_block: 8.0 }, &mut rng_from_seed(42));
-        let b = resample_indices(50, ResampleScheme::Stationary { mean_block: 8.0 }, &mut rng_from_seed(42));
+        let a = resample_indices(
+            50,
+            ResampleScheme::Stationary { mean_block: 8.0 },
+            &mut rng_from_seed(42),
+        );
+        let b = resample_indices(
+            50,
+            ResampleScheme::Stationary { mean_block: 8.0 },
+            &mut rng_from_seed(42),
+        );
         assert_eq!(a, b, "a fixed seed must reproduce the resample");
     }
 
@@ -209,7 +217,11 @@ mod tests {
         // With block == n the whole output is one contiguous circular run, so
         // consecutive indices always step by +1 (mod n).
         let n = 20;
-        let idx = resample_indices(n, ResampleScheme::MovingBlock { block: n }, &mut rng_from_seed(3));
+        let idx = resample_indices(
+            n,
+            ResampleScheme::MovingBlock { block: n },
+            &mut rng_from_seed(3),
+        );
         for w in idx.windows(2) {
             assert_eq!(w[1], (w[0] + 1) % n);
         }
@@ -222,7 +234,11 @@ mod tests {
         // a loose band around the target.
         let n = 5000;
         let mean_block = 10.0;
-        let idx = resample_indices(n, ResampleScheme::Stationary { mean_block }, &mut rng_from_seed(99));
+        let idx = resample_indices(
+            n,
+            ResampleScheme::Stationary { mean_block },
+            &mut rng_from_seed(99),
+        );
         let mut blocks = 1usize;
         for w in idx.windows(2) {
             if w[1] != (w[0] + 1) % n {

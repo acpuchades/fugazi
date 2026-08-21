@@ -29,8 +29,8 @@ pub fn parse_value(text: &str) -> Result<serde_json::Value> {
 /// short origin string — folded into the error prefix as `<label>:<line>:<col>:`
 /// when the underlying YAML parse reports a location.
 pub fn parse_value_at(text: &str, label: &str) -> Result<serde_json::Value> {
-    let value: serde_norway::Value = serde_norway::from_str(text)
-        .map_err(|e| yaml_parse_error(e, label))?;
+    let value: serde_norway::Value =
+        serde_norway::from_str(text).map_err(|e| yaml_parse_error(e, label))?;
     crate::spec::convert::yaml_to_json(value)
         .with_context(|| format!("normalising YAML tags in {label}"))
 }
@@ -97,8 +97,7 @@ impl Source {
     pub fn misused_path(&self) -> Option<&str> {
         match self {
             Source::Inline(text)
-                if !text.contains('\n')
-                    && (text.ends_with(".yml") || text.ends_with(".yaml")) =>
+                if !text.contains('\n') && (text.ends_with(".yml") || text.ends_with(".yaml")) =>
             {
                 Some(text)
             }

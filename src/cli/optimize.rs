@@ -22,8 +22,8 @@ use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::daterange::{self, Slice};
 use crate::imports;
-use crate::input::StrategyKind;
 use crate::input;
+use crate::input::StrategyKind;
 use crate::metrics;
 use crate::overlap;
 use crate::run::{attach_read_series, join_universe_by_time, read_only_series};
@@ -36,14 +36,11 @@ use fugazi::spec::pairs::PairsStrategySpec;
 // from `main.rs`) and other library-side items keep resolving through this
 // module.
 pub use fugazi::spec::optimize::{
-    AxisScale, ColumnPos, Direction, Evaluation, Row, SmoothKernel, SmoothScales, Smoothing,
-    Subgrid, Sweep,
-    build_any_spec, build_spec, build_typed, cartesian, combine_params, format_number,
-    format_value, lookup, lookup_windowed,
-    PLATEAU_TOLERANCE, mean_std_of, optimize, probe_params, rank_positions, ranking_value,
-    reject_axes_in_params, row_dsr_inputs, split_axes,
+    AxisScale, ColumnPos, Direction, Evaluation, PLATEAU_TOLERANCE, Row, SmoothKernel,
+    SmoothScales, Smoothing, Subgrid, Sweep, build_any_spec, build_spec, build_typed, cartesian,
+    combine_params, format_number, format_value, lookup, lookup_windowed, mean_std_of, optimize,
+    probe_params, rank_positions, ranking_value, reject_axes_in_params, row_dsr_inputs, split_axes,
 };
-
 
 /// Threaded-in inputs, same shape as [`crate::run::RunOptions`].
 pub struct OptimizeOptions<'a> {
@@ -223,10 +220,14 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
             for (k, v) in grid {
                 merged.insert(k.clone(), v.clone());
             }
-            let (fixed, axes) = split_axes(&merged)
-                .with_context(|| format!("--grid #{}", idx + 1))?;
+            let (fixed, axes) =
+                split_axes(&merged).with_context(|| format!("--grid #{}", idx + 1))?;
             let combos = cartesian(&axes);
-            Ok::<_, anyhow::Error>(Subgrid { fixed, axes, combos })
+            Ok::<_, anyhow::Error>(Subgrid {
+                fixed,
+                axes,
+                combos,
+            })
         })
         .collect::<Result<_>>()?;
 
@@ -438,12 +439,11 @@ fn run_single(
                 built.stable_bars()
             })
         };
-        let run_backtest =
-            |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
-                let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
-                backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
-                    .map_err(backtest::build_error)
-            };
+        let run_backtest = |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
+            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+            backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
+                .map_err(backtest::build_error)
+        };
         return walkforward_run(
             subgrids,
             atoms.len(),
@@ -525,7 +525,11 @@ fn run_single(
         let fed: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
         let period = evaluated_period_line(&fed, sweep_warmup.unwrap_or(0));
         style::print_header("optimize", "sweep a strategy over a parameter grid");
-        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, !opts.costs_supplied, "grid results"));
+        style::print_warns(&style::collect_warnings(
+            &skipped_overlay_columns,
+            !opts.costs_supplied,
+            "grid results",
+        ));
         print_inputs_block(
             opts,
             windowed_bars,
@@ -780,7 +784,11 @@ fn run_multi_symbol(
         let finished = SystemTime::now();
         let period = evaluated_period_line(&bars, sweep_warmup.unwrap_or(0));
         style::print_header("optimize", "sweep a strategy over a parameter grid");
-        style::print_warns(&style::collect_warnings(&[], !opts.costs_supplied, "grid results"));
+        style::print_warns(&style::collect_warnings(
+            &[],
+            !opts.costs_supplied,
+            "grid results",
+        ));
         print_inputs_block(
             opts,
             windowed_bars,
@@ -882,12 +890,10 @@ fn run_multi_symbol_walkforward(
         })
     };
 
-    let run_backtest =
-        |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
-            let spec = build_any_spec(kind, base_value, params)?;
-            backtest::measured_report_any(&spec, snapshots_ref, ctx_ref)
-                .map_err(backtest::build_error)
-        };
+    let run_backtest = |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
+        let spec = build_any_spec(kind, base_value, params)?;
+        backtest::measured_report_any(&spec, snapshots_ref, ctx_ref).map_err(backtest::build_error)
+    };
 
     // Basket / multi drivers currently don't surface `skipped_overlay_columns`
     // — the frame's per-symbol atoms are the source of truth, but the CLI's
@@ -1010,10 +1016,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         let flat = metrics::flatten(sample);
         metric_columns
             .iter()
-            .map(|(_, path)| {
-                flat.iter()
-                    .position(|(k, _)| *k == path.as_str())
-            })
+            .map(|(_, path)| flat.iter().position(|(k, _)| *k == path.as_str()))
             .collect()
     } else {
         // Empty sweep — no rows means no lookups needed. Fill with `None`.
@@ -1048,9 +1051,8 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
                     })
                     .collect();
                 for pos in &positions {
-                    let spread = pos.and_then(|p| {
-                        mean_std_of(per_window.iter().map(|window| window[p]))
-                    });
+                    let spread =
+                        pos.and_then(|p| mean_std_of(per_window.iter().map(|window| window[p])));
                     record.push(cell(spread.map(|(mean, _)| mean)));
                     record.push(cell(spread.map(|(_, std)| std)));
                 }
@@ -1067,13 +1069,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         if let Some((n_trials, trial_var)) = deflated_sharpe_context {
             let (sharpe, skew, kurt, n_returns, bpy) = row_dsr_inputs(row);
             let dsr = fugazi::metrics::deflated_sharpe_from_stats(
-                sharpe,
-                skew,
-                kurt,
-                n_returns,
-                bpy,
-                n_trials,
-                trial_var,
+                sharpe, skew, kurt, n_returns, bpy, n_trials, trial_var,
             );
             record.push(cell(dsr));
         }
@@ -1169,8 +1165,10 @@ fn print_inputs_block(
             // implicit: it is the thing that decides what "one step" means, and
             // on an irregular axis the automatic choice is a judgment call.
             if let Some(scales) = smooth_scales.filter(|s| !s.is_empty()) {
-                let per_axis: Vec<String> =
-                    scales.iter().map(|(name, scale)| format!("{name} {scale}")).collect();
+                let per_axis: Vec<String> = scales
+                    .iter()
+                    .map(|(name, scale)| format!("{name} {scale}"))
+                    .collect();
                 msg.push_str(&format!(" · scale {}", per_axis.join(", ")));
             }
             style::field("smooth", &msg);
@@ -1262,7 +1260,11 @@ fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) 
     style::field("started", &style::format_utc(started));
     style::field(
         "finished",
-        &format!("{} ({})", style::format_utc(finished), style::format_elapsed(elapsed)),
+        &format!(
+            "{} ({})",
+            style::format_utc(finished),
+            style::format_elapsed(elapsed)
+        ),
     );
 }
 
@@ -1315,7 +1317,10 @@ fn print_smoothing_lines(
         None => return,
     };
     let smoothed_label = match winner.value {
-        Some(v) => format!("{v:.4} · support {:.2} · {}", winner.support, smoothing.kernel),
+        Some(v) => format!(
+            "{v:.4} · support {:.2} · {}",
+            winner.support, smoothing.kernel
+        ),
         None => format!("— · support {:.2} · {}", winner.support, smoothing.kernel),
     };
     style::field("smoothed", &smoothed_label);
@@ -1393,7 +1398,10 @@ fn print_best_block(sweep: &Sweep, k: Real) {
         if best_by.map(|(_, p, _)| p.as_str()) == Some(path.as_str()) {
             continue;
         }
-        style::field(&friendly_metric_label(path), &format_metric(&best.eval, path));
+        style::field(
+            &friendly_metric_label(path),
+            &format_metric(&best.eval, path),
+        );
     }
     // Best-row headline metrics from the run block for context — cross-window
     // mean ± std under `-w`, matching the metric rows above.
@@ -1423,7 +1431,8 @@ fn print_best_block(sweep: &Sweep, k: Real) {
                 ),
                 fmt(
                     metrics::mean_std(
-                        ws.iter().map(|w| w.metrics.returns.annualized_volatility_pct)
+                        ws.iter()
+                            .map(|w| w.metrics.returns.annualized_volatility_pct)
                     ),
                     false
                 ),
@@ -1467,9 +1476,6 @@ fn format_metric(eval: &Evaluation, path: &str) -> String {
         ),
     }
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // Walk-forward (rolling)
@@ -1562,10 +1568,15 @@ where
         output,
         &result.union_columns,
         &result.metric_columns,
-        smoothing.and(result.best_by.as_ref()).map(|(_, path, _)| path.as_str()),
+        smoothing
+            .and(result.best_by.as_ref())
+            .map(|(_, path, _)| path.as_str()),
         &result.fold_rows,
     )?;
-    write_composite_equity_csv(&derive_sibling(output, "composite_oos_equity", "csv"), &result.composite_equity)?;
+    write_composite_equity_csv(
+        &derive_sibling(output, "composite_oos_equity", "csv"),
+        &result.composite_equity,
+    )?;
     write_composite_metrics_yaml(
         &derive_sibling(output, "composite_oos_metrics", "yml"),
         &result.composite_metrics,
@@ -1573,7 +1584,11 @@ where
 
     if !quiet {
         style::print_header("optimize", "walk-forward optimization");
-        style::print_warns(&style::collect_warnings(skipped_overlay_columns, false, "grid results"));
+        style::print_warns(&style::collect_warnings(
+            skipped_overlay_columns,
+            false,
+            "grid results",
+        ));
         print_walkforward_inputs(
             &spec,
             (result.is_bars, result.oos_bars, result.embargo_bars),
@@ -1583,7 +1598,11 @@ where
             n_bars,
             output,
         );
-        print_walkforward_summary(&result.fold_rows, &result.metric_columns, result.best_by.as_ref());
+        print_walkforward_summary(
+            &result.fold_rows,
+            &result.metric_columns,
+            result.best_by.as_ref(),
+        );
     }
     Ok(())
 }
@@ -1718,8 +1737,7 @@ fn write_composite_metrics_yaml(path: &Path, m: &metrics::Metrics) -> Result<()>
     }
     let yaml = serde_norway::to_string(m)
         .with_context(|| format!("serializing composite OOS metrics for `{}`", path.display()))?;
-    std::fs::write(path, yaml)
-        .with_context(|| format!("writing `{}`", path.display()))?;
+    std::fs::write(path, yaml).with_context(|| format!("writing `{}`", path.display()))?;
     Ok(())
 }
 
@@ -1734,12 +1752,19 @@ fn print_walkforward_inputs(
 ) {
     let (is_b, oos_b, emb_b) = resolved;
     style::print_section("inputs");
-    style::field("windows", &format!("{spec}  →  IS={is_b}, OS={oos_b}, embargo={emb_b} (bars)"));
+    style::field(
+        "windows",
+        &format!("{spec}  →  IS={is_b}, OS={oos_b}, embargo={emb_b} (bars)"),
+    );
     style::field(
         "prefix",
         &format!(
             "{prefix_skip} bars ({})",
-            if keep_unstable { "keep_unstable → max(warm_up)" } else { "safe → max(stable)" }
+            if keep_unstable {
+                "keep_unstable → max(warm_up)"
+            } else {
+                "safe → max(stable)"
+            }
         ),
     );
     style::field("folds", &format!("{n_folds}  (over {n_bars} bars)"));
@@ -1824,8 +1849,12 @@ fn print_walkforward_summary(
         for row in rows {
             let (is_str, oos_str) = match path {
                 Some(p) => (
-                    lookup(&row.is_metrics, p).map(format_number).unwrap_or_else(|| "—".into()),
-                    lookup(&row.oos_metrics, p).map(format_number).unwrap_or_else(|| "—".into()),
+                    lookup(&row.is_metrics, p)
+                        .map(format_number)
+                        .unwrap_or_else(|| "—".into()),
+                    lookup(&row.oos_metrics, p)
+                        .map(format_number)
+                        .unwrap_or_else(|| "—".into()),
                 ),
                 None => ("—".into(), "—".into()),
             };

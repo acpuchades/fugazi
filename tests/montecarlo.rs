@@ -7,13 +7,13 @@
 //! bracketing the point estimate's neighbourhood, p-values in `(0, 1]`) and a
 //! power/size sanity check on a constructed no-edge series.
 
-use fugazi::types::Symbol;
 use fugazi::market::Real;
 use fugazi::montecarlo::ResampleScheme;
 use fugazi::spec::backtest::{EvalContext, measured_report_any, run_iteration_any};
 use fugazi::spec::costs::CostConfig;
 use fugazi::spec::montecarlo::{McConfig, run_montecarlo};
 use fugazi::spec::{StrategyRef, StrategySpec};
+use fugazi::types::Symbol;
 use fugazi::types::{Atom, Candle, Snapshot};
 
 const CASH: Real = 10_000.0;
@@ -75,7 +75,11 @@ fn trending(n: usize) -> Vec<Real> {
         .collect()
 }
 
-fn run_mc(spec: &StrategySpec, snaps: &[Snapshot<Symbol>], config: &McConfig) -> fugazi::spec::McOutcome {
+fn run_mc(
+    spec: &StrategySpec,
+    snaps: &[Snapshot<Symbol>],
+    config: &McConfig,
+) -> fugazi::spec::McOutcome {
     let costs = empty_costs();
     let ctx = ctx(&costs);
     let report = measured_report_any(spec, snaps, &ctx).expect("drive strategy");
@@ -104,7 +108,11 @@ fn same_seed_reproduces_every_number() {
         assert_eq!(x.observed, y.observed, "observed drifted for {}", x.name);
         assert_eq!(x.ci_lower, y.ci_lower, "ci_lower drifted for {}", x.name);
         assert_eq!(x.ci_upper, y.ci_upper, "ci_upper drifted for {}", x.name);
-        assert_eq!(x.p_value_rerun, y.p_value_rerun, "p(rerun) drifted for {}", x.name);
+        assert_eq!(
+            x.p_value_rerun, y.p_value_rerun,
+            "p(rerun) drifted for {}",
+            x.name
+        );
     }
 }
 
@@ -121,7 +129,15 @@ fn a_different_seed_moves_the_numbers() {
         metrics: vec!["sharpe".to_string()],
     };
     let a = run_mc(&spec, &snaps, &base).section;
-    let b = run_mc(&spec, &snaps, &McConfig { seed: 2, ..base.clone() }).section;
+    let b = run_mc(
+        &spec,
+        &snaps,
+        &McConfig {
+            seed: 2,
+            ..base.clone()
+        },
+    )
+    .section;
     // The observed metric is seed-independent; the resampled CI is not.
     assert_eq!(a.metrics[0].observed, b.metrics[0].observed);
     assert_ne!(
@@ -180,8 +196,16 @@ fn multi_symbol_still_produces_a_rerun_pvalue() {
             let pa = a[i];
             let pb = 100.0 + 9.0 * ((i as Real) * 0.25).cos() + 0.1 * i as Real;
             let mut s = Snapshot::<Symbol>::new();
-            s.push(Some("A".into()), None, Atom::new(Candle::new(pa, pa + 1.0, pa - 1.0, pa, 1_000.0)));
-            s.push(Some("B".into()), None, Atom::new(Candle::new(pb, pb + 1.0, pb - 1.0, pb, 1_000.0)));
+            s.push(
+                Some("A".into()),
+                None,
+                Atom::new(Candle::new(pa, pa + 1.0, pa - 1.0, pa, 1_000.0)),
+            );
+            s.push(
+                Some("B".into()),
+                None,
+                Atom::new(Candle::new(pb, pb + 1.0, pb - 1.0, pb, 1_000.0)),
+            );
             s
         })
         .collect();
@@ -196,7 +220,10 @@ fn multi_symbol_still_produces_a_rerun_pvalue() {
     };
     let section = run_mc(&spec, &snaps, &config).section;
     let m = &section.metrics[0];
-    assert!(m.p_value_rerun.is_some(), "re-run null should still produce a p-value");
+    assert!(
+        m.p_value_rerun.is_some(),
+        "re-run null should still produce a p-value"
+    );
 }
 
 #[test]
@@ -220,10 +247,15 @@ fn backtest_layer_populates_montecarlo_not_just_the_cli() {
     });
 
     let iter = run_iteration_any(&spec, bars, &snaps, &ctx).expect("run iteration");
-    let section = iter.metrics.montecarlo.expect("montecarlo block attached by backtest layer");
+    let section = iter
+        .metrics
+        .montecarlo
+        .expect("montecarlo block attached by backtest layer");
     assert_eq!(section.metrics.len(), 1);
     assert_eq!(section.metrics[0].name, "risk_adjusted.sharpe");
-    let samples = iter.mc_samples.expect("samples surfaced on IterationResult");
+    let samples = iter
+        .mc_samples
+        .expect("samples surfaced on IterationResult");
     assert_eq!(samples.sets.len(), 2); // ci + rerun
 }
 

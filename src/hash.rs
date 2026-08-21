@@ -122,8 +122,19 @@ mod tests {
         // Not a guarantee in general — it is a hash — but the realistic symbol
         // shapes must not collide, or the maps degrade to linear scans.
         let syms = [
-            "BTC", "ETH", "SOL", "ADA", "BTCUSDT", "ETHUSDT", "BTC/USDT:USDT",
-            "AAPL", "MSFT", "S000", "S001", "S002", "S063",
+            "BTC",
+            "ETH",
+            "SOL",
+            "ADA",
+            "BTCUSDT",
+            "ETHUSDT",
+            "BTC/USDT:USDT",
+            "AAPL",
+            "MSFT",
+            "S000",
+            "S001",
+            "S002",
+            "S063",
         ];
         let mut seen = std::collections::HashSet::new();
         for s in syms {

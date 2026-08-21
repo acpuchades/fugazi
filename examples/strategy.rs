@@ -32,12 +32,8 @@ impl Reversal {
         let close = || Close::of(Pick::<&'static str>::new());
         Self {
             symbol,
-            long: Box::new(
-                Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
-            ),
-            short: Box::new(
-                Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
-            ),
+            long: Box::new(Sma::new(close(), fast).crosses_above(Sma::new(close(), slow))),
+            short: Box::new(Sma::new(close(), fast).crosses_below(Sma::new(close(), slow))),
         }
     }
 }

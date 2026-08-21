@@ -6,15 +6,15 @@ use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
-#[allow(unused_imports)]
-use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
 #[allow(unused_imports)]
+use crate::sources::*;
+#[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 
 use fugazi_core::montecarlo::{resample_indices as core_resample_indices, rng_from_seed};
 

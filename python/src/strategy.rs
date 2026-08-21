@@ -8,9 +8,9 @@ use crate::classes::*;
 #[allow(unused_imports)]
 use crate::constructors::*;
 #[allow(unused_imports)]
-use crate::sources::*;
-#[allow(unused_imports)]
 use crate::metrics::*;
+#[allow(unused_imports)]
+use crate::sources::*;
 #[allow(unused_imports)]
 use crate::spec::*;
 // Aliased: the prelude glob already binds `fugazi_core::wallet::WalletError`,
@@ -551,7 +551,11 @@ impl PyWallet {
     /// marks to market and whose `[low, high]` bounds fills) or a bare price
     /// `float` (a flat bar `open = high = low = close`). Call this each tick before
     /// trading or reading `equity`.
-    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+    pub(crate) fn update(
+        &mut self,
+        symbol: String,
+        bar: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyOrder>> {
         let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
             candle.borrow().inner
         } else {
@@ -569,7 +573,11 @@ impl PyWallet {
     /// Queue a market order driving `symbol` to `target` signed units; it fills on
     /// the next `update`, at that bar's `open`. Returns `None` (working — the fill
     /// shows up in that `update`'s return, not here).
-    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+    pub(crate) fn set_position(
+        &mut self,
+        symbol: String,
+        target: f64,
+    ) -> PyResult<Option<PyOrder>> {
         wrap_ack(self.inner.set_position(Units {
             symbol: intern(symbol),
             amount: target,
@@ -615,7 +623,10 @@ impl PyWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_stop(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_stop(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Rest a take-profit on `symbol` at `trigger` — the favourable twin of
@@ -629,7 +640,10 @@ impl PyWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_take_profit(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_take_profit(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Credit (positive) or debit (negative) the cash balance with no order
@@ -640,8 +654,6 @@ impl PyWallet {
             .adjust_funds(delta)
             .map_err(|e| PyWalletError::new_err(e.to_string()))
     }
-
-
 
     /// Rest a limit order on `symbol`: drive the position to `side · size` once
     /// the market trades through `limit`, filling at that price **or better**
@@ -821,7 +833,11 @@ impl PyOkxWallet {
     /// Feed `symbol`'s current bar (whose `close` marks price) and return any fills
     /// polled for it. Accepts a `Candle` or a bare price `float`. Refreshes the
     /// account cache first.
-    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+    pub(crate) fn update(
+        &mut self,
+        symbol: String,
+        bar: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyOrder>> {
         let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
             candle.borrow().inner
         } else {
@@ -838,7 +854,11 @@ impl PyOkxWallet {
 
     /// Send a market order driving `symbol` to `target` signed base units. Returns
     /// `None` (working — the fill surfaces from a later `update` / `poll_fills`).
-    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+    pub(crate) fn set_position(
+        &mut self,
+        symbol: String,
+        target: f64,
+    ) -> PyResult<Option<PyOrder>> {
         wrap_ack(self.inner.set_position(Units {
             symbol: intern(symbol),
             amount: target,
@@ -875,7 +895,10 @@ impl PyOkxWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_stop(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_stop(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Rest a `reduceOnly` take-profit on `symbol` at `trigger` — the favourable
@@ -888,7 +911,10 @@ impl PyOkxWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_take_profit(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_take_profit(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
@@ -1055,7 +1081,11 @@ impl PyCoinbaseWallet {
     /// Feed `symbol`'s current bar (whose `close` marks price) and return any
     /// fills polled for it. Accepts a `Candle` or a bare price `float`. Refreshes
     /// the account cache first.
-    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+    pub(crate) fn update(
+        &mut self,
+        symbol: String,
+        bar: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyOrder>> {
         let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
             candle.borrow().inner
         } else {
@@ -1073,7 +1103,11 @@ impl PyCoinbaseWallet {
     /// Send a market order driving `symbol` to `target` base units (spot: a
     /// negative target sells to flat). Returns `None` (working — the fill
     /// surfaces from a later `update` / `poll_fills`).
-    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+    pub(crate) fn set_position(
+        &mut self,
+        symbol: String,
+        target: f64,
+    ) -> PyResult<Option<PyOrder>> {
         wrap_ack(self.inner.set_position(Units {
             symbol: intern(symbol),
             amount: target,
@@ -1110,7 +1144,10 @@ impl PyCoinbaseWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_stop(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_stop(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Rest a reduce-only take-profit on `symbol` at `trigger` — the favourable
@@ -1123,7 +1160,10 @@ impl PyCoinbaseWallet {
         size: Option<PySize>,
     ) -> PyResult<Option<PyOrder>> {
         let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
-        wrap_ack(self.inner.set_take_profit(intern(symbol), Reference(trigger), size))
+        wrap_ack(
+            self.inner
+                .set_take_profit(intern(symbol), Reference(trigger), size),
+        )
     }
 
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
@@ -1178,7 +1218,6 @@ impl PyCoinbaseWallet {
             .collect()
     }
 }
-
 
 /// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
 /// is merely working, or a `ValueError`.
@@ -1275,7 +1314,9 @@ impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
     type Input = Snapshot<Symbol>;
     type Output = S::Output;
     fn update(&mut self, snap: Snapshot<Symbol>) -> Option<S::Output> {
-        snap.sole_atom_or_panic().cloned().and_then(|a| self.0.update(a))
+        snap.sole_atom_or_panic()
+            .cloned()
+            .and_then(|a| self.0.update(a))
     }
     fn value(&self) -> Option<S::Output> {
         self.0.value()
@@ -1296,9 +1337,9 @@ impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
 pub(crate) fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<Symbol>>> {
     match &sig.sig {
         // Bar-only lifts twice: to the atom domain, then to the snapshot one.
-        AnySignal::Candle(s) => Ok(SignalBox::new(AtomLift(SignalBox(
-            atom_over_candle(s.0.clone()),
-        )))),
+        AnySignal::Candle(s) => Ok(SignalBox::new(AtomLift(SignalBox(atom_over_candle(
+            s.0.clone(),
+        ))))),
         AnySignal::Atom(s) => Ok(SignalBox::new(AtomLift(s.clone()))),
         AnySignal::Snapshot(s) => Ok(s.clone()),
         AnySignal::Real(_) => Err(PyValueError::new_err(
@@ -1452,11 +1493,30 @@ pub(crate) fn pairs_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<Symbol
 /// `Clone`, so we carry the recipe rather than the built strategy).
 #[derive(Clone, Debug)]
 pub(crate) enum PresetSpec {
-    BuyAndHold { symbol: String },
-    MaCrossover { symbol: String, fast: usize, slow: usize },
-    RsiReversal { symbol: String, period: usize, oversold: Real, exit_level: Real },
-    DonchianBreakout { symbol: String, period: usize },
-    KeltnerBreakout { symbol: String, ema_period: usize, atr_period: usize, multiplier: Real },
+    BuyAndHold {
+        symbol: String,
+    },
+    MaCrossover {
+        symbol: String,
+        fast: usize,
+        slow: usize,
+    },
+    RsiReversal {
+        symbol: String,
+        period: usize,
+        oversold: Real,
+        exit_level: Real,
+    },
+    DonchianBreakout {
+        symbol: String,
+        period: usize,
+    },
+    KeltnerBreakout {
+        symbol: String,
+        ema_period: usize,
+        atr_period: usize,
+        multiplier: Real,
+    },
 }
 
 impl PresetSpec {
@@ -1474,15 +1534,21 @@ impl PresetSpec {
             PresetSpec::MaCrossover { symbol, fast, slow } => {
                 trend::ma_crossover(intern(symbol), *fast, *slow)
             }
-            PresetSpec::RsiReversal { symbol, period, oversold, exit_level } => {
-                mean_reversion::rsi_reversal(intern(symbol), *period, *oversold, *exit_level)
-            }
+            PresetSpec::RsiReversal {
+                symbol,
+                period,
+                oversold,
+                exit_level,
+            } => mean_reversion::rsi_reversal(intern(symbol), *period, *oversold, *exit_level),
             PresetSpec::DonchianBreakout { symbol, period } => {
                 trend::donchian_breakout(intern(symbol), *period)
             }
-            PresetSpec::KeltnerBreakout { symbol, ema_period, atr_period, multiplier } => {
-                composite::keltner_breakout(intern(symbol), *ema_period, *atr_period, *multiplier)
-            }
+            PresetSpec::KeltnerBreakout {
+                symbol,
+                ema_period,
+                atr_period,
+                multiplier,
+            } => composite::keltner_breakout(intern(symbol), *ema_period, *atr_period, *multiplier),
         };
         // Re-seed the book at the requested initial equity — the
         // catalogue free functions use `new`, which starts at 1.0.
@@ -1545,7 +1611,11 @@ impl PyStrategy {
     /// Enter (or reverse into) a long on `enter`; flatten it on `exit`
     /// (defaults to never).
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn long_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+    pub(crate) fn long_on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyStrategy> {
         if self.preset.is_some() {
             return Err(PyValueError::new_err(
                 "long_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
@@ -1560,7 +1630,11 @@ impl PyStrategy {
     /// Enter (or reverse into) a short on `enter`; flatten it on `exit`
     /// (defaults to never).
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn short_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+    pub(crate) fn short_on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyStrategy> {
         if self.preset.is_some() {
             return Err(PyValueError::new_err(
                 "short_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
@@ -1743,7 +1817,11 @@ impl PyPairsStrategy {
     /// (profiting as the spread rises), `exit` flattens both. A missing `exit`
     /// never fires.
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn long_spread_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+    pub(crate) fn long_spread_on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
         s.enter = Some(pairs_signal(enter)?);
         s.exit = exit.map(pairs_signal).transpose()?;
@@ -1768,7 +1846,11 @@ impl PyPairsStrategy {
     /// Alias for `long_spread_on`, kept for callers written before the short
     /// side existed.
     #[pyo3(signature = (enter, exit=None))]
-    pub(crate) fn on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+    pub(crate) fn on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyPairsStrategy> {
         self.long_spread_on(enter, exit)
     }
 
@@ -1799,7 +1881,10 @@ impl PyPairsStrategy {
 
     /// Attach the short-spread take-profit: that side flattens when the spread
     /// reads at or **below** `level`.
-    pub(crate) fn short_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+    pub(crate) fn short_spread_take_profit(
+        &self,
+        level: &PyIndicator,
+    ) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
         s.short_target = Some(pairs_source(level)?);
         Ok(s)
@@ -1848,7 +1933,10 @@ impl PyPairsStrategy {
     }
 
     pub(crate) fn __repr__(&self) -> String {
-        format!("PairsStrategy(left='{}', right='{}')", self.left, self.right)
+        format!(
+            "PairsStrategy(left='{}', right='{}')",
+            self.left, self.right
+        )
     }
 }
 
@@ -2011,7 +2099,10 @@ impl PyMultiAssetStrategy {
     /// panics, and readiness waits until every listed leg has settled.
     pub(crate) fn all_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
         let mut s = self.clone();
-        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s.universe = Some(DeclaredUniverse {
+            strict: true,
+            symbols,
+        });
         s
     }
 
@@ -2019,7 +2110,10 @@ impl PyMultiAssetStrategy {
     /// ones are silently skipped.
     pub(crate) fn any_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
         let mut s = self.clone();
-        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s.universe = Some(DeclaredUniverse {
+            strict: false,
+            symbols,
+        });
         s
     }
 
@@ -2118,11 +2212,7 @@ impl BasketSelection {
         match self {
             BasketSelection::Everything => Box::new(core_basket::Everything),
             BasketSelection::TopBottom { longs, shorts, of } => Box::new(
-                core_basket::TopBottom::of(
-                    core_basket::DynSelection(of.build()),
-                    *longs,
-                    *shorts,
-                ),
+                core_basket::TopBottom::of(core_basket::DynSelection(of.build()), *longs, *shorts),
             ),
             BasketSelection::Threshold {
                 long_min,
@@ -2372,14 +2462,20 @@ impl PyBasketStrategy {
     /// and readiness gates on every listed leg scoring & sizing.
     pub(crate) fn all_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s.universe = Some(DeclaredUniverse {
+            strict: true,
+            symbols,
+        });
         s
     }
 
     /// Restrict discovery to `symbols` (lax): absent / unready members skipped.
     pub(crate) fn any_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s.universe = Some(DeclaredUniverse {
+            strict: false,
+            symbols,
+        });
         s
     }
 
@@ -2616,10 +2712,7 @@ where
 {
     let build = Arc::new(build);
     let inner = build();
-    let carrier = RebuildOnClone {
-        build,
-        inner,
-    };
+    let carrier = RebuildOnClone { build, inner };
     PyIndicator::wrap(AnySource::Snapshot(runtime::erase(carrier)))
 }
 
@@ -2716,11 +2809,7 @@ pub(crate) fn max_drawdown_of(strategy: &PyStrategy, period: usize) -> PyIndicat
 /// curve of an embedded [`Strategy`](PyStrategy). Matches `!calmar` in the
 /// YAML spec.
 #[pyfunction]
-pub(crate) fn calmar_of(
-    strategy: &PyStrategy,
-    period: usize,
-    bars_per_year: Real,
-) -> PyIndicator {
+pub(crate) fn calmar_of(strategy: &PyStrategy, period: usize, bars_per_year: Real) -> PyIndicator {
     let preset = strategy.preset.clone();
     let symbol = strategy.symbol.clone();
     wrap_rebuild(move || {
@@ -2984,7 +3073,6 @@ impl PyRunReport {
     }
 }
 
-
 /// N *different* strategies sharing one account.
 ///
 /// The other four shapes each run a single decision rule; this one composes
@@ -3074,11 +3162,7 @@ impl PyPortfolio {
 
     /// Pull capital back to the target weights whenever `signal` fires.
     /// Off by default, so the split drifts with P&L.
-    pub(crate) fn rebalance_on(
-        &self,
-        py: Python<'_>,
-        signal: &PySignal,
-    ) -> PyResult<PyPortfolio> {
+    pub(crate) fn rebalance_on(&self, py: Python<'_>, signal: &PySignal) -> PyResult<PyPortfolio> {
         let mut next = self.clone_with(py);
         next.rebalance = Some(snapshot_signal(signal)?);
         Ok(next)
@@ -3168,7 +3252,8 @@ impl PyPortfolio {
             None => vec![seed / self.children.len() as Real; self.children.len()],
         };
 
-        let mut builder = fugazi_core::portfolio::Portfolio::<Symbol>::builder().with_initial_equity(seed);
+        let mut builder =
+            fugazi_core::portfolio::Portfolio::<Symbol>::builder().with_initial_equity(seed);
         for ((name, child), share) in self.children.iter().zip(&shares) {
             let bound = child.bind(py);
             builder = if let Ok(s) = bound.cast::<PyStrategy>() {
@@ -3317,10 +3402,11 @@ pub(crate) fn register_wallet_protocol(m: &Bound<'_, PyModule>) -> PyResult<()> 
             WALLET_SURFACE.join(", ")
         ),
     )?;
-    let wallet = py
-        .import("abc")?
-        .getattr("ABCMeta")?
-        .call1(("Wallet", pyo3::types::PyTuple::empty(py), namespace))?;
+    let wallet = py.import("abc")?.getattr("ABCMeta")?.call1((
+        "Wallet",
+        pyo3::types::PyTuple::empty(py),
+        namespace,
+    ))?;
     for ty in [
         py.get_type::<PyWallet>(),
         py.get_type::<PyOkxWallet>(),

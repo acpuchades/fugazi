@@ -31,7 +31,9 @@ pub struct Server {
 /// it borrows the `&MockServer` it mounts onto.
 pub fn serve<F>(setup: F) -> Server
 where
-    F: for<'a> FnOnce(&'a MockServer) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
+    F: for<'a> FnOnce(
+        &'a MockServer,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
 {
     let runtime = tokio::runtime::Runtime::new().expect("multi-thread runtime");
     let mock = runtime.block_on(async {

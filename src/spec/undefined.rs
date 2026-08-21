@@ -62,17 +62,17 @@ pub const UNDEFINED_KEY: &str = "__fugazi_undefined_hole__";
 /// `!param` with the given key.
 pub fn sentinel(param_key: &str) -> Json {
     let mut map = Map::with_capacity(1);
-    map.insert(UNSET_PARAM_KEY.to_string(), Json::String(param_key.to_string()));
+    map.insert(
+        UNSET_PARAM_KEY.to_string(),
+        Json::String(param_key.to_string()),
+    );
     Json::Object(map)
 }
 
 /// The `!undefined` twin of [`sentinel`], carrying the hole's document path.
 pub fn undefined_sentinel(path: &str) -> Json {
     let mut map = Map::with_capacity(1);
-    map.insert(
-        UNDEFINED_KEY.to_string(),
-        Json::String(path.to_string()),
-    );
+    map.insert(UNDEFINED_KEY.to_string(), Json::String(path.to_string()));
     Json::Object(map)
 }
 
@@ -463,10 +463,7 @@ impl<'de> Deserializer<'de> for UndefinedDeserializer {
     ) -> Result<V::Value, Self::Error> {
         match self.0 {
             // A bare string is a unit variant (`close`, `obv`).
-            Yaml::String(tag) => visitor.visit_enum(UndefinedEnum {
-                tag,
-                content: None,
-            }),
+            Yaml::String(tag) => visitor.visit_enum(UndefinedEnum { tag, content: None }),
             // The externally-tagged map form: `{variant: content}`.
             Yaml::Mapping(map) if map.len() == 1 => {
                 let (key, content) = map.into_iter().next().expect("len == 1");

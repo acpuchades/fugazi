@@ -521,7 +521,6 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
     }
 }
 
-
 /// The tag name of a variant, for diagnostics (`Sma` → `!sma`).
 ///
 /// Read off the `Debug` derive's leading identifier rather than a 113-arm
@@ -586,10 +585,7 @@ fn variants_from_error(message: &str) -> Vec<String> {
         .step_by(2)
         .map(str::to_string)
         .collect();
-    assert!(
-        !names.is_empty(),
-        "no variants parsed out of: {message}"
-    );
+    assert!(!names.is_empty(), "no variants parsed out of: {message}");
     names
 }
 
@@ -800,8 +796,8 @@ pub fn slot_demands(tag: &str) -> SlotDemands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::expr::Root;
     use crate::indicators::{Book, Position};
+    use crate::spec::expr::Root;
     use crate::types::Schema;
 
     /// Parse **without** the type check, so these tests can construct the
@@ -886,7 +882,9 @@ mod tests {
             let Some(declared) = output_type(&spec) else {
                 panic!("{yaml}: expected a declared output type");
             };
-            let built = spec.build(&anchor, &book, None, &schema, Root::sole()).output_type();
+            let built = spec
+                .build(&anchor, &book, None, &schema, Root::sole())
+                .output_type();
             assert_eq!(
                 declared, built,
                 "{yaml}: declared {declared} but build produced {built}"
@@ -1075,10 +1073,9 @@ mod tests {
             "!gt { lhs: !current {}, rhs: close }",
             "!crosses_above { lhs: close, rhs: !current {} }",
         ] {
-            let sig: Result<NodeSpec, String> =
-                serde_norway::from_str::<serde_norway::Value>(yaml)
-                    .map_err(|e| e.to_string())
-                    .and_then(NodeSpec::try_from);
+            let sig: Result<NodeSpec, String> = serde_norway::from_str::<serde_norway::Value>(yaml)
+                .map_err(|e| e.to_string())
+                .and_then(NodeSpec::try_from);
             assert!(sig.is_err(), "{yaml} should be rejected");
         }
     }
@@ -1091,10 +1088,9 @@ mod tests {
             "!eq { lhs: close, rhs: !value 5.0 }",
             "!eq { lhs: !value bull, rhs: !value bear }",
         ] {
-            let sig: Result<NodeSpec, String> =
-                serde_norway::from_str::<serde_norway::Value>(yaml)
-                    .map_err(|e| e.to_string())
-                    .and_then(NodeSpec::try_from);
+            let sig: Result<NodeSpec, String> = serde_norway::from_str::<serde_norway::Value>(yaml)
+                .map_err(|e| e.to_string())
+                .and_then(NodeSpec::try_from);
             assert!(sig.is_ok(), "{yaml} should type-check: {sig:?}");
         }
     }
@@ -1198,7 +1194,11 @@ mod tests {
         for (spec, slot, want) in [
             ("!and { lhs: !is_weekday, rhs: !is_weekend }", "lhs", "Bool"),
             ("!ema { source: !close {}, period: 3 }", "source", "Real"),
-            ("!adx { source: !current {}, period: 3 }", "source", "Candle"),
+            (
+                "!adx { source: !current {}, period: 3 }",
+                "source",
+                "Candle",
+            ),
         ] {
             let node = parse(spec);
             let from_tree = children(&node)
@@ -1208,7 +1208,10 @@ mod tests {
                 .expect("slot present");
             assert_eq!(from_tree, want);
             let from_tag = slot_demand(&tag_name(&node), slot).expect("slot present");
-            assert_eq!(from_tag.iter().map(|t| t.to_string()).collect::<Vec<_>>(), vec![want]);
+            assert_eq!(
+                from_tag.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                vec![want]
+            );
         }
     }
 
@@ -1227,4 +1230,3 @@ mod tests {
         assert!(parse_checked("!bars_since { source: !is_weekday }").is_ok());
     }
 }
-

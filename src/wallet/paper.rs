@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};
 
-use super::types::{
-    Ack, POSITION_EPSILON, PRICE_EPSILON, Order, OrderId, OrderKind, Reference,
-    Rejection, Side, Size, Units, WalletError, cash_tolerance,
-};
 use super::Wallet;
+use super::types::{
+    Ack, Order, OrderId, OrderKind, POSITION_EPSILON, PRICE_EPSILON, Reference, Rejection, Side,
+    Size, Units, WalletError, cash_tolerance,
+};
 use crate::hash::SymMap;
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -102,7 +102,6 @@ struct RestingLimit {
     limit: Real,
     id: OrderId,
 }
-
 
 /// The built-in **pure**, in-memory [`Wallet`]: a paper book of `funds`,
 /// per-symbol positions, the prices fed to it, a queue of market orders awaiting
@@ -496,10 +495,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // [`set_costs_for`](Self::set_costs_for) win over the default bundle.
         let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
         let units = delta.abs();
-        let costs = self
-            .per_symbol_costs
-            .get(&symbol)
-            .unwrap_or(&self.costs);
+        let costs = self.per_symbol_costs.get(&symbol).unwrap_or(&self.costs);
         let half_spread = half_spread_for(costs, kind, theoretical_price, &bar);
         let post_spread = match side {
             Side::Buy => theoretical_price + half_spread,
@@ -577,7 +573,11 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         magnitude: Real,
         pricing: FillPricing<'_>,
     ) -> Real {
-        let FillPricing { bar: candle, price, kind } = pricing;
+        let FillPricing {
+            bar: candle,
+            price,
+            kind,
+        } = pricing;
         if magnitude <= 0.0 {
             return magnitude;
         }
@@ -596,8 +596,9 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             }
             let half_spread = half_spread_for(costs, kind, price, candle);
             let post_spread = price + half_spread; // net buy
-            let final_price =
-                costs.slippage.adjust(Side::Buy, post_spread, delta, candle, kind);
+            let final_price = costs
+                .slippage
+                .adjust(Side::Buy, post_spread, delta, candle, kind);
             if final_price <= 0.0 {
                 return 0.0;
             }
@@ -917,18 +918,17 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                     // a specific unit intent and is left alone — an infeasible
                     // request is a caller error, not a sizing target.
                     let magnitude = match size {
-                        Size::ValueFraction(_) | Size::FundsFraction(_) => self
-                            .shrink_buy_to_fit(
-                                &symbol,
-                                side,
-                                position,
-                                magnitude,
-                                FillPricing {
-                                    bar: &candle,
-                                    price: candle.open,
-                                    kind: OrderKind::Market,
-                                },
-                            ),
+                        Size::ValueFraction(_) | Size::FundsFraction(_) => self.shrink_buy_to_fit(
+                            &symbol,
+                            side,
+                            position,
+                            magnitude,
+                            FillPricing {
+                                bar: &candle,
+                                price: candle.open,
+                                kind: OrderKind::Market,
+                            },
+                        ),
                         Size::Units(_) | Size::PositionFraction(_) => magnitude,
                     };
                     (side.sign() * magnitude, id)
@@ -1180,11 +1180,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::wallet::SleeveWallet;
     use crate::indicators::{BoolIndicatorExt, IndicatorExt, Sma};
     use crate::signal::Signal;
     use crate::strategy::Strategy;
     use crate::types::Candle;
+    use crate::wallet::SleeveWallet;
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)
@@ -1193,8 +1193,18 @@ mod tests {
     /// Assert an order's fields, ignoring its (wallet-minted) id.
     fn assert_fill(o: &Order<&str>, side: Side, units: Real, price: Real, kind: OrderKind) {
         assert_eq!(o.side, side, "side");
-        assert!((o.units - units).abs() < 1e-9, "units {} != {}", o.units, units);
-        assert!((o.price - price).abs() < 1e-9, "price {} != {}", o.price, price);
+        assert!(
+            (o.units - units).abs() < 1e-9,
+            "units {} != {}",
+            o.units,
+            units
+        );
+        assert!(
+            (o.price - price).abs() < 1e-9,
+            "price {} != {}",
+            o.price,
+            price
+        );
         assert_eq!(o.kind, kind, "kind");
     }
 
@@ -1412,7 +1422,8 @@ mod tests {
         })
         .unwrap();
         w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
-        w.set_stop("X", Reference(95.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(95.0), Size::position_frac(1.0))
+            .unwrap();
         w.set_limit("X", Side::Buy, Size::units(4.0), Reference(94.0))
             .unwrap();
 
@@ -1471,19 +1482,19 @@ mod tests {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_stop(
-        &mut self,
-        _s: &'static str,
-        _t: Reference,
-        _size: Size,
-    ) -> Result<Ack<&'static str>, WalletError> {
+                &mut self,
+                _s: &'static str,
+                _t: Reference,
+                _size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_take_profit(
-        &mut self,
-        _s: &'static str,
-        _t: Reference,
-        _size: Size,
-    ) -> Result<Ack<&'static str>, WalletError> {
+                &mut self,
+                _s: &'static str,
+                _t: Reference,
+                _size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn cancel_protective(&mut self, _s: &&'static str) -> Result<(), WalletError> {
@@ -1622,7 +1633,13 @@ mod tests {
         assert_eq!(w.position(&"X").amount, 3.0);
         assert_eq!(w.funds().0, 1_000.0 - 3.0 * 100.0);
         assert_fill(&fills[0], Side::Buy, 3.0, 100.0, OrderKind::Market);
-        assert_fill(w.orders().last().unwrap(), Side::Buy, 3.0, 100.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Buy,
+            3.0,
+            100.0,
+            OrderKind::Market,
+        );
         // Setting a larger target buys the difference (scale in), again next open.
         w.set_position(Units {
             symbol: "X",
@@ -1649,7 +1666,13 @@ mod tests {
         // Opposite side reverses: +4 -> -4 is a sell of 8.
         w.set("X", Side::Sell, Size::units(4.0)).unwrap();
         w.update("X", bar(50.0));
-        assert_fill(w.orders().last().unwrap(), Side::Sell, 8.0, 50.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Sell,
+            8.0,
+            50.0,
+            OrderKind::Market,
+        );
         assert_eq!(w.position(&"X").amount, -4.0);
     }
 
@@ -1662,7 +1685,13 @@ mod tests {
         w.update("X", bar(110.0)); // mark to 110
         assert!(matches!(w.close("X"), Ok(Ack::Working(_)))); // queued
         w.update("X", bar(110.0)); // fills the close at the open 110
-        assert_fill(w.orders().last().unwrap(), Side::Sell, 10.0, 110.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Sell,
+            10.0,
+            110.0,
+            OrderKind::Market,
+        );
         assert!(w.positions().is_empty());
         assert_eq!(w.funds().0, 1_100.0);
     }
@@ -1674,11 +1703,23 @@ mod tests {
         // 10% of 1000 = 100 / price 25 = 4 units, resolved at the fill (open 25).
         w.set("X", Side::Buy, Size::funds_frac(0.1)).unwrap();
         w.update("X", bar(25.0));
-        assert_fill(w.orders().last().unwrap(), Side::Buy, 4.0, 25.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Buy,
+            4.0,
+            25.0,
+            OrderKind::Market,
+        );
         // Set to 50% of the 4-unit position -> sell 2.
         w.set("X", Side::Buy, Size::position_frac(0.5)).unwrap();
         w.update("X", bar(25.0));
-        assert_fill(w.orders().last().unwrap(), Side::Sell, 2.0, 25.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Sell,
+            2.0,
+            25.0,
+            OrderKind::Market,
+        );
         assert_eq!(w.position(&"X").amount, 2.0);
     }
 
@@ -1694,7 +1735,13 @@ mod tests {
         // Equity is still 1000; flip all-in short -> -10 units (a sell of 20).
         w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
         w.update("X", bar(100.0));
-        assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 100.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Sell,
+            20.0,
+            100.0,
+            OrderKind::Market,
+        );
         assert_eq!(w.position(&"X").amount, -10.0);
     }
 
@@ -1712,7 +1759,13 @@ mod tests {
         // delta = -20. Using close (105) would give ~21.05 units sold — the bug.
         w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
         w.update("X", Candle::new(95.0, 106.0, 94.0, 105.0, 0.0));
-        assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 95.0, OrderKind::Market);
+        assert_fill(
+            w.orders().last().unwrap(),
+            Side::Sell,
+            20.0,
+            95.0,
+            OrderKind::Market,
+        );
         assert_eq!(w.position(&"X").amount, -10.0);
     }
 
@@ -1771,7 +1824,8 @@ mod tests {
 
         // Rest a stop above, then gap through it to a price that makes buying
         // back the short unaffordable.
-        w.set_stop("X", Reference(120.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(120.0), Size::position_frac(1.0))
+            .unwrap();
         let fills = w.update("X", Candle::new(900.0, 950.0, 890.0, 940.0, 0.0));
 
         assert!(fills.is_empty(), "the stop could not be booked");
@@ -1802,16 +1856,20 @@ mod tests {
         // A fill happens (was zero before the fix) and cash never goes negative.
         assert_eq!(fills.len(), 1, "expected one fill, got {}", fills.len());
         assert!(w.position(&"X").amount > 0.0);
-        assert!(
-            w.funds().0 >= -1e-6,
-            "funds went negative: {}",
-            w.funds().0
-        );
+        assert!(w.funds().0 >= -1e-6, "funds went negative: {}", w.funds().0);
         // The resulting notional is just under equity (deducted spread +
         // commission), not equal to it.
         let fill = &fills[0];
-        assert!(fill.units < 10.0, "units {} should be shrunk below 10.0", fill.units);
-        assert!(fill.units > 9.9, "units {} shrunk too aggressively", fill.units);
+        assert!(
+            fill.units < 10.0,
+            "units {} should be shrunk below 10.0",
+            fill.units
+        );
+        assert!(
+            fill.units > 9.9,
+            "units {} shrunk too aggressively",
+            fill.units
+        );
     }
 
     #[test]
@@ -1836,7 +1894,10 @@ mod tests {
         // that can never be priced, so the caller learns synchronously
         // instead of via the rejections log.
         assert_eq!(
-            w.set_position(Units { symbol: "X", amount: 1.0 }),
+            w.set_position(Units {
+                symbol: "X",
+                amount: 1.0
+            }),
             Err(WalletError::UnknownPrice)
         );
         assert_eq!(
@@ -1862,7 +1923,10 @@ mod tests {
             Err(WalletError::InsufficientFunds)
         );
         assert_eq!(
-            w.set_position(Units { symbol: "X", amount: 3.0 }),
+            w.set_position(Units {
+                symbol: "X",
+                amount: 3.0
+            }),
             Err(WalletError::InsufficientFunds)
         );
         // A short sale credits cash, so selling is always feasible.
@@ -1887,7 +1951,10 @@ mod tests {
             Err(WalletError::InvalidPrice)
         );
         assert_eq!(
-            w.set_position(Units { symbol: "X", amount: 1.0 }),
+            w.set_position(Units {
+                symbol: "X",
+                amount: 1.0
+            }),
             Err(WalletError::InvalidPrice)
         );
     }
@@ -1909,7 +1976,8 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0)); // long 1 @ 100
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         // The bar trades down through 90 (low 88) but opens above it.
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert_eq!(fills.len(), 1);
@@ -1923,7 +1991,8 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         // Gaps down opening at 85, already below the stop -> fills at the open.
         let fills = w.update("X", Candle::new(85.0, 86.0, 84.0, 84.0, 0.0));
         assert_fill(&fills[0], Side::Sell, 1.0, 85.0, OrderKind::Stop);
@@ -1937,7 +2006,8 @@ mod tests {
         w.set("X", Side::Sell, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0)); // short 1 @ 100
         // A short take-profit sits below entry; the bar trades down to it.
-        w.set_take_profit("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_take_profit("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 92.0, 0.0));
         assert_fill(&fills[0], Side::Buy, 1.0, 90.0, OrderKind::TakeProfit);
         assert!(w.positions().is_empty());
@@ -1949,8 +2019,10 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
-        w.set_take_profit("X", Reference(110.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
+        w.set_take_profit("X", Reference(110.0), Size::position_frac(1.0))
+            .unwrap();
         // A wide bar crosses both legs; the stop wins, and the fill flattens and
         // drops the whole bracket.
         let fills = w.update("X", Candle::new(100.0, 111.0, 89.0, 105.0, 0.0));
@@ -1968,7 +2040,8 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         // Flatten with a market close; the fill drops the resting stop.
         w.close("X").unwrap();
         w.update("X", bar(100.0));
@@ -1984,7 +2057,8 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         w.cancel_protective(&"X").unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert!(fills.is_empty());
@@ -2006,7 +2080,11 @@ mod tests {
 
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].kind, OrderKind::Stop);
-        assert!((fills[0].units - 4.0).abs() < 1e-9, "units {}", fills[0].units);
+        assert!(
+            (fills[0].units - 4.0).abs() < 1e-9,
+            "units {}",
+            fills[0].units
+        );
         assert!(
             (w.position(&"X").amount - 6.0).abs() < 1e-9,
             "6 units should survive the partial stop, got {}",
@@ -2023,7 +2101,8 @@ mod tests {
         w.set("X", Side::Buy, Size::units(10.0)).unwrap();
         w.update("X", bar(100.0));
 
-        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
 
         assert_eq!(fills.len(), 1);
@@ -2084,12 +2163,8 @@ mod tests {
             let close = || Close::of(Pick::<&'static str>::new());
             Self {
                 symbol,
-                enter: Box::new(
-                    Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
-                ),
-                exit: Box::new(
-                    Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
-                ),
+                enter: Box::new(Sma::new(close(), fast).crosses_above(Sma::new(close(), slow))),
+                exit: Box::new(Sma::new(close(), fast).crosses_below(Sma::new(close(), slow))),
             }
         }
     }
@@ -2128,7 +2203,9 @@ mod tests {
             14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
         ] {
             w.update("X", bar(px));
-            strat.update(crate::types::Snapshot::<&'static str>::of_atom(bar(px).into()));
+            strat.update(crate::types::Snapshot::<&'static str>::of_atom(
+                bar(px).into(),
+            ));
             strat.trade(&mut w);
         }
         // Market orders fill a bar late, so settle any order the last bar queued.
@@ -2213,17 +2290,17 @@ mod tests {
             w.update(sym, bar(10.0));
         }
         for &(sym, _) in &universe {
-            w.set_position(Units { symbol: sym, amount: 1.0 }).unwrap();
+            w.set_position(Units {
+                symbol: sym,
+                amount: 1.0,
+            })
+            .unwrap();
         }
         for &(sym, _) in &universe {
             w.update(sym, bar(10.0));
         }
         for &(sym, expected) in &universe {
-            let fill = w
-                .orders()
-                .iter()
-                .find(|o| o.symbol == sym)
-                .expect("fill");
+            let fill = w.orders().iter().find(|o| o.symbol == sym).expect("fill");
             assert!(
                 (fill.commission - expected).abs() < 1e-9,
                 "{sym}: expected {expected}, got {}",
@@ -2250,8 +2327,16 @@ mod tests {
         );
         w.update("A", bar(10.0));
         w.update("B", bar(20.0));
-        w.set_position(Units { symbol: "A", amount: 1.0 }).unwrap();
-        w.set_position(Units { symbol: "B", amount: 1.0 }).unwrap();
+        w.set_position(Units {
+            symbol: "A",
+            amount: 1.0,
+        })
+        .unwrap();
+        w.set_position(Units {
+            symbol: "B",
+            amount: 1.0,
+        })
+        .unwrap();
         w.update("A", bar(10.0));
         w.update("B", bar(20.0));
         let a = w.orders().iter().find(|o| o.symbol == "A").unwrap();
@@ -2279,18 +2364,38 @@ mod tests {
         // Prime both symbols and queue a buy on each.
         w.update("A", bar(10.0));
         w.update("B", bar(20.0));
-        w.set_position(Units { symbol: "A", amount: 3.0 }).unwrap();
-        w.set_position(Units { symbol: "B", amount: 2.0 }).unwrap();
+        w.set_position(Units {
+            symbol: "A",
+            amount: 3.0,
+        })
+        .unwrap();
+        w.set_position(Units {
+            symbol: "B",
+            amount: 2.0,
+        })
+        .unwrap();
         // Fill both at the next open.
         w.update("A", bar(10.0));
         w.update("B", bar(20.0));
         // A uses the default: $1 commission. B uses the override: $5.
         let a_fill = w.orders().iter().find(|o| o.symbol == "A").unwrap();
         let b_fill = w.orders().iter().find(|o| o.symbol == "B").unwrap();
-        assert!((a_fill.commission - 1.0).abs() < 1e-9, "A: got {}", a_fill.commission);
-        assert!((b_fill.commission - 5.0).abs() < 1e-9, "B: got {}", b_fill.commission);
+        assert!(
+            (a_fill.commission - 1.0).abs() < 1e-9,
+            "A: got {}",
+            a_fill.commission
+        );
+        assert!(
+            (b_fill.commission - 5.0).abs() < 1e-9,
+            "B: got {}",
+            b_fill.commission
+        );
         // Cash out: 100000 − (3·10 + 1) − (2·20 + 5) = 100000 − 31 − 45 = 99924.
-        assert!((w.funds().0 - 99_924.0).abs() < 1e-6, "funds: {}", w.funds().0);
+        assert!(
+            (w.funds().0 - 99_924.0).abs() < 1e-6,
+            "funds: {}",
+            w.funds().0
+        );
     }
 
     #[test]
@@ -2304,7 +2409,10 @@ mod tests {
         assert!(w.adjust_funds(-1_000.0).is_ok());
         assert_eq!(w.funds().0, 500.0);
         // Overdraft: refused, funds unchanged.
-        assert_eq!(w.adjust_funds(-1_000.0), Err(WalletError::InsufficientFunds));
+        assert_eq!(
+            w.adjust_funds(-1_000.0),
+            Err(WalletError::InsufficientFunds)
+        );
         assert_eq!(w.funds().0, 500.0);
     }
 
@@ -2331,7 +2439,11 @@ mod tests {
             fn equity(&self) -> Reference {
                 Reference(0.0)
             }
-            fn update(&mut self, _symbol: &'static str, _candle: Candle) -> Vec<Order<&'static str>> {
+            fn update(
+                &mut self,
+                _symbol: &'static str,
+                _candle: Candle,
+            ) -> Vec<Order<&'static str>> {
                 Vec::new()
             }
             fn set_position(
@@ -2341,19 +2453,19 @@ mod tests {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_stop(
-        &mut self,
-        _symbol: &'static str,
-        _trigger: Reference,
-        _size: Size,
-    ) -> Result<Ack<&'static str>, WalletError> {
+                &mut self,
+                _symbol: &'static str,
+                _trigger: Reference,
+                _size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_take_profit(
-        &mut self,
-        _symbol: &'static str,
-        _trigger: Reference,
-        _size: Size,
-    ) -> Result<Ack<&'static str>, WalletError> {
+                &mut self,
+                _symbol: &'static str,
+                _trigger: Reference,
+                _size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn cancel_protective(&mut self, _symbol: &&'static str) -> Result<(), WalletError> {
@@ -2361,8 +2473,14 @@ mod tests {
             }
         }
         let mut w = NoTransferWallet;
-        assert_eq!(w.adjust_funds(100.0), Err(WalletError::UnsupportedOperation));
-        assert_eq!(w.adjust_funds(-50.0), Err(WalletError::UnsupportedOperation));
+        assert_eq!(
+            w.adjust_funds(100.0),
+            Err(WalletError::UnsupportedOperation)
+        );
+        assert_eq!(
+            w.adjust_funds(-50.0),
+            Err(WalletError::UnsupportedOperation)
+        );
         // The two Tier-B additions also fall through to their trait defaults:
         // no out-of-band fills, and cancel is unsupported for a bare impl.
         assert!(w.poll_fills().is_empty());
@@ -2375,7 +2493,11 @@ mod tests {
         // empty default — the driver draining it must be a no-op.
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", bar(100.0));
-        w.set_position(Units { symbol: "X", amount: 3.0 }).unwrap();
+        w.set_position(Units {
+            symbol: "X",
+            amount: 3.0,
+        })
+        .unwrap();
         w.update("X", bar(100.0));
         assert!(w.poll_fills().is_empty());
     }
@@ -2384,7 +2506,13 @@ mod tests {
     fn cancel_drops_a_queued_market_order() {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", bar(100.0));
-        let id = match w.set_position(Units { symbol: "X", amount: 3.0 }).unwrap() {
+        let id = match w
+            .set_position(Units {
+                symbol: "X",
+                amount: 3.0,
+            })
+            .unwrap()
+        {
             Ack::Working(id) => id,
             Ack::Filled(_) => panic!("market order should queue, not fill"),
         };
@@ -2404,11 +2532,15 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(10.0)).unwrap();
         w.update("X", bar(100.0)); // long 10 @ 100
-        let stop = match w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap() {
+        let stop = match w
+            .set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap()
+        {
             Ack::Working(id) => id,
             Ack::Filled(_) => panic!("resting order returns Working"),
         };
-        w.set_take_profit("X", Reference(120.0), Size::position_frac(1.0)).unwrap();
+        w.set_take_profit("X", Reference(120.0), Size::position_frac(1.0))
+            .unwrap();
         // Cancel only the stop; the take-profit leg survives and still fires.
         assert_eq!(w.cancel(stop), Ok(()));
         let through_stop = w.update("X", Candle::new(95.0, 96.0, 85.0, 88.0, 0.0));
@@ -2416,7 +2548,13 @@ mod tests {
         assert_eq!(w.position(&"X").amount, 10.0);
         let through_tp = w.update("X", Candle::new(115.0, 125.0, 114.0, 121.0, 0.0));
         assert_eq!(through_tp.len(), 1, "take-profit leg should still fire");
-        assert_fill(&through_tp[0], Side::Sell, 10.0, 120.0, OrderKind::TakeProfit);
+        assert_fill(
+            &through_tp[0],
+            Side::Sell,
+            10.0,
+            120.0,
+            OrderKind::TakeProfit,
+        );
     }
 
     // -- retention -------------------------------------------------------

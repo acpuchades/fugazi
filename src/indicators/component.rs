@@ -680,10 +680,7 @@ mod tests {
                 // Force a crossover: a = t, b = 5.0 (constant), so a rises
                 // through b on bar 5 (0-indexed 5). One clean edge event.
                 self.t += 1.0;
-                let out = Pair {
-                    a: self.t,
-                    b: 5.0,
-                };
+                let out = Pair { a: self.t, b: 5.0 };
                 self.last = Some(out);
                 Some(out)
             }
@@ -828,10 +825,7 @@ mod tests {
             fn update(&mut self, _: Real) -> Option<Pair> {
                 self.counter.set(self.counter.get() + 1);
                 self.t += 1.0;
-                let out = Pair {
-                    a: self.t,
-                    b: 5.0,
-                };
+                let out = Pair { a: self.t, b: 5.0 };
                 self.last = Some(out);
                 Some(out)
             }

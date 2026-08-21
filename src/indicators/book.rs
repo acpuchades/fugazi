@@ -73,8 +73,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::indicator::Indicator;
-use crate::wallet::{CASH_EPSILON, POSITION_EPSILON, Side};
 use crate::types::{Atom, Candle, Real};
+use crate::wallet::{CASH_EPSILON, POSITION_EPSILON, Side};
 
 /// Per-leg tracked state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -303,7 +303,11 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     /// Reset every counter back to the freshly-constructed state, keeping
     /// the original `initial_equity` seed.
     pub fn reset(&self) {
-        let seed = self.state.lock().expect("Book lock poisoned").initial_equity;
+        let seed = self
+            .state
+            .lock()
+            .expect("Book lock poisoned")
+            .initial_equity;
         *self.state.lock().expect("Book lock poisoned") = BookState::seed(seed);
     }
 
@@ -466,7 +470,10 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
 
     /// The seed value the book started with.
     pub fn initial_equity(&self) -> Real {
-        self.state.lock().expect("Book lock poisoned").initial_equity
+        self.state
+            .lock()
+            .expect("Book lock poisoned")
+            .initial_equity
     }
 
     /// The marked-to-market equity as of the most recent
@@ -566,7 +573,9 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. [`Some`] only on the close bar.
     pub fn trade_return<In>(&self) -> BookField<Sym, In> {
-        BookField::new(self.clone(), 0, |s| s.active_trade_close.map(|t| t.return_ratio))
+        BookField::new(self.clone(), 0, |s| {
+            s.active_trade_close.map(|t| t.return_ratio)
+        })
     }
 }
 
@@ -666,9 +675,7 @@ mod tests {
         assert_eq!(book.return_per_bar::<Atom>().value(), None);
         book.update([("X", bar(110.0))]);
         assert_eq!(book.equity_value(), 1_100.0);
-        assert!(
-            (book.return_per_bar::<Atom>().value().unwrap() - 0.1).abs() < 1e-12
-        );
+        assert!((book.return_per_bar::<Atom>().value().unwrap() - 0.1).abs() < 1e-12);
         book.update([("X", bar(120.0))]);
         assert_eq!(book.equity_value(), 1_200.0);
         assert_eq!(book.equity_peak_value(), 1_200.0);
@@ -832,5 +839,4 @@ mod tests {
         assert_eq!(book.trade_pnl::<Atom>().value(), None);
         assert_eq!(book.trade_return::<Atom>().value(), None);
     }
-
 }

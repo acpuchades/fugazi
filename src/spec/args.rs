@@ -195,11 +195,7 @@ mod tests {
         // `args` values are arbitrary JSON, so the placeholder can resolve
         // to a number, bool, string, or even a nested object.
         let input = json!({"period": {"arg": "N"}, "trend": {"arg": "T"}});
-        let out = substitute(
-            input,
-            &args(&[("N", json!(20)), ("T", json!(true))]),
-        )
-        .unwrap();
+        let out = substitute(input, &args(&[("N", json!(20)), ("T", json!(true))])).unwrap();
         assert_eq!(out, json!({"period": 20, "trend": true}));
     }
 }

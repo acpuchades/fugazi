@@ -59,15 +59,17 @@ use base64::Engine as _;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use reqwest::Method;
 
-use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
+use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
-use super::venue::{decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query};
+use super::venue::{
+    decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query,
+};
 
 const MAINNET_BASE_URL: &str = "https://api.coinbase.com";
 const API_PREFIX: &str = "/api/v3/brokerage";
@@ -162,10 +164,7 @@ impl CoinbaseWallet {
     /// (`organizations/{org}/apiKeys/{key}`); `private_key_pem` is that key's
     /// EC private key in PEM form (either `EC PRIVATE KEY` / SEC1 or
     /// `PRIVATE KEY` / PKCS#8). Errors if the PEM does not parse as a P-256 key.
-    pub fn mainnet(
-        key_name: impl Into<String>,
-        private_key_pem: &str,
-    ) -> Result<Self, LiveError> {
+    pub fn mainnet(key_name: impl Into<String>, private_key_pem: &str) -> Result<Self, LiveError> {
         Self::with_base_url(MAINNET_BASE_URL, key_name, private_key_pem)
     }
 
@@ -291,7 +290,10 @@ impl CoinbaseWallet {
                     balances.insert(ccy.to_string(), avail);
                 }
             }
-            let has_next = value.get("has_next").and_then(|h| h.as_bool()).unwrap_or(false);
+            let has_next = value
+                .get("has_next")
+                .and_then(|h| h.as_bool())
+                .unwrap_or(false);
             cursor = value
                 .get("cursor")
                 .and_then(|c| c.as_str())
@@ -312,7 +314,10 @@ impl CoinbaseWallet {
 
     /// Current base-asset balance for `symbol` — the trait's spot "position".
     fn base_balance(&self, symbol: &str) -> Real {
-        self.balances.get(Self::base_ccy(symbol)).copied().unwrap_or(0.0)
+        self.balances
+            .get(Self::base_ccy(symbol))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// Mint the next unique local [`OrderId`].
@@ -386,9 +391,20 @@ impl CoinbaseWallet {
                 Some(id) => id,
                 None => self.mint(),
             };
-            let kind = self.order_kind.get(&f.order_id).copied().unwrap_or(OrderKind::Market);
-            let order = Order::new(crate::types::symbol(symbol), f.side, f.size, f.price, kind, local)
-                .with_commission(f.commission);
+            let kind = self
+                .order_kind
+                .get(&f.order_id)
+                .copied()
+                .unwrap_or(OrderKind::Market);
+            let order = Order::new(
+                crate::types::symbol(symbol),
+                f.side,
+                f.size,
+                f.price,
+                kind,
+                local,
+            )
+            .with_commission(f.commission);
             out.push(order);
         }
         Ok(out)
@@ -404,7 +420,13 @@ impl CoinbaseWallet {
     /// A **refused order**: log the detail, buffer a [`Rejection`] for
     /// [`take_rejections`](Wallet::take_rejections), and return
     /// [`WalletError::Venue`].
-    fn refuse(&mut self, symbol: &str, id: OrderId, kind: OrderKind, err: LiveError) -> WalletError {
+    fn refuse(
+        &mut self,
+        symbol: &str,
+        id: OrderId,
+        kind: OrderKind,
+        err: LiveError,
+    ) -> WalletError {
         self.errors.push(err);
         self.rejections.push(Rejection {
             symbol: crate::types::symbol(symbol),
@@ -429,7 +451,11 @@ impl CoinbaseWallet {
     ) -> Result<serde_json::Value, LiveError> {
         let full_path = format!("{API_PREFIX}{path}");
         let jwt = self.build_jwt(method.as_str(), &full_path)?;
-        let url = format!("{}{}", self.base_url.trim_end_matches('/'), with_query(&full_path, query));
+        let url = format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            with_query(&full_path, query)
+        );
         let client = self.client.clone();
         let fut = async move {
             let mut req = client
@@ -439,7 +465,10 @@ impl CoinbaseWallet {
             if let Some(b) = body {
                 req = req.json(&b);
             }
-            let resp = req.send().await.map_err(|e| LiveError::Network(e.to_string()))?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| LiveError::Network(e.to_string()))?;
             read_json(resp).await
         };
         self.rt.block_on(fut)
@@ -468,14 +497,29 @@ impl CoinbaseWallet {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let nonce = self.next_nonce();
-        build_jwt(&self.key_name, &self.host, method, full_path, &nonce, now, &self.signing_key)
+        build_jwt(
+            &self.key_name,
+            &self.host,
+            method,
+            full_path,
+            &nonce,
+            now,
+            &self.signing_key,
+        )
     }
 
     /// Fetch the recent fills for `symbol`.
     fn fetch_fills(&mut self, symbol: &str) -> Result<Vec<Fill>, LiveError> {
-        let query = vec![("product_id", symbol.to_string()), ("limit", "100".to_string())];
+        let query = vec![
+            ("product_id", symbol.to_string()),
+            ("limit", "100".to_string()),
+        ];
         let value = self.signed(Method::GET, "/orders/historical/fills", &query, None)?;
-        let rows = value.get("fills").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+        let rows = value
+            .get("fills")
+            .and_then(|f| f.as_array())
+            .cloned()
+            .unwrap_or_default();
         rows.iter().map(parse_fill).collect()
     }
 
@@ -534,7 +578,9 @@ impl CoinbaseWallet {
                 &symbol,
                 local,
                 kind,
-                LiveError::Decode(format!("protective trigger must be positive, got {trigger}")),
+                LiveError::Decode(format!(
+                    "protective trigger must be positive, got {trigger}"
+                )),
             ));
         }
         let spec = match self.ensure_spec(&symbol) {
@@ -608,7 +654,13 @@ impl CoinbaseWallet {
             Err(e) => return Err(self.refuse(&symbol, local, kind, e)),
         };
         self.map_order(local, &order_id, kind);
-        let leg = RestingOrder { price, base_size, side: Side::Sell, order_id, local };
+        let leg = RestingOrder {
+            price,
+            base_size,
+            side: Side::Sell,
+            order_id,
+            local,
+        };
         let entry = self.protective.entry(symbol).or_default();
         match kind {
             OrderKind::TakeProfit => entry.take_profit = Some(leg),
@@ -723,7 +775,12 @@ impl Wallet<Symbol> for CoinbaseWallet {
             // Below the venue's minimum tradable size: accept but place nothing.
             return Ok(Ack::Working(id));
         }
-        self.place_market(&symbol, side, format_decimals(base_size, spec.base_decimals), id)?;
+        self.place_market(
+            &symbol,
+            side,
+            format_decimals(base_size, spec.base_decimals),
+            id,
+        )?;
         Ok(Ack::Working(id))
     }
 
@@ -838,7 +895,13 @@ impl Wallet<Symbol> for CoinbaseWallet {
         self.map_order(local, &order_id, OrderKind::Limit);
         self.limits.insert(
             symbol,
-            RestingOrder { price, base_size, side: order_side, order_id, local },
+            RestingOrder {
+                price,
+                base_size,
+                side: order_side,
+                order_id,
+                local,
+            },
         );
         Ok(Ack::Working(local))
     }
@@ -962,7 +1025,8 @@ fn build_jwt(
         "uri": format!("{method} {host}{path}"),
     });
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let header_b64 = b64.encode(serde_json::to_vec(&header).map_err(|e| LiveError::Decode(e.to_string()))?);
+    let header_b64 =
+        b64.encode(serde_json::to_vec(&header).map_err(|e| LiveError::Decode(e.to_string()))?);
     let payload_b64 =
         b64.encode(serde_json::to_vec(&payload).map_err(|e| LiveError::Decode(e.to_string()))?);
     let signing_input = format!("{header_b64}.{payload_b64}");
@@ -983,13 +1047,18 @@ fn side_token(side: Side) -> &'static str {
     }
 }
 
-
 /// Read a response body, mapping a non-2xx status into [`LiveError::Http`].
 async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveError> {
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| LiveError::Network(e.to_string()))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| LiveError::Network(e.to_string()))?;
     if !status.is_success() {
-        return Err(LiveError::Http { status: status.as_u16(), body });
+        return Err(LiveError::Http {
+            status: status.as_u16(),
+            body,
+        });
     }
     if body.is_empty() {
         return Ok(serde_json::Value::Null);
@@ -1000,7 +1069,10 @@ async fn read_json(resp: reqwest::Response) -> Result<serde_json::Value, LiveErr
 /// Extract the venue `order_id` from a create-order response, mapping a
 /// `success == false` (or a `2xx` with an `error_response`) into a [`LiveError`].
 fn order_result_id(value: &serde_json::Value) -> Result<String, LiveError> {
-    let success = value.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+    let success = value
+        .get("success")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
     if !success {
         let msg = value
             .get("error_response")
@@ -1008,7 +1080,10 @@ fn order_result_id(value: &serde_json::Value) -> Result<String, LiveError> {
             .and_then(|m| m.as_str())
             .or_else(|| value.get("failure_reason").and_then(|m| m.as_str()))
             .unwrap_or("order rejected");
-        return Err(LiveError::Http { status: 200, body: msg.to_string() });
+        return Err(LiveError::Http {
+            status: 200,
+            body: msg.to_string(),
+        });
     }
     value
         .get("success_response")
@@ -1016,14 +1091,14 @@ fn order_result_id(value: &serde_json::Value) -> Result<String, LiveError> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .or_else(|| value.get("order_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| {
+            value
+                .get("order_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .ok_or_else(|| LiveError::Decode("order response missing order_id".into()))
 }
-
-
-
-
-
 
 /// Pull one product's trading grid out of a `market/products/{id}` response.
 fn parse_product_spec(value: &serde_json::Value) -> Option<ProductSpec> {
@@ -1031,7 +1106,10 @@ fn parse_product_spec(value: &serde_json::Value) -> Option<ProductSpec> {
     let quote_str = value.get("quote_increment").and_then(|v| v.as_str())?;
     Some(ProductSpec {
         base_increment: base_str.parse::<Real>().ok()?,
-        base_min: value.get("base_min_size").and_then(parse_num).unwrap_or(0.0),
+        base_min: value
+            .get("base_min_size")
+            .and_then(parse_num)
+            .unwrap_or(0.0),
         quote_increment: quote_str.parse::<Real>().ok()?,
         base_decimals: decimals_of(base_str),
         price_decimals: decimals_of(quote_str),
@@ -1057,7 +1135,11 @@ fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| LiveError::Decode("fill missing trade_id".into()))?;
-    let order_id = v.get("order_id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let order_id = v
+        .get("order_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     let sequence = v
         .get("sequence_timestamp")
         .and_then(|x| x.as_str())
@@ -1068,10 +1150,28 @@ fn parse_fill(v: &serde_json::Value) -> Result<Fill, LiveError> {
         Some(s) if s.eq_ignore_ascii_case("SELL") => Side::Sell,
         _ => Side::Buy,
     };
-    let size = v.get("size").and_then(parse_num).ok_or_else(|| LiveError::Decode("fill missing size".into()))?;
-    let price = v.get("price").and_then(parse_num).ok_or_else(|| LiveError::Decode("fill missing price".into()))?;
-    let commission = v.get("commission").and_then(parse_num).map(|c| c.max(0.0)).unwrap_or(0.0);
-    Ok(Fill { trade_id, order_id, sequence, side, size, price, commission })
+    let size = v
+        .get("size")
+        .and_then(parse_num)
+        .ok_or_else(|| LiveError::Decode("fill missing size".into()))?;
+    let price = v
+        .get("price")
+        .and_then(parse_num)
+        .ok_or_else(|| LiveError::Decode("fill missing price".into()))?;
+    let commission = v
+        .get("commission")
+        .and_then(parse_num)
+        .map(|c| c.max(0.0))
+        .unwrap_or(0.0);
+    Ok(Fill {
+        trade_id,
+        order_id,
+        sequence,
+        side,
+        size,
+        price,
+        commission,
+    })
 }
 
 #[cfg(test)]
@@ -1117,7 +1217,10 @@ mod tests {
         assert_eq!(payload["sub"], "organizations/o/apiKeys/k");
         assert_eq!(payload["nbf"], 1_700_000_000_u64);
         assert_eq!(payload["exp"], 1_700_000_120_u64);
-        assert_eq!(payload["uri"], "GET api.coinbase.com/api/v3/brokerage/accounts");
+        assert_eq!(
+            payload["uri"],
+            "GET api.coinbase.com/api/v3/brokerage/accounts"
+        );
 
         // The signature verifies against the public key over the signing input.
         let signing_input = format!("{}.{}", parts[0], parts[1]);
@@ -1160,7 +1263,6 @@ mod tests {
     fn client_order_id_is_stable() {
         assert_eq!(client_order_id(OrderId(42)), "fugazi42");
     }
-
 
     #[test]
     fn parses_product_spec() {

@@ -160,7 +160,7 @@ def test_arithmetic_operators():
     out = feed(spread, [ta.Candle(1, 5, 2, 3, 1) for _ in range(2)])
     assert out[-1] == pytest.approx(3.0)
     # numbers are lifted to constants, and dunders work
-    plus = (ta.close() + 10.0)
+    plus = ta.close() + 10.0
     assert feed(plus, closes([5.0]))[0] == pytest.approx(15.0)
 
 
@@ -456,7 +456,9 @@ def test_mixing_domains_raises():
 
 def test_feed_dict_of_columns_is_numpy():
     np = pytest.importorskip("numpy")
-    out = ta.atr(2).feed({"high": [11, 12, 13], "low": [9, 8, 10], "close": [10, 11, 12]})
+    out = ta.atr(2).feed(
+        {"high": [11, 12, 13], "low": [9, 8, 10], "close": [10, 11, 12]}
+    )
     assert isinstance(out, np.ndarray)
     assert np.isnan(out[0]) and out[-1] > 0
 
@@ -624,8 +626,21 @@ def test_feed_signal_enforces_domain():
     assert isinstance(value_sig.feed([1.0, 2.0, 3.0]), np.ndarray)
 
 
-@pytest.mark.parametrize("op", ["add", "sub", "mul", "div", "gt", "lt", "ge", "le",
-                                "crosses_above", "crosses_below"])
+@pytest.mark.parametrize(
+    "op",
+    [
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "gt",
+        "lt",
+        "ge",
+        "le",
+        "crosses_above",
+        "crosses_below",
+    ],
+)
 def test_operators_refuse_to_cross_domains(op):
     candle, value = ta.close(), ta.identity()
     with pytest.raises(TypeError):
@@ -718,9 +733,15 @@ def test_bar_field_combines_with_calendar_leaf():
 
 @pytest.mark.parametrize(
     "leaf,want",
-    [("open", 10.0), ("high", 14.0), ("low", 8.0), ("close", 12.0),
-     ("volume", 100.0), ("typical", (14.0 + 8.0 + 12.0) / 3.0),
-     ("median", (14.0 + 8.0) / 2.0)],
+    [
+        ("open", 10.0),
+        ("high", 14.0),
+        ("low", 8.0),
+        ("close", 12.0),
+        ("volume", 100.0),
+        ("typical", (14.0 + 8.0 + 12.0) / 3.0),
+        ("median", (14.0 + 8.0) / 2.0),
+    ],
 )
 def test_bar_rooted_and_atom_rooted_fields_agree(leaf, want):
     """`ta.close()` and `ta.close(source=...)` are now *different* code paths.
@@ -858,7 +879,9 @@ def test_bars_since_high_reports_the_argmax_offset():
     assert out[2] == pytest.approx(2.0)  # the 5.0 was two bars back
     assert out[3] == pytest.approx(0.0)  # new high now
     assert out[4] == pytest.approx(1.0)
-    assert feed(ta.bars_since_low(ta.close(), 3), closes([1.0, 3.0, 5.0]))[-1] == pytest.approx(2.0)
+    assert feed(ta.bars_since_low(ta.close(), 3), closes([1.0, 3.0, 5.0]))[
+        -1
+    ] == pytest.approx(2.0)
 
 
 def test_correlation_bounds_and_domain_check():
@@ -942,8 +965,12 @@ def test_linreg_fits_a_ramp():
     assert feed(fit.slope(), bars)[2] == pytest.approx(2.0)
     # One handle, one underlying fit — it has already consumed those bars, so
     # each further reading gets its own.
-    assert feed(ta.linreg(ta.close(), 3).shared().intercept(), bars)[2] == pytest.approx(1.0)
-    assert feed(ta.linreg(ta.close(), 3).shared().value(), bars)[2] == pytest.approx(5.0)
+    assert feed(ta.linreg(ta.close(), 3).shared().intercept(), bars)[
+        2
+    ] == pytest.approx(1.0)
+    assert feed(ta.linreg(ta.close(), 3).shared().value(), bars)[2] == pytest.approx(
+        5.0
+    )
     assert feed(ta.linreg(ta.close(), 3).shared().r2(), bars)[2] == pytest.approx(1.0)
     assert ta.linreg(ta.close(), 3).shared().names() == [
         "slope",
@@ -1134,7 +1161,10 @@ def test_run_rejects_a_non_wallet():
     # the stable stem so adding a wallet kind doesn't break this.
     strat = ta.Strategy("X")
     with pytest.raises(TypeError, match="must be a PaperWallet"):
-        strat.run("not a wallet", {"open": [], "high": [], "low": [], "close": [], "volume": []})
+        strat.run(
+            "not a wallet",
+            {"open": [], "high": [], "low": [], "close": [], "volume": []},
+        )
 
 
 def test_wallet_relative_sizing():
@@ -1242,11 +1272,7 @@ def test_strategy_sizing_and_metrics_pipeline():
     prices = [10, 11, 12, 11, 10, 12, 14, 16, 15, 13, 15, 17]
 
     # Half-position sizing scales the value-fraction magnitude.
-    strat = (
-        ta.Strategy("BTC")
-        .long_on(enter, down)
-        .position_sizing(ta.value(0.5))
-    )
+    strat = ta.Strategy("BTC").long_on(enter, down).position_sizing(ta.value(0.5))
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, _ohlcv(prices))
 
@@ -1285,12 +1311,16 @@ def test_ma_crossover_preset_matches_the_manual_build_shape():
     # A preset ma_crossover should trade the same golden/death crosses as the
     # manual builder with the same fast/slow. We assert convergence of the
     # blotters' fill counts on a golden-then-death path.
-    manual = ta.Strategy("BTC").long_on(
-        ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
-        ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
-    ).short_on(
-        ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
-        ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
+    manual = (
+        ta.Strategy("BTC")
+        .long_on(
+            ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
+            ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
+        )
+        .short_on(
+            ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
+            ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
+        )
     )
     preset = ta.ma_crossover("BTC", fast=2, slow=4)
     prices = [14, 13, 12, 11, 12, 14, 16, 18, 15, 12]
@@ -1344,7 +1374,9 @@ def test_trailing_risk_of_strategy_indicators_construct_and_read():
     for ind in inds:
         readings = []
         for p in prices:
-            v = ind.update({"BTC": ta.Candle(open=p, high=p, low=p, close=p, volume=0.0)})
+            v = ind.update(
+                {"BTC": ta.Candle(open=p, high=p, low=p, close=p, volume=0.0)}
+            )
             if v is not None:
                 readings.append(v)
         # Every metric should have produced at least one Some over a
@@ -1378,8 +1410,10 @@ def _msnaps(series):
     n = len(next(iter(series.values())))
     out = []
     for i in range(n):
-        d = {sym: ta.Candle(prices[i], prices[i], prices[i], prices[i], 1000.0)
-             for sym, prices in series.items()}
+        d = {
+            sym: ta.Candle(prices[i], prices[i], prices[i], prices[i], 1000.0)
+            for sym, prices in series.items()
+        }
         out.append(ta.Snapshot(d))
     return out
 
@@ -1391,10 +1425,12 @@ def test_pairs_strategy_runs_and_reports():
     exit_ = ta.close(ta.pick("BTC")).crosses_below(ta.close(ta.pick("ETH")))
     strat = ta.PairsStrategy("BTC", "ETH").on(enter, exit_)
 
-    snaps = _msnaps({
-        "BTC": [10, 11, 9, 8, 10, 13, 15, 14, 11, 9, 8],
-        "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-    })
+    snaps = _msnaps(
+        {
+            "BTC": [10, 11, 9, 8, 10, 13, 15, 14, 11, 9, 8],
+            "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
 
@@ -1417,10 +1453,12 @@ def test_pairs_strategy_trades_both_spread_directions():
         spread.lt(ta.value(-1.0)), spread.gt(ta.value(0.0))
     )
 
-    snaps = _msnaps({
-        "BTC": [10, 12, 13, 10, 8, 7, 8, 11, 13, 12, 9, 7],
-        "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-    })
+    snaps = _msnaps(
+        {
+            "BTC": [10, 12, 13, 10, 8, 7, 8, 11, 13, 12, 9, 7],
+            "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        }
+    )
 
     def min_btc_position(report):
         """Lowest signed BTC holding across the run, replayed from fills."""
@@ -1463,11 +1501,13 @@ def test_multi_asset_strategy_trades_symbols_independently():
     # via per-symbol factories rooted on each symbol with pick(sym).
     def up(sym):
         return ta.sma(ta.close(ta.pick(sym)), 2).crosses_above(
-            ta.sma(ta.close(ta.pick(sym)), 4))
+            ta.sma(ta.close(ta.pick(sym)), 4)
+        )
 
     def down(sym):
         return ta.sma(ta.close(ta.pick(sym)), 2).crosses_below(
-            ta.sma(ta.close(ta.pick(sym)), 4))
+            ta.sma(ta.close(ta.pick(sym)), 4)
+        )
 
     strat = (
         ta.MultiAssetStrategy()
@@ -1475,10 +1515,12 @@ def test_multi_asset_strategy_trades_symbols_independently():
         .short_on(down, up)
         .position_sizing(lambda sym: ta.value(0.5))
     )
-    snaps = _msnaps({
-        "BTC": [14, 13, 12, 11, 10, 11, 13, 15, 17, 15, 12, 9, 7, 9, 12, 15],
-        "ETH": [20, 21, 22, 23, 24, 23, 21, 19, 17, 19, 22, 25, 27, 25, 22, 19],
-    })
+    snaps = _msnaps(
+        {
+            "BTC": [14, 13, 12, 11, 10, 11, 13, 15, 17, 15, 12, 9, 7, 9, 12, 15],
+            "ETH": [20, 21, 22, 23, 24, 23, 21, 19, 17, 19, 22, 25, 27, 25, 22, 19],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
 
@@ -1506,11 +1548,13 @@ def test_basket_strategy_selects_top_and_bottom():
         .top_bottom(1, 1)
     )
     # AAA rising, CCC falling, BBB flat → AAA long, CCC short each bar.
-    snaps = _msnaps({
-        "AAA": [10, 11, 12, 13, 14, 15, 16, 17],
-        "BBB": [10, 10, 10, 10, 10, 10, 10, 10],
-        "CCC": [10, 9, 8, 7, 6, 5, 4, 3],
-    })
+    snaps = _msnaps(
+        {
+            "AAA": [10, 11, 12, 13, 14, 15, 16, 17],
+            "BBB": [10, 10, 10, 10, 10, 10, 10, 10],
+            "CCC": [10, 9, 8, 7, 6, 5, 4, 3],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
 
@@ -1532,11 +1576,13 @@ def test_basket_balance_sides_and_universe_chain():
         .balance_sides()
         .any_of(["AAA", "BBB", "CCC"])
     )
-    snaps = _msnaps({
-        "AAA": [10, 11, 12, 13, 14, 15],
-        "BBB": [10, 10, 10, 10, 10, 10],
-        "CCC": [10, 9, 8, 7, 6, 5],
-    })
+    snaps = _msnaps(
+        {
+            "AAA": [10, 11, 12, 13, 14, 15],
+            "BBB": [10, 10, 10, 10, 10, 10],
+            "CCC": [10, 9, 8, 7, 6, 5],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -1554,12 +1600,14 @@ def test_basket_selection_composes_via_of():
         .sized_by(lambda sym: ta.value(0.2))
         .top_bottom(2, 2, of=ta.threshold(85.0, 15.0))
     )
-    snaps = _msnaps({
-        "AAA": [100, 100, 100, 100],
-        "BBB": [90, 90, 90, 90],
-        "CCC": [80, 80, 80, 80],
-        "DDD": [10, 10, 10, 10],
-    })
+    snaps = _msnaps(
+        {
+            "AAA": [100, 100, 100, 100],
+            "BBB": [90, 90, 90, 90],
+            "CCC": [80, 80, 80, 80],
+            "DDD": [10, 10, 10, 10],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
     traded = {f.order.symbol for f in rep.fills}
@@ -1576,11 +1624,13 @@ def test_basket_selection_install_via_seam_and_everything_leaf():
         .sized_by(lambda sym: ta.value(0.5))
         .selection(ta.top_bottom(1, 1, of=ta.everything()))
     )
-    snaps = _msnaps({
-        "AAA": [10, 11, 12, 13, 14],
-        "BBB": [10, 10, 10, 10, 10],
-        "CCC": [10, 9, 8, 7, 6],
-    })
+    snaps = _msnaps(
+        {
+            "AAA": [10, 11, 12, 13, 14],
+            "BBB": [10, 10, 10, 10, 10],
+            "CCC": [10, 9, 8, 7, 6],
+        }
+    )
     wallet = ta.PaperWallet(10_000.0)
     rep = strat.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
@@ -1627,10 +1677,15 @@ def test_pairs_refuses_an_unrooted_calendar_leaf_but_takes_a_rooted_one():
         .long_spread_on(ta.close(ta.pick("BTC")) > ta.close(ta.pick("ETH")))
         .rebalance_on(ta.day_of_week(ta.pick("BTC")) > 3)
     )
-    rep = strat.run(ta.PaperWallet(10_000.0), _msnaps({
-        "BTC": [10, 11, 12, 11, 10, 9, 10, 12],
-        "ETH": [10, 10, 10, 10, 10, 10, 10, 10],
-    }))
+    rep = strat.run(
+        ta.PaperWallet(10_000.0),
+        _msnaps(
+            {
+                "BTC": [10, 11, 12, 11, 10, 9, 10, 12],
+                "ETH": [10, 10, 10, 10, 10, 10, 10, 10],
+            }
+        ),
+    )
     assert len(rep.equity_curve) == 8
 
 
@@ -1641,13 +1696,16 @@ def test_pairs_still_accepts_a_constant_sizing_multiplier():
     assert isinstance(strat, ta.PairsStrategy)
 
 
-@pytest.mark.parametrize("wire", [
-    lambda arg: ta.BasketStrategy().scored_by(arg),
-    lambda arg: ta.BasketStrategy().sized_by(arg),
-    lambda arg: ta.MultiAssetStrategy().long_on(arg),
-    lambda arg: ta.MultiAssetStrategy().short_on(arg),
-    lambda arg: ta.MultiAssetStrategy().position_sizing(arg),
-])
+@pytest.mark.parametrize(
+    "wire",
+    [
+        lambda arg: ta.BasketStrategy().scored_by(arg),
+        lambda arg: ta.BasketStrategy().sized_by(arg),
+        lambda arg: ta.MultiAssetStrategy().long_on(arg),
+        lambda arg: ta.MultiAssetStrategy().short_on(arg),
+        lambda arg: ta.MultiAssetStrategy().position_sizing(arg),
+    ],
+)
 def test_per_symbol_slots_reject_a_non_callable(wire):
     # Passing the indicator itself, rather than a `sym -> Indicator` factory,
     # is the common slip: each symbol needs its own chain rooted on that
@@ -1886,6 +1944,7 @@ def test_unstable_signal_zeroes_unstable_bars_but_forwards_output():
 # ---------------------------------------------------------------------------
 # Schema / OverlayInfo / Atom / Get indicator
 # ---------------------------------------------------------------------------
+
 
 def _schema(*keys):
     b = ta.SchemaBuilder()
@@ -2485,12 +2544,22 @@ def test_order_constructor_defaults_and_round_trips():
     assert o.signed_units == 2.0
     # Every field a getter reports is a field the constructor accepts back.
     full = ta.Order(
-        symbol="ETH", side="sell", units=1.5, price=20.0,
-        kind="stop", id=7, commission=0.25,
+        symbol="ETH",
+        side="sell",
+        units=1.5,
+        price=20.0,
+        kind="stop",
+        id=7,
+        commission=0.25,
     )
     again = ta.Order(
-        symbol=full.symbol, side=full.side, units=full.units, price=full.price,
-        kind=full.kind, id=full.id, commission=full.commission,
+        symbol=full.symbol,
+        side=full.side,
+        units=full.units,
+        price=full.price,
+        kind=full.kind,
+        id=full.id,
+        commission=full.commission,
     )
     assert repr(again) == repr(full)
     assert again.signed_units == -1.5
@@ -2522,7 +2591,7 @@ def test_set_costs_for_stamps_commission_on_fills():
     w.set_position("BTC", 1.0)
     fills = w.update("BTC", 100.0)
     assert len(fills) == 1
-    assert fills[0].commission == pytest.approx(0.1)   # 1 unit * 100 * 0.1%
+    assert fills[0].commission == pytest.approx(0.1)  # 1 unit * 100 * 0.1%
     # The charge came out of the account, not just the record.
     assert w.funds == pytest.approx(1000.0 - 100.0 - 0.1)
 
@@ -2563,9 +2632,7 @@ def test_every_gates_a_strategy_rebalance():
     """The pulse lifts into a snapshot-rooted rebalance slot on every shape."""
     prices = [100.0 + i for i in range(20)]
     strat = (
-        ta.Strategy("BTC")
-        .long_on(ta.close().above(0.0))
-        .position_sizing(ta.value(0.5))
+        ta.Strategy("BTC").long_on(ta.close().above(0.0)).position_sizing(ta.value(0.5))
     )
     often = strat.rebalance_on(ta.every(1)).run(
         ta.PaperWallet(10_000.0), _ohlcv(prices)
@@ -2679,12 +2746,16 @@ def test_a_solvent_run_reports_no_ruin():
     enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
     down = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
     strat = ta.Strategy("BTC").long_on(enter, down)
-    report = strat.run(ta.PaperWallet(10_000.0), _ohlcv([14, 13, 12, 11, 10, 11, 13, 15]))
+    report = strat.run(
+        ta.PaperWallet(10_000.0), _ohlcv([14, 13, 12, 11, 10, 11, 13, 15])
+    )
     assert report.ruin_bar is None
     # Absent from the document entirely, so `run.ruin_bar` present == ruined.
     assert "ruin_bar" not in ta.evaluate_report(report, bars_per_year=252.0)["run"]
     # A bare curve defaults to solvent without the caller passing anything.
-    assert ta.RunReport(equity_curve=[100.0, 101.0], initial_equity=100.0).ruin_bar is None
+    assert (
+        ta.RunReport(equity_curve=[100.0, 101.0], initial_equity=100.0).ruin_bar is None
+    )
 
 
 def test_trade_and_drawdown_segment_are_frozen_readonly():
@@ -2773,7 +2844,9 @@ def test_snapshot_iterates_its_keys():
     fell into Python's legacy sequence protocol and probed `snap[0]`, which
     `coerce_selector` rejected — so iterating reported a *key type* error for
     something the caller never asked to index."""
-    snap = ta.Snapshot({"BTC": _atom(ms=1, close=100.0), "ETH": _atom(ms=1, close=50.0)})
+    snap = ta.Snapshot(
+        {"BTC": _atom(ms=1, close=100.0), "ETH": _atom(ms=1, close=50.0)}
+    )
     assert list(snap) == snap.keys()
     assert [snap[k].candle.close for k in snap] == [100.0, 50.0]
     assert [a.candle.close for a in snap.values()] == [100.0, 50.0]
@@ -2794,7 +2867,9 @@ def test_schema_iterates_its_column_names():
 
 def test_snapshot_construct_from_mapping():
     # Both a dict of Atom and a dict of Candle work (candle → atom lifted).
-    snap = ta.Snapshot({"BTC": _atom(ms=1, close=100.0), "ETH": ta.Candle(1, 2, 0.5, 50, 1)})
+    snap = ta.Snapshot(
+        {"BTC": _atom(ms=1, close=100.0), "ETH": ta.Candle(1, 2, 0.5, 50, 1)}
+    )
     assert snap["BTC"].candle.close == 100.0
     assert snap["ETH"].candle.close == 50.0
 
@@ -2823,7 +2898,9 @@ def test_pick_projects_named_asset():
 def test_pick_dict_input_works_like_snapshot():
     # A plain dict[str, Atom|Candle] is auto-lifted into a Snapshot on the fly.
     btc_close = ta.close(source=ta.pick("BTC"))
-    out = btc_close.update({"BTC": _atom(ms=1, close=42.0), "ETH": _atom(ms=1, close=0.0)})
+    out = btc_close.update(
+        {"BTC": _atom(ms=1, close=42.0), "ETH": _atom(ms=1, close=0.0)}
+    )
     assert out == pytest.approx(42.0)
 
 
@@ -2897,7 +2974,9 @@ def test_frequency_roundtrip():
 def test_frequency_orders_by_duration_not_variant():
     # 120 minutes > 1 hour — total order is by seconds-per-bar, not variant tag.
     assert ta.Frequency("120m") > ta.Frequency("1h")
-    assert ta.Frequency("1d") > ta.Frequency("24h") or ta.Frequency("1d") == ta.Frequency("24h")
+    assert ta.Frequency("1d") > ta.Frequency("24h") or ta.Frequency(
+        "1d"
+    ) == ta.Frequency("24h")
 
 
 def test_frequency_rejects_bad_tokens():
@@ -3024,15 +3103,21 @@ def _overlay_schema():
 
 
 def _overlay_atom(schema, px, val=None, flag=None, regime=None):
-    return ta.Atom(ta.Candle(px, px, px, px, 1.0), ta.OverlayInfo(schema, [val, flag, regime]))
+    return ta.Atom(
+        ta.Candle(px, px, px, px, 1.0), ta.OverlayInfo(schema, [val, flag, regime])
+    )
 
 
 def _two_symbol_snaps(schema, n=4):
     return [
-        ta.Snapshot({
-            "T": _overlay_atom(schema, 100 + i, val=0.0, flag=False, regime="flat"),
-            "M": _overlay_atom(schema, 50 + i, val=1.5 + i, flag=True, regime="bull"),
-        })
+        ta.Snapshot(
+            {
+                "T": _overlay_atom(schema, 100 + i, val=0.0, flag=False, regime="flat"),
+                "M": _overlay_atom(
+                    schema, 50 + i, val=1.5 + i, flag=True, regime="bull"
+                ),
+            }
+        )
         for i in range(n)
     ]
 
@@ -3153,7 +3238,9 @@ def test_binance_vision_futures_rejects_sub_hourly():
     # no such constraint: it is klines only, and Binance publishes those at
     # every cadence.
     with pytest.raises(ValueError, match="unsupported interval"):
-        ta.BinanceVision("futures").fetch(symbol="BTCUSDT", freq="15m", since="2024-01-01")
+        ta.BinanceVision("futures").fetch(
+            symbol="BTCUSDT", freq="15m", since="2024-01-01"
+        )
 
 
 def test_binance_vision_market_must_be_spot_or_futures():
@@ -3429,21 +3516,34 @@ def _pickle_cases():
     import fugazi.metrics as mm
 
     order = ta.Order(
-        symbol="BTC", side="buy", units=2.0, price=100.0,
-        kind="limit", id=7, commission=0.5,
+        symbol="BTC",
+        side="buy",
+        units=2.0,
+        price=100.0,
+        kind="limit",
+        id=7,
+        commission=0.5,
     )
     fill = ta.Fill(bar=3, order=order)
-    trades = mm.reconstruct_trades([
-        ta.Fill(bar=0, order=ta.Order(symbol="B", side="buy", units=1.0, price=10.0)),
-        ta.Fill(bar=1, order=ta.Order(symbol="B", side="sell", units=1.0, price=12.0)),
-    ])
+    trades = mm.reconstruct_trades(
+        [
+            ta.Fill(
+                bar=0, order=ta.Order(symbol="B", side="buy", units=1.0, price=10.0)
+            ),
+            ta.Fill(
+                bar=1, order=ta.Order(symbol="B", side="sell", units=1.0, price=12.0)
+            ),
+        ]
+    )
     b = ta.SchemaBuilder()
     b.add_real("funding")
     b.add_bool("halted")
     b.add_str("regime")
     schema = b.finish()
     overlays = ta.OverlayInfo(schema, [0.01, True, "bull"])
-    atom = ta.Atom(candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0), overlays=overlays, time=1)
+    atom = ta.Atom(
+        candle=ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0), overlays=overlays, time=1
+    )
     snapshot = ta.Snapshot()
     snapshot.push("BTC", atom)
     # Two entries under one symbol at different cadences: the case a `dict`
@@ -3610,7 +3710,12 @@ def test_unpickling_helpers_stay_exported():
     """They must be on the package, not merely on the extension module: a
     `__reduce__` resolves `fugazi._rebuild_*`, and maturin's shim populates the
     package with `from .fugazi import *`, which honours `__all__`."""
-    for name in ("_rebuild_schema", "_rebuild_size", "_rebuild_order", "_rebuild_run_report"):
+    for name in (
+        "_rebuild_schema",
+        "_rebuild_size",
+        "_rebuild_order",
+        "_rebuild_run_report",
+    ):
         assert name in ta.__all__, f"{name} missing from __all__ — pickling will break"
         assert hasattr(ta, name)
 

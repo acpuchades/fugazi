@@ -101,7 +101,11 @@ fn runs_windowed_metrics() {
         header.starts_with("window_start,window_end,run.bars,"),
         "unexpected metrics.csv header: {header}"
     );
-    for section in ["returns.total_pct", "risk_adjusted.sharpe", "drawdown.max_pct"] {
+    for section in [
+        "returns.total_pct",
+        "risk_adjusted.sharpe",
+        "drawdown.max_pct",
+    ] {
         assert!(
             header.contains(section),
             "metrics.csv header missing `{section}`: {header}"

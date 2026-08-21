@@ -148,7 +148,11 @@ fn the_invocation_each_example_documents_still_works() {
             // which happens before any file is opened. So every documented
             // invocation is held to that, and the ones whose data actually
             // exists are additionally required to succeed.
-            for bad in ["unexpected argument", "a value is required", "invalid value"] {
+            for bad in [
+                "unexpected argument",
+                "a value is required",
+                "invalid value",
+            ] {
                 assert!(
                     !outcome.stderr.contains(bad),
                     "{name}'s documented invocation is not valid CLI:\n  fugazi {}\n{}",
@@ -158,7 +162,9 @@ fn the_invocation_each_example_documents_still_works() {
             }
             let runnable = argv.iter().all(|a| {
                 a.strip_prefix('@').is_none_or(|f| {
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f).exists()
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join(f)
+                        .exists()
                 })
             });
             if runnable {
@@ -173,7 +179,10 @@ fn the_invocation_each_example_documents_still_works() {
         }
     }
 
-    assert!(checked >= 2, "expected to find documented `fugazi run` invocations, found {checked}");
+    assert!(
+        checked >= 2,
+        "expected to find documented `fugazi run` invocations, found {checked}"
+    );
 }
 
 /// Every `examples/*.yml` is covered by one of the tests above.
@@ -201,7 +210,10 @@ fn no_example_yaml_is_left_unchecked() {
         .collect();
     found.sort();
 
-    let uncovered: Vec<&String> = found.iter().filter(|n| !covered.contains(&n.as_str())).collect();
+    let uncovered: Vec<&String> = found
+        .iter()
+        .filter(|n| !covered.contains(&n.as_str()))
+        .collect();
     assert!(
         uncovered.is_empty(),
         "these examples/ YAMLs have no check above: {uncovered:?}",

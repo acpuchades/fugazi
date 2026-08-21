@@ -41,7 +41,10 @@ enum Token {
     /// A literal character (already lowercased).
     Char(char),
     /// `[…]` — one character from (or, when negated, outside) the set.
-    Class { negated: bool, items: Vec<ClassItem> },
+    Class {
+        negated: bool,
+        items: Vec<ClassItem>,
+    },
 }
 
 /// One member of a `[…]` class: a single character or an inclusive range.

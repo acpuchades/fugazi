@@ -60,10 +60,7 @@ pub fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error
 }
 
 /// Build the `GrammarTag { .. }` expression for one variant.
-fn variant_tag(
-    variant: &Variant,
-    group: &str,
-) -> Result<proc_macro2::TokenStream, syn::Error> {
+fn variant_tag(variant: &Variant, group: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     let tag_name = serde_name(variant);
     let doc = doc_string(&variant.attrs);
     let VariantGrammar {
@@ -258,16 +255,14 @@ fn alt_form(
 }
 
 /// Prose for the synthesised `{ source: … }` spelling of a `newtype` wrapper.
-const SOURCE_MAP_DOC: &str =
-    "The keyed spelling: the same inner expression written under a lone \
+const SOURCE_MAP_DOC: &str = "The keyed spelling: the same inner expression written under a lone \
      `source:` key. Equivalent to the bare form, and the one to reach for when \
      YAML forbids the bare one — a tag cannot carry another tag directly, so an \
      inner that is itself a `!tag` has to be keyed (or spelled as a single-key \
      map).";
 
 /// Prose for the synthesised bare spelling of a `map { source }` wrapper.
-const BARE_INNER_DOC: &str =
-    "The bare spelling: the inner expression written directly as the tag's \
+const BARE_INNER_DOC: &str = "The bare spelling: the inner expression written directly as the tag's \
      payload, with no `source:` key. Equivalent to the keyed form. Reachable in \
      YAML only when the inner needs no tag of its own (a bare word like \
      `close`), since YAML forbids two tags on one node — the JSON bridge form \
@@ -285,7 +280,10 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
     let ty_str = type_string(&field.ty);
     let is_option = ty_str.starts_with("Option");
     let grammar_ty = grammar_type(&ty_str);
-    let is_scalar = matches!(grammar_ty, "uint" | "positive_uint" | "number" | "str" | "bool");
+    let is_scalar = matches!(
+        grammar_ty,
+        "uint" | "positive_uint" | "number" | "str" | "bool"
+    );
 
     let default_kind = serde_default(&field.attrs)?;
     let required = !is_option && matches!(default_kind, SerdeDefault::None);
@@ -612,9 +610,17 @@ fn doc_string(attrs: &[Attribute]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let joined = lines.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let joined = strip_doc_links(&joined);
-    if joined.is_empty() { None } else { Some(joined) }
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 /// Strip rustdoc intra-doc / markdown links from prose so the descriptor carries

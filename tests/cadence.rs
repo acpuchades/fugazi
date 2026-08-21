@@ -115,7 +115,10 @@ fn a_symbol_carrying_two_cadences_stops_the_run() {
         out.stderr
     );
     // Refused before anything was written.
-    assert!(!out.wrote("metrics.yml"), "the run produced artefacts anyway");
+    assert!(
+        !out.wrote("metrics.yml"),
+        "the run produced artefacts anyway"
+    );
 }
 
 /// `-f SYM:CODE` is the disambiguator, and it really selects: the run's bar
@@ -156,8 +159,16 @@ fn every_ambiguous_symbol_is_named_at_once() {
         .output_dir("cadence_two_bad")
         .fails();
 
-    assert!(out.stderr.contains("`BTC` carries 2 cadences"), "{}", out.stderr);
-    assert!(out.stderr.contains("`ETH` carries 2 cadences"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("`BTC` carries 2 cadences"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("`ETH` carries 2 cadences"),
+        "{}",
+        out.stderr
+    );
 }
 
 /// `-f` naming a cadence the input does not carry is a typo, not a request to
@@ -190,7 +201,10 @@ fn a_frequency_the_input_lacks_is_rejected() {
 fn a_frequency_contradicting_the_declared_one_is_rejected() {
     let out = Cmd::new("run")
         .arg(&single_strategy("BTC"))
-        .series(&series_of("cadence_contradict.csv", &daily_series("BTC", 12)))
+        .series(&series_of(
+            "cadence_contradict.csv",
+            &daily_series("BTC", 12),
+        ))
         .args(&["-f", "BTC:1h"])
         .output_dir("cadence_contradict")
         .fails();
@@ -257,9 +271,7 @@ fn untagged_rows_beside_two_cadences_are_refused_and_the_remedy_works() {
 /// annualizable by one factor. It warns and continues.
 #[test]
 fn a_mixed_cadence_universe_warns_and_still_runs() {
-    let body = daily_series("BTC", 12)
-        + &daily_series("SOL", 12)
-        + &hourly_series("ETH", "1h", 24);
+    let body = daily_series("BTC", 12) + &daily_series("SOL", 12) + &hourly_series("ETH", "1h", 24);
     let out = Cmd::new("run")
         .arg(&basket_strategy())
         .series(&series_of("cadence_mixed.csv", &body))
@@ -287,7 +299,10 @@ fn a_mislabelled_series_warns() {
     let out = Cmd::new("run")
         .arg(&single_strategy("BTC"))
         // Stamped every hour, labelled `1d`.
-        .series(&series_of("cadence_lying.csv", &hourly_series("BTC", "1d", 40)))
+        .series(&series_of(
+            "cadence_lying.csv",
+            &hourly_series("BTC", "1d", 40),
+        ))
         .output_dir("cadence_lying")
         .ok();
 
@@ -315,7 +330,11 @@ fn quiet_does_not_suppress_a_cadence_warning() {
         .output_dir("cadence_quiet")
         .ok();
 
-    assert!(out.stdout.trim().is_empty(), "--quiet still printed:\n{}", out.stdout);
+    assert!(
+        out.stdout.trim().is_empty(),
+        "--quiet still printed:\n{}",
+        out.stdout
+    );
     assert!(
         out.stderr.contains("runs at 2 different cadences"),
         "--quiet swallowed the warning:\n{}",
@@ -332,7 +351,10 @@ fn quiet_does_not_suppress_a_cadence_warning() {
 fn the_freq_column_drives_annualization() {
     let out = Cmd::new("run")
         .arg(&single_strategy("BTC"))
-        .series(&series_of("cadence_annual.csv", &hourly_series("BTC", "1h", 40)))
+        .series(&series_of(
+            "cadence_annual.csv",
+            &hourly_series("BTC", "1h", 40),
+        ))
         .args(&["--crypto"])
         .output_dir("cadence_annual")
         .ok();
@@ -406,7 +428,10 @@ fn optimize_refuses_an_ambiguous_frame_before_the_sweep() {
         .arg(&strategy)
         .series(&series_of("cadence_opt.csv", &body))
         .args(&["--grid", "FAST=[2,3]"])
-        .args(&["-o", unique_path("cadence_opt.csv").to_str().expect("utf-8")])
+        .args(&[
+            "-o",
+            unique_path("cadence_opt.csv").to_str().expect("utf-8"),
+        ])
         .fails();
 
     assert!(
@@ -436,7 +461,11 @@ fn optimize_accepts_a_disambiguated_frame() {
         .args(&["-o", results.to_str().expect("utf-8")])
         .ok();
     let written = std::fs::read_to_string(&results).expect("optimize wrote its results");
-    assert_eq!(written.lines().count(), 3, "header plus one row per grid point");
+    assert_eq!(
+        written.lines().count(),
+        3,
+        "header plus one row per grid point"
+    );
 }
 
 // ------------------------------------------------------------- the quiet path

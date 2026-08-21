@@ -36,12 +36,8 @@ impl GoldenCross {
         let close = || Close::of(Pick::<&'static str>::new());
         Self {
             symbol,
-            enter: Box::new(
-                Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
-            ),
-            exit: Box::new(
-                Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
-            ),
+            enter: Box::new(Sma::new(close(), fast).crosses_above(Sma::new(close(), slow))),
+            exit: Box::new(Sma::new(close(), fast).crosses_below(Sma::new(close(), slow))),
         }
     }
 }

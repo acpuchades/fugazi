@@ -470,11 +470,7 @@ impl Atom {
 
     /// An atom carrying a candle, a bar-open [`Timestamp`], and bound overlay
     /// values.
-    pub fn with_overlays_and_time(
-        candle: Candle,
-        overlays: OverlayInfo,
-        time: Timestamp,
-    ) -> Self {
+    pub fn with_overlays_and_time(candle: Candle, overlays: OverlayInfo, time: Timestamp) -> Self {
         Self {
             candle: Some(candle),
             time: Some(time),

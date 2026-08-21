@@ -34,16 +34,14 @@ use std::collections::HashMap;
 use crate::hash::SymMap;
 use std::hash::Hash;
 
+use super::{Chain, LevelFactory};
 use crate::indicators::{Book, Every, Position, Value};
 use crate::prelude::*;
 use crate::types::Snapshot;
-use super::{Chain, LevelFactory};
-
 
 /// A per-symbol factory: builds a fresh [`Chain`] for the given symbol. Called
 /// exactly once per symbol the first time it appears in a snapshot.
 type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
-
 
 // The `Selection` algebra and the `Universe` trait moved to sibling
 // modules — they are independent of this shape (multi-asset uses the
@@ -54,8 +52,6 @@ pub use super::selection::{
     threshold, top_bottom,
 };
 pub use super::universe::{AllOf, AnyOf, Floating, Universe};
-
-
 
 /// A cross-sectional, ranking basket strategy over a floating universe.
 ///
@@ -667,7 +663,9 @@ where
             .as_object()
             .ok_or_else(|| format!("basket: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("book") {
-            self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
+            self.book
+                .restore_state(v)
+                .map_err(|e| format!("book > {e}"))?;
         }
         if let Some(v) = obj.get("rebalance") {
             self.rebalance
@@ -933,8 +931,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                     let scaled = size * long_scale;
                     let is_long = position.map(|p| p.is_long()).unwrap_or(false);
                     if !is_long {
-                        let _ =
-                            wallet.set(sym.clone(), Side::Buy, Size::value_frac(scaled));
+                        let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(scaled));
                         let _ = wallet.cancel_protective(sym);
                     }
                     // Re-submit long-side resting orders every fire —
@@ -942,10 +939,18 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                     // latest-wins on `PaperWallet`) so trailing levels
                     // that move with the bar update naturally.
                     if let Some(level) = self.long_stops.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
+                        let _ = wallet.set_stop(
+                            sym.clone(),
+                            Reference(level),
+                            Size::position_frac(1.0),
+                        );
                     }
                     if let Some(level) = self.long_targets.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
+                        let _ = wallet.set_take_profit(
+                            sym.clone(),
+                            Reference(level),
+                            Size::position_frac(1.0),
+                        );
                     }
                 }
                 Some(Side::Sell) => {
@@ -955,15 +960,22 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                     let scaled = size * short_scale;
                     let is_short = position.map(|p| p.is_short()).unwrap_or(false);
                     if !is_short {
-                        let _ =
-                            wallet.set(sym.clone(), Side::Sell, Size::value_frac(scaled));
+                        let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(scaled));
                         let _ = wallet.cancel_protective(sym);
                     }
                     if let Some(level) = self.short_stops.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
+                        let _ = wallet.set_stop(
+                            sym.clone(),
+                            Reference(level),
+                            Size::position_frac(1.0),
+                        );
                     }
                     if let Some(level) = self.short_targets.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
+                        let _ = wallet.set_take_profit(
+                            sym.clone(),
+                            Reference(level),
+                            Size::position_frac(1.0),
+                        );
                     }
                 }
                 None => {
@@ -1013,8 +1025,8 @@ mod tests {
     use super::*;
     use crate::indicators::sizing::equal_weight;
     use crate::indicators::{Close, Pick};
-    use crate::wallet::PaperWallet;
     use crate::types::{Atom, Selector};
+    use crate::wallet::PaperWallet;
 
     /// Build a snapshot from per-symbol closes. Insertion order is the
     /// caller's argument order.
@@ -1035,13 +1047,10 @@ mod tests {
 
     #[test]
     fn lazy_instantiation_on_first_sight() {
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         // Before any bar: no symbols known.
         assert!(strat.position(&"A").is_none());
         // First bar with A, B → chains built lazily.
@@ -1059,13 +1068,10 @@ mod tests {
         // close, so the highest-priced symbol goes long and the lowest
         // goes short. Sizing: equal-weight over 2 legs (50% each = 100%
         // gross).
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
 
         // Bar 1: prime the wallet + strategy.
@@ -1108,13 +1114,10 @@ mod tests {
         // Same setup as above, but on bar 3 the scores flip: A now scores
         // lowest, C highest. The basket should close A, open C long, and
         // reverse the short from C into A.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
 
         // Helper: mark, deliver fills, update, trade. `close_by_symbol` is a
@@ -1139,16 +1142,38 @@ mod tests {
         // wallet's cash — a bigger move would leave the short leg's mark
         // to market > equity, and the queued reversal would fail with
         // `InsufficientFunds` (silently, per the strategy's `let _`).
-        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 90.0), ("C", 80.0)]);
-        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 90.0), ("C", 80.0)]);
-        assert!(wallet.position(&"A").amount > 0.0, "A long after first fill");
-        assert!(wallet.position(&"C").amount < 0.0, "C short after first fill");
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 100.0), ("B", 90.0), ("C", 80.0)],
+        );
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 100.0), ("B", 90.0), ("C", 80.0)],
+        );
+        assert!(
+            wallet.position(&"A").amount > 0.0,
+            "A long after first fill"
+        );
+        assert!(
+            wallet.position(&"C").amount < 0.0,
+            "C short after first fill"
+        );
 
         // Bar 3: flip scores — A drops to 80, C climbs to 100. New pick:
         // C long, A short. Queues open on this bar.
-        tick(&mut strat, &mut wallet, &[("A", 80.0), ("B", 90.0), ("C", 100.0)]);
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 80.0), ("B", 90.0), ("C", 100.0)],
+        );
         // Bar 4: queued rebalance fills at the open.
-        tick(&mut strat, &mut wallet, &[("A", 80.0), ("B", 90.0), ("C", 100.0)]);
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 80.0), ("B", 90.0), ("C", 100.0)],
+        );
         assert!(wallet.position(&"C").amount > 0.0, "C long after flip");
         assert!(wallet.position(&"A").amount < 0.0, "A short after flip");
     }
@@ -1157,16 +1182,12 @@ mod tests {
     fn no_trade_while_score_reads_none() {
         // Use an Sma-5 as the scoring source. For the first 4 bars, every
         // symbol's score is None — the basket must select nothing.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    crate::indicators::Sma::new(
-                        Close::of(Pick::matching(Selector::by_symbol(*sym))),
-                        5,
-                    )
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| {
+                crate::indicators::Sma::new(Close::of(Pick::matching(Selector::by_symbol(*sym))), 5)
+            })
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
 
         for _ in 0..4 {
@@ -1183,7 +1204,10 @@ mod tests {
         }
         // 4 bars fed; SMA-5 hasn't warmed, so no queued entry has resolved,
         // and none should even have been queued.
-        assert!(wallet.orders().is_empty(), "expected zero fills during warm-up");
+        assert!(
+            wallet.orders().is_empty(),
+            "expected zero fills during warm-up"
+        );
     }
 
     #[test]
@@ -1191,13 +1215,10 @@ mod tests {
         // Establish a top-1/bottom-1 selection on A and B; then B stops
         // appearing. B's score chain returns None on its own symbol via
         // Pick, so B rolls off the ranking and the strategy closes it.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
                     wallet: &mut PaperWallet<&'static str>,
@@ -1246,13 +1267,10 @@ mod tests {
         // 2-leg basket, top-1 long + bottom-1 short. After the entry fills,
         // move both legs to book a small P&L and confirm Book equity
         // reflects it.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let book = strat.book();
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
@@ -1291,12 +1309,9 @@ mod tests {
 
     #[test]
     fn reset_clears_everything() {
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2));
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2));
         strat.update(snap(&[("A", 100.0), ("B", 50.0)]));
         assert!(strat.position(&"A").is_some());
         strat.reset();
@@ -1310,16 +1325,15 @@ mod tests {
     #[test]
     fn roc_scored_basket_compiles() {
         use crate::indicators::Roc;
-        let _strat: BasketStrategy<String> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &String| {
-                    Roc::new(
-                        Close::of(Pick::matching(Selector::by_symbol(sym.clone()))),
-                        5,
-                    )
-                })
-                .sized_by(|_sym: &String| equal_weight::<String>(4))
-                .top_bottom(2, 2);
+        let _strat: BasketStrategy<String> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &String| {
+                Roc::new(
+                    Close::of(Pick::matching(Selector::by_symbol(sym.clone()))),
+                    5,
+                )
+            })
+            .sized_by(|_sym: &String| equal_weight::<String>(4))
+            .top_bottom(2, 2);
     }
     // ---------------- Rebalance gate ------------------------------------
 
@@ -1328,13 +1342,10 @@ mod tests {
         // No `.rebalance_on(...)` set — default `Every::new(1)` gate
         // rebalances on every bar (matches the pre-`rebalance_on`
         // behavior). A top-1 long / bottom-1 short basket enters on bar 2.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
                     wallet: &mut PaperWallet<&'static str>,
@@ -1363,14 +1374,11 @@ mod tests {
         // enters positions. Between rebalance bars the basket should NOT
         // issue new orders even if the ranking changed.
         use crate::indicators::Every;
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .rebalance_on(Every::<Snapshot<&'static str>>::new(3));
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .rebalance_on(Every::<Snapshot<&'static str>>::new(3));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
                     wallet: &mut PaperWallet<&'static str>,
@@ -1395,8 +1403,14 @@ mod tests {
         tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
         // Bar 4: fills at open.
         tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
-        assert!(wallet.position(&"A").amount > 0.0, "A long after first rebalance");
-        assert!(wallet.position(&"B").amount < 0.0, "B short after first rebalance");
+        assert!(
+            wallet.position(&"A").amount > 0.0,
+            "A long after first rebalance"
+        );
+        assert!(
+            wallet.position(&"B").amount < 0.0,
+            "B short after first rebalance"
+        );
         let n_after_first = wallet.orders().len();
         // Bar 5: ranking flip — A drops to 40, B rises to 100. Under
         // `rebalance_on: !every 3`, the basket must NOT re-rank on this
@@ -1407,8 +1421,14 @@ mod tests {
             n_after_first,
             "bar 5 is off-cycle: no new orders"
         );
-        assert!(wallet.position(&"A").amount > 0.0, "A stays long between rebalances");
-        assert!(wallet.position(&"B").amount < 0.0, "B stays short between rebalances");
+        assert!(
+            wallet.position(&"A").amount > 0.0,
+            "A stays long between rebalances"
+        );
+        assert!(
+            wallet.position(&"B").amount < 0.0,
+            "B stays short between rebalances"
+        );
     }
 
     #[test]
@@ -1416,14 +1436,11 @@ mod tests {
         // With `rebalance_on(ValueBool::new(false))`, the basket never runs
         // selection. No orders at all.
         use crate::indicators::ValueBool;
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .top_bottom(1, 1)
-                .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 1)
+            .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         for _ in 0..5 {
             let s = snap(&[("A", 100.0), ("B", 50.0)]);
@@ -1437,7 +1454,10 @@ mod tests {
             strat.update(s);
             strat.trade(&mut wallet);
         }
-        assert!(wallet.orders().is_empty(), "never-rebalance basket must not trade");
+        assert!(
+            wallet.orders().is_empty(),
+            "never-rebalance basket must not trade"
+        );
     }
 
     // ---------------- Side balancing ------------------------------------
@@ -1479,14 +1499,21 @@ mod tests {
         let mut strat = priced_basket(0.5).top_bottom(2, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         // A = 300 (top), B = 200 (mid, long), C = 100 (bottom, short).
-        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
-        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 300.0), ("B", 200.0), ("C", 100.0)],
+        );
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 300.0), ("B", 200.0), ("C", 100.0)],
+        );
 
         // Per-symbol notionals: |units × price|. Longs summed vs shorts summed
         // should be equal (balanced) and each side ≈ 0.5 × equity ≈ 5000.
-        let notional = |sym: &'static str, price: Real| -> Real {
-            wallet.position(&sym).amount.abs() * price
-        };
+        let notional =
+            |sym: &'static str, price: Real| -> Real { wallet.position(&sym).amount.abs() * price };
         let long_gross = notional("A", 300.0) + notional("B", 200.0);
         let short_gross = notional("C", 100.0);
         // Same tolerance we use elsewhere for equity math with rounded
@@ -1510,12 +1537,19 @@ mod tests {
         // twice the short side, and the book carries that net exposure.
         let mut strat = priced_basket(0.5).top_bottom(2, 1).balance_sides(false);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
-        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
-        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 300.0), ("B", 200.0), ("C", 100.0)],
+        );
+        tick(
+            &mut strat,
+            &mut wallet,
+            &[("A", 300.0), ("B", 200.0), ("C", 100.0)],
+        );
 
-        let notional = |sym: &'static str, price: Real| -> Real {
-            wallet.position(&sym).amount.abs() * price
-        };
+        let notional =
+            |sym: &'static str, price: Real| -> Real { wallet.position(&sym).amount.abs() * price };
         let long_gross = notional("A", 300.0) + notional("B", 200.0);
         let short_gross = notional("C", 100.0);
         assert!(
@@ -1536,7 +1570,11 @@ mod tests {
         let mut strat = priced_basket(0.5).top_bottom(2, 0).balance_sides(true);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         for _ in 0..3 {
-            tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+            tick(
+                &mut strat,
+                &mut wallet,
+                &[("A", 300.0), ("B", 200.0), ("C", 100.0)],
+            );
         }
         assert!(
             !wallet.orders().is_empty(),
@@ -1561,13 +1599,18 @@ mod tests {
         // whose `None` arm closes de-selected symbols, so the basket held a
         // stale one-sided book — precisely the net exposure the flag exists
         // to prevent.
-        let mut strat = priced_basket(0.5).threshold(250.0, 150.0).balance_sides(true);
+        let mut strat = priced_basket(0.5)
+            .threshold(250.0, 150.0)
+            .balance_sides(true);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
 
         // Two-sided: A = 300 ≥ 250 → long, C = 100 ≤ 150 → short.
         tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 100.0)]);
         tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 100.0)]);
-        assert!(wallet.position(&"C").amount < 0.0, "C should be short by now");
+        assert!(
+            wallet.position(&"C").amount < 0.0,
+            "C should be short by now"
+        );
 
         // C reprices into the dead band (150 < 200 < 250) → selection is
         // long-only, and C is no longer selected at all.

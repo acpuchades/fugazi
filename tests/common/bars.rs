@@ -41,21 +41,14 @@ pub fn banded(px: Real) -> Candle {
 /// A price-less atom: an overlay series carries values but no candle, so
 /// `backtest::run` skips it for wallet pricing while the strategy still sees it.
 pub fn overlay_only_atom() -> Atom {
-    Atom::overlay_only(
-        OverlayInfo::new(Schema::empty(), Vec::new()),
-        Timestamp(0),
-    )
+    Atom::overlay_only(OverlayInfo::new(Schema::empty(), Vec::new()), Timestamp(0))
 }
 
 /// One untimed single-symbol snapshot per close, built from `shape`.
 ///
 /// `shape` is the per-bar candle builder — pass [`flat`] when fill prices must
 /// be readable by eye, [`banded`] when the bar needs a real range.
-pub fn series(
-    symbol: &str,
-    closes: &[Real],
-    shape: fn(Real) -> Candle,
-) -> Vec<Snapshot<Symbol>> {
+pub fn series(symbol: &str, closes: &[Real], shape: fn(Real) -> Candle) -> Vec<Snapshot<Symbol>> {
     // Interned once for the whole series; each bar's tag is a refcount bump.
     let sym = intern(symbol);
     closes
@@ -80,7 +73,10 @@ pub fn daily_series(
     assert!(
         columns.iter().all(|(_, c)| c.len() == bars),
         "ragged columns: {:?}",
-        columns.iter().map(|(s, c)| (*s, c.len())).collect::<Vec<_>>()
+        columns
+            .iter()
+            .map(|(s, c)| (*s, c.len()))
+            .collect::<Vec<_>>()
     );
     (0..bars)
         .map(|i| {

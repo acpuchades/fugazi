@@ -84,18 +84,9 @@ fn run_buy_and_hold_portfolio(
 fn equal_weight_splits_initial_cash_evenly() {
     let portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
-        .add(
-            "a",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
-        )
-        .add(
-            "b",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
-        )
-        .add(
-            "c",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("C"),
-        )
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
+        .add("c", SingleAssetStrategy::<&'static str>::buy_and_hold("C"))
         .weights(EqualWeight)
         .build();
     let wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
@@ -115,14 +106,8 @@ fn equal_weight_splits_initial_cash_evenly() {
 fn fixed_weights_splits_at_the_configured_ratios() {
     let portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
-        .add(
-            "a",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
-        )
-        .add(
-            "b",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
-        )
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
         .weights(Fixed::new(vec![0.7, 0.3]))
         .build();
     let wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
@@ -252,8 +237,16 @@ fn per_symbol_costs_on_the_account_scope_by_symbol() {
 
     // Every fill on A should carry commission (> 0); every fill on B
     // should stay commission-free.
-    let a_fills: Vec<_> = report.fills.iter().filter(|f| f.order.symbol == "A").collect();
-    let b_fills: Vec<_> = report.fills.iter().filter(|f| f.order.symbol == "B").collect();
+    let a_fills: Vec<_> = report
+        .fills
+        .iter()
+        .filter(|f| f.order.symbol == "A")
+        .collect();
+    let b_fills: Vec<_> = report
+        .fills
+        .iter()
+        .filter(|f| f.order.symbol == "B")
+        .collect();
     assert!(!a_fills.is_empty(), "expected at least one A fill");
     assert!(!b_fills.is_empty(), "expected at least one B fill");
     for f in &a_fills {
@@ -283,14 +276,8 @@ fn account_costs_apply_to_every_child_fill() {
     );
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(2_000.0)
-        .add(
-            "a",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
-        )
-        .add(
-            "b",
-            SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
-        )
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
         .weights(EqualWeight)
         .build();
     let mut wallet = PaperWallet::with_costs(2_000.0, costs);
@@ -331,7 +318,10 @@ fn is_ready_gates_trade_until_every_child_is_ready() {
         .build();
 
     // Freshly built, second child's SMA(10) needs 10 bars.
-    assert!(!portfolio.is_ready(), "portfolio should not be ready pre-warm-up");
+    assert!(
+        !portfolio.is_ready(),
+        "portfolio should not be ready pre-warm-up"
+    );
 
     // Feed enough bars through the portfolio's Strategy interface for
     // both children to warm up. Buy-and-hold is ready from bar 0; the
@@ -401,7 +391,7 @@ fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
     //                          B: 250 + 250 = 500 equity  (total 1250)
     // Target 50/50 = 625 each. A donates 125 cash; B receives 125.
     // Result: A: 125 + 500 = 625, B: 375 + 250 = 625. No fills queued.
-    use fugazi::indicators::{ValueBool, Every, Value};
+    use fugazi::indicators::{Every, Value, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -453,7 +443,7 @@ fn position_phase_downsizes_when_contributor_has_no_free_cash() {
     // still 1000. Bar 4 fire (Every::new(1)): cash phase donates 125
     // (delta at that point). Snap continues over more fires; here we
     // just verify convergence proceeds.
-    use fugazi::indicators::{ValueBool, Every};
+    use fugazi::indicators::{Every, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -576,7 +566,7 @@ impl Strategy for SeedThenIdle {
 ///   cash + 0 in position = 600. No position downsize needed.
 #[test]
 fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
-    use fugazi::indicators::{ValueBool, Every};
+    use fugazi::indicators::{Every, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -646,7 +636,7 @@ fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
 ///   Final: A = 250, B = 750. Aligned.
 #[test]
 fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
-    use fugazi::indicators::{ValueBool, Every};
+    use fugazi::indicators::{Every, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -696,7 +686,7 @@ fn weight_shares_override_weight_policy_at_rebalance() {
     // 75% / 25% between the two subs. Policy would otherwise be
     // EqualWeight (50/50), so this verifies the share indicators are
     // actually consulted and win.
-    use fugazi::indicators::{ValueBool, Every, Value};
+    use fugazi::indicators::{Every, Value, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -756,7 +746,7 @@ fn cash_covered_rebalance_queues_no_new_fills() {
     // sizing) plus a price move that shifts equity. Verify the rebalance
     // fires but generates no new blotter entries beyond the two initial
     // entry fills — position phase should be a natural no-op.
-    use fugazi::indicators::{ValueBool, Every, Value};
+    use fugazi::indicators::{Every, Value, ValueBool};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -821,7 +811,10 @@ fn portfolio_book_tracks_aggregate_mark_to_market() {
     assert!(book.equity_peak_value() >= book.equity_value() - 1e-9);
     // Drawdown at a fresh peak is 0.
     let dd = book.drawdown::<Atom>().value().unwrap();
-    assert!(dd.abs() < 1e-9, "expected 0 drawdown at fresh peak, got {dd}");
+    assert!(
+        dd.abs() < 1e-9,
+        "expected 0 drawdown at fresh peak, got {dd}"
+    );
 }
 
 #[test]
@@ -829,8 +822,7 @@ fn portfolio_book_reset_returns_to_seed() {
     // After reset(), the aggregate book restores to its seed equity —
     // same rule as any other Book, verified end-to-end through the
     // portfolio surface.
-    let (mut portfolio, _report, _wallet) =
-        run_buy_and_hold_portfolio(2_000.0, EqualWeight);
+    let (mut portfolio, _report, _wallet) = run_buy_and_hold_portfolio(2_000.0, EqualWeight);
     let book = portfolio.book();
     assert!(book.equity_value() > 2_000.0); // rose from the run
     portfolio.reset();
@@ -854,19 +846,17 @@ fn weight_share_reads_aggregate_directly() {
     // own book as the strategy book, and the aggregate book passed as
     // the `portfolio_book` build argument (so `source: !portfolio_book`
     // resolves to the aggregate).
-    use fugazi::indicators::{Book, ValueBool, Every};
+    use fugazi::indicators::{Book, Every, ValueBool};
 
     let agg_book: Book<&'static str> = Book::new(1_000.0);
-    let child_a = SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
-        .long_on(
-            ValueBool::<Snapshot<&'static str>>::new(true),
-            ValueBool::<Snapshot<&'static str>>::new(false),
-        );
-    let child_b = SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
-        .long_on(
-            ValueBool::<Snapshot<&'static str>>::new(true),
-            ValueBool::<Snapshot<&'static str>>::new(false),
-        );
+    let child_a = SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0).long_on(
+        ValueBool::<Snapshot<&'static str>>::new(true),
+        ValueBool::<Snapshot<&'static str>>::new(false),
+    );
+    let child_b = SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0).long_on(
+        ValueBool::<Snapshot<&'static str>>::new(true),
+        ValueBool::<Snapshot<&'static str>>::new(false),
+    );
     // Weight-share indicators built directly on the aggregate book —
     // both read the same value each bar.
     let share_a = agg_book.equity_peak::<Snapshot<&'static str>>();
@@ -964,7 +954,7 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
     // Under LargestFirst: X value = 600 (biggest), Y = 200. Shortfall
     // fits in X — keep (600-150)/600 = 75% of X → target 2.25 units.
     // Y untouched at 2 units.
-    use fugazi::indicators::{ValueBool, Every};
+    use fugazi::indicators::{Every, ValueBool};
     use fugazi::portfolio::rebalance::LargestFirst;
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
@@ -975,11 +965,10 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
         )
         .add(
             "idle",
-            SingleAssetStrategy::<&'static str>::with_initial_equity("Z", 500.0)
-                .long_on(
-                    ValueBool::<Snapshot<&'static str>>::new(false),
-                    ValueBool::<Snapshot<&'static str>>::new(false),
-                ),
+            SingleAssetStrategy::<&'static str>::with_initial_equity("Z", 500.0).long_on(
+                ValueBool::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(false),
+            ),
         )
         .weights(EqualWeight)
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
@@ -1047,7 +1036,10 @@ fn a_portfolio_can_be_driven_from_another_thread() {
 
     let final_equity = handle.join().expect("the worker must not panic");
     // Bought at bar 1's open (11) with 1000, held to 13.
-    assert!(final_equity > 1_000.0, "equity {final_equity} should have grown");
+    assert!(
+        final_equity > 1_000.0,
+        "equity {final_equity} should have grown"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,7 +1094,10 @@ fn child_hard_cap_rejections_reach_the_child_not_the_report() {
         .with_initial_equity(1_000.0)
         // Asks for a billion units of A against ~500 of ledger cash — refused
         // by the child's own ledger cap, every bar.
-        .add("greedy", submitter(&log, Some(("A", Side::Buy, Size::units(1e9)))))
+        .add(
+            "greedy",
+            submitter(&log, Some(("A", Side::Buy, Size::units(1e9)))),
+        )
         .add("idle", submitter(&Default::default(), None))
         .weights(EqualWeight)
         .build();
@@ -1113,9 +1108,14 @@ fn child_hard_cap_rejections_reach_the_child_not_the_report() {
         "child hard-cap refusals stay off the account-level report",
     );
     let entries = log.lock().unwrap();
-    assert!(!entries.is_empty(), "the greedy child must hear its own refusals");
     assert!(
-        entries.iter().all(|r| r.error == WalletError::InsufficientFunds),
+        !entries.is_empty(),
+        "the greedy child must hear its own refusals"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|r| r.error == WalletError::InsufficientFunds),
         "expected every refusal to be InsufficientFunds",
     );
 }
@@ -1161,7 +1161,10 @@ fn a_child_running_past_its_slice_after_partial_fills_reaches_the_child() {
         // 45 units cost 450 at the last close of 10 — comfortably within the
         // child's 1_000, so pre-flight passes and the order is acked. At the
         // gapped open of 100 the same 45 units cost 4_500 and can't be paid for.
-        .add("gapped", submitter(&log, Some(("A", Side::Buy, Size::units(45.0)))))
+        .add(
+            "gapped",
+            submitter(&log, Some(("A", Side::Buy, Size::units(45.0)))),
+        )
         .weights(EqualWeight)
         .build();
 
@@ -1504,9 +1507,18 @@ fn opposite_sides_cross_internally_and_only_the_imbalance_trades() {
         .filter(|f| f.order.side == Side::Buy)
         .map(|f| f.order.units)
         .sum();
-    assert!((net_bought - 3.0).abs() < 1e-9, "only 3 net units trade, got {net_bought}");
-    assert!((portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9, "long child holds 5");
-    assert!((portfolio.sub_position(1, &"A") + 2.0).abs() < 1e-9, "short child holds -2");
+    assert!(
+        (net_bought - 3.0).abs() < 1e-9,
+        "only 3 net units trade, got {net_bought}"
+    );
+    assert!(
+        (portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9,
+        "long child holds 5"
+    );
+    assert!(
+        (portfolio.sub_position(1, &"A") + 2.0).abs() < 1e-9,
+        "short child holds -2"
+    );
     portfolio.assert_books_balance(&wallet);
 }
 
@@ -1538,7 +1550,10 @@ fn crossed_flow_pays_no_commission() {
     let paid = |r: &fugazi::RunReport<&'static str>| -> Real {
         r.fills.iter().map(|f| f.order.commission).sum()
     };
-    assert!(paid(&plain) > 0.0, "sanity: the plain run should pay something");
+    assert!(
+        paid(&plain) > 0.0,
+        "sanity: the plain run should pay something"
+    );
     assert!(
         (paid(&crossed) - paid(&plain)).abs() < 1e-9,
         "crossing 2 extra units should cost nothing extra: {} vs {}",
@@ -1568,11 +1583,7 @@ impl Strategy for HoldWithStop {
             self.seeded.set(true);
             return;
         }
-        let _ = wallet.set_stop(
-            self.symbol,
-            Reference(self.stop),
-            Size::position_frac(1.0),
-        );
+        let _ = wallet.set_stop(self.symbol, Reference(self.stop), Size::position_frac(1.0));
     }
     fn reset(&mut self) {
         self.seeded.set(false);
@@ -1641,7 +1652,10 @@ fn a_child_cannot_spend_past_its_own_slice() {
         .with_initial_equity(2_000.0)
         // 15 units of A at 100 is $1,500 — affordable for the account, but not
         // for this child's $1,000.
-        .add("greedy", submitter(&log, Some(("A", Side::Buy, Size::units(15.0)))))
+        .add(
+            "greedy",
+            submitter(&log, Some(("A", Side::Buy, Size::units(15.0)))),
+        )
         .add("idle", submitter(&Default::default(), None))
         .weights(EqualWeight)
         .build();
@@ -1658,7 +1672,10 @@ fn a_child_cannot_spend_past_its_own_slice() {
             .any(|r| r.error == WalletError::InsufficientFunds),
         "the capped child should be told about its own refusal",
     );
-    assert!(wallet.position(&"A").amount.abs() < 1e-9, "nothing should have traded");
+    assert!(
+        wallet.position(&"A").amount.abs() < 1e-9,
+        "nothing should have traded"
+    );
 }
 
 #[test]
@@ -1767,8 +1784,12 @@ impl Wallet<&'static str> for AsyncVenue {
     }
     fn update(&mut self, symbol: &'static str, candle: Candle) -> Vec<Order<&'static str>> {
         self.marks.insert(symbol, candle.close);
-        let due: Vec<(&'static str, Real)> =
-            self.queued.iter().copied().filter(|(s, _)| *s == symbol).collect();
+        let due: Vec<(&'static str, Real)> = self
+            .queued
+            .iter()
+            .copied()
+            .filter(|(s, _)| *s == symbol)
+            .collect();
         self.queued.retain(|(s, _)| *s != symbol);
         for (sym, target) in due {
             let order = self.execute(sym, target, candle.open);
@@ -1786,7 +1807,10 @@ impl Wallet<&'static str> for AsyncVenue {
         target: Units<&'static str>,
     ) -> Result<Ack<&'static str>, WalletError> {
         if self.synchronous {
-            let price = self.price(&target.symbol).ok_or(WalletError::UnknownPrice)?.0;
+            let price = self
+                .price(&target.symbol)
+                .ok_or(WalletError::UnknownPrice)?
+                .0;
             let order = self.execute(target.symbol, target.amount, price);
             return Ok(Ack::Filled(order));
         }
@@ -1854,7 +1878,10 @@ fn fills_reported_out_of_band_still_reach_the_ledgers() {
     let mut venue = AsyncVenue::new(2_000.0, false);
     let report = backtest::run(&mut portfolio, &mut venue, flat_snapshots(5));
 
-    assert!(!report.fills.is_empty(), "the out-of-band fills should surface");
+    assert!(
+        !report.fills.is_empty(),
+        "the out-of-band fills should surface"
+    );
     assert!(
         (venue.position(&"A").amount - 4.0).abs() < 1e-9,
         "account A = {}",
@@ -1909,8 +1936,14 @@ fn portfolio_trades_the_passed_wallet() {
     let mut wallet = PaperWallet::new(2_000.0);
     let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
-    assert!(wallet.position(&"A").amount > 0.0, "child A opened on the account");
-    assert!(wallet.position(&"B").amount > 0.0, "child B opened on the account");
+    assert!(
+        wallet.position(&"A").amount > 0.0,
+        "child A opened on the account"
+    );
+    assert!(
+        wallet.position(&"B").amount > 0.0,
+        "child B opened on the account"
+    );
     assert!(
         (wallet.equity().0 - *report.equity_curve.last().unwrap()).abs() < 1e-6,
         "the reported curve is the account's own equity",
@@ -1932,13 +1965,22 @@ fn internal_cross_books_at_open_with_no_wallet_fill() {
     let mut wallet = PaperWallet::new(2_000.0);
     let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
 
-    assert!(wallet.position(&"A").amount.abs() < 1e-9, "net 0 reaches the account");
+    assert!(
+        wallet.position(&"A").amount.abs() < 1e-9,
+        "net 0 reaches the account"
+    );
     assert!(
         report.fills.iter().all(|f| f.order.symbol != "A"),
         "a fully-crossed symbol never appears in the blotter",
     );
-    assert!((portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9, "long child holds 5");
-    assert!((portfolio.sub_position(1, &"A") + 5.0).abs() < 1e-9, "short child holds -5");
+    assert!(
+        (portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9,
+        "long child holds 5"
+    );
+    assert!(
+        (portfolio.sub_position(1, &"A") + 5.0).abs() < 1e-9,
+        "short child holds -5"
+    );
     portfolio.assert_books_balance(&wallet);
 }
 
@@ -1951,7 +1993,10 @@ fn a_sleeve_lets_a_portfolio_coexist_with_external_positions() {
     // use, now over a portfolio's account.
     let mut account = PaperWallet::new(2_000.0);
     account.update("C", flat_bar(100.0));
-    let _ = account.set_position(fugazi::wallet::Units { symbol: "C", amount: 3.0 });
+    let _ = account.set_position(fugazi::wallet::Units {
+        symbol: "C",
+        amount: 3.0,
+    });
     account.update("C", flat_bar(100.0)); // fills at open 100 → holds 3 C
     assert!((account.position(&"C").amount - 3.0).abs() < 1e-9);
 
@@ -1971,7 +2016,10 @@ fn a_sleeve_lets_a_portfolio_coexist_with_external_positions() {
         (account.position(&"C").amount - 3.0).abs() < 1e-9,
         "the external C position must be left untouched",
     );
-    assert!(account.position(&"A").amount > 0.0, "the portfolio opened its own A position");
+    assert!(
+        account.position(&"A").amount > 0.0,
+        "the portfolio opened its own A position"
+    );
 }
 
 /// A child trades a `LedgerWallet`, which holds no handle on the account — so
@@ -2057,7 +2105,12 @@ fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
     let seen = Arc::new(Mutex::new(None));
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
-        .add("asks", AsksCanShort { seen: Arc::clone(&seen) })
+        .add(
+            "asks",
+            AsksCanShort {
+                seen: Arc::clone(&seen),
+            },
+        )
         .weights(EqualWeight)
         .build();
     let mut spot = SpotAccount(PaperWallet::new(1_000.0));
@@ -2072,7 +2125,12 @@ fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
     let seen = Arc::new(Mutex::new(None));
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
-        .add("asks", AsksCanShort { seen: Arc::clone(&seen) })
+        .add(
+            "asks",
+            AsksCanShort {
+                seen: Arc::clone(&seen),
+            },
+        )
         .weights(EqualWeight)
         .build();
     let mut paper = PaperWallet::new(1_000.0);

@@ -92,7 +92,9 @@ def main() -> None:
     # empyrical.downside_risk(required_return=rf_per_bar).
     rf_per_bar = RISK_FREE_RATE / BARS_PER_YEAR
     ann_downside = float(
-        ep.downside_risk(returns, required_return=rf_per_bar, annualization=BARS_PER_YEAR)
+        ep.downside_risk(
+            returns, required_return=rf_per_bar, annualization=BARS_PER_YEAR
+        )
     )
 
     fields = {
@@ -105,7 +107,8 @@ def main() -> None:
         # ReturnSection
         "returns.total": total_return,
         "returns.total_pct": total_return * 100.0,
-        "returns.cagr_pct": ((final_equity / INITIAL_CASH) ** (1.0 / years) - 1.0) * 100.0,
+        "returns.cagr_pct": ((final_equity / INITIAL_CASH) ** (1.0 / years) - 1.0)
+        * 100.0,
         "returns.mean_bar": float(returns.mean()),
         "returns.median_bar": float(np.median(returns)),
         "returns.stddev_bar": float(returns.std(ddof=1)),
@@ -124,9 +127,7 @@ def main() -> None:
         * 100.0,
         # RiskAdjustedSection
         "risk_adjusted.sharpe": float(
-            ep.sharpe_ratio(
-                returns, risk_free=rf_per_bar, annualization=BARS_PER_YEAR
-            )
+            ep.sharpe_ratio(returns, risk_free=rf_per_bar, annualization=BARS_PER_YEAR)
         ),
         # empyrical's sortino_ratio has a different denominator convention
         # (it computes the downside independently of `required_return`), so
@@ -135,9 +136,7 @@ def main() -> None:
             float(returns.mean()) * BARS_PER_YEAR - RISK_FREE_RATE
         )
         / ann_downside,
-        "risk_adjusted.calmar": (
-            (final_equity / INITIAL_CASH) ** (1.0 / years) - 1.0
-        )
+        "risk_adjusted.calmar": ((final_equity / INITIAL_CASH) ** (1.0 / years) - 1.0)
         / (-float(ep.max_drawdown(returns))),
         # Omega with per-bar arithmetic rf threshold (matches fugazi's rule
         # exactly; empyrical.omega_ratio would use a geometric conversion).

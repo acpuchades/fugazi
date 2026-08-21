@@ -9,8 +9,8 @@ use std::time::Instant;
 use fugazi::backtest::run;
 use fugazi::indicators::Macd;
 use fugazi::prelude::*;
-use fugazi::types::{Symbol, symbol as intern};
 use fugazi::strategies::trend::macd_crossover;
+use fugazi::types::{Symbol, symbol as intern};
 
 const BARS: usize = 200_000;
 const REPS: usize = 3;
@@ -23,7 +23,9 @@ fn synth_candles(n: usize) -> Vec<Candle> {
     // Small LCG so the walk is deterministic without pulling in `rand`.
     let mut s: u64 = 0x5eed_1234_5678_9abc;
     for _ in 0..n {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let noise = ((s >> 33) as f64 / u32::MAX as f64) - 0.5; // ~[-0.5, 0.5]
         let ret = 0.0002 + 0.01 * noise;
         let open = px;
@@ -69,7 +71,9 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> MacdCrossoverManua
     }
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for MacdCrossoverManual<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy
+    for MacdCrossoverManual<Sym>
+{
     type Input = fugazi::types::Snapshot<Sym>;
     type Symbol = Sym;
     fn update(&mut self, snap: fugazi::types::Snapshot<Sym>) {
@@ -77,7 +81,13 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for MacdC
         self.event = None;
         if let Some(mv) = v {
             let diff = mv.macd - mv.signal;
-            let sign: i8 = if diff > 0.0 { 1 } else if diff < 0.0 { -1 } else { 0 };
+            let sign: i8 = if diff > 0.0 {
+                1
+            } else if diff < 0.0 {
+                -1
+            } else {
+                0
+            };
             if let Some(prev) = self.prev_sign {
                 if prev < 0 && sign > 0 {
                     self.event = Some(Side::Buy);
@@ -206,27 +216,26 @@ fn bench_snapshot_clone_scaling() {
         for _ in 0..REPS {
             // One SMA-crossover decision per symbol: four signal slots, each
             // fed a clone of the whole snapshot every bar.
-            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
-                .long_on(
-                    |sym: &Symbol| {
-                        use fugazi::indicators::{Close, Pick, Sma};
-                        let close = || {
-                            Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
-                                sym.clone(),
-                            )))
-                        };
-                        Sma::new(close(), 5).crosses_above(Sma::new(close(), 20))
-                    },
-                    |sym: &Symbol| {
-                        use fugazi::indicators::{Close, Pick, Sma};
-                        let close = || {
-                            Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
-                                sym.clone(),
-                            )))
-                        };
-                        Sma::new(close(), 5).crosses_below(Sma::new(close(), 20))
-                    },
-                );
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0).long_on(
+                |sym: &Symbol| {
+                    use fugazi::indicators::{Close, Pick, Sma};
+                    let close = || {
+                        Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
+                            sym.clone(),
+                        )))
+                    };
+                    Sma::new(close(), 5).crosses_above(Sma::new(close(), 20))
+                },
+                |sym: &Symbol| {
+                    use fugazi::indicators::{Close, Pick, Sma};
+                    let close = || {
+                        Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
+                            sym.clone(),
+                        )))
+                    };
+                    Sma::new(close(), 5).crosses_below(Sma::new(close(), 20))
+                },
+            );
             let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let t = Instant::now();
             let rep = run(&mut strat, &mut w, snaps.iter().cloned());
@@ -234,12 +243,7 @@ fn bench_snapshot_clone_scaling() {
             let _ = std::hint::black_box(rep.equity_curve.len());
         }
         let m = median(times);
-        eprintln!(
-            "{:>8}  {:>12.4}  {:>14.1}",
-            n,
-            m,
-            m * 1e9 / N_BARS as f64
-        );
+        eprintln!("{:>8}  {:>12.4}  {:>14.1}", n, m, m * 1e9 / N_BARS as f64);
     }
 }
 
@@ -286,10 +290,13 @@ fn bench_yaml_vs_rust_macd_crossover() {
             lhs: !macd_line { fast: 12, slow: 26, signal: 9 }
             rhs: !macd_signal { fast: 12, slow: 26, signal: 9 }
     "#;
-    let spec: SingleStrategySpec =
-        SingleStrategySpec::from_text_with_params_in(
-            yaml, &Default::default(), std::path::Path::new("."), "(bench)",
-        ).unwrap();
+    let spec: SingleStrategySpec = SingleStrategySpec::from_text_with_params_in(
+        yaml,
+        &Default::default(),
+        std::path::Path::new("."),
+        "(bench)",
+    )
+    .unwrap();
     let schema = fugazi::market::Schema::empty();
 
     let mut yaml_times = vec![];
@@ -304,7 +311,8 @@ fn bench_yaml_vs_rust_macd_crossover() {
 
     let mut rust_times = vec![];
     for _ in 0..REPS {
-        let mut strat = fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
+        let mut strat =
+            fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
         let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let t = Instant::now();
         let rep = run(&mut strat, &mut w, snaps.iter().cloned());
@@ -313,7 +321,13 @@ fn bench_yaml_vs_rust_macd_crossover() {
     }
 
     let (y, r) = (median(yaml_times), median(rust_times));
-    eprintln!("YAML  !macd_line/!macd_signal : {:.1} ns/bar", y * 1e9 / BARS as f64);
-    eprintln!("Rust  macd_crossover .shared(): {:.1} ns/bar", r * 1e9 / BARS as f64);
+    eprintln!(
+        "YAML  !macd_line/!macd_signal : {:.1} ns/bar",
+        y * 1e9 / BARS as f64
+    );
+    eprintln!(
+        "Rust  macd_crossover .shared(): {:.1} ns/bar",
+        r * 1e9 / BARS as f64
+    );
     eprintln!("YAML / Rust = {:.2}×", y / r);
 }

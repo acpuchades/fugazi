@@ -9,8 +9,14 @@ use super::SingleAssetStrategy;
 ///
 /// Treats OBV crossing its own moving average as confirmation that volume is
 /// backing the move: long while OBV is above its SMA, flat below it.
-pub fn obv_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, ma_period: usize) -> SingleAssetStrategy<Sym> {
-    let bullish = || Obv::new(super::self_bar::<Sym>()).gt(Sma::new(Obv::new(super::self_bar::<Sym>()), ma_period));
+pub fn obv_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
+    symbol: Sym,
+    ma_period: usize,
+) -> SingleAssetStrategy<Sym> {
+    let bullish = || {
+        Obv::new(super::self_bar::<Sym>())
+            .gt(Sma::new(Obv::new(super::self_bar::<Sym>()), ma_period))
+    };
     SingleAssetStrategy::new(symbol).long_on(bullish(), bullish().not())
 }
 
@@ -19,7 +25,10 @@ pub fn obv_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send 
 /// Buys when price dips below a rolling VWAP over the last `period` bars and
 /// exits when it recovers above — a "fair value" fade against the recent
 /// volume-weighted mean.
-pub fn vwap_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
+pub fn vwap_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
+    symbol: Sym,
+    period: usize,
+) -> SingleAssetStrategy<Sym> {
     SingleAssetStrategy::new(symbol).long_on(
         super::self_close::<Sym>().crosses_below(Vwap::new(super::self_bar::<Sym>(), period)),
         super::self_close::<Sym>().crosses_above(Vwap::new(super::self_bar::<Sym>(), period)),
@@ -31,7 +40,12 @@ pub fn vwap_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + 
 /// Like [`obv_trend`] but on the Chaikin A/D line, which weights each bar's
 /// volume by where the close fell within its range: long while the A/D line is
 /// above its moving average, flat below.
-pub fn chaikin_ad_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, ma_period: usize) -> SingleAssetStrategy<Sym> {
-    let bullish = || Ad::new(super::self_bar::<Sym>()).gt(Sma::new(Ad::new(super::self_bar::<Sym>()), ma_period));
+pub fn chaikin_ad_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
+    symbol: Sym,
+    ma_period: usize,
+) -> SingleAssetStrategy<Sym> {
+    let bullish = || {
+        Ad::new(super::self_bar::<Sym>()).gt(Sma::new(Ad::new(super::self_bar::<Sym>()), ma_period))
+    };
     SingleAssetStrategy::new(symbol).long_on(bullish(), bullish().not())
 }

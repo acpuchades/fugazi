@@ -27,7 +27,7 @@
 
 use fugazi::indicators::{
     Abs, Ad, Aroon, Beta, Bollinger, Cci, Covariance, CumMax, CumMin, CumSum, Current, Ema, Exp,
-    Identity, LinReg, Log, Mfi, Obv, Percentile, RollingMax, RollingMin, Rma, Rsi, Sigmoid, Sign,
+    Identity, LinReg, Log, Mfi, Obv, Percentile, Rma, RollingMax, RollingMin, Rsi, Sigmoid, Sign,
     Sma, Sqrt, StdDev, Stochastic, Tanh, TrueRange, Value, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
@@ -347,10 +347,7 @@ fn mfi_is_a_volume_weighted_rsi_of_the_typical_price() {
 /// `RSI = 100 − 100/(1 + 2) = 200/3`.
 #[test]
 fn rsi_seeds_both_wilder_averages_on_the_first_deltas() {
-    let got = run(
-        Rsi::new(Identity::new(), 3),
-        vec![10.0, 11.0, 10.0, 11.0],
-    );
+    let got = run(Rsi::new(Identity::new(), 3), vec![10.0, 11.0, 10.0, 11.0]);
     assert_series(&got, &warm(3, &[200.0 / 3.0]), "rsi3");
 }
 
@@ -495,8 +492,16 @@ fn reset_replays_every_stateful_shape_identically() {
     replays(Sma::new(Identity::new(), 3), SPIKY.to_vec(), "sma");
     replays(Ema::new(Identity::new(), 3), SPIKY.to_vec(), "ema");
     replays(Rma::new(Identity::new(), 3), SPIKY.to_vec(), "rma");
-    replays(RollingMax::new(Identity::new(), 3), SPIKY.to_vec(), "rolling_max");
-    replays(Percentile::new(Identity::new(), 3, 0.5), SPIKY.to_vec(), "percentile");
+    replays(
+        RollingMax::new(Identity::new(), 3),
+        SPIKY.to_vec(),
+        "rolling_max",
+    );
+    replays(
+        Percentile::new(Identity::new(), 3, 0.5),
+        SPIKY.to_vec(),
+        "percentile",
+    );
     replays(Rsi::new(Identity::new(), 3), SPIKY.to_vec(), "rsi");
     replays(
         Obv::new(Current::candle()),
@@ -561,10 +566,7 @@ fn sigmoid_is_the_logistic_curve() {
 /// fractional exponent has no real answer, so it reads `None`.
 #[test]
 fn pow_refuses_what_has_no_real_answer() {
-    let got = run(
-        Identity::new().pow(Value::new(0.5)),
-        vec![9.0, 16.0, -4.0],
-    );
+    let got = run(Identity::new().pow(Value::new(0.5)), vec![9.0, 16.0, -4.0]);
     assert_series(&got, &[Some(3.0), Some(4.0), None], "pow_half");
     let cubed = run(Identity::new().pow(Value::new(3.0)), vec![2.0, -2.0]);
     assert_series(&cubed, &some(&[8.0, -8.0]), "pow_cubed");

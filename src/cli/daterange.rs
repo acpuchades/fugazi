@@ -104,10 +104,16 @@ impl DateRange {
     /// `--strict-from` without `--from` is refused rather than ignored: it
     /// would silently do nothing, and a flag that reads as a safety measure
     /// must not be a no-op.
-    pub(crate) fn parse(from: Option<&str>, until: Option<&str>, strict: bool) -> Result<Option<Self>> {
+    pub(crate) fn parse(
+        from: Option<&str>,
+        until: Option<&str>,
+        strict: bool,
+    ) -> Result<Option<Self>> {
         if from.is_none() && until.is_none() {
             if strict {
-                bail!("`--strict-from` needs `--from` — there is no boundary for it to be strict about");
+                bail!(
+                    "`--strict-from` needs `--from` — there is no boundary for it to be strict about"
+                );
             }
             return Ok(None);
         }
@@ -132,7 +138,11 @@ impl DateRange {
                  half-open `[from, until)`, so an equal pair selects no bars"
             );
         }
-        Ok(Some(DateRange { from, until, strict }))
+        Ok(Some(DateRange {
+            from,
+            until,
+            strict,
+        }))
     }
 
     /// Whether a warm-up read-back applies at all.
@@ -154,9 +164,8 @@ impl DateRange {
         // A label the calendar cannot parse sorts as "before everything", which
         // would silently pull unparseable bars into the range. Treating it as
         // out of range in both directions is the conservative reading.
-        let at_or_after = |t: i64| -> usize {
-            bars.partition_point(|b| stamp(b).is_some_and(|ms| ms < t))
-        };
+        let at_or_after =
+            |t: i64| -> usize { bars.partition_point(|b| stamp(b).is_some_and(|ms| ms < t)) };
 
         let requested = self.from.map_or(0, at_or_after);
         let end = self.until.map_or(bars.len(), at_or_after);
@@ -245,9 +254,7 @@ mod tests {
 
     /// Ten consecutive days, `2024-01-01` … `2024-01-10`.
     fn ten_days() -> Vec<String> {
-        (1..=10)
-            .map(|d| format!("2024-01-{d:02}"))
-            .collect()
+        (1..=10).map(|d| format!("2024-01-{d:02}")).collect()
     }
 
     #[test]
@@ -345,7 +352,10 @@ mod tests {
 
         let warn = short_warmup_warning(&slice, &bars, "2024-01-03", 5)
             .expect("evaluation slipped, so the run must say so");
-        assert!(warn.contains("only 2 bars"), "counts the real history: {warn}");
+        assert!(
+            warn.contains("only 2 bars"),
+            "counts the real history: {warn}"
+        );
         assert!(warn.contains("2024-01-06"), "names the real start: {warn}");
     }
 

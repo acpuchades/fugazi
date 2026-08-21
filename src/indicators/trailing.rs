@@ -337,7 +337,9 @@ where
             .as_object()
             .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("engine") {
-            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+            self.engine
+                .restore_state(v)
+                .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
             self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
@@ -437,7 +439,9 @@ where
             .as_object()
             .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("engine") {
-            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+            self.engine
+                .restore_state(v)
+                .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
             self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
@@ -519,7 +523,9 @@ where
             .as_object()
             .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("engine") {
-            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+            self.engine
+                .restore_state(v)
+                .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
             self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
@@ -617,7 +623,9 @@ where
             .as_object()
             .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("engine") {
-            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+            self.engine
+                .restore_state(v)
+                .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("equity") {
             self.equity = serde_json::from_value(v.clone()).map_err(|e| format!("equity: {e}"))?;
@@ -717,7 +725,9 @@ where
             .as_object()
             .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
         if let Some(v) = obj.get("engine") {
-            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+            self.engine
+                .restore_state(v)
+                .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("equity") {
             self.equity = serde_json::from_value(v.clone()).map_err(|e| format!("equity: {e}"))?;
@@ -729,14 +739,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::types::Symbol;
     use super::*;
     use crate::backtest;
     use crate::metrics;
     use crate::strategies::SingleAssetStrategy;
+    use crate::types::Symbol;
     use crate::types::{Atom, Candle};
 
-    fn sym() -> Symbol { crate::types::symbol("X") }
+    fn sym() -> Symbol {
+        crate::types::symbol("X")
+    }
     const SEED: Real = 1_000.0;
     const BPY: Real = 252.0;
 
@@ -845,7 +857,10 @@ mod tests {
         // Equity mirrors price for a fully-invested buy-and-hold: peak at 120,
         // trough at 96 → 20% drawdown.
         let dd = last.expect("max drawdown defined");
-        assert!((dd - 0.20).abs() < 1e-6, "expected ~0.20 drawdown, got {dd}");
+        assert!(
+            (dd - 0.20).abs() < 1e-6,
+            "expected ~0.20 drawdown, got {dd}"
+        );
     }
 
     #[test]
@@ -921,8 +936,27 @@ mod tests {
         let a = [100.0, 102.0, 101.0, 104.0, 106.0, 105.0, 108.0, 110.0];
         let b = [100.0, 99.0, 100.0, 97.0, 96.0, 97.0, 95.0, 93.0];
 
-        let mut vol = Volatility::new(LongShortPair { a: crate::types::symbol("A"), b: crate::types::symbol("B") }, crate::types::symbol("A"), SEED, 5, BPY);
-        let mut sharpe = Sharpe::new(LongShortPair { a: crate::types::symbol("A"), b: crate::types::symbol("B") }, crate::types::symbol("A"), SEED, 5, 0.0, BPY);
+        let mut vol = Volatility::new(
+            LongShortPair {
+                a: crate::types::symbol("A"),
+                b: crate::types::symbol("B"),
+            },
+            crate::types::symbol("A"),
+            SEED,
+            5,
+            BPY,
+        );
+        let mut sharpe = Sharpe::new(
+            LongShortPair {
+                a: crate::types::symbol("A"),
+                b: crate::types::symbol("B"),
+            },
+            crate::types::symbol("A"),
+            SEED,
+            5,
+            0.0,
+            BPY,
+        );
 
         let mut last_vol = None;
         let mut last_sharpe = None;

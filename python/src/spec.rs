@@ -6,13 +6,13 @@ use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
+#[allow(unused_imports)]
+use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::sources::*;
 #[allow(unused_imports)]
-use crate::metrics::*;
+use crate::strategy::*;
 // See `errors.rs`: a document that will not load or build is a `SpecError`,
 // which subclasses `ValueError`. Argument validation of this module's own
 // kwargs (`grid=`, `smooth=`, `windowed=`) stays a bare `ValueError`.
@@ -122,8 +122,7 @@ pub(crate) fn json_to_py(py: Python<'_>, v: &JsonValue) -> PyResult<Py<PyAny>> {
         }
         JsonValue::String(s) => Ok(s.into_pyobject(py)?.to_owned().into_any().unbind()),
         JsonValue::Array(arr) => {
-            let items: PyResult<Vec<Py<PyAny>>> =
-                arr.iter().map(|v| json_to_py(py, v)).collect();
+            let items: PyResult<Vec<Py<PyAny>>> = arr.iter().map(|v| json_to_py(py, v)).collect();
             let list = pyo3::types::PyList::new(py, items?)?;
             Ok(list.into_any().unbind())
         }
@@ -149,9 +148,9 @@ pub(crate) fn extract_params(
     if o.is_none() {
         return Ok(std::collections::HashMap::new());
     }
-    let dict = o.cast::<pyo3::types::PyDict>().map_err(|_| {
-        PyTypeError::new_err("`params` must be a dict[str, Any] (or None)")
-    })?;
+    let dict = o
+        .cast::<pyo3::types::PyDict>()
+        .map_err(|_| PyTypeError::new_err("`params` must be a dict[str, Any] (or None)"))?;
     let mut out = std::collections::HashMap::new();
     for (k, v) in dict.iter() {
         let key = k
@@ -440,7 +439,11 @@ pub(crate) fn load_loaded_spec(
         fugazi_core::spec::load_value_no_imports(text, params, "(inline)")
     }
     .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
-    let kind = if kind == "auto" { detect_kind(&value) } else { kind };
+    let kind = if kind == "auto" {
+        detect_kind(&value)
+    } else {
+        kind
+    };
     macro_rules! parse {
         ($variant:ident, $ty:ty, $label:literal) => {{
             let s: $ty = serde_json::from_value(value)
@@ -897,25 +900,41 @@ impl PyStrategySpec {
         let mut value = serde_json::to_value(&metrics)
             .map_err(|e| PyValueError::new_err(format!("serializing metrics: {e}")))?;
         if let Some(samples) = samples
-            && let Some(obj) = value.get_mut("montecarlo").and_then(JsonValue::as_object_mut)
+            && let Some(obj) = value
+                .get_mut("montecarlo")
+                .and_then(JsonValue::as_object_mut)
         {
             obj.insert("samples".to_string(), mc_samples_to_json(&samples));
         }
         if let Some(w) = windowed {
-            let win_rows =
-                spec_metrics::windowed_from_report(&report, w, bars_per_year, risk_free_rate, seconds_per_bar);
-            let roll_rows =
-                spec_metrics::rolling_from_report(&report, w, bars_per_year, risk_free_rate, seconds_per_bar);
-            let obj = value.as_object_mut().expect("metrics document serializes to an object");
+            let win_rows = spec_metrics::windowed_from_report(
+                &report,
+                w,
+                bars_per_year,
+                risk_free_rate,
+                seconds_per_bar,
+            );
+            let roll_rows = spec_metrics::rolling_from_report(
+                &report,
+                w,
+                bars_per_year,
+                risk_free_rate,
+                seconds_per_bar,
+            );
+            let obj = value
+                .as_object_mut()
+                .expect("metrics document serializes to an object");
             obj.insert(
                 "windowed".to_string(),
-                serde_json::to_value(&win_rows)
-                    .map_err(|e| PyValueError::new_err(format!("serializing windowed metrics: {e}")))?,
+                serde_json::to_value(&win_rows).map_err(|e| {
+                    PyValueError::new_err(format!("serializing windowed metrics: {e}"))
+                })?,
             );
             obj.insert(
                 "rolling".to_string(),
-                serde_json::to_value(&roll_rows)
-                    .map_err(|e| PyValueError::new_err(format!("serializing rolling metrics: {e}")))?,
+                serde_json::to_value(&roll_rows).map_err(|e| {
+                    PyValueError::new_err(format!("serializing rolling metrics: {e}"))
+                })?,
             );
         }
         json_to_py(py, &value)
@@ -1420,7 +1439,11 @@ impl PySweep {
     }
 
     pub(crate) fn __repr__(&self) -> String {
-        format!("Sweep(rows={}, columns={})", self.rows.len(), self.columns.len())
+        format!(
+            "Sweep(rows={}, columns={})",
+            self.rows.len(),
+            self.columns.len()
+        )
     }
 }
 
@@ -1440,24 +1463,30 @@ pub(crate) fn build_subgrids(
         PyTypeError::new_err("`grid` must be a list of dicts (each dict maps NAME -> value)")
     })?;
     if list.is_empty() {
-        return Err(PyValueError::new_err("`grid` must contain at least one subgrid"));
+        return Err(PyValueError::new_err(
+            "`grid` must contain at least one subgrid",
+        ));
     }
     let mut subgrids = Vec::with_capacity(list.len());
     for (idx, item) in list.iter().enumerate() {
-        let dict = item.cast::<pyo3::types::PyDict>().map_err(|_| {
-            PyTypeError::new_err(format!("`grid[{idx}]` must be a dict"))
-        })?;
+        let dict = item
+            .cast::<pyo3::types::PyDict>()
+            .map_err(|_| PyTypeError::new_err(format!("`grid[{idx}]` must be a dict")))?;
         let mut merged: std::collections::HashMap<String, JsonValue> = baseline.clone();
         for (k, v) in dict.iter() {
-            let key: String = k.extract().map_err(|_| {
-                PyTypeError::new_err(format!("`grid[{idx}]` keys must be strings"))
-            })?;
+            let key: String = k
+                .extract()
+                .map_err(|_| PyTypeError::new_err(format!("`grid[{idx}]` keys must be strings")))?;
             merged.insert(key, py_to_json(&v)?);
         }
         let (fixed, axes) = spec_optimize::split_axes(&merged)
             .map_err(|e| PyValueError::new_err(format!("--grid #{}: {e}", idx + 1)))?;
         let combos = spec_optimize::cartesian(&axes);
-        subgrids.push(spec_optimize::Subgrid { fixed, axes, combos });
+        subgrids.push(spec_optimize::Subgrid {
+            fixed,
+            axes,
+            combos,
+        });
     }
     Ok(subgrids)
 }
@@ -1583,7 +1612,11 @@ pub(crate) fn optimize(
     // Detect the kind from the raw (pre-`!param`) base value. Kind is fixed by
     // top-level shape, not by any parameter — running `!param` here would fail
     // for grid-only names.
-    let detected = if kind == "auto" { detect_kind(&base_value) } else { kind };
+    let detected = if kind == "auto" {
+        detect_kind(&base_value)
+    } else {
+        kind
+    };
     let grid_py = grid.ok_or_else(|| {
         PyValueError::new_err("`grid` is required (list of dicts, one per subgrid)")
     })?;
@@ -1623,22 +1656,25 @@ pub(crate) fn optimize(
     // Polled once per row so Ctrl-C ends a long grid. See `SweepInterrupt` for
     // why only the main thread asks Python and the workers read an atomic.
     let interrupt = crate::classes::SweepInterrupt::new();
-    let sweep = crate::classes::run_watched(py, &interrupt, || -> anyhow::Result<spec_optimize::Sweep> {
-        let ctx = spec_backtest::EvalContext {
-            cash,
-            bars_per_year,
-            risk_free_rate,
-            cost_config: &cost_config,
-            // The Python surface takes snapshots, not a dated series, so
-            // there's no bar cadence to resolve cost scopes against.
-            effective_freq: None,
-            windowed: windowed.and_then(std::num::NonZeroUsize::new),
-            seconds_per_bar,
-            mc: None,
-            warmup_bars: None,
-        };
-        let ctx_ref = &ctx;
-        let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
+    let sweep = crate::classes::run_watched(
+        py,
+        &interrupt,
+        || -> anyhow::Result<spec_optimize::Sweep> {
+            let ctx = spec_backtest::EvalContext {
+                cash,
+                bars_per_year,
+                risk_free_rate,
+                cost_config: &cost_config,
+                // The Python surface takes snapshots, not a dated series, so
+                // there's no bar cadence to resolve cost scopes against.
+                effective_freq: None,
+                windowed: windowed.and_then(std::num::NonZeroUsize::new),
+                seconds_per_bar,
+                mc: None,
+                warmup_bars: None,
+            };
+            let ctx_ref = &ctx;
+            let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
             if interrupt.should_stop() {
@@ -1658,17 +1694,18 @@ pub(crate) fn optimize(
             })
         };
 
-        spec_optimize::optimize(
-            subgrids,
-            windowed,
-            &metric_names_vec,
-            best_by_str.as_deref(),
-            risk_aversion,
-            smoothing.as_ref(),
-            jobs,
-            evaluate_row,
-        )
-    })
+            spec_optimize::optimize(
+                subgrids,
+                windowed,
+                &metric_names_vec,
+                best_by_str.as_deref(),
+                risk_aversion,
+                smoothing.as_ref(),
+                jobs,
+                evaluate_row,
+            )
+        },
+    )
     .map_err(|e| SpecError::new_err(format!("optimize: {e:#}")));
     // A row that saw the signal aborts the sweep with an ordinary error; the
     // parked `KeyboardInterrupt` is the one the caller asked for.
@@ -1982,19 +2019,18 @@ pub(crate) fn run_walkforward(
             let wf_ctx_ref = &wf_ctx;
             let wf_schema = spec_backtest::schema_from_snapshots(snaps);
 
-            let probe_readiness = |params: &std::collections::HashMap<String, JsonValue>|
-                -> anyhow::Result<usize>
-            {
-                let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
-                let spec = spec_from_value(value, detected)?;
-                let mut built = spec
-                    .try_build(cash, &wf_schema, None)
-                    .map_err(spec_backtest::build_error)?;
-                if needs_probe_feed {
-                    built.update(probe_snapshot.clone());
-                }
-                Ok(built.stable_bars())
-            };
+            let probe_readiness =
+                |params: &std::collections::HashMap<String, JsonValue>| -> anyhow::Result<usize> {
+                    let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                    let spec = spec_from_value(value, detected)?;
+                    let mut built = spec
+                        .try_build(cash, &wf_schema, None)
+                        .map_err(spec_backtest::build_error)?;
+                    if needs_probe_feed {
+                        built.update(probe_snapshot.clone());
+                    }
+                    Ok(built.stable_bars())
+                };
 
             let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|
                 -> anyhow::Result<fugazi_core::RunReport<Symbol>>
@@ -2025,8 +2061,9 @@ pub(crate) fn run_walkforward(
                 jobs,
                 cash,
             )
-        })
-        .map_err(|e| SpecError::new_err(format!("walkforward: {e:#}")));
+        },
+    )
+    .map_err(|e| SpecError::new_err(format!("walkforward: {e:#}")));
     let result = interrupt.raise_over(result)?;
 
     // Convert into pyclass objects.
@@ -2068,4 +2105,3 @@ pub(crate) fn run_walkforward(
     )?;
     Ok(py_result.into_any())
 }
-

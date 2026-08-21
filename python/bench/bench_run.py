@@ -42,7 +42,9 @@ def synth_candles(n: int) -> list[tuple[float, float, float, float, float]]:
         noise = ((s >> 33) / 0xFFFFFFFF) - 0.5
         ret = 0.0002 + 0.01 * noise
         open_, close = px, px * (1.0 + ret)
-        out.append((open_, max(open_, close) * 1.001, min(open_, close) * 0.999, close, 1000.0))
+        out.append(
+            (open_, max(open_, close) * 1.001, min(open_, close) * 0.999, close, 1000.0)
+        )
         px = close
     return out
 
@@ -102,8 +104,10 @@ def main() -> int:
             return [fugazi.Snapshot(r) for r in rows]
 
         t_conv = timed(convert)
-        print(f"{f'snapshot conversion, {n_syms} sym':<44}"
-              f"{t_conv:>11.4f}{t_conv * 1e6 / BARS:>11.2f}")
+        print(
+            f"{f'snapshot conversion, {n_syms} sym':<44}"
+            f"{t_conv:>11.4f}{t_conv * 1e6 / BARS:>11.2f}"
+        )
 
         # Whole run from Python, single-asset spec on the first symbol.
         spec = fugazi.load_spec(SMA_YAML.format(sym=symbols[0]))
@@ -114,8 +118,10 @@ def main() -> int:
             return spec.run(w, snaps)
 
         t_run = timed(run)
-        print(f"{f'run (spec, pre-built snapshots), {n_syms} sym':<44}"
-              f"{t_run:>11.4f}{t_run * 1e6 / BARS:>11.2f}")
+        print(
+            f"{f'run (spec, pre-built snapshots), {n_syms} sym':<44}"
+            f"{t_run:>11.4f}{t_run * 1e6 / BARS:>11.2f}"
+        )
 
     return 0
 

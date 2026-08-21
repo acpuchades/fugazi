@@ -199,7 +199,8 @@ impl Census {
         for symbol in self.symbols() {
             let groups = self.groups_of(symbol);
             let pick = calendar::pick_frequency(specs, symbol);
-            let labelled: Vec<&Series> = groups.iter().copied().filter(|g| g.is_labelled()).collect();
+            let labelled: Vec<&Series> =
+                groups.iter().copied().filter(|g| g.is_labelled()).collect();
             let untagged = groups.iter().copied().find(|g| !g.is_labelled());
 
             // Untagged rows beside labelled ones. Reachable only when the
@@ -242,10 +243,7 @@ impl Census {
                     None => {
                         findings.push(Finding::Ambiguous {
                             symbol: symbol.to_string(),
-                            cadences: labelled
-                                .iter()
-                                .map(|g| (g.freq.clone(), g.bars))
-                                .collect(),
+                            cadences: labelled.iter().map(|g| (g.freq.clone(), g.bars)).collect(),
                         });
                         None
                     }
@@ -398,7 +396,11 @@ impl fmt::Display for Finding {
                 f,
                 "`-f/--frequency` asks for `{requested}` on `{symbol}`, but the input series \
                  carry only {} for it: {}. Nothing would be traded at `{requested}`.",
-                if available.len() == 1 { "one cadence" } else { "these cadences" },
+                if available.len() == 1 {
+                    "one cadence"
+                } else {
+                    "these cadences"
+                },
                 available.join(", "),
             ),
             Finding::Untagged {
@@ -496,7 +498,9 @@ mod tests {
 
     /// `n` stamps spaced `step` apart, starting at an arbitrary fixed epoch.
     fn spaced(step: i64, n: usize) -> Vec<i64> {
-        (0..n as i64).map(|i| 1_704_067_200_000 + i * step).collect()
+        (0..n as i64)
+            .map(|i| 1_704_067_200_000 + i * step)
+            .collect()
     }
 
     /// A group whose cadence is unambiguous and matches its label — the shape
@@ -831,7 +835,10 @@ mod tests {
         assert!(!res.has_errors());
         assert_eq!(kept(&res), [("BTC", "1d")]);
         let text = res.findings[0].to_string();
-        assert!(text.contains("labelled `1d` by the `freq` column"), "{text}");
+        assert!(
+            text.contains("labelled `1d` by the `freq` column"),
+            "{text}"
+        );
         assert!(text.contains("spaced like `1h`"), "{text}");
     }
 

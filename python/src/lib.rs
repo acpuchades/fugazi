@@ -40,8 +40,8 @@
 // wiring and the `#[pymodule]` registration. Every module's items are
 // re-exported here so cross-module references stay path-free, which is
 // how they read when this was one file.
-pub(crate) mod errors;
 pub(crate) mod carriers;
+pub(crate) mod errors;
 #[macro_use]
 pub(crate) mod macros;
 pub(crate) mod classes;
@@ -50,64 +50,55 @@ pub(crate) mod classes;
 #[macro_use]
 pub(crate) mod strategy;
 pub(crate) mod constructors;
-pub(crate) mod sources;
 pub(crate) mod metrics;
 pub(crate) mod montecarlo;
-pub(crate) mod spec;
 pub(crate) mod prelude;
+pub(crate) mod sources;
+pub(crate) mod spec;
 
-
-use crate::prelude::*;
 #[allow(unused_imports)]
 use crate::carriers::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
-#[allow(unused_imports)]
-use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::montecarlo::*;
+use crate::prelude::*;
+#[allow(unused_imports)]
+use crate::sources::*;
 #[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 // `wrap_pyfunction!` resolves a hidden item pyo3 generates beside each
 // `#[pyfunction]`, and a glob import doesn't carry it — so every registered
 // function is named explicitly. The list doubles as the module's index.
 use crate::constructors::{
-    open, high, low, close, volume, typical,
-    median, identity, value, value_str, sma, ema,
-    rma, wma, hma, rsi, stddev, skewness_indicator,
-    kurtosis_indicator, zscore, correlation, covariance, beta, percentile, percentile_rank,
-    bars_since,
-    bars_since_high, bars_since_low, variance_ratio, stochastic, cci, log, exp,
-    atr, parkinson, garman_klass, rogers_satchell, mfi, williams_r,
-    obv, vwap, ad, true_range, adx, dmi,
-    aroon, sar, macd, bollinger, keltner, donchian, linreg,
-    stoch_rsi, resample, latch, unstable, if_else, get,
-    get_real, get_bool, get_str, compute_overlays, str_eq, str_ne,
-    year, month, day, hour, minute, second,
-    day_of_week, day_of_year, week_of_year, quarter, unix_seconds, unix_millis,
-    is_weekday, is_weekend, every, pick,
+    ad, adx, aroon, atr, bars_since, bars_since_high, bars_since_low, beta, bollinger, cci, close,
+    compute_overlays, correlation, covariance, day, day_of_week, day_of_year, dmi, donchian, ema,
+    every, exp, garman_klass, get, get_bool, get_real, get_str, high, hma, hour, identity, if_else,
+    is_weekday, is_weekend, keltner, kurtosis_indicator, latch, linreg, log, low, macd, median,
+    mfi, minute, month, obv, open, parkinson, percentile, percentile_rank, pick, quarter, resample,
+    rma, rogers_satchell, rsi, sar, second, skewness_indicator, sma, stddev, stoch_rsi, stochastic,
+    str_eq, str_ne, true_range, typical, unix_millis, unix_seconds, unstable, value, value_str,
+    variance_ratio, volume, vwap, week_of_year, williams_r, wma, year, zscore,
 };
 // Unpickling entry points. Not surface — but `__reduce__` names its callable by
 // `module.qualname`, so each has to be a real, importable module member.
 use crate::classes::{_rebuild_schema, _rebuild_snapshot};
-use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
-use crate::strategy::{
-    everything, top_bottom, threshold, quantile, buy_and_hold, ma_crossover,
-    rsi_reversal, donchian_breakout, keltner_breakout, sharpe_of, sortino_of, volatility_of,
-    max_drawdown_of, calmar_of,
-};
-use crate::sources::{
-    fetch,
-};
+use crate::sources::fetch;
 use crate::spec::{
     load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
     spec_json_schema, spec_tags,
+};
+use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
+use crate::strategy::{
+    buy_and_hold, calmar_of, donchian_breakout, everything, keltner_breakout, ma_crossover,
+    max_drawdown_of, quantile, rsi_reversal, sharpe_of, sortino_of, threshold, top_bottom,
+    volatility_of,
 };
 
 // ---------------------------------------------------------------------------
@@ -172,9 +163,15 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The exception hierarchy (`errors.rs`). Added by explicit `get_type`
     // because `create_exception!` produces a plain Rust type, not a
     // `#[pyclass]` that `add_class` would pick up.
-    m.add("FugaziError", m.py().get_type::<crate::errors::FugaziError>())?;
+    m.add(
+        "FugaziError",
+        m.py().get_type::<crate::errors::FugaziError>(),
+    )?;
     m.add("SpecError", m.py().get_type::<crate::errors::SpecError>())?;
-    m.add("WalletError", m.py().get_type::<crate::errors::WalletError>())?;
+    m.add(
+        "WalletError",
+        m.py().get_type::<crate::errors::WalletError>(),
+    )?;
     m.add("FetchError", m.py().get_type::<crate::errors::FetchError>())?;
 
     // The default comparison tolerance is hybrid (absolute floor + relative
@@ -187,31 +184,120 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
     }
     reg!(
-        open, high, low, close, volume, typical,
-        median, identity, value, value_str, sma, ema,
-        rma, wma, hma, rsi, stddev, skewness_indicator,
-        kurtosis_indicator, zscore, correlation, covariance, beta, percentile, percentile_rank,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        typical,
+        median,
+        identity,
+        value,
+        value_str,
+        sma,
+        ema,
+        rma,
+        wma,
+        hma,
+        rsi,
+        stddev,
+        skewness_indicator,
+        kurtosis_indicator,
+        zscore,
+        correlation,
+        covariance,
+        beta,
+        percentile,
+        percentile_rank,
         bars_since,
-        bars_since_high, bars_since_low, variance_ratio, stochastic, cci, log, exp,
-        atr, parkinson, garman_klass, rogers_satchell, mfi, williams_r,
-        obv, vwap, ad, true_range, adx, dmi,
-        aroon, sar, macd, bollinger, keltner, donchian, linreg,
-        stoch_rsi, resample, latch, unstable, if_else, get,
-        get_real, get_bool, get_str, compute_overlays, str_eq, str_ne,
-        year, month, day, hour, minute, second,
-        day_of_week, day_of_year, week_of_year, quarter, unix_seconds, unix_millis,
-        is_weekday, is_weekend, pick, everything, every, top_bottom, threshold,
-        quantile, buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
-        sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of, fetch,
-        load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
-        spec_json_schema, spec_tags, evaluate_report,
+        bars_since_high,
+        bars_since_low,
+        variance_ratio,
+        stochastic,
+        cci,
+        log,
+        exp,
+        atr,
+        parkinson,
+        garman_klass,
+        rogers_satchell,
+        mfi,
+        williams_r,
+        obv,
+        vwap,
+        ad,
+        true_range,
+        adx,
+        dmi,
+        aroon,
+        sar,
+        macd,
+        bollinger,
+        keltner,
+        donchian,
+        linreg,
+        stoch_rsi,
+        resample,
+        latch,
+        unstable,
+        if_else,
+        get,
+        get_real,
+        get_bool,
+        get_str,
+        compute_overlays,
+        str_eq,
+        str_ne,
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        day_of_week,
+        day_of_year,
+        week_of_year,
+        quarter,
+        unix_seconds,
+        unix_millis,
+        is_weekday,
+        is_weekend,
+        pick,
+        everything,
+        every,
+        top_bottom,
+        threshold,
+        quantile,
+        buy_and_hold,
+        ma_crossover,
+        rsi_reversal,
+        donchian_breakout,
+        keltner_breakout,
+        sharpe_of,
+        sortino_of,
+        volatility_of,
+        max_drawdown_of,
+        calmar_of,
+        fetch,
+        load_spec,
+        optimize,
+        slot_demand,
+        slot_demands,
+        spec_document_json_schema,
+        spec_grammar,
+        spec_json_schema,
+        spec_tags,
+        evaluate_report,
         // Unpickling entry points. These deliberately stay in the module's
         // generated `__all__`, underscore prefix and all: maturin's shim
         // populates the `fugazi` package with `from .fugazi import *`, which
         // honours `__all__` — so filtering them out for tidiness would take
         // them off the package and break every `__reduce__` that resolves
         // `fugazi._rebuild_*`. Exported is a requirement here, not an oversight.
-        _rebuild_schema, _rebuild_snapshot, _rebuild_size, _rebuild_order,
+        _rebuild_schema,
+        _rebuild_snapshot,
+        _rebuild_size,
+        _rebuild_order,
         _rebuild_run_report,
     );
 

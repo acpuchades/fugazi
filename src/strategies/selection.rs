@@ -248,10 +248,7 @@ fn ranked_take<Sym: Clone + Hash + Eq + Ord>(
     if k < ranked.len() {
         ranked.select_nth_unstable_by(k, order);
     }
-    ranked[..k]
-        .iter()
-        .map(|(sym, _)| (*sym).clone())
-        .collect()
+    ranked[..k].iter().map(|(sym, _)| (*sym).clone()).collect()
 }
 
 /// The ranked "long the highest `longs`, short the lowest `shorts`" rule,
@@ -697,21 +694,18 @@ mod tests {
     #[test]
     fn custom_selection_closure_is_installed_verbatim() {
         // A whimsical rule: long any symbol whose name starts with 'A'.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .selection(|scores: &HashMap<&'static str, Real>| {
-                    let mut out = HashMap::new();
-                    for sym in scores.keys() {
-                        if sym.starts_with('A') {
-                            out.insert(*sym, Side::Buy);
-                        }
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .selection(|scores: &HashMap<&'static str, Real>| {
+                let mut out = HashMap::new();
+                for sym in scores.keys() {
+                    if sym.starts_with('A') {
+                        out.insert(*sym, Side::Buy);
                     }
-                    out
-                });
+                }
+                out
+            });
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
                     wallet: &mut PaperWallet<&'static str>,
@@ -729,7 +723,10 @@ mod tests {
         };
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
-        assert!(wallet.position(&"AAPL").amount > 0.0, "AAPL long via custom rule");
+        assert!(
+            wallet.position(&"AAPL").amount > 0.0,
+            "AAPL long via custom rule"
+        );
         assert!(
             wallet.position(&"BTC").amount.abs() < 1e-9,
             "BTC not picked, so flat"
@@ -745,10 +742,7 @@ mod tests {
         // implements the trait once and installs it via `.selection(...)`.
         struct StartsWithSelection(char);
         impl Selection<&'static str> for StartsWithSelection {
-            fn select(
-                &self,
-                scores: &HashMap<&'static str, Real>,
-            ) -> Sides<&'static str> {
+            fn select(&self, scores: &HashMap<&'static str, Real>) -> Sides<&'static str> {
                 Sides {
                     long: scores
                         .keys()
@@ -760,13 +754,10 @@ mod tests {
             }
         }
 
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(1_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| equal_weight::<&'static str>(2))
-                .selection(StartsWithSelection('A'));
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .selection(StartsWithSelection('A'));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
         let tick = |strat: &mut BasketStrategy<&'static str>,
                     wallet: &mut PaperWallet<&'static str>,
@@ -784,7 +775,10 @@ mod tests {
         };
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
-        assert!(wallet.position(&"AAPL").amount > 0.0, "AAPL long via custom impl");
+        assert!(
+            wallet.position(&"AAPL").amount > 0.0,
+            "AAPL long via custom impl"
+        );
         assert!(
             wallet.position(&"BTC").amount.abs() < 1e-9,
             "BTC not picked, so flat"
@@ -821,10 +815,16 @@ mod tests {
     /// short side is not the long side's tie order reversed.
     #[test]
     fn both_sides_break_ties_ascending() {
-        let scores: HashMap<&str, Real> =
-            [("A", 1.0), ("B", 1.0), ("C", 1.0), ("X", -1.0), ("Y", -1.0), ("Z", -1.0)]
-                .into_iter()
-                .collect();
+        let scores: HashMap<&str, Real> = [
+            ("A", 1.0),
+            ("B", 1.0),
+            ("C", 1.0),
+            ("X", -1.0),
+            ("Y", -1.0),
+            ("Z", -1.0),
+        ]
+        .into_iter()
+        .collect();
         for _ in 0..64 {
             let picked = top_bottom(&scores, 2, 2);
             assert_eq!(picked.get("A"), Some(&Side::Buy));
@@ -855,14 +855,10 @@ mod tests {
     /// mapped it to `Equal`, which left it wherever the hash landed it.
     #[test]
     fn nan_scores_are_ranked_last_at_both_ends() {
-        let scores: HashMap<&str, Real> = [
-            ("A", Real::NAN),
-            ("B", 3.0),
-            ("C", 1.0),
-            ("D", Real::NAN),
-        ]
-        .into_iter()
-        .collect();
+        let scores: HashMap<&str, Real> =
+            [("A", Real::NAN), ("B", 3.0), ("C", 1.0), ("D", Real::NAN)]
+                .into_iter()
+                .collect();
         for _ in 0..64 {
             let picked = top_bottom(&scores, 1, 1);
             assert_eq!(picked.get("B"), Some(&Side::Buy), "highest real score");
@@ -887,5 +883,4 @@ mod tests {
             assert_eq!(got, ["A", "B"]);
         }
     }
-
 }

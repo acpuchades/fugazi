@@ -112,30 +112,42 @@ fn main() {
 
     let mut out: Vec<(&str, Vec<f64>)> = Vec::new();
 
-    out.push(("sma", bench(n, || {
-        let mut ind = Sma::new(Identity::new(), SMA_P);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
-    out.push(("ema", bench(n, || {
-        let mut ind = Ema::new(Identity::new(), EMA_P);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
-    out.push(("rsi", bench(n, || {
-        let mut ind = Rsi::new(Identity::new(), RSI_P);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
-    out.push(("stddev", bench(n, || {
-        let mut ind = StdDev::new(Identity::new(), STDDEV_P);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
+    out.push((
+        "sma",
+        bench(n, || {
+            let mut ind = Sma::new(Identity::new(), SMA_P);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
+    out.push((
+        "ema",
+        bench(n, || {
+            let mut ind = Ema::new(Identity::new(), EMA_P);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
+    out.push((
+        "rsi",
+        bench(n, || {
+            let mut ind = Rsi::new(Identity::new(), RSI_P);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
+    out.push((
+        "stddev",
+        bench(n, || {
+            let mut ind = StdDev::new(Identity::new(), STDDEV_P);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
     // ATR consumes whole bars, so it is fed `Candle`s directly — the analogue of
     // `TA_ATR` reading three flat `double` arrays, and the only fair shape for
     // an indicator-throughput comparison.
@@ -148,12 +160,15 @@ fn main() {
     // — and it was the number that made fugazi's ATR look 2.8x slower than
     // native TA-Lib when the real figure is 2.2x. `benches/icount.rs` keeps
     // `atr_atom` / `atr_candle` as workloads so the split stays reproducible.
-    out.push(("atr", bench(n, || {
-        let mut ind = Atr::new(Identity::<fugazi::market::Candle>::new(), ATR_P);
-        for c in &candles {
-            black_box(ind.update(*c));
-        }
-    })));
+    out.push((
+        "atr",
+        bench(n, || {
+            let mut ind = Atr::new(Identity::<fugazi::market::Candle>::new(), ATR_P);
+            for c in &candles {
+                black_box(ind.update(*c));
+            }
+        }),
+    ));
 
     // Two-source rolling statistics. Both legs are the close series in all
     // three tiers: the paired window's cost does not depend on the values, and
@@ -163,16 +178,16 @@ fn main() {
     // different field out of one shared `moments()` pass, so their cost is
     // this one's. (`TA_BETA` differences its inputs into returns internally,
     // so it is not a like-for-like partner for `Beta` and is not benched.)
-    out.push(("correlation", bench(n, || {
-        let mut ind = Correlation::new(
-            Identity::<Real>::new(),
-            Identity::<Real>::new(),
-            CORREL_P,
-        );
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
+    out.push((
+        "correlation",
+        bench(n, || {
+            let mut ind =
+                Correlation::new(Identity::<Real>::new(), Identity::<Real>::new(), CORREL_P);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
 
     // What a strategy pays for a regression slope. `LinReg::update` produces
     // slope, intercept, value and r² from one window every bar and the
@@ -181,12 +196,15 @@ fn main() {
     // the comparison a caller who wants a slope actually faces, and it is why
     // this is not in the multi-output block below: TA-Lib has no single call
     // that fills all four.
-    out.push(("linreg_slope", bench(n, || {
-        let mut ind = LinReg::new(Identity::<Real>::new(), LINREG_P).slope();
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
+    out.push((
+        "linreg_slope",
+        bench(n, || {
+            let mut ind = LinReg::new(Identity::<Real>::new(), LINREG_P).slope();
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
 
     // ---- multi-output ----------------------------------------------------
     //
@@ -199,36 +217,51 @@ fn main() {
     // series, the three bar indicators take `Candle`s by value. Same reason
     // `atr` above does — a `Vec<Atom>` clone per bar is the benchmark's own
     // bookkeeping and TA-Lib pays no analogue of it.
-    out.push(("macd", bench(n, || {
-        let mut ind = Macd::new(Identity::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
-    out.push(("bbands", bench(n, || {
-        let mut ind = Bollinger::new(Identity::new(), BBANDS_P, BBANDS_K);
-        for &p in &closes {
-            black_box(ind.update(p));
-        }
-    })));
-    out.push(("aroon", bench(n, || {
-        let mut ind = Aroon::new(Identity::<fugazi::market::Candle>::new(), AROON_P);
-        for c in &candles {
-            black_box(ind.update(*c));
-        }
-    })));
-    out.push(("dmi", bench(n, || {
-        let mut ind = Dmi::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
-        for c in &candles {
-            black_box(ind.update(*c));
-        }
-    })));
-    out.push(("adx", bench(n, || {
-        let mut ind = Adx::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
-        for c in &candles {
-            black_box(ind.update(*c));
-        }
-    })));
+    out.push((
+        "macd",
+        bench(n, || {
+            let mut ind = Macd::new(Identity::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
+    out.push((
+        "bbands",
+        bench(n, || {
+            let mut ind = Bollinger::new(Identity::new(), BBANDS_P, BBANDS_K);
+            for &p in &closes {
+                black_box(ind.update(p));
+            }
+        }),
+    ));
+    out.push((
+        "aroon",
+        bench(n, || {
+            let mut ind = Aroon::new(Identity::<fugazi::market::Candle>::new(), AROON_P);
+            for c in &candles {
+                black_box(ind.update(*c));
+            }
+        }),
+    ));
+    out.push((
+        "dmi",
+        bench(n, || {
+            let mut ind = Dmi::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
+            for c in &candles {
+                black_box(ind.update(*c));
+            }
+        }),
+    ));
+    out.push((
+        "adx",
+        bench(n, || {
+            let mut ind = Adx::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
+            for c in &candles {
+                black_box(ind.update(*c));
+            }
+        }),
+    ));
 
     // What a *strategy* pays for two lines of one MACD, which is the question
     // the whole-struct rows above do not answer.
@@ -239,67 +272,86 @@ fn main() {
     // `macd.signal()` build in hand-written Rust. TA-Lib's single `TA_MACD`
     // call is the baseline for both, so whatever this costs above `macd` is
     // duplicated work fugazi is doing and TA-Lib is not.
-    out.push(("macd_two_lines", bench(n, || {
-        let macd = Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
-        let (mut line, mut signal) = (macd.line(), macd.signal());
-        for &p in &closes {
-            black_box(line.update(p));
-            black_box(signal.update(p));
-        }
-    })));
+    out.push((
+        "macd_two_lines",
+        bench(n, || {
+            let macd = Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
+            let (mut line, mut signal) = (macd.line(), macd.signal());
+            for &p in &closes {
+                black_box(line.update(p));
+                black_box(signal.update(p));
+            }
+        }),
+    ));
 
     // The same two lines off a `Shared` handle: one MACD, advanced once per bar,
     // both accessors projecting out of the cached output. The library has had
     // this since the beginning; nothing that builds from a spec uses it.
-    out.push(("macd_two_lines_shared", bench(n, || {
-        let macd = Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).shared();
-        let (mut line, mut signal) = (macd.line(), macd.signal());
-        for &p in &closes {
-            black_box(line.update(p));
-            black_box(signal.update(p));
-        }
-    })));
+    out.push((
+        "macd_two_lines_shared",
+        bench(n, || {
+            let macd =
+                Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).shared();
+            let (mut line, mut signal) = (macd.line(), macd.signal());
+            for &p in &closes {
+                black_box(line.update(p));
+                black_box(signal.update(p));
+            }
+        }),
+    ));
 
     // The same SMA driven through the runtime type-erasure layer — a
     // `Box<dyn DynIndicator>` exchanging `DynValue` payloads, which is exactly
     // what the Python bindings hold. Measuring it here, with no Python in
     // sight, separates the erasure cost from the FFI boundary: whatever this
     // costs above `sma`, a Python caller pays too and cannot avoid.
-    out.push(("sma_erased", bench(n, || {
-        let mut ind = runtime::wrap(Sma::new(Identity::<Real>::new(), SMA_P));
-        for &p in &closes {
-            black_box(ind.update(DynValue::Real(p)));
-        }
-    })));
+    out.push((
+        "sma_erased",
+        bench(n, || {
+            let mut ind = runtime::wrap(Sma::new(Identity::<Real>::new(), SMA_P));
+            for &p in &closes {
+                black_box(ind.update(DynValue::Real(p)));
+            }
+        }),
+    ));
 
     // Faithful to what the Python bindings actually build: `sma(identity())`
     // wraps an *already erased* source, so the chain is
     // `Box<dyn> -> Sma -> Box<dyn> -> Identity` and every sample crosses the
     // `DynValue` boundary twice in each direction. The single-boundary
     // `sma_erased` above understates it.
-    out.push(("sma_erased_nested", bench(n, || {
-        let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
-        let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
-        for &p in &closes {
-            black_box(ind.update(DynValue::Real(p)));
-        }
-    })));
+    out.push((
+        "sma_erased_nested",
+        bench(n, || {
+            let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
+            let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
+            for &p in &closes {
+                black_box(ind.update(DynValue::Real(p)));
+            }
+        }),
+    ));
 
     // Everything `PyIndicator::feed` does on the Rust side of the boundary,
     // with no Python at all: the nested erased chain, the `Vec<Option<Real>>`
     // it collects into, and the `Vec<f64>` `build_floats` maps that to. If this
     // lands near the measured `feed()` cost the problem is ours; if it lands
     // far below, the rest is pyo3/NumPy and has to be chased there.
-    out.push(("feed_rust_side", bench(n, || {
-        let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
-        let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
-        let values: Vec<Option<Real>> = closes
-            .iter()
-            .map(|&p| ind.update(DynValue::Real(p)).and_then(|v| Real::try_from(v).ok()))
-            .collect();
-        let nums: Vec<Real> = values.iter().map(|v| v.unwrap_or(Real::NAN)).collect();
-        black_box(nums.len());
-    })));
+    out.push((
+        "feed_rust_side",
+        bench(n, || {
+            let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
+            let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
+            let values: Vec<Option<Real>> = closes
+                .iter()
+                .map(|&p| {
+                    ind.update(DynValue::Real(p))
+                        .and_then(|v| Real::try_from(v).ok())
+                })
+                .collect();
+            let nums: Vec<Real> = values.iter().map(|v| v.unwrap_or(Real::NAN)).collect();
+            black_box(nums.len());
+        }),
+    ));
 
     // Everything `PyMulti::feed` does on the Rust side of the boundary, with no
     // Python at all: the chunked fold into a flat row-major buffer, then the
@@ -325,7 +377,10 @@ fn main() {
             "size_of::<PayloadValue>() = {} B  (the payload every erased `update` moves)\n",
             std::mem::size_of::<DynValue>()
         );
-        println!("{:<20}{:>12}{:>12}{:>12}", "indicator", "min", "median", "max");
+        println!(
+            "{:<20}{:>12}{:>12}{:>12}",
+            "indicator", "min", "median", "max"
+        );
         for (name, xs) in &out {
             println!(
                 "{name:<20}{:>12.2}{:>12.2}{:>12.2}",

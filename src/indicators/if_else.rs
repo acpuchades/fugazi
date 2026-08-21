@@ -258,7 +258,10 @@ mod tests {
         // isn't consulted until bar 4, but by that bar it should read Some —
         // its warm-up has advanced silently.
         let mut ind = IfElse::new(
-            AtBar { seen: 0, fires_on: 4 },
+            AtBar {
+                seen: 0,
+                fires_on: 4,
+            },
             Sma::new(crate::indicators::Identity::<Real>::new(), 3),
             Sma::new(crate::indicators::Identity::<Real>::new(), 3),
         );
@@ -300,7 +303,10 @@ mod tests {
     #[test]
     fn reset_clears_the_ternary_and_its_sources() {
         let mut ind = IfElse::new(
-            AtBar { seen: 0, fires_on: 1 },
+            AtBar {
+                seen: 0,
+                fires_on: 1,
+            },
             Value::<Real>::new(1.0),
             Value::<Real>::new(2.0),
         );

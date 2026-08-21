@@ -4,15 +4,15 @@ use crate::prelude::*;
 #[allow(unused_imports)]
 use crate::classes::*;
 #[allow(unused_imports)]
-use crate::strategy::*;
-#[allow(unused_imports)]
 use crate::constructors::*;
-#[allow(unused_imports)]
-use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
 #[allow(unused_imports)]
+use crate::sources::*;
+#[allow(unused_imports)]
 use crate::spec::*;
+#[allow(unused_imports)]
+use crate::strategy::*;
 
 // ---------------------------------------------------------------------------
 // Shared type-erasure vocabulary (fugazi::runtime::chain)
@@ -1374,7 +1374,10 @@ impl AnyMulti {
     /// [`feed_into_columns`](Self::feed_into_columns)** — same standing
     /// duplication as `AnySource`, same reason, and this one likewise exists only
     /// for the no-NumPy fallback.
-    pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
+    pub(crate) fn feed_rows(
+        &mut self,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<Option<Vec<Real>>>> {
         let py = data.py();
         // One scratch buffer, cloned per produced row. The clone is unavoidable
         // here because the caller wants owned rows; the *repeated allocation

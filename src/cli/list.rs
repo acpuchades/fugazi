@@ -127,7 +127,11 @@ pub fn run(cmd: ListCmd) -> Result<()> {
 /// being pushed into the source trait: no provider's endpoint offers a
 /// server-side filter, so a `pattern` parameter there would be a lie that every
 /// impl re-implements identically.
-fn write_tickers<W: Write>(w: &mut W, provider: &str, pattern: Option<&glob::Pattern>) -> Result<()> {
+fn write_tickers<W: Write>(
+    w: &mut W,
+    provider: &str,
+    pattern: Option<&glob::Pattern>,
+) -> Result<()> {
     let rt = RuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
@@ -146,9 +150,7 @@ fn write_tickers<W: Write>(w: &mut W, provider: &str, pattern: Option<&glob::Pat
         // suggesting `*b**` to someone who typed `b*` is noise.
         if tickers.is_empty() && std::io::stdout().is_terminal() {
             let hint = if pattern.is_anchored() {
-                format!(
-                    " (matching is whole-symbol — `*{pattern}*` searches for a substring)"
-                )
+                format!(" (matching is whole-symbol — `*{pattern}*` searches for a substring)")
             } else {
                 String::new()
             };
@@ -209,8 +211,8 @@ fn write_grid<W: Write>(w: &mut W, items: &[String], term_width: usize) -> io::R
     // narrowest item bounds how many columns could ever fit, so this loop is
     // short even for a 20k-symbol list.
     let min_width = widths.iter().copied().min().unwrap_or(0);
-    let max_cols = ((term_width + COLUMN_GAP) / (min_width + COLUMN_GAP).max(1))
-        .clamp(1, items.len());
+    let max_cols =
+        ((term_width + COLUMN_GAP) / (min_width + COLUMN_GAP).max(1)).clamp(1, items.len());
 
     let (cols, col_widths) = (1..=max_cols)
         .rev()
@@ -298,7 +300,10 @@ fn column_widths(widths: &[usize], cols: usize) -> Vec<usize> {
 /// No title line of its own — the banner printed by [`run`] already names the
 /// command.
 fn write_sources<W: Write>(w: &mut W, providers: &[ProviderInfo]) -> io::Result<()> {
-    writeln!(w, "  Spec grammar: <provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*")?;
+    writeln!(
+        w,
+        "  Spec grammar: <provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*"
+    )?;
     writeln!(w)?;
     let name_width = providers.iter().map(|p| p.name.len()).max().unwrap_or(0);
     for p in providers {
@@ -435,7 +440,10 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
 
         for (label, _) in CATEGORIES {
-            assert!(text.contains(&format!("  {label}:")), "missing section `{label}`");
+            assert!(
+                text.contains(&format!("  {label}:")),
+                "missing section `{label}`"
+            );
         }
         // Every descriptor tag's name shows up somewhere in the rendered body.
         for tag in spec_grammar() {
@@ -455,9 +463,7 @@ mod tests {
         use crate::spec::grammar::spec_grammar;
 
         let grammar = spec_grammar();
-        let sig = |name: &str| {
-            signature(grammar.iter().find(|t| t.name == name).expect(name))
-        };
+        let sig = |name: &str| signature(grammar.iter().find(|t| t.name == name).expect(name));
 
         // `!close { source? }` collapses to the bare leaf; `!sma` shows params.
         assert_eq!(sig("close"), "close");
@@ -466,7 +472,10 @@ mod tests {
         // required, so it renders bare.
         assert_eq!(sig("sma"), "!sma { period, source=!close }");
         // Both arms of `GrammarDefault`, on one tag.
-        assert_eq!(sig("bb_upper"), "!bb_upper { source=!close, period=20, k=2.0 }");
+        assert_eq!(
+            sig("bb_upper"),
+            "!bb_upper { source=!close, period=20, k=2.0 }"
+        );
         // A node default that isn't a price series. `period` leads: required
         // keys come first, whatever order the variant declares them in.
         assert_eq!(sig("atr"), "!atr { period, source=!current }");
@@ -475,7 +484,10 @@ mod tests {
             "!donchian_upper { period, high=!high, low=!low }",
             "the two defaulted keys are declared first and still render last",
         );
-        assert_eq!(sig("top_bottom"), "!top_bottom { longs, shorts, of=!everything }");
+        assert_eq!(
+            sig("top_bottom"),
+            "!top_bottom { longs, shorts, of=!everything }"
+        );
         // `?` survives for the slot that genuinely has nothing to report: a
         // cross-asset `source:` defaults to the strategy's own series, which no
         // tag spells. `!get`'s `key` is required, so the `?` here is `source`.
@@ -501,10 +513,7 @@ mod tests {
         // Column-major means column 0 gets items[0..3], column 1 items[3..6],
         // column 2 items[6..7]. Row 0 → "11", "44", "77"; row 1 → "22", "55";
         // row 2 → "33", "66".
-        let out = render_grid(
-            &["11", "22", "33", "44", "55", "66", "77"],
-            12,
-        );
+        let out = render_grid(&["11", "22", "33", "44", "55", "66", "77"], 12);
         assert_eq!(out, "11  44  77\n22  55\n33  66\n");
     }
 
@@ -555,7 +564,10 @@ mod tests {
         // Budget 4 = 3 cells + the `…`. `币` is 2 cells wide, so exactly one
         // fits: a byte- or char-count truncation would emit two and overflow.
         assert_eq!(elide("币币币币", 4), "币…");
-        assert_eq!(console::measure_text_width(elide("币币币币", 4).as_ref()), 3);
+        assert_eq!(
+            console::measure_text_width(elide("币币币币", 4).as_ref()),
+            3
+        );
         // Anything already inside the cap is returned untouched (and borrowed).
         assert_eq!(elide("btc", 24), "btc");
         assert!(matches!(elide("btc", 24), Cow::Borrowed(_)));
@@ -594,8 +606,10 @@ mod tests {
         for p in KNOWN_PROVIDERS {
             let (name, doc) = (p.name, p.description);
             assert!(text.contains(name), "missing provider `{name}` in output");
-            assert!(text.contains(doc), "missing description for `{name}` in output");
+            assert!(
+                text.contains(doc),
+                "missing description for `{name}` in output"
+            );
         }
     }
-
 }

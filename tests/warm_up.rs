@@ -10,7 +10,7 @@
 
 use fugazi::indicators::{
     Abs, Adx, Aroon, Atr, BarsSinceHigh, BarsSinceLow, Beta, Bollinger, Cci, Correlation,
-    Covariance, CumMax, CumMin, CumSum, CurrentTime, Current, Day, DayOfWeek, DayOfYear, Dmi,
+    Covariance, CumMax, CumMin, CumSum, Current, CurrentTime, Day, DayOfWeek, DayOfYear, Dmi,
     Donchian, Ema, Exp, GarmanKlass, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis,
     Latch, LinReg, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Percentile, PercentileRank,
     Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Sigmoid, Sign, Skewness, Sma, Sqrt,
@@ -41,7 +41,10 @@ fn bars(n: usize) -> Vec<Candle> {
 fn assert_exact_warm_up<I: Indicator>(mut ind: I, inputs: Vec<I::Input>, name: &str) {
     let w = ind.warm_up_bars();
     if w == 0 {
-        assert!(ind.is_ready(), "{name}: warm-up 0 should be ready untouched");
+        assert!(
+            ind.is_ready(),
+            "{name}: warm-up 0 should be ready untouched"
+        );
         return;
     }
     assert!(
@@ -106,7 +109,10 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Atr::new(Current::candle(), 14), "atr");
     candle_case(Parkinson::new(Current::candle(), 20), "parkinson");
     candle_case(GarmanKlass::new(Current::candle(), 20), "garman_klass");
-    candle_case(RogersSatchell::new(Current::candle(), 20), "rogers_satchell");
+    candle_case(
+        RogersSatchell::new(Current::candle(), 20),
+        "rogers_satchell",
+    );
     candle_case(Mfi::new(Current::candle(), 14), "mfi");
     candle_case(Dmi::new(Current::candle(), 14), "dmi");
     candle_case(Adx::new(Current::candle(), 14), "adx");
@@ -124,17 +130,11 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Kurtosis::new(Current::close(), 20), "kurtosis");
     candle_case(ZScore::new(Current::close(), 20), "zscore");
     candle_case(Percentile::new(Current::close(), 20, 0.8), "percentile");
-    candle_case(
-        PercentileRank::new(Current::close(), 20),
-        "percentile_rank",
-    );
+    candle_case(PercentileRank::new(Current::close(), 20), "percentile_rank");
     // The rolling-extremum shorthands are exact (the window's extreme is always
     // attained somewhere inside it); the general `BarsSince` is not — see the
     // exclusion note in `warm_up_is_exact_for_composition`.
-    candle_case(
-        BarsSinceHigh::new(Current::close(), 20),
-        "bars_since_high",
-    );
+    candle_case(BarsSinceHigh::new(Current::close(), 20), "bars_since_high");
     candle_case(BarsSinceLow::new(Current::close(), 20), "bars_since_low");
     candle_case(
         Correlation::new(Current::close(), Current::open(), 20),
@@ -197,10 +197,7 @@ fn warm_up_is_exact_for_the_catalogue() {
 #[test]
 fn warm_up_is_exact_for_composition() {
     // Chaining adds up: the EMA seeds on the SMA's first output.
-    candle_case(
-        Ema::new(Sma::new(Current::close(), 10), 20),
-        "ema_of_sma",
-    );
+    candle_case(Ema::new(Sma::new(Current::close(), 10), 20), "ema_of_sma");
     // Components report the whole multi-output indicator's warm-up.
     candle_case(Macd::new(Current::close(), 12, 26, 9).line(), "macd_line");
     // Operators take the max of their operands; lookbacks add their period.
@@ -341,14 +338,8 @@ fn windowed_indicators_are_stable_once_ready() {
         Percentile::new(Current::close(), 20, 0.8).unstable_bars(),
         0
     );
-    assert_eq!(
-        PercentileRank::new(Current::close(), 20).unstable_bars(),
-        0
-    );
-    assert_eq!(
-        BarsSinceHigh::new(Current::close(), 20).unstable_bars(),
-        0
-    );
+    assert_eq!(PercentileRank::new(Current::close(), 20).unstable_bars(), 0);
+    assert_eq!(BarsSinceHigh::new(Current::close(), 20).unstable_bars(), 0);
     assert_eq!(
         Correlation::new(Current::close(), Current::open(), 20).unstable_bars(),
         0

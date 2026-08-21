@@ -43,8 +43,8 @@ use std::str::FromStr;
 use fugazi::sources::Interval;
 use fugazi::{Frequency, Schema, Selector};
 
-use crate::dyn_indicator::PayloadIndicator;
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
+use crate::dyn_indicator::PayloadIndicator;
 use crate::input::{self, Source};
 use crate::params;
 use crate::spec::{NodeSpec, Root};
@@ -301,8 +301,7 @@ fn split_scope(text: &str) -> Result<(OverlayScope, &str)> {
 /// [`Interval`] conversion is overlay-specific (calendar/costs use
 /// [`crate::calendar::Frequency`] instead).
 fn parse_scope(text: &str) -> Result<OverlayScope> {
-    let (symbol, freq_str) =
-        parse_scope_parts(text).map_err(|e| anyhow!("overlay scope: {e}"))?;
+    let (symbol, freq_str) = parse_scope_parts(text).map_err(|e| anyhow!("overlay scope: {e}"))?;
     let interval = match freq_str {
         Some(freq) => {
             Some(parse_interval(freq).with_context(|| format!("overlay scope {text:?}"))?)
@@ -414,7 +413,10 @@ const RESERVED_COLUMNS: &[&str] = &[
 ];
 
 fn reject_reserved_name(name: &str) -> Result<()> {
-    if RESERVED_COLUMNS.iter().any(|r| r.eq_ignore_ascii_case(name)) {
+    if RESERVED_COLUMNS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+    {
         bail!("overlay column {name:?} collides with the reserved base column");
     }
     Ok(())
@@ -634,9 +636,15 @@ mod tests {
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
         let btc = active_for(&overlays, &cols, "BTC", Interval::Day(1));
-        assert!(matches!(btc[0].map(|o| &o.spec), Some(NodeSpec::Ema { .. })));
+        assert!(matches!(
+            btc[0].map(|o| &o.spec),
+            Some(NodeSpec::Ema { .. })
+        ));
         let eth = active_for(&overlays, &cols, "ETH", Interval::Day(1));
-        assert!(matches!(eth[0].map(|o| &o.spec), Some(NodeSpec::Sma { .. })));
+        assert!(matches!(
+            eth[0].map(|o| &o.spec),
+            Some(NodeSpec::Sma { .. })
+        ));
     }
 
     #[test]
@@ -688,8 +696,14 @@ mod tests {
             },
         ];
         let cols = column_names(&overlays);
-        assert_eq!(stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 200);
-        assert_eq!(stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 20);
+        assert_eq!(
+            stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(),
+            200
+        );
+        assert_eq!(
+            stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(),
+            20
+        );
     }
 
     #[test]
@@ -700,8 +714,14 @@ mod tests {
         let b = Source::Inline("BTC:ma=!sma { period: 30 }".to_string());
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 30);
-        assert_eq!(stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 200);
+        assert_eq!(
+            stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(),
+            30
+        );
+        assert_eq!(
+            stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(),
+            200
+        );
     }
 
     #[test]
@@ -711,7 +731,10 @@ mod tests {
         let src = Source::Inline("s=!sma { period: 14 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_bars_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()).unwrap(), 14);
+        assert_eq!(
+            stable_bars_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()).unwrap(),
+            14
+        );
     }
 
     #[test]
@@ -731,7 +754,8 @@ mod tests {
 
     #[test]
     fn param_default_applies_when_unset() {
-        let src = Source::Inline("ma=!sma { period: !param { key: FAST, default: 14 } }".to_string());
+        let src =
+            Source::Inline("ma=!sma { period: !param { key: FAST, default: 14 } }".to_string());
         let overlays = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap();
         assert!(matches!(
             &overlays[0].spec,

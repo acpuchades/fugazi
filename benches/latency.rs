@@ -61,7 +61,13 @@ use common::synth_candles;
 
 /// Percentiles reported. p99.9 needs ~10 000 samples to mean anything, which
 /// sets the default sample count.
-const PCTS: [(f64, &str); 5] = [(0.50, "p50"), (0.90, "p90"), (0.99, "p99"), (0.999, "p99.9"), (1.0, "max")];
+const PCTS: [(f64, &str); 5] = [
+    (0.50, "p50"),
+    (0.90, "p90"),
+    (0.99, "p99"),
+    (0.999, "p99.9"),
+    (1.0, "max"),
+];
 
 struct Row {
     name: &'static str,
@@ -133,7 +139,11 @@ fn main() {
             // warm pass left hot.
             let warm = measure(n, None, $mk);
             let cold = measure(n, Some(gap), $mk);
-            rows.push(Row { name: $name, warm, cold });
+            rows.push(Row {
+                name: $name,
+                warm,
+                cold,
+            });
         }};
     }
 
@@ -165,7 +175,8 @@ fn main() {
     // erasure the YAML and Python paths both produce. If erasure's cost changes
     // shape when cold, this is where it shows.
     row!("sma_erased", {
-        let mut ind: runtime::Chain<Real, Real> = runtime::erase(Sma::new(Identity::<Real>::new(), 14));
+        let mut ind: runtime::Chain<Real, Real> =
+            runtime::erase(Sma::new(Identity::<Real>::new(), 14));
         move |i: usize| ind.update(closes[i]).unwrap_or(0.0)
     });
 
@@ -199,16 +210,29 @@ fn main() {
         // the clock. Say so rather than printing a number that reads like a
         // result.
         let resolved = r.name != "timer" && pct(&r.warm, 0.50) > floor * 1.5;
-        println!("{:>11}", if r.name == "timer" { "(floor)" } else if resolved { "yes" } else { "NO" });
+        println!(
+            "{:>11}",
+            if r.name == "timer" {
+                "(floor)"
+            } else if resolved {
+                "yes"
+            } else {
+                "NO"
+            }
+        );
     }
 
-    println!("\ntimer floor (warm p50) = {floor:.1} ns — rows at or under ~1.5x of it are\nnot resolvable by this instrument; read their warm/cold *ratio*, not the value.");
+    println!(
+        "\ntimer floor (warm p50) = {floor:.1} ns — rows at or under ~1.5x of it are\nnot resolvable by this instrument; read their warm/cold *ratio*, not the value."
+    );
     // `max` is deliberately absent: it is one observation, and a warm run that
     // happened to be preempted once produces a warm max above the cold max and a
     // ratio below 1. Measured here at 0.0x and 308x on the same run — noise in
     // both directions, and reporting it would invite reading either as a result.
     println!("\ncold/warm per percentile — the number this target exists for.");
-    println!("**`timer` is in this table on purpose**: the instrument goes cold too,\nso its row is how much of every other row is the clock rather than the code.");
+    println!(
+        "**`timer` is in this table on purpose**: the instrument goes cold too,\nso its row is how much of every other row is the clock rather than the code."
+    );
     print!("{:<12}", "workload");
     for (_, label) in PCTS.iter().take(4) {
         print!("{label:>9}");

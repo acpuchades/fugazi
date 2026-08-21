@@ -18,10 +18,16 @@ pub fn adx_trend_filter<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static 
     adx_period: usize,
     adx_min: Real,
 ) -> SingleAssetStrategy<Sym> {
-    let cross_up = Sma::new(super::self_close::<Sym>(), fast).crosses_above(Sma::new(super::self_close::<Sym>(), slow));
+    let cross_up = Sma::new(super::self_close::<Sym>(), fast)
+        .crosses_above(Sma::new(super::self_close::<Sym>(), slow));
     SingleAssetStrategy::new(symbol).long_on(
-        cross_up.and(Adx::new(super::self_bar::<Sym>(), adx_period).adx().above(adx_min)),
-        Sma::new(super::self_close::<Sym>(), fast).crosses_below(Sma::new(super::self_close::<Sym>(), slow)),
+        cross_up.and(
+            Adx::new(super::self_bar::<Sym>(), adx_period)
+                .adx()
+                .above(adx_min),
+        ),
+        Sma::new(super::self_close::<Sym>(), fast)
+            .crosses_below(Sma::new(super::self_close::<Sym>(), slow)),
     )
 }
 
@@ -56,9 +62,14 @@ pub fn keltner_breakout<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static 
     atr_period: usize,
     multiplier: Real,
 ) -> SingleAssetStrategy<Sym> {
-    let channel =
-        Keltner::new(super::self_close::<Sym>(), super::self_bar::<Sym>(), ema_period, atr_period, multiplier)
-            .shared();
+    let channel = Keltner::new(
+        super::self_close::<Sym>(),
+        super::self_bar::<Sym>(),
+        ema_period,
+        atr_period,
+        multiplier,
+    )
+    .shared();
     let up = || super::self_close::<Sym>().gt(channel.upper());
     let down = || super::self_close::<Sym>().lt(channel.lower());
     SingleAssetStrategy::new(symbol)

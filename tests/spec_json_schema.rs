@@ -59,7 +59,10 @@ fn branch_names(v: &Value) -> Vec<String> {
 fn root_refs_node() {
     let schema = spec_json_schema();
     assert_eq!(schema["$ref"], "#/$defs/node");
-    assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
 }
 
 #[test]
@@ -70,7 +73,9 @@ fn every_ref_resolves() {
     collect_refs(&schema, &mut refs);
     assert!(!refs.is_empty(), "schema has no $refs at all");
     for r in refs {
-        let name = r.strip_prefix("#/$defs/").unwrap_or_else(|| panic!("odd $ref {r}"));
+        let name = r
+            .strip_prefix("#/$defs/")
+            .unwrap_or_else(|| panic!("odd $ref {r}"));
         assert!(defs.contains_key(name), "$ref {r} points at a missing def");
     }
     for expected in ["node", "selection", "match_case", "strategy"] {
@@ -100,7 +105,9 @@ fn node_and_selection_cover_every_tag_exactly() {
 
     // Node covers every node tag plus the authored load-time placeholders
     // (`REWRITTEN_TAGS`), which flow in from the parser's own list.
-    let node_alts = schema["$defs"]["node"]["oneOf"].as_array().expect("node oneOf");
+    let node_alts = schema["$defs"]["node"]["oneOf"]
+        .as_array()
+        .expect("node oneOf");
     let node_covered: BTreeSet<String> = node_alts.iter().flat_map(branch_names).collect();
     let mut want_node = want("node");
     want_node.extend(REWRITTEN_TAGS.iter().map(|s| s.to_string()));
@@ -113,7 +120,10 @@ fn node_and_selection_cover_every_tag_exactly() {
             b.get("type").is_some() && b.get("required").is_none() && b.get("const").is_none()
         })
         .count();
-    assert_eq!(shorthands, 3, "expected number/boolean/array literal shorthands");
+    assert_eq!(
+        shorthands, 3,
+        "expected number/boolean/array literal shorthands"
+    );
 }
 
 #[test]
@@ -123,8 +133,18 @@ fn document_schema_is_well_formed() {
 
     // The five shapes plus their slot defs plus the shared expression defs.
     for name in [
-        "single", "pairs", "basket", "multi", "portfolio", "side", "basket_side",
-        "multi_side", "universe", "portfolio_child", "node", "selection",
+        "single",
+        "pairs",
+        "basket",
+        "multi",
+        "portfolio",
+        "side",
+        "basket_side",
+        "multi_side",
+        "universe",
+        "portfolio_child",
+        "node",
+        "selection",
     ] {
         assert!(defs.contains_key(name), "missing $defs/{name}");
     }
@@ -150,7 +170,9 @@ fn document_schema_is_well_formed() {
     let mut refs = Vec::new();
     collect_refs(&schema, &mut refs);
     for r in refs {
-        let name = r.strip_prefix("#/$defs/").unwrap_or_else(|| panic!("odd $ref {r}"));
+        let name = r
+            .strip_prefix("#/$defs/")
+            .unwrap_or_else(|| panic!("odd $ref {r}"));
         assert!(defs.contains_key(name), "$ref {r} points at a missing def");
     }
 }

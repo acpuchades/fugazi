@@ -596,7 +596,10 @@ impl StrategySpec {
         match self {
             StrategySpec::Single(s) => vec![crate::types::symbol(s.symbol())],
             StrategySpec::Pairs(s) => {
-                vec![crate::types::symbol(&s.left), crate::types::symbol(&s.right)]
+                vec![
+                    crate::types::symbol(&s.left),
+                    crate::types::symbol(&s.right),
+                ]
             }
             StrategySpec::Basket(_) | StrategySpec::Multi(_) | StrategySpec::Portfolio(_) => {
                 super::backtest::universe_from_snapshots(snapshots)

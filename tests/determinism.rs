@@ -42,7 +42,10 @@ fn tie_series() -> String {
     let mut out = String::from("symbol;time;open;high;low;close;volume\n");
     for d in 0..120 {
         let date = format!("2024-{:02}-{:02}", d / 28 + 1, d % 28 + 1);
-        for (i, sym) in ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"].iter().enumerate() {
+        for (i, sym) in ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
+            .iter()
+            .enumerate()
+        {
             let p = 100.0 + 10.0 * (((d + i * 3) as f64) / 7.0).sin();
             out += &format!(
                 "{sym};{date}T00:00:00Z;{p:.2};{:.2};{:.2};{:.2};1000\n",

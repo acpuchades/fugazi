@@ -47,20 +47,20 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, Coinbase, CoinGecko, Interval, Okx, SeriesSource,
-    Timestamp, Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
+    self, Binance, BinanceVision, CoinGecko, Coinbase, Interval, Okx, SeriesSource, Timestamp,
+    Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
     coingecko::coingecko_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
 use serde_json::Value as Json;
 
-use crate::dyn_indicator::{PayloadIndicator, PayloadValue};
-use crate::spec::Root;
 use crate::csv_source::{CsvBar, CsvSource};
+use crate::dyn_indicator::{PayloadIndicator, PayloadValue};
 use crate::input::Source as InputSource;
 use crate::overlap::{self, Overlap};
 use crate::overlay::{self, Overlay};
 use crate::params;
+use crate::spec::Root;
 use crate::style;
 use fugazi::types::Symbol;
 
@@ -152,8 +152,8 @@ struct DatasetSpec {
 /// `serde_norway::from_str` → `imports::resolve` → `yaml_to_json` →
 /// `serde_json::from_value`.
 fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading dataset {path:?}"))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading dataset {path:?}"))?;
     let base = Path::new(path).parent().unwrap_or(Path::new("."));
     let yaml: serde_norway::Value = serde_norway::from_str(&content)
         .with_context(|| format!("parsing dataset YAML {path:?}"))?;
@@ -161,8 +161,8 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
         .with_context(|| format!("normalising tags in dataset {path:?}"))?;
     let json = crate::imports::resolve(json, base)
         .with_context(|| format!("resolving !import in dataset {path:?}"))?;
-    let dataset: DatasetSpec = serde_json::from_value(json)
-        .with_context(|| format!("parsing dataset {path:?}"))?;
+    let dataset: DatasetSpec =
+        serde_json::from_value(json).with_context(|| format!("parsing dataset {path:?}"))?;
     let interval = crate::calendar::parse_interval(&dataset.interval)
         .with_context(|| format!("dataset {path:?}: interval {:?}", dataset.interval))?;
     let specs = dataset
@@ -256,8 +256,8 @@ fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
 /// with no metadata.
 fn parse_spec_arg(s: &str) -> Result<(Vec<FetchSpec>, Option<DatasetMeta>)> {
     if let Some(path) = s.strip_prefix('@') {
-        let (specs, meta) = parse_dataset(path)
-            .with_context(|| format!("loading dataset {path:?}"))?;
+        let (specs, meta) =
+            parse_dataset(path).with_context(|| format!("loading dataset {path:?}"))?;
         Ok((specs, Some(meta)))
     } else {
         parse_spec(s).map(|f| (vec![f], None))
@@ -295,16 +295,14 @@ pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
     },
     ProviderInfo {
         name: "binance-vision",
-        description:
-            "Binance spot klines from the public archive (data.binance.vision) — \
+        description: "Binance spot klines from the public archive (data.binance.vision) — \
              deeper and cheaper than the live endpoint, one request per month and no \
              rate limit, at the cost of a ~2-day lag. Same columns as `binance`",
         schema: Some(|| binance_vision_schema(sources::binance_vision::Market::Spot).clone()),
     },
     ProviderInfo {
         name: "binance-vision-futures",
-        description:
-            "Binance USDⓈ-M perpetual klines from the same archive, plus the side \
+        description: "Binance USDⓈ-M perpetual klines from the same archive, plus the side \
              channels only a derivative has: funding rate (summed within a bar, so \
              `[1d]` is that day's carry), premium index, open interest and the \
              long/short ratios. Hourly to daily only",
@@ -314,23 +312,20 @@ pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
     },
     ProviderInfo {
         name: "okx",
-        description:
-            "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
+        description: "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
              `ETH-USDT`). Day/week/month bars are UTC-aligned",
         schema: Some(|| okx_schema().clone()),
     },
     ProviderInfo {
         name: "coinbase",
-        description:
-            "Coinbase Advanced Trade candles endpoint (symbols are dash-separated \
+        description: "Coinbase Advanced Trade candles endpoint (symbols are dash-separated \
              product ids: `BTC-USD`, `ETH-USD`). Fixed cadences only: 1m/5m/15m/30m, \
              1h/2h/6h, 1d",
         schema: None,
     },
     ProviderInfo {
         name: "cg",
-        description:
-            "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
+        description: "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
              (symbols are coin ids: `bitcoin`, not `BTC`)",
         schema: Some(|| coingecko_schema().clone()),
     },
@@ -402,8 +397,7 @@ enum FetchSpec {
     },
 }
 
-impl FetchSpec {
-}
+impl FetchSpec {}
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
@@ -527,13 +521,16 @@ pub fn run(mut args: GetArgs) -> Result<()> {
 
     // Extract per-dataset metadata upfront (cloned so we can consume `metas` later).
     let n_datasets = metas.len();
-    let (dataset_since, dataset_until, dataset_name): (Option<String>, Option<String>, Option<String>) =
-        if n_datasets == 1 {
-            let m = &metas[0];
-            (m.since.clone(), m.until.clone(), Some(m.name.clone()))
-        } else {
-            (None, None, None)
-        };
+    let (dataset_since, dataset_until, dataset_name): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = if n_datasets == 1 {
+        let m = &metas[0];
+        (m.since.clone(), m.until.clone(), Some(m.name.clone()))
+    } else {
+        (None, None, None)
+    };
     // Consume metas to take ownership of the pre-parsed overlays.
     let dataset_overlays: Vec<Overlay> = metas.into_iter().flat_map(|m| m.overlays).collect();
 
@@ -635,7 +632,14 @@ fn run_candles(
 
     if !args.quiet {
         style::print_header("get", "fetch OHLCV candles from remote providers");
-        print_inputs_block(&args, since_ts, until_ts, since_specified, &overlay_columns, output);
+        print_inputs_block(
+            &args,
+            since_ts,
+            until_ts,
+            since_specified,
+            &overlay_columns,
+            output,
+        );
     }
 
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
@@ -683,9 +687,8 @@ fn run_candles(
                 let shared = Arc::new(bars);
                 // The CSV loader classified every non-OHLCV column into a
                 // shared `Arc<Schema>` — pluck it off any atom.
-                let file_schema = sources::schema_of(
-                    &shared.iter().map(|b| b.atom.clone()).collect::<Vec<_>>(),
-                );
+                let file_schema =
+                    sources::schema_of(&shared.iter().map(|b| b.atom.clone()).collect::<Vec<_>>());
                 let mut pairs: Vec<(String, Interval)> = Vec::new();
                 for b in shared.iter() {
                     let pair = (b.symbol.clone(), b.interval);
@@ -773,11 +776,6 @@ fn run_candles(
     Ok(())
 }
 
-
-
-
-
-
 /// One row of output: which symbol + interval it came from, the timed candle,
 /// the per-`-x`-column overlay values (aligned with the CLI's overlay column
 /// layout — `None` for a column no applicable overlay covers this row's
@@ -849,9 +847,9 @@ impl Series {
     fn fetch_since(&self, since: Timestamp, since_specified: bool) -> Timestamp {
         if since_specified {
             Timestamp(
-                since
-                    .0
-                    .saturating_sub((self.stable as i64).saturating_mul(self.interval.duration_ms())),
+                since.0.saturating_sub(
+                    (self.stable as i64).saturating_mul(self.interval.duration_ms()),
+                ),
             )
         } else {
             since
@@ -946,7 +944,10 @@ async fn fetch_series(
             .filter(|b| {
                 b.symbol == series.symbol
                     && b.interval == series.interval
-                    && b.atom.time.map(|t| t.0 >= fetch_since.0 && t.0 < until.0).unwrap_or(false)
+                    && b.atom
+                        .time
+                        .map(|t| t.0 >= fetch_since.0 && t.0 < until.0)
+                        .unwrap_or(false)
             })
             .map(|b| RawBar {
                 symbol: series.symbol.clone(),
@@ -997,8 +998,11 @@ async fn fetch_series(
 fn snapshots_by_time(raw: &[RawBar]) -> HashMap<i64, Snapshot<Symbol>> {
     let mut ordered: Vec<&RawBar> = raw.iter().filter(|b| b.atom.time.is_some()).collect();
     ordered.sort_by(|a, b| {
-        (a.atom.time, a.symbol.as_str(), a.interval.as_token())
-            .cmp(&(b.atom.time, b.symbol.as_str(), b.interval.as_token()))
+        (a.atom.time, a.symbol.as_str(), a.interval.as_token()).cmp(&(
+            b.atom.time,
+            b.symbol.as_str(),
+            b.interval.as_token(),
+        ))
     });
 
     // One interned `Symbol` per distinct name, reused across every bar that
@@ -1073,7 +1077,8 @@ fn apply_overlays(
 
         let active: Vec<Option<&Overlay>> =
             overlay::active_for(overlays, columns, &symbol, interval);
-        let mut instances: Vec<Option<Box<dyn PayloadIndicator>>> = Vec::with_capacity(active.len());
+        let mut instances: Vec<Option<Box<dyn PayloadIndicator>>> =
+            Vec::with_capacity(active.len());
         for slot in &active {
             instances.push(match slot {
                 Some(o) => Some(o.build(&schema, Root::blessed(&root))?),
@@ -1093,7 +1098,9 @@ fn apply_overlays(
                     .time
                     .and_then(|t| by_time.get(&t.0))
                     .cloned()
-                    .unwrap_or_else(|| Snapshot::single(fugazi::types::symbol(&b.symbol), b.atom.clone()));
+                    .unwrap_or_else(|| {
+                        Snapshot::single(fugazi::types::symbol(&b.symbol), b.atom.clone())
+                    });
                 let values: Vec<Option<OverlayValue>> = instances
                     .iter_mut()
                     .map(|slot| {
@@ -1136,8 +1143,11 @@ fn apply_overlays(
     }
 
     out.sort_by(|a, b| {
-        (a.atom.time, a.symbol.as_str(), a.freq.as_str())
-            .cmp(&(b.atom.time, b.symbol.as_str(), b.freq.as_str()))
+        (a.atom.time, a.symbol.as_str(), a.freq.as_str()).cmp(&(
+            b.atom.time,
+            b.symbol.as_str(),
+            b.freq.as_str(),
+        ))
     });
     Ok(out)
 }
@@ -1463,9 +1473,7 @@ fn print_result_block(rows: usize, n_symbols: usize, n_series: usize, overlap: &
 /// since the fetch grammar is date-precision and printing HH:MM:SS would add
 /// noise the user never gave us.
 fn format_date(t: Timestamp) -> String {
-    t.to_datetime()
-        .date()
-        .to_string()
+    t.to_datetime().date().to_string()
 }
 
 /// Write the row list to `path` as a `,`-delimited CSV. Base header:
@@ -1518,7 +1526,12 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
         let mut record: Vec<String> = vec![row.symbol.clone(), row.freq.clone(), time];
         if any_candle {
             let ohlcv = |f: fn(&Candle) -> Real| {
-                row.atom.candle.as_ref().map(f).map(format_f64).unwrap_or_default()
+                row.atom
+                    .candle
+                    .as_ref()
+                    .map(f)
+                    .map(format_f64)
+                    .unwrap_or_default()
             };
             record.extend([
                 ohlcv(|c| c.open),
@@ -1696,17 +1709,13 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
             bail!("{s:?}: empty frequency token in bracket");
         }
         freqs.push(
-            crate::calendar::parse_interval(tok)
-                .with_context(|| format!("{s:?}: freq {tok:?}"))?,
+            crate::calendar::parse_interval(tok).with_context(|| format!("{s:?}: freq {tok:?}"))?,
         );
     }
     if freqs.is_empty() {
         bail!("{s:?}: empty frequency list");
     }
-    Ok(SymbolSpec {
-        symbol,
-        freqs,
-    })
+    Ok(SymbolSpec { symbol, freqs })
 }
 
 /// Parse a date string against `now`, returning an [`OffsetDateTime`] at UTC
@@ -1772,7 +1781,10 @@ fn parse_absolute(s: &str) -> Option<Date> {
     if parts.len() != 3 {
         return None;
     }
-    if !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+    if !parts
+        .iter()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     let first_len = parts[0].len();
@@ -1825,13 +1837,6 @@ mod tests {
         assert_eq!(symbols[0].freqs, vec![Interval::Day(1)]);
     }
 
-
-
-
-
-
-
-
     #[test]
     fn a_symbol_carrying_an_equals_needs_no_escape() {
         // With the `OUT=QUERY` remap gone, nothing in a spec head is
@@ -1863,7 +1868,6 @@ mod tests {
         assert!(parse_spec("binance:BTCUSDT[1x]").is_err());
     }
 
-
     #[test]
     fn label_round_trips_to_a_spec_that_parses_back() {
         let series = Series {
@@ -1880,7 +1884,6 @@ mod tests {
         let (_, parsed) = remote(&series.label());
         assert_eq!(parsed[0].symbol, "EURUSD=X");
     }
-
 
     #[test]
     fn parses_multi_symbol_multi_freq() {
@@ -2027,37 +2030,88 @@ mod tests {
 
     #[test]
     fn today_yesterday_and_relative_dates() {
-        assert_eq!(parse_date("today", now()).unwrap(), datetime!(2024-03-15 0:00 UTC));
-        assert_eq!(parse_date("yesterday", now()).unwrap(), datetime!(2024-03-14 0:00 UTC));
-        assert_eq!(parse_date("7d ago", now()).unwrap(), datetime!(2024-03-08 0:00 UTC));
-        assert_eq!(parse_date("2w ago", now()).unwrap(), datetime!(2024-03-01 0:00 UTC));
+        assert_eq!(
+            parse_date("today", now()).unwrap(),
+            datetime!(2024-03-15 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("yesterday", now()).unwrap(),
+            datetime!(2024-03-14 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("7d ago", now()).unwrap(),
+            datetime!(2024-03-08 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("2w ago", now()).unwrap(),
+            datetime!(2024-03-01 0:00 UTC)
+        );
     }
 
     #[test]
     fn iso_and_eu_dates() {
-        assert_eq!(parse_date("2020-01-01", now()).unwrap(), datetime!(2020-01-01 0:00 UTC));
-        assert_eq!(parse_date("1-1-2020", now()).unwrap(), datetime!(2020-01-01 0:00 UTC));
-        assert_eq!(parse_date("15-03-2024", now()).unwrap(), datetime!(2024-03-15 0:00 UTC));
+        assert_eq!(
+            parse_date("2020-01-01", now()).unwrap(),
+            datetime!(2020-01-01 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("1-1-2020", now()).unwrap(),
+            datetime!(2020-01-01 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("15-03-2024", now()).unwrap(),
+            datetime!(2024-03-15 0:00 UTC)
+        );
         // `01-02-2020` is EU (Feb 1 2020), disambiguated by first-component length.
-        assert_eq!(parse_date("01-02-2020", now()).unwrap(), datetime!(2020-02-01 0:00 UTC));
+        assert_eq!(
+            parse_date("01-02-2020", now()).unwrap(),
+            datetime!(2020-02-01 0:00 UTC)
+        );
     }
 
     #[test]
     fn human_readable_dates() {
         // Month names: day-first freely, month-first with a comma.
-        assert_eq!(parse_date("1 March 2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
-        assert_eq!(parse_date("Mar 1, 2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        assert_eq!(
+            parse_date("1 March 2020", now()).unwrap(),
+            datetime!(2020-03-01 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("Mar 1, 2020", now()).unwrap(),
+            datetime!(2020-03-01 0:00 UTC)
+        );
         // Slash dates follow the dashed rules: ISO year-first or EU day-first.
-        assert_eq!(parse_date("2020/03/01", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
-        assert_eq!(parse_date("01/03/2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        assert_eq!(
+            parse_date("2020/03/01", now()).unwrap(),
+            datetime!(2020-03-01 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("01/03/2020", now()).unwrap(),
+            datetime!(2020-03-01 0:00 UTC)
+        );
         // Spelled-out relative offsets and weekday anchors, against a fixed
         // `now` of Friday 2024-03-15.
-        assert_eq!(parse_date("3 weeks ago", now()).unwrap(), datetime!(2024-02-23 0:00 UTC));
-        assert_eq!(parse_date("2 months ago", now()).unwrap(), datetime!(2024-01-15 0:00 UTC));
-        assert_eq!(parse_date("1 year ago", now()).unwrap(), datetime!(2023-03-15 0:00 UTC));
-        assert_eq!(parse_date("last monday", now()).unwrap(), datetime!(2024-03-11 0:00 UTC));
+        assert_eq!(
+            parse_date("3 weeks ago", now()).unwrap(),
+            datetime!(2024-02-23 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("2 months ago", now()).unwrap(),
+            datetime!(2024-01-15 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("1 year ago", now()).unwrap(),
+            datetime!(2023-03-15 0:00 UTC)
+        );
+        assert_eq!(
+            parse_date("last monday", now()).unwrap(),
+            datetime!(2024-03-11 0:00 UTC)
+        );
         // A time-of-day is accepted but floored to midnight.
-        assert_eq!(parse_date("2020-03-01 14:30", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        assert_eq!(
+            parse_date("2020-03-01 14:30", now()).unwrap(),
+            datetime!(2020-03-01 0:00 UTC)
+        );
     }
 
     #[test]
@@ -2086,7 +2140,11 @@ mod tests {
         // timestamp preserved — nothing that appeared only once is dropped.
         assert_eq!(
             rows,
-            vec![(BOUNDARY - 3600, 'a'), (BOUNDARY - 10, 'b'), (BOUNDARY + 3600, 'c')]
+            vec![
+                (BOUNDARY - 3600, 'a'),
+                (BOUNDARY - 10, 'b'),
+                (BOUNDARY + 3600, 'c')
+            ]
         );
     }
 

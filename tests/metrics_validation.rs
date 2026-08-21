@@ -119,7 +119,10 @@ fn matches_empyrical_reference() {
 
     let (_return_indices, return_values) = match read_two_col(&returns_path) {
         Some(x) => x,
-        None => panic!("missing {}: rerun tools/gen_metrics_returns.py", returns_path.display()),
+        None => panic!(
+            "missing {}: rerun tools/gen_metrics_returns.py",
+            returns_path.display()
+        ),
     };
     let returns: Vec<Real> = return_values
         .iter()
@@ -140,7 +143,11 @@ fn matches_empyrical_reference() {
     };
     let expected: HashMap<String, Real> = keys
         .into_iter()
-        .zip(values.into_iter().map(|s| s.parse().expect("numeric expected")))
+        .zip(
+            values
+                .into_iter()
+                .map(|s| s.parse().expect("numeric expected")),
+        )
         .collect();
 
     // Turn the returns into an equity curve (same shape a real backtest gives

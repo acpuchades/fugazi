@@ -19,7 +19,6 @@
 
 mod common;
 
-use fugazi::types::{Symbol, symbol as intern};
 use common::bars;
 use fugazi::backtest::Fill;
 use fugazi::market::{Real, Schema};
@@ -28,6 +27,7 @@ use fugazi::spec::{
     RunnableStrategy, SingleStrategySpec,
 };
 use fugazi::types::{Atom, Snapshot};
+use fugazi::types::{Symbol, symbol as intern};
 
 /// A price series with enough swings to trigger crossovers in every chunk.
 fn prices(n: usize) -> Vec<Real> {
@@ -208,12 +208,7 @@ fn assert_chunked_resume_matches<S, B>(
         run.whole_equity.len(),
         "{case}: chunked curve length"
     );
-    for (i, (got, want)) in run
-        .chunk_equity
-        .iter()
-        .zip(&run.whole_equity)
-        .enumerate()
-    {
+    for (i, (got, want)) in run.chunk_equity.iter().zip(&run.whole_equity).enumerate() {
         assert_eq!(
             got.to_bits(),
             want.to_bits(),
@@ -224,7 +219,8 @@ fn assert_chunked_resume_matches<S, B>(
     let got: Vec<_> = run.chunk_fills.iter().map(fill_key).collect();
     let want: Vec<_> = run.whole_fills.iter().map(fill_key).collect();
     assert_eq!(
-        got, want,
+        got,
+        want,
         "{case}: fills diverged (splits {splits:?}); chunked {} vs whole {}",
         got.len(),
         want.len()
@@ -648,14 +644,24 @@ fn portfolio_with_weight_shares_resumes_across_three_chunks() {
 fn single_asset_carries_every_state_field_across_chunks() {
     let spec = single_ema_spec();
     let sch = schema();
-    assert_chunked_state_matches("single/ema", || spec.build(CASH, &sch), &single_snaps(60), SPLITS);
+    assert_chunked_state_matches(
+        "single/ema",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+        SPLITS,
+    );
 }
 
 #[test]
 fn pairs_carries_every_state_field_across_chunks() {
     let spec = pairs_spec();
     let sch = schema();
-    assert_chunked_state_matches("pairs/spread", || spec.build(CASH, &sch), &multi_snaps(60), SPLITS);
+    assert_chunked_state_matches(
+        "pairs/spread",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
 }
 
 #[test]
@@ -728,7 +734,9 @@ fn flatten_closes_the_position_in_the_wallet_not_just_the_report() {
     // that flattens must not resume holding the position it just closed.
     let carried_positions = wallet_positions(&carried_state);
     assert!(
-        carried_positions.iter().any(|(_, units)| units.abs() > 1e-12),
+        carried_positions
+            .iter()
+            .any(|(_, units)| units.abs() > 1e-12),
         "the carried run should still hold its long: {carried_positions:?}"
     );
     let flattened_positions = wallet_positions(&flattened_state);
@@ -809,7 +817,10 @@ fn resuming_a_mismatched_shape_is_rejected() {
         .drive_resumable(&multi_snaps(20), CASH, &[], Some(&state), false)
         .expect_err("cross-shape resume must fail");
     assert!(err.contains("!resume"), "unexpected error: {err}");
-    assert!(err.contains("single") && err.contains("pairs"), "error: {err}");
+    assert!(
+        err.contains("single") && err.contains("pairs"),
+        "error: {err}"
+    );
 }
 
 #[test]
@@ -855,7 +866,9 @@ fn state_size_does_not_grow_with_run_length() {
         let (report, state) = strat
             .drive_resumable(&single_snaps(bars), CASH, &[], None, false)
             .expect("run");
-        let size = serde_json::to_string(&state).expect("serialize state").len();
+        let size = serde_json::to_string(&state)
+            .expect("serialize state")
+            .len();
         (size, report.fills.len())
     };
 

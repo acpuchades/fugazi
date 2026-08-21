@@ -1,8 +1,8 @@
 //! End-to-end checks that indicators and signals compose through the public API.
 
 use fugazi::indicators::{Current, Ema, Identity, Rsi, Sma, Value};
-use fugazi::prelude::*;
 use fugazi::indicators::{Gt, Lt};
+use fugazi::prelude::*;
 
 #[test]
 fn rsi_threshold_is_a_single_signal() {

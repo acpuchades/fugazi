@@ -92,7 +92,10 @@ mod tests {
         assert_eq!(sk.update(2.0), None);
         assert_eq!(sk.update(4.0), None);
         let out = sk.update(6.0).unwrap();
-        assert!(out.abs() < 1e-12, "symmetric window should be ~0, got {out}");
+        assert!(
+            out.abs() < 1e-12,
+            "symmetric window should be ~0, got {out}"
+        );
     }
 
     #[test]
@@ -110,7 +113,10 @@ mod tests {
         sk.update(0.0);
         sk.update(0.0);
         let out = sk.update(3.0).unwrap();
-        assert!(out > 0.0, "right-tailed window should be positive, got {out}");
+        assert!(
+            out > 0.0,
+            "right-tailed window should be positive, got {out}"
+        );
     }
 
     #[test]
