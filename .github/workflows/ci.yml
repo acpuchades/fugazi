@@ -72,6 +72,25 @@ jobs:
         run: cargo test -p fugazi
         env:
           FUGAZI_REQUIRE_FIXTURES: "1"
+      # The live venue wallets were the one part of the library CI compiled but
+      # never *ran*. `cargo test -p fugazi` uses the default feature set, which
+      # excludes `live`, so `tests/live_*.rs` compiled to nothing and every
+      # `#[cfg(test)]` inside `src/live/` — the HMAC signature vector, the JWT
+      # structure, the PEM parsing, the contracts-to-units grid, the bounded
+      # logs and fill cursors — was dead here. The feature matrix below only
+      # `cargo check`s them, and a check that never runs an assertion is
+      # indistinguishable from a passing one.
+      #
+      # `--lib` as well as the three integration targets, because those unit
+      # tests are half the coverage and live in the library. Everything is
+      # offline: `wiremock` on localhost, and the handful of tests that touch a
+      # real venue are `#[ignore]`d and env-gated.
+      #
+      # A separate step rather than folding `--features live` into the one
+      # above, so the **default** feature set stays the configuration whose
+      # behaviour is tested. The cost is one extra compile of the library.
+      - name: Test (live wallets)
+        run: cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_portfolio
       - name: Clippy
         run: cargo clippy -p fugazi --all-targets -- -D warnings
       # `fugazi-derive` is an unconditional dependency providing both
@@ -185,8 +204,10 @@ jobs:
           - features: "--no-default-features --features parallel"
           # What the Python wheel enables (`spec` implies runtime + parallel).
           - features: "--no-default-features --features spec"
-          # The live-execution wallets. Not default-on, so this is the only
-          # place they are compiled at all.
+          # The live-execution wallets, standing alone. The `rust` job tests
+          # them on top of the default features; this row is what proves the
+          # `live`-without-`cli` configuration Cargo.toml advertises still
+          # builds.
           - features: "--no-default-features --features live"
           # Everything at once — catches a pair of features that only conflict
           # when both are on.

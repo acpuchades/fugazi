@@ -680,11 +680,13 @@ endpoints, its envelopes, its request bodies, and its signing.
    live API; a venue's free **demo / paper** endpoint (OKX selects it with an
    `x-simulated-trading` header) is the manual end-to-end, behind `#[ignore]`.
 
-`live` compiles in exactly one CI row, so check both
-`cargo check/clippy -p fugazi --no-default-features --features live --lib`
-(does it build alone?) and `cargo clippy -p fugazi --all-features --all-targets`
-(do the live *test* targets build?). `FAST=1 scripts/ci-local.sh` skips the
-feature matrix and never compiles `live` at all.
+`live` is off by default, so a plain `cargo test -p fugazi` runs none of this —
+`tests/live_*.rs` compiles to nothing and every `#[cfg(test)]` in `src/live/` is
+skipped. The `rust` job runs `cargo test -p fugazi --features live --lib --test
+live_okx --test live_coinbase --test live_portfolio`, and the feature matrix
+separately checks that `live` builds *without* the default features. Run
+`scripts/ci-local.sh rust` for the first and `scripts/ci-local.sh features` for
+the second; `FAST=1` skips the matrix.
 
 [`SleeveWallet`]: run the strategy against its own carve-out of an account that
 already holds positions — wrap the live wallet before `backtest::run`.

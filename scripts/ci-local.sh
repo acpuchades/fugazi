@@ -80,6 +80,12 @@ fi
 if [[ $job == all || $job == rust ]]; then
     FUGAZI_REQUIRE_FIXTURES=1 run "rust / Test" \
         cargo test -p fugazi
+    # `live` is not in the default feature set, so the line above compiles
+    # `tests/live_*.rs` to nothing and skips every `#[cfg(test)]` in
+    # `src/live/`. `--lib` too: those unit tests are half the live coverage.
+    # Offline — `wiremock` on localhost.
+    run "rust / Test (live wallets)" \
+        cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_portfolio
     run "rust / Clippy" \
         cargo clippy -p fugazi --all-targets -- -D warnings
     run "rust / Clippy (derive crate)" \
