@@ -11,7 +11,7 @@
 # `tests/ci_mirror.rs` fails if the two ever drift.
 #
 #   scripts/ci-local.sh            # everything (what CI does)
-#   scripts/ci-local.sh rust       # one job: rust | version-sync | features | python
+#   scripts/ci-local.sh rust       # one job: fmt | rust | version-sync | features | python
 #   FAST=1 scripts/ci-local.sh     # skip the feature matrix and the wheel build
 #
 # The Python job builds and installs a release wheel, which is slow. `FAST=1`
@@ -38,6 +38,41 @@ run() { # run <label> <cmd...>
 }
 
 job="${1:-all}"
+
+# --- fmt: rustfmt + ruff -----------------------------------------------------
+# Cheapest job in the file and the one most likely to be what's red, so it runs
+# first. Both are `--check`: this script reports, it never rewrites your tree.
+# `cargo fmt --all` / `ruff format` (no flag) are the fixing forms, and
+# `scripts/hooks/pre-commit` runs them for you on staged files.
+#
+# Ruff is resolved rather than assumed. CI pins it to a minor series because the
+# formatter's output is stable within one and not across, and a local run that
+# used a different series would report a diff CI won't — the exact failure this
+# script exists to prevent. So: use the ruff on PATH only if it is in range,
+# otherwise let `uv` fetch one that is. `uv` is already this script's dependency
+# (the python job builds the venv with it).
+if [[ $job == all || $job == fmt ]]; then
+    run "fmt / rustfmt" \
+        cargo fmt --all -- --check
+
+    ruff_pin='ruff>=0.15,<0.16'   # keep in sync with ci.yml's `Install ruff`
+    ruff_cmd=()
+    if command -v ruff >/dev/null && [[ $(ruff --version) == "ruff 0.15."* ]]; then
+        ruff_cmd=(ruff)
+    elif command -v uv >/dev/null; then
+        echo "no in-range ruff on PATH — using uv to fetch $ruff_pin"
+        ruff_cmd=(uv tool run --quiet --from "$ruff_pin" ruff)
+    fi
+    if ((${#ruff_cmd[@]})); then
+        # `.` and not a file list: `ruff.toml` at the root is what makes one
+        # invocation cover `python/` and `tools/` under one configuration.
+        run "fmt / ruff format" \
+            "${ruff_cmd[@]}" format --check .
+    else
+        printf '\033[31mFAILED\033[0m — %s\n' "fmt / ruff format (no ruff, no uv)"
+        failures+=("fmt / ruff format (install ruff, or uv — https://docs.astral.sh/uv/)")
+    fi
+fi
 
 # --- rust: test + clippy -----------------------------------------------------
 # Scoped to `-p fugazi`: the `fugazi-python` member links libpython and cannot

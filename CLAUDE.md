@@ -61,13 +61,24 @@ else, and each has already broken a green local tree.
 | `python/src` — ~11k lines every other clippy scopes past with `-p fugazi` | `cargo clippy -p fugazi-python --all-targets -- -D warnings` |
 | the feature matrix — `live` compiles in no other job | `cargo check/clippy -p fugazi --no-default-features --features <f> --lib` |
 
-`scripts/ci-local.sh [rust|version-sync|features|python]` runs one job;
+`scripts/ci-local.sh [fmt|rust|version-sync|features|python]` runs one job;
 `FAST=1` skips the feature matrix and the wheel rebuild for an inner loop — not
 enough before a push. **`tests/ci_mirror.rs` fails if the script and the workflow
 drift**, so adding a CI step means adding it to the script too.
 
+**Formatting is gated.** `cargo fmt --all` + `ruff format` (both **at their
+defaults** — no `rustfmt.toml`, and `ruff.toml` only writes ruff's own defaults
+down; the alternatives were measured, see TODO.md *Repo hygiene*). CI's
+`Formatting` job checks both; `scripts/ci-local.sh fmt` is the local form.
+`scripts/hooks/pre-commit` formats staged files and re-stages them — install it
+once per clone with `git config core.hooksPath scripts/hooks`. It only rewrites
+files that are *fully* staged; a partially staged one is checked, never
+rewritten. The ruff pin (`ruff>=0.15,<0.16`) is repeated in the workflow, the
+script and the hook, and `ci_mirror.rs` asserts the three agree — its output is
+stable within a minor series and not across.
+
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
-  clean); Docs: `cargo doc --open`
+  clean); Format: `cargo fmt --all` + `ruff format`; Docs: `cargo doc --open`
 - `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the **four** cross-validation suites
   **fail** instead of skipping when their generated fixture is missing or stale. One
   per layer, because no reference library spans two: `talib_validation` (indicators /

@@ -14,6 +14,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Formatting is its own job on purpose: it needs neither a build nor a wheel,
+  # so it is the first thing to go red and the cheapest thing to fix. Folding it
+  # into `rust` would hide a whitespace diff behind a five-minute test run.
+  #
+  # Both formatters run at their defaults (see `ruff.toml` and the absence of a
+  # `rustfmt.toml`), and both are `--check` here: CI reports the diff, it never
+  # writes one. `scripts/hooks/pre-commit` is the half that fixes.
+  fmt:
+    name: Formatting (rustfmt + ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # `--all`, not `-p fugazi`: `fugazi-derive` and `fugazi-python` are the
+      # two members every *other* job has to name explicitly to reach, and
+      # formatting is the one check with no reason to scope past them.
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # Pinned to a minor series. The formatter's output is stable within one
+      # but not across: an unpinned install turns CI red on a tree nobody
+      # touched, which reads as a broken commit and isn't one. Bumping the
+      # bound is a deliberate commit that carries its own reformat — keep this
+      # in sync with the `uv pip install` line in `scripts/ci-local.sh`.
+      - name: Install ruff
+        run: pip install 'ruff>=0.15,<0.16'
+      # Covers `python/` and `tools/` both; `ruff.toml` at the root is what
+      # makes one invocation reach both trees under one configuration.
+      - name: ruff format
+        run: ruff format --check .
+
   rust:
     name: Rust (test + clippy)
     runs-on: ubuntu-latest

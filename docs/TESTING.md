@@ -201,7 +201,10 @@ narrower sweep.
 `scripts/ci-local.sh` against `.github/workflows/ci.yml` command by command,
 because a local gate that has silently fallen behind CI is worse than no local
 gate: it reports green and the push goes red. It checks one direction only — the
-script may run *more* than CI, never less.
+script may run *more* than CI, never less. It also guards a three-way constant:
+the ruff version pin appears in the workflow, the script *and*
+`scripts/hooks/pre-commit`, and a hook pinned to a different series would format
+code the gate then rejects.
 
 ---
 

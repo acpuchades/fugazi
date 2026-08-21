@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Format what is being committed — the fixing half of the gate whose checking
+# half is `scripts/ci-local.sh fmt` and the `Formatting` job in CI.
+#
+# Install (once per clone; hooks are not checked out into `.git/hooks`):
+#
+#     git config core.hooksPath scripts/hooks
+#
+# Skip a single commit with `git commit --no-verify`, or the whole hook for a
+# session with `FUGAZI_NO_FMT=1`.
+#
+# It rewrites only files that are **fully** staged, and re-stages them. A file
+# whose index copy differs from its worktree copy — `git add -p`, or an edit
+# made after staging — is left alone and merely *checked*: formatting it in
+# place would fold unstaged work into the commit, and re-staging it would
+# commit changes you deliberately held back. That case fails the hook and tells
+# you what to run, which is the only honest answer.
+#
+# Formatters are run over the staged file list rather than the whole tree, so a
+# commit that touches three files does not block on the other 250.
+
+set -uo pipefail
+
+[[ -n ${FUGAZI_NO_FMT:-} ]] && exit 0
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+# Added / copied / modified / renamed — not deleted, whose path is gone.
+mapfile -t candidates < <(git diff --cached --name-only --diff-filter=ACMR -z |
+    tr '\0' '\n' | grep -E '\.(rs|py)$')
+
+# `ACMR` is HEAD-vs-index, so it still lists a path that was staged and *then*
+# deleted from the worktree. There is nothing on disk to format or check, and
+# the commit is valid — the index blob is what gets recorded. Skip it, rather
+# than handing the formatter a path it will only fail to open.
+staged=()
+for f in "${candidates[@]}"; do [[ -f $f ]] && staged+=("$f"); done
+((${#staged[@]})) || exit 0
+
+# Partially staged: `git diff --name-only` (index vs worktree) over the same set.
+mapfile -t dirty < <(git diff --name-only -z -- "${staged[@]}" | tr '\0' '\n')
+
+declare -A is_dirty=()
+for f in "${dirty[@]}"; do is_dirty["$f"]=1; done
+
+clean_rs=() clean_py=() dirty_rs=() dirty_py=()
+for f in "${staged[@]}"; do
+    case "$f" in
+    *.rs) if [[ -n ${is_dirty["$f"]:-} ]]; then dirty_rs+=("$f"); else clean_rs+=("$f"); fi ;;
+    *.py) if [[ -n ${is_dirty["$f"]:-} ]]; then dirty_py+=("$f"); else clean_py+=("$f"); fi ;;
+    esac
+done
+
+# `rustfmt` directly rather than `cargo fmt`, which has no file argument: it
+# formats whole crates and would rewrite files this commit does not touch. The
+# edition cannot be inferred from a bare path, so it is passed — all three
+# workspace members are 2024, and `scripts/ci-local.sh fmt` (which does go
+# through `cargo fmt --all`) is what catches it if one ever isn't.
+EDITION=2024
+# Keep in sync with `.github/workflows/ci.yml`'s `Install ruff` and the pin in
+# `scripts/ci-local.sh`.
+RUFF_PIN='ruff>=0.15,<0.16'
+
+ruff_cmd=()
+if command -v ruff >/dev/null && [[ $(ruff --version) == "ruff 0.15."* ]]; then
+    ruff_cmd=(ruff)
+elif command -v uv >/dev/null; then
+    ruff_cmd=(uv tool run --quiet --from "$RUFF_PIN" ruff)
+fi
+
+status=0
+note() { printf '\033[1mpre-commit:\033[0m %s\n' "$*" >&2; }
+fail() {
+    printf '\033[31mpre-commit:\033[0m %s\n' "$*" >&2
+    status=1
+}
+
+# --- rewrite the fully-staged files, then re-stage ---------------------------
+if ((${#clean_rs[@]})); then
+    if command -v rustfmt >/dev/null; then
+        if rustfmt --edition "$EDITION" -- "${clean_rs[@]}"; then
+            git add -- "${clean_rs[@]}"
+        else
+            fail "rustfmt failed on the staged Rust files (syntax error?)"
+        fi
+    else
+        fail "rustfmt is not installed — \`rustup component add rustfmt\`"
+    fi
+fi
+
+if ((${#clean_py[@]})); then
+    if ((${#ruff_cmd[@]})); then
+        if "${ruff_cmd[@]}" format --quiet -- "${clean_py[@]}"; then
+            git add -- "${clean_py[@]}"
+        else
+            fail "ruff format failed on the staged Python files (syntax error?)"
+        fi
+    else
+        fail "no ruff in range ($RUFF_PIN) and no \`uv\` to fetch one"
+    fi
+fi
+
+# --- partially staged: check only --------------------------------------------
+# `--check` against the *worktree* copy, which is not what is being committed.
+# It is the closest thing available without writing the index blob out to a
+# temp tree, and it is enough: what the hook must not do is stay silent.
+if ((${#dirty_rs[@]})) && command -v rustfmt >/dev/null; then
+    if ! rustfmt --edition "$EDITION" --check -- "${dirty_rs[@]}" >/dev/null; then
+        fail "partially-staged and unformatted: ${dirty_rs[*]}"
+        note "  run \`rustfmt --edition $EDITION ${dirty_rs[*]}\`, restage, retry"
+    fi
+fi
+if ((${#dirty_py[@]})) && ((${#ruff_cmd[@]})); then
+    if ! "${ruff_cmd[@]}" format --check --quiet -- "${dirty_py[@]}" >/dev/null; then
+        fail "partially-staged and unformatted: ${dirty_py[*]}"
+        note "  run \`ruff format ${dirty_py[*]}\`, restage, retry"
+    fi
+fi
+
+((status == 0)) || note "commit aborted — \`git commit --no-verify\` to override"
+exit $status

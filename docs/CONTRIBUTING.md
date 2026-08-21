@@ -42,13 +42,40 @@ rustdoc lints (only under `RUSTDOCFLAGS=-D warnings`), clippy over `python/src`
 compiles in no other job). Run it before you push.
 
 ```sh
-scripts/ci-local.sh              # all four jobs, ~23 checks
-scripts/ci-local.sh rust         # one job: rust | version-sync | features | python
+scripts/ci-local.sh              # all five jobs, ~25 checks
+scripts/ci-local.sh rust         # one job: fmt | rust | version-sync | features | python
 FAST=1 scripts/ci-local.sh       # skip the matrix + wheel rebuild (inner loop only)
 ```
 
 `tests/ci_mirror.rs` fails if the script stops matching the workflow, so a new
 CI step has to land in both.
+
+### Formatting
+
+`cargo fmt --all` (Rust) and `ruff format` (Python — `python/` *and* `tools/`,
+under the root `ruff.toml`). Both at their defaults; there is no `rustfmt.toml`,
+deliberately. `scripts/ci-local.sh fmt` is the checking form and takes seconds.
+
+Install the hook once per clone — hooks live in the tree, not in `.git/hooks`:
+
+```sh
+git config core.hooksPath scripts/hooks
+```
+
+It formats the files you staged and re-stages them, so a normal `git add && git
+commit` is always fmt-clean. Two behaviours worth knowing:
+
+- A **partially staged** file (you `git add -p`'d it, or edited it after
+  staging) is *checked*, never rewritten. Formatting it in place would fold
+  unstaged work into the commit; re-staging it would commit changes you held
+  back. The hook fails and tells you what to run.
+- `git commit --no-verify` skips one commit; `FUGAZI_NO_FMT=1` skips the hook
+  for a session.
+
+Ruff is pinned to a minor series (`ruff>=0.15,<0.16`) in three places — the
+workflow, the script, and the hook — because its output is stable within a
+series and not across, so an unpinned install turns CI red on a tree nobody
+touched. `ci_mirror.rs` asserts the three agree.
 
 [docs/TESTING.md](TESTING.md) is the map of the test suite — the five layers,
 where a given change's test belongs, the shared `tests/common/` harness, and the
@@ -56,9 +83,13 @@ fixture skip-vs-fail policy. Read it before adding a test file or a helper.
 
 Three repo-specific rules:
 
-- **Do not run `cargo fmt` across the repo.** The tree is not rustfmt-clean
-  (~95 files differ) and CI does not check formatting. A blanket reformat buries
-  your change in noise. Match the surrounding style by hand.
+- **Let the formatters do it.** `cargo fmt` and `ruff format` at their defaults
+  are the house style, checked by CI's `Formatting` job and applied to staged
+  files by `scripts/hooks/pre-commit` (see below). This reverses an older rule —
+  the tree used to be rustfmt-dirty, so a blanket reformat buried real changes
+  in noise and hand-matching the surrounding style was the lesser evil. The
+  baseline reformat removed that cost. Don't hand-format, and don't add a
+  `rustfmt.toml`: the defaults were measured against this tree and win (TODO.md).
 - **Grep before writing a helper.** `CLAUDE.md` carries a table of existing
   helpers ("Existing helpers — grep before writing new code"). If the private
   function you're about to write has a name resembling a row in that table, it
@@ -717,7 +748,7 @@ When one of these fails, it is telling you something specific:
 | `tests/trade_metrics_validation.rs` | A `trades.*` or drawdown-duration metric drifted from the backtesting.py reference. |
 | `tests/metrics_coverage.rs` | A metric exists with no reference value and no written exemption — or an exemption went stale. Never skips. |
 | `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |
-| `tests/ci_mirror.rs` | `.github/workflows/ci.yml` gained (or changed) a step that `scripts/ci-local.sh` doesn't run — the local gate has fallen behind CI and would report green on a tree CI rejects. |
+| `tests/ci_mirror.rs` | `.github/workflows/ci.yml` gained (or changed) a step that `scripts/ci-local.sh` doesn't run — the local gate has fallen behind CI and would report green on a tree CI rejects. Also: the ruff pin drifted apart across the workflow, the script and `scripts/hooks/pre-commit`, so the hook would format code the gate rejects. |
 
 **Four of these could disable themselves.** The cross-validation suites compare
 against an external library and *skip* when their generated fixture is absent —

@@ -111,6 +111,43 @@ fn the_local_script_carries_the_env_vars_ci_sets() {
     }
 }
 
+/// The formatting gate's Python half. `cargo fmt --all -- --check` needs no
+/// guard of its own — it is a `cargo …` line, so
+/// `the_local_script_runs_every_cargo_command_ci_runs` already covers it. Ruff
+/// is not, and the script resolves it through a `ruff_cmd` array rather than
+/// naming the binary inline, so a literal-command comparison would not work
+/// here. Assert the two facts that matter instead: the script runs *a* ruff
+/// format check, and it pins the same minor series CI installs — a local run
+/// against a different series reports a diff CI won't, or misses one CI will.
+#[test]
+fn the_local_script_runs_the_same_ruff_ci_does() {
+    assert!(
+        WORKFLOW.contains("ruff format --check"),
+        "ci.yml no longer runs `ruff format --check` — update this guard"
+    );
+    assert!(
+        SCRIPT.contains("format --check ."),
+        "scripts/ci-local.sh must run `ruff format --check .`; ci.yml does"
+    );
+
+    const PIN: &str = "ruff>=0.15,<0.16";
+    assert!(
+        WORKFLOW.contains(PIN),
+        "ci.yml's ruff pin moved off `{PIN}` — update this guard, \
+         scripts/ci-local.sh and scripts/hooks/pre-commit together"
+    );
+    assert!(
+        SCRIPT.contains(PIN),
+        "scripts/ci-local.sh pins a different ruff than ci.yml's `{PIN}`"
+    );
+    const HOOK: &str = include_str!("../scripts/hooks/pre-commit");
+    assert!(
+        HOOK.contains(PIN),
+        "scripts/hooks/pre-commit pins a different ruff than ci.yml's `{PIN}` — \
+         it would format code the gate then rejects"
+    );
+}
+
 #[test]
 fn the_local_script_runs_the_python_suite() {
     assert!(

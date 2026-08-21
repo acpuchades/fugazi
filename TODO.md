@@ -516,3 +516,56 @@ If `uv` becomes a first-class workflow rather than a lockfile that rides along,
 the shape is a `dev` extra (`fugazi[test]` plus `maturin`) and a CI
 `uv lock --check`. Neither earns its keep while the failure mode is a local venv
 losing a tool the script would reinstall.
+
+### Both formatters run at their defaults, and there is no `rustfmt.toml`
+
+Decided by measurement, not taste. The candidates were run over the whole tree
+and scored by files touched (`cargo fmt --all -- --check`, at the 0.69.0 tree):
+
+| config | files reformatted |
+|---|---|
+| **rustfmt defaults** | **1708** |
+| `max_width = 90` | 2077 |
+| `max_width = 88` | 2265 |
+| `max_width = 100`, `use_small_heuristics = "Max"` | 2520 |
+| `max_width = 80` | 3308 |
+| `max_width = 80`, `use_small_heuristics = "Max"` | 3593 |
+
+Defaults win at both ends, for opposite reasons. Widening loses because the code
+is *written* at 80 columns (p95 = 80 characters across `src/` + `python/src/`),
+so a wider budget re-joins hand-split lines instead of leaving them alone —
+`use_small_heuristics = "Max"` is the extreme of this and is the worst option
+tested. Narrowing loses because rustfmt's small-item heuristics are *derived*
+from `max_width`: cutting it to 80 shrinks `struct_lit_width` and
+`fn_call_width` with it, and explodes short literals that fit fine today.
+
+So there is no `rustfmt.toml`, and adding one should come with the same table.
+The two knobs that would genuinely suit this codebase — `wrap_comments` and
+`group_imports` — are **nightly-only**, and the gate runs on stable. Their
+absence is also load-bearing in the good direction: the hand-set 80-column prose
+in every module header is untouched by the formatter and stays that way.
+
+`ruff.toml` does exist, but only because `tools/` sits outside
+`python/pyproject.toml` and would otherwise resolve against ruff's built-in
+defaults — two configurations for one repo. Its values *are* ruff's defaults,
+written down so a release cannot move them silently.
+
+What would change it: rustfmt stabilizing `wrap_comments` (then the module
+headers are worth a look, and the table is worth re-running), or the tree
+drifting far enough from 80 columns that the p95 argument no longer holds.
+
+### The ruff *linter* is not wired — only the formatter
+
+`ruff check` runs nowhere. `ruff.toml` has no `[lint]` section, on purpose.
+
+Formatting is a decision with one answer and no backlog: run it, commit the
+baseline, gate it. Linting is neither. It is a rule-set choice (which of ruff's
+~800 rules, in a repo whose Python is 21 files of test harness and fixture
+generators), and every rule enabled arrives with findings someone has to triage
+— against code whose job is to be an *independent* reference implementation, where
+"more idiomatic" is not obviously better.
+
+What would change it: the Python surface growing past test-harness scale, or a
+concrete bug that a specific rule set would have caught. Then it lands as its own
+commit with its own baseline, the way the formatter did — not as a line added to
+this file.
