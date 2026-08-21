@@ -59,6 +59,7 @@ use base64::Engine as _;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use reqwest::Method;
 
+use crate::hash::SymMap;
 use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{
@@ -68,8 +69,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON, marked_sum};
 
 use super::LiveError;
 use super::venue::{
-    HttpCore, LiveLog, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick,
-    with_query,
+    Bracket, HttpCore, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder, decimals_of,
+    parse_num, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://api.coinbase.com";
@@ -78,41 +79,6 @@ const API_PREFIX: &str = "/api/v3/brokerage";
 const DEFAULT_QUOTE_CCY: &str = "USD";
 /// How long each signed JWT is valid, in seconds (Coinbase's fixed window).
 const JWT_TTL_SECS: u64 = 120;
-
-/// The trading grid for one product, needed so submitted sizes and prices land
-/// on the venue's increments. Parsed once from
-/// `GET /api/v3/brokerage/market/products/{id}` and cached.
-#[derive(Debug, Clone, Copy)]
-struct ProductSpec {
-    /// Base-asset size step.
-    base_increment: Real,
-    /// Minimum base-asset order size.
-    base_min: Real,
-    /// Quote-price step.
-    quote_increment: Real,
-    base_decimals: usize,
-    price_decimals: usize,
-}
-
-/// A resting order we've placed (a limit entry or a protective stop leg), kept so
-/// a re-submit at the same parameters is a no-op and a change cancels the venue
-/// order before replacing it.
-#[derive(Debug, Clone)]
-struct RestingOrder {
-    /// Trigger for a protective leg; the limit price for a plain limit entry.
-    price: Real,
-    /// Resolved size in base units.
-    base_size: Real,
-    side: Side,
-    order_id: String,
-    local: OrderId,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ProtectiveState {
-    stop: Option<RestingOrder>,
-    take_profit: Option<RestingOrder>,
-}
 
 /// A live [`Wallet`] over Coinbase Advanced Trade spot. See the module-level
 /// docs for the trait-to-venue mapping and the spot-balance convention.
@@ -133,23 +99,20 @@ pub struct CoinbaseWallet {
 
     // Cached account state, refreshed from the accounts endpoint.
     balances: HashMap<String, Real>,
-    marks: HashMap<Symbol, Real>,
-    specs: HashMap<Symbol, ProductSpec>,
+    marks: SymMap<Symbol, Real>,
+    grids: SymMap<Symbol, InstrumentGrid>,
 
-    // Order-id bookkeeping: wallet-minted local ids <-> venue order ids, and the
-    // kind each venue order was placed as (so a polled fill is tagged).
-    next_id: u64,
+    // Wallet-minted local ids <-> venue order ids, and the kind each was placed
+    // as (so a polled fill is tagged).
+    orders: OrderRegistry,
     nonce_counter: u64,
-    local_to_venue: HashMap<OrderId, String>,
-    venue_to_local: HashMap<String, OrderId>,
-    order_kind: HashMap<String, OrderKind>,
 
     // Resting orders, for idempotent re-submit / cancel-on-change.
-    protective: HashMap<Symbol, ProtectiveState>,
-    limits: HashMap<Symbol, RestingOrder>,
+    protective: SymMap<Symbol, Bracket>,
+    limits: SymMap<Symbol, RestingOrder>,
 
     // Fill polling: per-symbol set of already-reported trade ids.
-    seen_trades: HashMap<String, HashSet<String>>,
+    seen_trades: SymMap<Symbol, HashSet<String>>,
     // The error log, and the refused orders awaiting a drain through
     // take_rejections. Both bounded; see `LiveLog`.
     log: LiveLog,
@@ -185,16 +148,13 @@ impl CoinbaseWallet {
             signing_key,
             quote_ccy: DEFAULT_QUOTE_CCY.to_string(),
             balances: HashMap::new(),
-            marks: HashMap::new(),
-            specs: HashMap::new(),
-            next_id: 0,
+            marks: SymMap::default(),
+            grids: SymMap::default(),
+            orders: OrderRegistry::default(),
             nonce_counter: 0,
-            local_to_venue: HashMap::new(),
-            venue_to_local: HashMap::new(),
-            order_kind: HashMap::new(),
-            protective: HashMap::new(),
-            limits: HashMap::new(),
-            seen_trades: HashMap::new(),
+            protective: SymMap::default(),
+            limits: SymMap::default(),
+            seen_trades: SymMap::default(),
             log: LiveLog::default(),
         })
     }
@@ -222,16 +182,13 @@ impl CoinbaseWallet {
             signing_key,
             quote_ccy: DEFAULT_QUOTE_CCY.to_string(),
             balances: HashMap::new(),
-            marks: HashMap::new(),
-            specs: HashMap::new(),
-            next_id: 0,
+            marks: SymMap::default(),
+            grids: SymMap::default(),
+            orders: OrderRegistry::default(),
             nonce_counter: 0,
-            local_to_venue: HashMap::new(),
-            venue_to_local: HashMap::new(),
-            order_kind: HashMap::new(),
-            protective: HashMap::new(),
-            limits: HashMap::new(),
-            seen_trades: HashMap::new(),
+            protective: SymMap::default(),
+            limits: SymMap::default(),
+            seen_trades: SymMap::default(),
             log: LiveLog::default(),
         }
     }
@@ -310,13 +267,6 @@ impl CoinbaseWallet {
             .unwrap_or(0.0)
     }
 
-    /// Mint the next unique local [`OrderId`].
-    fn mint(&mut self) -> OrderId {
-        let id = OrderId(self.next_id);
-        self.next_id += 1;
-        id
-    }
-
     /// A unique JWT nonce (time-in-nanos plus a monotonic counter, hex).
     fn next_nonce(&mut self) -> String {
         let nanos = SystemTime::now()
@@ -328,25 +278,18 @@ impl CoinbaseWallet {
         format!("{nanos:x}{c:x}")
     }
 
-    /// Record a placed order's venue id + kind against a local id.
-    fn map_order(&mut self, local: OrderId, venue_id: &str, kind: OrderKind) {
-        self.local_to_venue.insert(local, venue_id.to_string());
-        self.venue_to_local.insert(venue_id.to_string(), local);
-        self.order_kind.insert(venue_id.to_string(), kind);
-    }
-
-    /// Ensure the [`ProductSpec`] for `symbol` is cached, fetching the public
+    /// Ensure the [`InstrumentGrid`] for `symbol` is cached, fetching the public
     /// product endpoint if not.
-    fn ensure_spec(&mut self, symbol: &str) -> Result<ProductSpec, LiveError> {
-        if let Some(s) = self.specs.get(symbol) {
-            return Ok(*s);
+    fn ensure_grid(&mut self, symbol: &str) -> Result<InstrumentGrid, LiveError> {
+        if let Some(g) = self.grids.get(symbol) {
+            return Ok(*g);
         }
         let path = format!("{API_PREFIX}/market/products/{symbol}");
         let value = self.public_get(&path)?;
-        let spec = parse_product_spec(&value)
+        let grid = parse_product_grid(&value)
             .ok_or_else(|| LiveError::Decode(format!("no product spec for {symbol}")))?;
-        self.specs.insert(crate::types::symbol(symbol), spec);
-        Ok(spec)
+        self.grids.insert(crate::types::symbol(symbol), grid);
+        Ok(grid)
     }
 
     /// Ensure the seen-trades set for `symbol` exists, seeding it with the
@@ -358,7 +301,7 @@ impl CoinbaseWallet {
         }
         let fills = self.fetch_fills(symbol)?;
         let seen: HashSet<String> = fills.into_iter().map(|f| f.trade_id).collect();
-        self.seen_trades.insert(symbol.to_string(), seen);
+        self.seen_trades.insert(crate::types::symbol(symbol), seen);
         Ok(())
     }
 
@@ -370,22 +313,21 @@ impl CoinbaseWallet {
         let mut fills = self.fetch_fills(symbol)?;
         // Oldest-first, so partial fills reach the strategy in execution order.
         fills.sort_by(|a, b| a.sequence.cmp(&b.sequence));
-        let seen = self.seen_trades.entry(symbol.to_string()).or_default();
+        let seen = self
+            .seen_trades
+            .entry(crate::types::symbol(symbol))
+            .or_default();
         let fresh: Vec<Fill> = fills
             .into_iter()
             .filter(|f| seen.insert(f.trade_id.clone()))
             .collect();
         let mut out = Vec::new();
         for f in fresh {
-            let local = match self.venue_to_local.get(&f.order_id).copied() {
+            let local = match self.orders.local_for(&f.order_id) {
                 Some(id) => id,
-                None => self.mint(),
+                None => self.orders.mint(),
             };
-            let kind = self
-                .order_kind
-                .get(&f.order_id)
-                .copied()
-                .unwrap_or(OrderKind::Market);
+            let kind = self.orders.kind_for(&f.order_id);
             let order = Order::new(
                 crate::types::symbol(symbol),
                 f.side,
@@ -502,7 +444,7 @@ impl CoinbaseWallet {
             Ok(v) => v,
             Err(e) => return Err(self.log.refuse(symbol, id, OrderKind::Market, e)),
         };
-        self.map_order(id, &order_id, OrderKind::Market);
+        self.orders.record(id, &order_id, OrderKind::Market);
         Ok(())
     }
 
@@ -515,7 +457,7 @@ impl CoinbaseWallet {
         trigger: Real,
         size: Size,
     ) -> Result<Ack<Symbol>, WalletError> {
-        let local = self.mint();
+        let local = self.orders.mint();
         if trigger <= 0.0 {
             return Err(self.log.refuse(
                 &symbol,
@@ -526,8 +468,8 @@ impl CoinbaseWallet {
                 )),
             ));
         }
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(&symbol, local, kind, e)),
         };
         // A protective exit sells the held base balance; clamp the share to what
@@ -541,8 +483,8 @@ impl CoinbaseWallet {
                 self.equity().0,
             )
             .min(held);
-        let base_size = floor_to_step(units, spec.base_increment);
-        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
+        let base_size = grid.venue_size(units);
+        if grid.below_minimum(base_size) {
             return Err(self.log.refuse(
                 &symbol,
                 local,
@@ -550,20 +492,21 @@ impl CoinbaseWallet {
                 LiveError::Decode("protective size rounds below the product minimum".into()),
             ));
         }
-        let price = round_to_tick(trigger, spec.quote_increment);
+        let price = grid.on_tick(trigger);
 
         // Idempotent re-submit: an unchanged leg stays where it is.
-        let existing = self.protective.get(&symbol).and_then(|p| match kind {
-            OrderKind::TakeProfit => p.take_profit.clone(),
-            _ => p.stop.clone(),
-        });
+        let existing = self
+            .protective
+            .get(&symbol)
+            .and_then(|bracket| bracket.leg(kind))
+            .cloned();
         if let Some(leg) = existing {
             if (leg.price - price).abs() <= PRICE_EPSILON
-                && (leg.base_size - base_size).abs() <= POSITION_EPSILON
+                && (leg.size - base_size).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(leg.local));
             }
-            self.cancel_order(&leg.order_id)?;
+            self.cancel_order(&leg.venue_id)?;
         }
 
         // Stop-loss triggers on the way *down* (sell as price falls); take-profit
@@ -573,13 +516,13 @@ impl CoinbaseWallet {
             OrderKind::TakeProfit => "STOP_DIRECTION_STOP_UP",
             _ => "STOP_DIRECTION_STOP_DOWN",
         };
-        let px = format_decimals(price, spec.price_decimals);
+        let px = grid.price_str(price);
         let body = serde_json::json!({
             "client_order_id": client_order_id(local),
             "product_id": symbol,
             "side": side_token(Side::Sell),
             "order_configuration": { "stop_limit_stop_limit_gtc": {
-                "base_size": format_decimals(base_size, spec.base_decimals),
+                "base_size": grid.size_str(base_size),
                 "limit_price": px.clone(),
                 "stop_price": px,
                 "stop_direction": stop_direction,
@@ -596,19 +539,15 @@ impl CoinbaseWallet {
             Ok(v) => v,
             Err(e) => return Err(self.log.refuse(&symbol, local, kind, e)),
         };
-        self.map_order(local, &order_id, kind);
+        self.orders.record(local, &order_id, kind);
         let leg = RestingOrder {
             price,
-            base_size,
+            size: base_size,
             side: Side::Sell,
-            order_id,
+            venue_id: order_id,
             local,
         };
-        let entry = self.protective.entry(symbol).or_default();
-        match kind {
-            OrderKind::TakeProfit => entry.take_profit = Some(leg),
-            _ => entry.stop = Some(leg),
-        }
+        self.protective.entry(symbol).or_default().set(kind, leg);
         Ok(Ack::Working(local))
     }
 }
@@ -702,9 +641,9 @@ impl Wallet<Symbol> for CoinbaseWallet {
 
     fn set_position(&mut self, target: Units<Symbol>) -> Result<Ack<Symbol>, WalletError> {
         let symbol = target.symbol;
-        let id = self.mint();
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let id = self.orders.mint();
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         let current = self.base_balance(&symbol);
@@ -721,17 +660,12 @@ impl Wallet<Symbol> for CoinbaseWallet {
         }
         let delta = effective_target - current;
         let side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
-        let base_size = floor_to_step(delta.abs(), spec.base_increment);
-        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
+        let base_size = grid.venue_size(delta.abs());
+        if grid.below_minimum(base_size) {
             // Below the venue's minimum tradable size: accept but place nothing.
             return Ok(Ack::Working(id));
         }
-        self.place_market(
-            &symbol,
-            side,
-            format_decimals(base_size, spec.base_decimals),
-            id,
-        )?;
+        self.place_market(&symbol, side, grid.size_str(base_size), id)?;
         Ok(Ack::Working(id))
     }
 
@@ -754,12 +688,9 @@ impl Wallet<Symbol> for CoinbaseWallet {
     }
 
     fn cancel_protective(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
-        if let Some(state) = self.protective.remove(symbol) {
-            if let Some(leg) = state.stop {
-                self.cancel_order(&leg.order_id)?;
-            }
-            if let Some(leg) = state.take_profit {
-                self.cancel_order(&leg.order_id)?;
+        if let Some(bracket) = self.protective.remove(symbol) {
+            for leg in bracket.into_legs() {
+                self.cancel_order(&leg.venue_id)?;
             }
         }
         Ok(())
@@ -783,7 +714,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
         size: Size,
         limit: Reference,
     ) -> Result<Ack<Symbol>, WalletError> {
-        let local = self.mint();
+        let local = self.orders.mint();
         if limit.0 <= 0.0 {
             return Err(self.log.refuse(
                 &symbol,
@@ -792,8 +723,8 @@ impl Wallet<Symbol> for CoinbaseWallet {
                 LiveError::Decode(format!("limit price must be positive, got {}", limit.0)),
             ));
         }
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
         let current = self.base_balance(&symbol);
@@ -804,9 +735,9 @@ impl Wallet<Symbol> for CoinbaseWallet {
             delta = delta.max(-current);
         }
         let order_side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
-        let base_size = floor_to_step(delta.abs(), spec.base_increment);
-        let price = round_to_tick(limit.0, spec.quote_increment);
-        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
+        let base_size = grid.venue_size(delta.abs());
+        let price = grid.on_tick(limit.0);
+        if grid.below_minimum(base_size) {
             return Ok(Ack::Working(local));
         }
 
@@ -814,11 +745,11 @@ impl Wallet<Symbol> for CoinbaseWallet {
         if let Some(existing) = self.limits.get(&symbol).cloned() {
             if existing.side == order_side
                 && (existing.price - price).abs() <= PRICE_EPSILON
-                && (existing.base_size - base_size).abs() <= POSITION_EPSILON
+                && (existing.size - base_size).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(existing.local));
             }
-            let order_id = existing.order_id.clone();
+            let order_id = existing.venue_id.clone();
             self.cancel_order(&order_id)?;
             self.limits.remove(&symbol);
         }
@@ -831,8 +762,8 @@ impl Wallet<Symbol> for CoinbaseWallet {
             "product_id": symbol,
             "side": side_token(order_side),
             "order_configuration": { "limit_limit_gtc": {
-                "base_size": format_decimals(base_size, spec.base_decimals),
-                "limit_price": format_decimals(price, spec.price_decimals),
+                "base_size": grid.size_str(base_size),
+                "limit_price": grid.price_str(price),
             }},
         });
         let value = match self.signed(Method::POST, "/orders", &[], Some(body)) {
@@ -843,14 +774,14 @@ impl Wallet<Symbol> for CoinbaseWallet {
             Ok(v) => v,
             Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
-        self.map_order(local, &order_id, OrderKind::Limit);
+        self.orders.record(local, &order_id, OrderKind::Limit);
         self.limits.insert(
             symbol,
             RestingOrder {
                 price,
-                base_size,
+                size: base_size,
                 side: order_side,
-                order_id,
+                venue_id: order_id,
                 local,
             },
         );
@@ -859,7 +790,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
 
     fn cancel_limit(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(resting) = self.limits.remove(symbol) {
-            self.cancel_order(&resting.order_id)?;
+            self.cancel_order(&resting.venue_id)?;
         }
         Ok(())
     }
@@ -869,7 +800,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
     }
 
     fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
-        let symbols: Vec<String> = self.seen_trades.keys().cloned().collect();
+        let symbols: Vec<Symbol> = self.seen_trades.keys().cloned().collect();
         let mut out = Vec::new();
         for symbol in symbols {
             match self.poll_symbol(&symbol) {
@@ -881,7 +812,7 @@ impl Wallet<Symbol> for CoinbaseWallet {
     }
 
     fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
-        let Some(venue_id) = self.local_to_venue.get(&id).cloned() else {
+        let Some(venue_id) = self.orders.venue_for(id).map(str::to_string) else {
             return Ok(());
         };
         if let Some(symbol) = self
@@ -893,22 +824,16 @@ impl Wallet<Symbol> for CoinbaseWallet {
             self.limits.remove(&symbol);
             return Ok(());
         }
-        let leg_symbol = self.protective.iter().find_map(|(sym, state)| {
-            let hit = state.stop.as_ref().map(|l| l.local) == Some(id)
-                || state.take_profit.as_ref().map(|l| l.local) == Some(id);
-            hit.then(|| sym.clone())
-        });
+        let leg_symbol = self
+            .protective
+            .iter()
+            .find_map(|(sym, bracket)| bracket.leg_local(id).then(|| sym.clone()));
         let Some(symbol) = leg_symbol else {
             return Ok(());
         };
         self.cancel_order(&venue_id)?;
-        if let Some(state) = self.protective.get_mut(&symbol) {
-            if state.stop.as_ref().map(|l| l.local) == Some(id) {
-                state.stop = None;
-            }
-            if state.take_profit.as_ref().map(|l| l.local) == Some(id) {
-                state.take_profit = None;
-            }
+        if let Some(bracket) = self.protective.get_mut(&symbol) {
+            bracket.clear_local(id);
         }
         Ok(())
     }
@@ -1033,17 +958,20 @@ fn order_result_id(value: &serde_json::Value) -> Result<String, LiveError> {
 }
 
 /// Pull one product's trading grid out of a `market/products/{id}` response.
-fn parse_product_spec(value: &serde_json::Value) -> Option<ProductSpec> {
+fn parse_product_grid(value: &serde_json::Value) -> Option<InstrumentGrid> {
     let base_str = value.get("base_increment").and_then(|v| v.as_str())?;
     let quote_str = value.get("quote_increment").and_then(|v| v.as_str())?;
-    Some(ProductSpec {
-        base_increment: base_str.parse::<Real>().ok()?,
-        base_min: value
+    Some(InstrumentGrid {
+        size_step: base_str.parse::<Real>().ok()?,
+        min_size: value
             .get("base_min_size")
             .and_then(parse_num)
             .unwrap_or(0.0),
-        quote_increment: quote_str.parse::<Real>().ok()?,
-        base_decimals: decimals_of(base_str),
+        price_tick: quote_str.parse::<Real>().ok()?,
+        // Spot trades in base units: one venue size unit *is* one base unit, so
+        // every contracts↔units conversion on this venue is the identity.
+        contract_multiplier: 1.0,
+        size_decimals: decimals_of(base_str),
         price_decimals: decimals_of(quote_str),
     })
 }
@@ -1204,12 +1132,14 @@ mod tests {
             "quote_increment": "0.01",
             "base_min_size": "0.0001"
         });
-        let s = parse_product_spec(&info).expect("spec parsed");
-        assert!((s.base_increment - 0.00000001).abs() < 1e-16);
-        assert!((s.quote_increment - 0.01).abs() < 1e-12);
-        assert!((s.base_min - 0.0001).abs() < 1e-12);
-        assert_eq!(s.base_decimals, 8);
-        assert_eq!(s.price_decimals, 2);
+        let g = parse_product_grid(&info).expect("spec parsed");
+        assert!((g.size_step - 0.00000001).abs() < 1e-16);
+        assert!((g.price_tick - 0.01).abs() < 1e-12);
+        assert!((g.min_size - 0.0001).abs() < 1e-12);
+        assert_eq!(g.size_decimals, 8);
+        assert_eq!(g.price_decimals, 2);
+        // Spot: one venue size unit is one base unit.
+        assert_eq!(g.contract_multiplier, 1.0);
     }
 
     #[test]

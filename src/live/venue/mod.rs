@@ -19,7 +19,7 @@ mod rest;
 mod state;
 
 pub(in crate::live) use rest::HttpCore;
-pub(in crate::live) use state::LiveLog;
+pub(in crate::live) use state::{Bracket, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder};
 
 use crate::types::Real;
 

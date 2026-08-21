@@ -1,9 +1,189 @@
 //! Bookkeeping every live backend keeps, independent of the venue.
 
-use crate::types::Symbol;
-use crate::wallet::{DEFAULT_RETENTION, OrderId, OrderKind, Rejection, WalletError, trim_front};
+use crate::hash::SymMap;
+use crate::types::{Real, Symbol};
+use crate::wallet::{
+    DEFAULT_RETENTION, OrderId, OrderKind, POSITION_EPSILON, Rejection, Side, WalletError,
+    trim_front,
+};
 
 use super::super::LiveError;
+use super::{floor_to_step, format_decimals, round_to_tick};
+
+/// The trading grid for one instrument, in **venue-native size units** —
+/// contracts on a derivatives venue, base-asset units on spot.
+///
+/// One type for what the two backends called `InstrumentSpec` and
+/// `ProductSpec`: the same five concepts under different names, plus OKX's
+/// `ctVal`. `contract_multiplier` is that factor — base units = venue size ×
+/// multiplier — and a spot venue reports `1.0`, at which every conversion below
+/// collapses to the identity *exactly* (multiplying and dividing by `1.0` is
+/// lossless in IEEE 754, so adopting this changed no spot arithmetic).
+///
+/// Fetched once per symbol and cached; the caller owns the caching.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::live) struct InstrumentGrid {
+    /// Size step, in venue-native units.
+    pub(in crate::live) size_step: Real,
+    /// Minimum order size, in venue-native units.
+    pub(in crate::live) min_size: Real,
+    /// Price step.
+    pub(in crate::live) price_tick: Real,
+    /// Base-asset value of one venue-native size unit. `1.0` on spot.
+    pub(in crate::live) contract_multiplier: Real,
+    pub(in crate::live) size_decimals: usize,
+    pub(in crate::live) price_decimals: usize,
+}
+
+impl InstrumentGrid {
+    /// Base units → the venue-native size to submit: divide out the contract
+    /// multiplier, then floor to the step, so a rounded order is never *larger*
+    /// than the diff it was meant to close.
+    pub(in crate::live) fn venue_size(&self, base_units: Real) -> Real {
+        floor_to_step(base_units / self.contract_multiplier, self.size_step)
+    }
+
+    /// Venue-native size → base units. Nothing above the wallet ever sees a
+    /// contract, so every fill goes through here on the way out.
+    pub(in crate::live) fn base_units(&self, venue_size: Real) -> Real {
+        venue_size * self.contract_multiplier
+    }
+
+    /// A price snapped to the venue's tick.
+    pub(in crate::live) fn on_tick(&self, price: Real) -> Real {
+        round_to_tick(price, self.price_tick)
+    }
+
+    pub(in crate::live) fn size_str(&self, venue_size: Real) -> String {
+        format_decimals(venue_size, self.size_decimals)
+    }
+
+    pub(in crate::live) fn price_str(&self, price: Real) -> String {
+        format_decimals(price, self.price_decimals)
+    }
+
+    /// Whether `venue_size` is below what the venue will accept — either under
+    /// its stated minimum or rounded away to nothing.
+    pub(in crate::live) fn below_minimum(&self, venue_size: Real) -> bool {
+        venue_size < self.min_size || venue_size <= POSITION_EPSILON
+    }
+}
+
+/// Wallet-minted local [`OrderId`]s ↔ venue order ids, plus the [`OrderKind`]
+/// each venue order was placed as, so a polled fill can be tagged.
+///
+/// A venue reports a fill against *its* id; the strategy only ever saw ours.
+#[derive(Debug, Default)]
+pub(in crate::live) struct OrderRegistry {
+    next_id: u64,
+    local_to_venue: SymMap<OrderId, String>,
+    venue_to_local: SymMap<String, OrderId>,
+    kind: SymMap<String, OrderKind>,
+}
+
+impl OrderRegistry {
+    /// Mint the next unique local [`OrderId`].
+    pub(in crate::live) fn mint(&mut self) -> OrderId {
+        let id = OrderId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Record a placed order's venue id + kind against a local id.
+    pub(in crate::live) fn record(&mut self, local: OrderId, venue_id: &str, kind: OrderKind) {
+        self.local_to_venue.insert(local, venue_id.to_string());
+        self.venue_to_local.insert(venue_id.to_string(), local);
+        self.kind.insert(venue_id.to_string(), kind);
+    }
+
+    pub(in crate::live) fn local_for(&self, venue_id: &str) -> Option<OrderId> {
+        self.venue_to_local.get(venue_id).copied()
+    }
+
+    /// The kind a venue order was placed as. A fill on an order we didn't place
+    /// (submitted out of band, through the venue's own UI) reads as `Market` —
+    /// it moved the position, and that is all the strategy needs to know.
+    pub(in crate::live) fn kind_for(&self, venue_id: &str) -> OrderKind {
+        self.kind
+            .get(venue_id)
+            .copied()
+            .unwrap_or(OrderKind::Market)
+    }
+
+    pub(in crate::live) fn venue_for(&self, local: OrderId) -> Option<&str> {
+        self.local_to_venue.get(&local).map(String::as_str)
+    }
+}
+
+/// A resting order we placed: a limit entry, or one protective leg.
+///
+/// Unifies OKX's `RestingLeg` + `RestingLimit` and Coinbase's `RestingOrder`.
+/// `size` is **venue-native**; `price` is the trigger for a protective leg and
+/// the limit for an entry — the same field under both of OKX's two names.
+///
+/// Kept so an unchanged re-submit is a no-op and a changed one cancels the
+/// previous venue order before placing the replacement. The size is part of
+/// that dedup key, so re-resting the same trigger for a *different* share
+/// replaces the order rather than being mistaken for a no-op.
+#[derive(Debug, Clone)]
+pub(in crate::live) struct RestingOrder {
+    pub(in crate::live) price: Real,
+    pub(in crate::live) size: Real,
+    pub(in crate::live) side: Side,
+    pub(in crate::live) venue_id: String,
+    pub(in crate::live) local: OrderId,
+}
+
+/// The resting protective bracket for one symbol: a stop leg and/or a
+/// take-profit leg.
+#[derive(Debug, Clone, Default)]
+pub(in crate::live) struct Bracket {
+    stop: Option<RestingOrder>,
+    take_profit: Option<RestingOrder>,
+}
+
+impl Bracket {
+    /// The leg `kind` selects. `Stop` is the default: `Market` / `Limit` never
+    /// reach a bracket (a market exit is `set_position`, a resting entry is
+    /// `set_limit`), and answering them as the stop leg is what every open-coded
+    /// copy of this match already did.
+    pub(in crate::live) fn leg(&self, kind: OrderKind) -> Option<&RestingOrder> {
+        match kind {
+            OrderKind::TakeProfit => self.take_profit.as_ref(),
+            _ => self.stop.as_ref(),
+        }
+    }
+
+    pub(in crate::live) fn set(&mut self, kind: OrderKind, leg: RestingOrder) {
+        match kind {
+            OrderKind::TakeProfit => self.take_profit = Some(leg),
+            _ => self.stop = Some(leg),
+        }
+    }
+
+    /// Whether either leg carries this local id.
+    pub(in crate::live) fn leg_local(&self, local: OrderId) -> bool {
+        [&self.stop, &self.take_profit]
+            .into_iter()
+            .any(|slot| slot.as_ref().is_some_and(|leg| leg.local == local))
+    }
+
+    /// Drop the leg with this local id; `true` if one matched.
+    pub(in crate::live) fn clear_local(&mut self, local: OrderId) -> bool {
+        for slot in [&mut self.stop, &mut self.take_profit] {
+            if slot.as_ref().is_some_and(|leg| leg.local == local) {
+                *slot = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Both legs, consuming — what `cancel_protective` walks.
+    pub(in crate::live) fn into_legs(self) -> impl Iterator<Item = RestingOrder> {
+        [self.stop, self.take_profit].into_iter().flatten()
+    }
+}
 
 /// A live wallet's error log and its buffer of refused orders.
 ///

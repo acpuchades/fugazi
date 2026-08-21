@@ -59,8 +59,6 @@
 //! REST fill polling is the MVP; a WebSocket user-data stream is the natural
 //! lower-latency follow-up.
 
-use std::collections::HashMap;
-
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Method;
@@ -68,6 +66,7 @@ use sha2::Sha256;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
+use crate::hash::SymMap;
 use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{
@@ -77,8 +76,8 @@ use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 
 use super::LiveError;
 use super::venue::{
-    HttpCore, LiveLog, decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick,
-    with_query,
+    Bracket, HttpCore, InstrumentGrid, LiveLog, OrderRegistry, RestingOrder, decimals_of,
+    parse_num, with_query,
 };
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
@@ -87,55 +86,6 @@ const MAINNET_BASE_URL: &str = "https://www.okx.com";
 const QUOTE_CCY: &str = "USDT";
 /// OKX's sentinel for "execute the triggered protective order at market".
 const MARKET_ORDER_PX: &str = "-1";
-
-/// The instrument spec for one swap, needed so submitted sizes and trigger
-/// prices land on the venue's grid and so contracts convert to base units.
-/// Parsed once from `/api/v5/public/instruments` and cached.
-#[derive(Debug, Clone, Copy)]
-struct InstrumentSpec {
-    /// Size step, in contracts.
-    lot_sz: Real,
-    /// Minimum order size, in contracts.
-    min_sz: Real,
-    /// Price step.
-    tick: Real,
-    /// Base-asset value of one contract (`ctVal`) — the contracts↔units factor.
-    ct_val: Real,
-    sz_decimals: usize,
-    px_decimals: usize,
-}
-
-/// A resting protective algo leg we've placed, kept so a re-submit at the same
-/// trigger + size is a no-op and a change cancels the previous venue order.
-#[derive(Debug, Clone)]
-struct RestingLeg {
-    trigger: Real,
-    /// Resolved size in **contracts** — part of the dedup key so re-resting the
-    /// same trigger for a *different* share replaces the venue order rather than
-    /// being mistaken for a no-op.
-    contracts: Real,
-    algo_id: String,
-    local: OrderId,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ProtectiveState {
-    stop: Option<RestingLeg>,
-    take_profit: Option<RestingLeg>,
-}
-
-/// A resting limit order we've placed, kept for the same reasons as
-/// [`RestingLeg`]: an unchanged re-submit is a no-op, a changed one cancels the
-/// previous venue order before placing the replacement.
-#[derive(Debug, Clone)]
-struct RestingLimit {
-    limit: Real,
-    /// Size in contracts.
-    contracts: Real,
-    side: Side,
-    ord_id: String,
-    local: OrderId,
-}
 
 /// A live [`Wallet`] over OKX V5 perpetual swaps. See the module-level docs
 /// for the trait-to-venue mapping and the contracts↔units convention.
@@ -158,25 +108,21 @@ pub struct OkxWallet {
     available_balance: Real,
     equity: Real,
     /// Signed positions in **base units** (converted from the venue's contracts).
-    positions: HashMap<Symbol, Real>,
-    marks: HashMap<Symbol, Real>,
-    specs: HashMap<Symbol, InstrumentSpec>,
+    positions: SymMap<Symbol, Real>,
+    marks: SymMap<Symbol, Real>,
+    grids: SymMap<Symbol, InstrumentGrid>,
 
-    // Order-id bookkeeping: wallet-minted local ids <-> venue order/algo ids,
-    // and the kind each venue order was placed as (so a polled fill is tagged
-    // Market / Stop / TakeProfit / Limit).
-    next_id: u64,
-    local_to_venue: HashMap<OrderId, String>,
-    venue_to_local: HashMap<String, OrderId>,
-    order_kind: HashMap<String, OrderKind>,
+    // Wallet-minted local ids <-> venue order/algo ids, and the kind each was
+    // placed as (so a polled fill is tagged Market / Stop / TakeProfit / Limit).
+    orders: OrderRegistry,
 
     // Resting protective legs, for idempotent re-submit / cancel-on-change.
-    protective: HashMap<Symbol, ProtectiveState>,
+    protective: SymMap<Symbol, Bracket>,
     // Resting limit orders, one per symbol — same convention as `protective`.
-    limits: HashMap<Symbol, RestingLimit>,
+    limits: SymMap<Symbol, RestingOrder>,
 
     // Fill polling: per-symbol last-seen billId.
-    trade_cursor: HashMap<Symbol, i64>,
+    trade_cursor: SymMap<Symbol, i64>,
     // The error log, and the refused orders awaiting a drain through
     // take_rejections (the trait's failure stream — the twin of the fill stream
     // update()/poll_fills return). Both bounded; see `LiveLog`.
@@ -226,16 +172,13 @@ impl OkxWallet {
             td_mode: "cross".to_string(),
             available_balance: 0.0,
             equity: 0.0,
-            positions: HashMap::new(),
-            marks: HashMap::new(),
-            specs: HashMap::new(),
-            next_id: 0,
-            local_to_venue: HashMap::new(),
-            venue_to_local: HashMap::new(),
-            order_kind: HashMap::new(),
-            protective: HashMap::new(),
-            limits: HashMap::new(),
-            trade_cursor: HashMap::new(),
+            positions: SymMap::default(),
+            marks: SymMap::default(),
+            grids: SymMap::default(),
+            orders: OrderRegistry::default(),
+            protective: SymMap::default(),
+            limits: SymMap::default(),
+            trade_cursor: SymMap::default(),
             log: LiveLog::default(),
         }
     }
@@ -296,48 +239,34 @@ impl OkxWallet {
                 continue;
             }
             // Convert contracts to base units; needs the instrument's ctVal.
-            let ct_val = match self.ensure_spec(inst) {
-                Ok(spec) => spec.ct_val,
+            let grid = match self.ensure_grid(inst) {
+                Ok(g) => g,
                 Err(e) => {
                     self.log.note(e);
                     continue;
                 }
             };
             self.positions
-                .insert(crate::types::symbol(inst), contracts * ct_val);
+                .insert(crate::types::symbol(inst), grid.base_units(contracts));
         }
         Ok(())
     }
 
-    /// Mint the next unique local [`OrderId`].
-    fn mint(&mut self) -> OrderId {
-        let id = OrderId(self.next_id);
-        self.next_id += 1;
-        id
-    }
-
-    /// Record a placed order's venue id + kind against a local id.
-    fn map_order(&mut self, local: OrderId, venue_id: &str, kind: OrderKind) {
-        self.local_to_venue.insert(local, venue_id.to_string());
-        self.venue_to_local.insert(venue_id.to_string(), local);
-        self.order_kind.insert(venue_id.to_string(), kind);
-    }
-
-    /// Ensure the [`InstrumentSpec`] for `symbol` is cached, fetching
+    /// Ensure the [`InstrumentGrid`] for `symbol` is cached, fetching
     /// `/api/v5/public/instruments` if not.
-    fn ensure_spec(&mut self, symbol: &str) -> Result<InstrumentSpec, LiveError> {
-        if let Some(s) = self.specs.get(symbol) {
-            return Ok(*s);
+    fn ensure_grid(&mut self, symbol: &str) -> Result<InstrumentGrid, LiveError> {
+        if let Some(g) = self.grids.get(symbol) {
+            return Ok(*g);
         }
         let params = vec![
             ("instType", "SWAP".to_string()),
             ("instId", symbol.to_string()),
         ];
         let value = self.public_get("/api/v5/public/instruments", params)?;
-        let spec = parse_instrument_spec(&value, symbol)
+        let grid = parse_instrument_grid(&value, symbol)
             .ok_or_else(|| LiveError::Decode(format!("no instrument spec for {symbol}")))?;
-        self.specs.insert(crate::types::symbol(symbol), spec);
-        Ok(spec)
+        self.grids.insert(crate::types::symbol(symbol), grid);
+        Ok(grid)
     }
 
     /// Ensure a fill cursor exists for `symbol`, seeding it to the latest
@@ -358,7 +287,7 @@ impl OkxWallet {
     /// to its local [`OrderId`] and recorded [`OrderKind`]; a fill on an order we
     /// don't know (placed out-of-band) gets a fresh local id and `Market` kind.
     fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
-        let ct_val = self.ensure_spec(symbol)?.ct_val;
+        let grid = self.ensure_grid(symbol)?;
         let cursor = self.trade_cursor.get(symbol).copied().unwrap_or(0);
         // Pull the recent fills (OKX returns the last few days, most-recent
         // first) and keep only those newer than the cursor. Polling a small
@@ -373,19 +302,15 @@ impl OkxWallet {
                 continue;
             }
             max = max.max(t.bill_id);
-            let local = match self.venue_to_local.get(&t.ord_id).copied() {
+            let local = match self.orders.local_for(&t.ord_id) {
                 Some(id) => id,
-                None => self.mint(),
+                None => self.orders.mint(),
             };
-            let kind = self
-                .order_kind
-                .get(&t.ord_id)
-                .copied()
-                .unwrap_or(OrderKind::Market);
+            let kind = self.orders.kind_for(&t.ord_id);
             let order = Order::new(
                 crate::types::symbol(symbol),
                 t.side,
-                t.contracts * ct_val,
+                grid.base_units(t.contracts),
                 t.price,
                 kind,
                 local,
@@ -507,10 +432,10 @@ impl OkxWallet {
         kind: OrderKind,
         trigger: Real,
         contracts: Real,
-    ) -> Result<RestingLeg, WalletError> {
-        let local = self.mint();
-        let spec = match self.ensure_spec(symbol) {
-            Ok(s) => s,
+    ) -> Result<RestingOrder, WalletError> {
+        let local = self.orders.mint();
+        let grid = match self.ensure_grid(symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
         };
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
@@ -523,8 +448,8 @@ impl OkxWallet {
         }
         // A protective exit trades the opposite side of the open position.
         let side = if pos > 0.0 { Side::Sell } else { Side::Buy };
-        let price = format_decimals(round_to_tick(trigger, spec.tick), spec.px_decimals);
-        let sz = format_decimals(contracts, spec.sz_decimals);
+        let price = grid.price_str(grid.on_tick(trigger));
+        let sz = grid.size_str(contracts);
         // `conditional` algo with a single trigger; `slOrdPx`/`tpOrdPx` of -1
         // means "fill at market when triggered", the reduce-only twin of
         // Binance's STOP_MARKET / TAKE_PROFIT_MARKET.
@@ -559,11 +484,12 @@ impl OkxWallet {
             Ok(id) => id,
             Err(e) => return Err(self.log.refuse(symbol, local, kind, e)),
         };
-        self.map_order(local, &algo_id, kind);
-        Ok(RestingLeg {
-            trigger,
-            contracts,
-            algo_id,
+        self.orders.record(local, &algo_id, kind);
+        Ok(RestingOrder {
+            price: trigger,
+            size: contracts,
+            side,
+            venue_id: algo_id,
             local,
         })
     }
@@ -578,10 +504,10 @@ impl OkxWallet {
         trigger: Real,
         size: Size,
     ) -> Result<Ack<Symbol>, WalletError> {
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => {
-                let id = self.mint();
+                let id = self.orders.mint();
                 return Err(self.log.refuse(&symbol, id, kind, e));
             }
         };
@@ -597,9 +523,9 @@ impl OkxWallet {
                 self.equity,
             )
             .min(pos.abs());
-        let contracts = floor_to_step(units / spec.ct_val, spec.lot_sz);
+        let contracts = grid.venue_size(units);
         if contracts <= POSITION_EPSILON {
-            let id = self.mint();
+            let id = self.orders.mint();
             return Err(self.log.refuse(
                 &symbol,
                 id,
@@ -607,25 +533,22 @@ impl OkxWallet {
                 LiveError::Decode("protective size rounds to zero contracts".into()),
             ));
         }
-        let existing = self.protective.get(&symbol).and_then(|p| match kind {
-            OrderKind::TakeProfit => p.take_profit.clone(),
-            _ => p.stop.clone(),
-        });
+        let existing = self
+            .protective
+            .get(&symbol)
+            .and_then(|bracket| bracket.leg(kind))
+            .cloned();
         if let Some(leg) = existing {
-            if (leg.trigger - trigger).abs() <= PRICE_EPSILON
-                && (leg.contracts - contracts).abs() <= POSITION_EPSILON
+            if (leg.price - trigger).abs() <= PRICE_EPSILON
+                && (leg.size - contracts).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(leg.local));
             }
-            self.cancel_algo(&symbol, &leg.algo_id)?;
+            self.cancel_algo(&symbol, &leg.venue_id)?;
         }
         let leg = self.place_protective(&symbol, kind, trigger, contracts)?;
         let local = leg.local;
-        let entry = self.protective.entry(symbol).or_default();
-        match kind {
-            OrderKind::TakeProfit => entry.take_profit = Some(leg),
-            _ => entry.stop = Some(leg),
-        }
+        self.protective.entry(symbol).or_default().set(kind, leg);
         Ok(Ack::Working(local))
     }
 }
@@ -713,15 +636,15 @@ impl Wallet<Symbol> for OkxWallet {
         let symbol = target.symbol;
         // Mint the id up front so a refusal before the POST still carries the
         // submission's id into its Rejection.
-        let id = self.mint();
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let id = self.orders.mint();
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target.amount - current;
-        let contracts = floor_to_step(delta.abs() / spec.ct_val, spec.lot_sz);
-        if contracts < spec.min_sz || contracts <= POSITION_EPSILON {
+        let contracts = grid.venue_size(delta.abs());
+        if grid.below_minimum(contracts) {
             // Below the venue's minimum tradable size: accept the submission but
             // place nothing (no fill will arrive under this id).
             return Ok(Ack::Working(id));
@@ -738,7 +661,7 @@ impl Wallet<Symbol> for OkxWallet {
             "tdMode": self.td_mode,
             "side": side_token(side),
             "ordType": "market",
-            "sz": format_decimals(contracts, spec.sz_decimals),
+            "sz": grid.size_str(contracts),
             "clOrdId": client_order_id(id),
         });
         let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
@@ -749,7 +672,7 @@ impl Wallet<Symbol> for OkxWallet {
             Ok(v) => v,
             Err(e) => return Err(self.log.refuse(&symbol, id, OrderKind::Market, e)),
         };
-        self.map_order(id, &ord_id, OrderKind::Market);
+        self.orders.record(id, &ord_id, OrderKind::Market);
         Ok(Ack::Working(id))
     }
 
@@ -772,12 +695,9 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn cancel_protective(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
-        if let Some(state) = self.protective.remove(symbol) {
-            if let Some(leg) = state.stop {
-                self.cancel_algo(symbol, &leg.algo_id)?;
-            }
-            if let Some(leg) = state.take_profit {
-                self.cancel_algo(symbol, &leg.algo_id)?;
+        if let Some(bracket) = self.protective.remove(symbol) {
+            for leg in bracket.into_legs() {
+                self.cancel_algo(symbol, &leg.venue_id)?;
             }
         }
         Ok(())
@@ -807,7 +727,7 @@ impl Wallet<Symbol> for OkxWallet {
         size: Size,
         limit: Reference,
     ) -> Result<Ack<Symbol>, WalletError> {
-        let local = self.mint();
+        let local = self.orders.mint();
         if limit.0 <= 0.0 {
             return Err(self.log.refuse(
                 &symbol,
@@ -816,17 +736,17 @@ impl Wallet<Symbol> for OkxWallet {
                 LiveError::Decode(format!("limit price must be positive, got {}", limit.0)),
             ));
         }
-        let spec = match self.ensure_spec(&symbol) {
-            Ok(s) => s,
+        let grid = match self.ensure_grid(&symbol) {
+            Ok(g) => g,
             Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
 
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let units = size.resolve(limit.0, current, self.available_balance, self.equity);
         let delta = side.sign() * units - current;
-        let contracts = floor_to_step(delta.abs() / spec.ct_val, spec.lot_sz);
-        let price = round_to_tick(limit.0, spec.tick);
-        if contracts < spec.min_sz || contracts <= POSITION_EPSILON {
+        let contracts = grid.venue_size(delta.abs());
+        let price = grid.on_tick(limit.0);
+        if grid.below_minimum(contracts) {
             // Below the venue's minimum tradable size: accept the submission but
             // place nothing, exactly as `set_position` does.
             return Ok(Ack::Working(local));
@@ -836,12 +756,12 @@ impl Wallet<Symbol> for OkxWallet {
         // Idempotent re-submit: an unchanged order stays where it is.
         if let Some(existing) = self.limits.get(&symbol).cloned() {
             if existing.side == order_side
-                && (existing.limit - price).abs() <= POSITION_EPSILON
-                && (existing.contracts - contracts).abs() <= POSITION_EPSILON
+                && (existing.price - price).abs() <= POSITION_EPSILON
+                && (existing.size - contracts).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(existing.local));
             }
-            let ord_id = existing.ord_id.clone();
+            let ord_id = existing.venue_id.clone();
             self.cancel_order(&symbol, &ord_id)?;
             self.limits.remove(&symbol);
         }
@@ -856,8 +776,8 @@ impl Wallet<Symbol> for OkxWallet {
             "tdMode": self.td_mode,
             "side": side_token(order_side),
             "ordType": "limit",
-            "sz": format_decimals(contracts, spec.sz_decimals),
-            "px": format_decimals(price, spec.px_decimals),
+            "sz": grid.size_str(contracts),
+            "px": grid.price_str(price),
             "clOrdId": client_order_id(local),
         });
         let value = match self.signed(Method::POST, "/api/v5/trade/order", &[], Some(body)) {
@@ -868,14 +788,14 @@ impl Wallet<Symbol> for OkxWallet {
             Ok(v) => v,
             Err(e) => return Err(self.log.refuse(&symbol, local, OrderKind::Limit, e)),
         };
-        self.map_order(local, &ord_id, OrderKind::Limit);
+        self.orders.record(local, &ord_id, OrderKind::Limit);
         self.limits.insert(
             symbol,
-            RestingLimit {
-                limit: price,
-                contracts,
+            RestingOrder {
+                price,
+                size: contracts,
                 side: order_side,
-                ord_id,
+                venue_id: ord_id,
                 local,
             },
         );
@@ -884,7 +804,7 @@ impl Wallet<Symbol> for OkxWallet {
 
     fn cancel_limit(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(resting) = self.limits.remove(symbol) {
-            self.cancel_order(symbol, &resting.ord_id)?;
+            self.cancel_order(symbol, &resting.venue_id)?;
         }
         Ok(())
     }
@@ -906,7 +826,7 @@ impl Wallet<Symbol> for OkxWallet {
     }
 
     fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
-        let Some(venue_id) = self.local_to_venue.get(&id).cloned() else {
+        let Some(venue_id) = self.orders.venue_for(id).map(str::to_string) else {
             return Ok(());
         };
         // Locate the resting record this id belongs to (a working market order
@@ -920,24 +840,18 @@ impl Wallet<Symbol> for OkxWallet {
             self.limits.remove(&symbol);
             return Ok(());
         }
-        let leg_symbol = self.protective.iter().find_map(|(sym, state)| {
-            let hit = state.stop.as_ref().map(|l| l.local) == Some(id)
-                || state.take_profit.as_ref().map(|l| l.local) == Some(id);
-            hit.then(|| sym.clone())
-        });
+        let leg_symbol = self
+            .protective
+            .iter()
+            .find_map(|(sym, bracket)| bracket.leg_local(id).then(|| sym.clone()));
         let Some(symbol) = leg_symbol else {
             // Known venue id, but not a tracked resting order: nothing
             // actionable, treat as gone.
             return Ok(());
         };
         self.cancel_algo(&symbol, &venue_id)?;
-        if let Some(state) = self.protective.get_mut(&symbol) {
-            if state.stop.as_ref().map(|l| l.local) == Some(id) {
-                state.stop = None;
-            }
-            if state.take_profit.as_ref().map(|l| l.local) == Some(id) {
-                state.take_profit = None;
-            }
+        if let Some(bracket) = self.protective.get_mut(&symbol) {
+            bracket.clear_local(id);
         }
         Ok(())
     }
@@ -1081,21 +995,24 @@ fn num_field(value: &serde_json::Value, key: &str) -> Option<Real> {
     value.get(key).and_then(parse_num)
 }
 
-/// Pull one swap's grid + contract value out of `/api/v5/public/instruments`.
-fn parse_instrument_spec(value: &serde_json::Value, symbol: &str) -> Option<InstrumentSpec> {
+/// Pull one swap's grid + contract value out of `/api/v5/public/instruments`,
+/// which answers with every matching instrument rather than a single object.
+fn parse_instrument_grid(value: &serde_json::Value, symbol: &str) -> Option<InstrumentGrid> {
     let data = value.get("data")?.as_array()?;
     let entry = data
         .iter()
         .find(|s| s.get("instId").and_then(|v| v.as_str()) == Some(symbol))?;
     let lot_str = entry.get("lotSz").and_then(|v| v.as_str())?;
     let tick_str = entry.get("tickSz").and_then(|v| v.as_str())?;
-    Some(InstrumentSpec {
-        lot_sz: lot_str.parse::<Real>().ok()?,
-        min_sz: entry.get("minSz").and_then(parse_num).unwrap_or(0.0),
-        tick: tick_str.parse::<Real>().ok()?,
-        ct_val: entry.get("ctVal").and_then(parse_num).unwrap_or(1.0),
-        sz_decimals: decimals_of(lot_str),
-        px_decimals: decimals_of(tick_str),
+    Some(InstrumentGrid {
+        size_step: lot_str.parse::<Real>().ok()?,
+        min_size: entry.get("minSz").and_then(parse_num).unwrap_or(0.0),
+        price_tick: tick_str.parse::<Real>().ok()?,
+        // A swap quotes `ctVal` base units per contract; an instrument that
+        // omits it trades in base units already.
+        contract_multiplier: entry.get("ctVal").and_then(parse_num).unwrap_or(1.0),
+        size_decimals: decimals_of(lot_str),
+        price_decimals: decimals_of(tick_str),
     })
 }
 
@@ -1187,13 +1104,39 @@ mod tests {
                 "lotSz": "0.1", "minSz": "0.1", "tickSz": "0.1", "ctVal": "0.01"
             }]
         });
-        let s = parse_instrument_spec(&info, "BTC-USDT-SWAP").expect("spec parsed");
-        assert!((s.lot_sz - 0.1).abs() < 1e-12);
-        assert!((s.min_sz - 0.1).abs() < 1e-12);
-        assert!((s.ct_val - 0.01).abs() < 1e-12);
-        assert_eq!(s.sz_decimals, 1);
-        assert_eq!(s.px_decimals, 1);
-        assert!(parse_instrument_spec(&info, "ETH-USDT-SWAP").is_none());
+        let g = parse_instrument_grid(&info, "BTC-USDT-SWAP").expect("spec parsed");
+        assert!((g.size_step - 0.1).abs() < 1e-12);
+        assert!((g.min_size - 0.1).abs() < 1e-12);
+        assert!((g.contract_multiplier - 0.01).abs() < 1e-12);
+        assert_eq!(g.size_decimals, 1);
+        assert_eq!(g.price_decimals, 1);
+        // The endpoint answers with every matching instrument, so the parser
+        // has to pick the right row rather than trust the first.
+        assert!(parse_instrument_grid(&info, "ETH-USDT-SWAP").is_none());
+    }
+
+    /// The contracts↔units conversion the whole OKX backend rests on: a swap
+    /// quoting `ctVal = 0.01` trades 5 contracts for 0.05 base units.
+    ///
+    /// Sizes floor rather than round, so a rounded order is never *larger* than
+    /// the diff it was meant to close.
+    #[test]
+    fn the_grid_converts_between_contracts_and_base_units() {
+        let grid = InstrumentGrid {
+            size_step: 0.1,
+            min_size: 0.1,
+            price_tick: 0.1,
+            contract_multiplier: 0.01,
+            size_decimals: 1,
+            price_decimals: 1,
+        };
+        assert!((grid.venue_size(0.05) - 5.0).abs() < 1e-12);
+        assert!((grid.base_units(5.0) - 0.05).abs() < 1e-12);
+        assert_eq!(grid.size_str(grid.venue_size(0.05)), "5.0");
+        // Floors to the step: 0.0509 base units is 5.09 contracts, submitted
+        // as 5.0 rather than 5.1.
+        assert_eq!(grid.size_str(grid.venue_size(0.0509)), "5.0");
+        assert!(grid.below_minimum(grid.venue_size(0.0005)));
     }
 
     #[test]
