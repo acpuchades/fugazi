@@ -1125,11 +1125,15 @@ composition — `!resample` + `!latch`, which `check overlay` also validates
 (missing `inner`, `every: 0`, and unknown nested tags all fail there) —
 crossovers, MACD, moving averages, oscillators, placeholders, position
 anchors, rolling extrema, stability gate, trend/directional). Each entry shows
-the tag's YAML surface, with an omissible key rendered as `name=<default>` when
-the descriptor says what omitting it is equivalent to — `!sma { source=!close,
-period }`, `!bb_upper { source=!close, period=20, k=2.0 }` — and as `name?` when
-there is nothing to say (`!pick`'s `symbol`, or a cross-asset `source:`, which
-defaults to the strategy's own series and so names no tag).
+the tag's YAML surface, **required keys first**, with an omissible key rendered
+as `name=<default>` when the descriptor says what omitting it is equivalent to —
+`!sma { period, source=!close }`, `!bb_upper { source=!close, period=20, k=2.0 }`
+— and as `name?` when there is nothing to say (`!pick`'s `symbol`, or a
+cross-asset `source:`, which defaults to the strategy's own series and so names
+no tag). The order is the variants' own — required fields are *declared* first —
+so `fugazi grammar` reports it identically and no consumer has to re-sort. (YAML
+mappings are unordered, so this is presentation, not grammar: a document may
+write the keys in any order.)
 
 `list tickers
 binance` calls

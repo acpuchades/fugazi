@@ -343,7 +343,8 @@ fn write_indicators<W: Write>(w: &mut W) -> io::Result<()> {
 /// and render without the `!`; everything else renders in its `!tag`-prefixed
 /// form, with an omissible `map` key rendered as `name=<default>` when the
 /// descriptor says what omitting it is equivalent to, and a bare `name?` when
-/// there is nothing to say.
+/// there is nothing to say. Keys render in the descriptor's own order, which is
+/// required-first because the variants are declared that way.
 fn signature(tag: &crate::spec::grammar::GrammarTag) -> String {
     // The canonical spelling. A tag with alternates (`!changed`, `!unstable`,
     // `!param`, …) renders the one to reach for by default; the alternates are
@@ -357,6 +358,9 @@ fn signature(tag: &crate::spec::grammar::GrammarTag) -> String {
         // body, optional keys marked `?`.
         "map" if form.fields.iter().all(|f| f.name == "source") => tag.name.clone(),
         "map" => {
+            // Declaration order, which is already required-first: the variants
+            // themselves are written that way, so every consumer of the
+            // descriptor gets the useful order without re-sorting.
             let body: Vec<String> = form.fields.iter().map(field_form).collect();
             format!("!{} {{ {} }}", tag.name, body.join(", "))
         }
@@ -460,11 +464,17 @@ mod tests {
         // An omissible key renders what omitting it is equivalent to — the
         // whole point of the descriptor's tagged `default`. `period` is
         // required, so it renders bare.
-        assert_eq!(sig("sma"), "!sma { source=!close, period }");
+        assert_eq!(sig("sma"), "!sma { period, source=!close }");
         // Both arms of `GrammarDefault`, on one tag.
         assert_eq!(sig("bb_upper"), "!bb_upper { source=!close, period=20, k=2.0 }");
-        // A node default that isn't a price series.
-        assert_eq!(sig("atr"), "!atr { source=!current, period }");
+        // A node default that isn't a price series. `period` leads: required
+        // keys come first, whatever order the variant declares them in.
+        assert_eq!(sig("atr"), "!atr { period, source=!current }");
+        assert_eq!(
+            sig("donchian_upper"),
+            "!donchian_upper { period, high=!high, low=!low }",
+            "the two defaulted keys are declared first and still render last",
+        );
         assert_eq!(sig("top_bottom"), "!top_bottom { longs, shorts, of=!everything }");
         // `?` survives for the slot that genuinely has nothing to report: a
         // cross-asset `source:` defaults to the strategy's own series, which no
