@@ -51,7 +51,7 @@ def late_listing_stream() -> list[ta.Snapshot]:
 
 def doc(sym: str) -> str:
     return (
-        f"symbol: {sym}\n"
+        f"root: {sym}\n"
         "long:\n"
         "  enter: !crosses_above { lhs: !close, rhs: !sma { period: 10 } }\n"
         "  exit: !crosses_below { lhs: !close, rhs: !sma { period: 10 } }\n"

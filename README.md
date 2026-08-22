@@ -882,7 +882,7 @@ always-in reversal — the opposite side's `enter` reverses the position. Give a
 `exit` only when you want a flat rest.
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: 10 }
@@ -982,7 +982,7 @@ Two notes that cost people round-trips:
 Any value can be a placeholder resolved at run time:
 
 ```yaml
-symbol: !param { key: SYM, default: BTC }
+root: !param { key: SYM, default: BTC }
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: !param { key: FAST } }              # required
@@ -1008,7 +1008,7 @@ typed, so a param can stand anywhere — including where a number is required.
 recipe lives in one place:
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !import signals/breakout.yml     # the file's value takes this slot
   exit: !crosses_below { lhs: close, rhs: !sma { period: 20 } }

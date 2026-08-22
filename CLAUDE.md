@@ -173,19 +173,28 @@ Two stacked defaults on any atom leaf; don't conflate them.
 2. **Blessed series**: once you bottom out at a leaf (`!close`, `!high`, `!current`,
    `!get`, …), which *asset* it projects out of the bar's `Snapshot`.
 
-The blessed series is an explicit `root: Option<&Selector<String>>` **parameter** on
-`NodeSpec::try_build`, consumed by `pick_root` / `build_pick`. `Some(sel)` →
-`Pick::rooted(sel)`, `None` → `Pick::new()` (sole-atom, panics on 2+). The ~142 match
-arms never mention it — they fan out through the `atom_src` / `atom_src_any` closures.
+The blessed series is an explicit `root: Root<'_>` **parameter** on
+`NodeSpec::try_build`, wrapping an `Option<&RootSpec>` and consumed by `root_source` /
+`build_pick`. A root that is *exactly* a selector (`RootSpec::as_pick`) installs
+`Pick::rooted(sel)` directly; a richer one is built as the expression it is, with
+`Root::sole()` as **its** root — which is what terminates the recursion. `None` →
+`Pick::new()` (sole-atom, panics on 2+). The ~142 match arms never mention it — they fan
+out through the `atom_src` / `atom_src_any` closures.
+
+**The `as_pick` fast path is correctness, not just cost.** Only `Pick::rooted` has the
+*match, else sole-atom unpack* fallback; `!pick`'s own build arm yields the strict
+`Pick::matching`. Any tag that drives a sub-chain over **untagged** synthesized bars —
+`!resample` feeding its `inner:`, the `Vec<Candle>` / `Vec<Atom>` drivers — reads `None`
+on every bar without it, and reports a silent zero-fill backtest.
 
 **Who blesses what:**
 
 | Context | root |
 |---|---|
-| `SingleStrategySpec::build` | `Some(by_symbol(self.symbol))` |
-| `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(by_symbol(sym))` via `leg_root` |
+| `SingleStrategySpec::build` | `Some(&self.root)` — the document's `root:` expression |
+| `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(RootSpec::for_symbol(sym))` via `leg_root` |
 | overlay column, per `(symbol, freq)` series | `Some(group key)` via `cli::overlay::group_root` |
-| `PortfolioSpec` `weights:`, single-asset child | `Some(by_symbol(child.symbol))` |
+| `PortfolioSpec` `weights:`, single-asset child | `Some(child.root())` |
 | `PairsStrategySpec` | `None` — two legs, neither privileged |
 | portfolio/basket/multi `rebalance_on:`, portfolio `weights:` on non-single children | `None` — gate spans everything |
 | `!sharpe` & co.'s `strategy:` subtree | `None` — the embedded strategy blesses itself |
@@ -370,18 +379,19 @@ If you're about to write a private helper whose name looks like something here, 
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
 | Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
 | How much of a multi-symbol universe ever shares a snapshot | `cli::overlap::{measure, measure_universe, warn_if_fragmented}` → `Overlap<K>` (`is_fragmented()` / `summary()`). Wired into `get`'s result block, `run`'s inputs block, and `optimize` before the sweep. Measures **observed co-occurrence**, never per-symbol stamp signatures — DST alone splits those. Joining on the trading *date* is rejected, permanently: it manufactures cross-timezone lookahead (see TODO) | `src/cli/overlap.rs` |
-| Which bar cadence a run/optimize targets, and whether the input agrees | `cli::cadence::{Census, Series, Finding, apply, warn}` → `Resolution`. `main::load_frame` calls it right after `DataFrame::from_series`, before anything reads the frame. **Ambiguity is refused, disagreement is warned**: a symbol carrying 2+ cadences, a `-f` naming an absent one, or untagged rows beside 2+ labelled ones are errors; a mixed-cadence universe or a label that disagrees with the timestamp spacing are stderr warnings (ungated by `--quiet`, like `overlap`). Cadence precedence everywhere: `-f/--frequency` → the `freq` **column** (`DataFrame::declared_frequency`) → `detect_frequency_from_atoms` | `src/cli/cadence.rs` |
+| Which bar cadence a run/optimize targets, and whether the input agrees | `cli::cadence::{Census, Series, Finding, apply, warn}` → `Resolution`. `main::load_frame` calls it right after `DataFrame::from_series`, before anything reads the frame. **Ambiguity is refused, disagreement is warned**: a symbol carrying 2+ cadences, a `-f` naming an absent one, or untagged rows beside 2+ labelled ones are errors; a mixed-cadence universe or a label that disagrees with the timestamp spacing are stderr warnings (ungated by `--quiet`, like `overlap`). Cadence precedence everywhere: `-f/--frequency` → the document's **`root:`** (`RootSpec::declared_freq`) → the `freq` **column** (`DataFrame::declared_frequency`) → `detect_frequency_from_atoms` | `src/cli/cadence.rs` |
 | Two cadences of one symbol in one `--series` frame | `DataFrame` keys rows by **`(symbol, freq, time)`**; `frequencies_of` / `cadence_groups` / `retain_cadence`. The `freq` cell is the key verbatim — never case-folded (`1M` month vs `1m` minute). A row with no `freq` adopts its symbol's **sole declared** cadence in a pre-pass, so an untagged overlay CSV still joins onto a `get`-written price file *and* `--series` order still decides column clashes. `atoms()` refuses a symbol with 2+ cadences rather than interleaving them | `src/cli/data.rs` |
 | Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `Okx`, `Coinbase`, `Yahoo`, `CoinGecko`, `BinanceVision`. `schema()` = fixed overlay schema when known before the fetch (`Coinbase` has none — OHLCV only) | `src/sources/mod.rs` |
 | Provider schemas | `*::*_schema()` (`OnceLock`) | `src/sources/{binance,binance_vision,yahoo,coingecko,okx}.rs` |
 | Bucket an irregular sample stream onto a cadence | `sources::floor_to_bucket(ms, interval)` — Monday weeks, 1st-of-month months, epoch modulo otherwise | `src/sources/mod.rs` |
 | Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
 | Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` via `build_overlay`). `compute_snapshots` is the multi-symbol path | `src/spec/overlay.rs`, `python/src/constructors.rs`, `src/cli/overlay.rs` |
-| Blessed series of an overlay group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::basket::leg_root(sym)` / `spec::multi_asset::leg_root(sym)` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
+| A document's evaluation root, and what it names without building | `spec::root::RootSpec` — `node()` (build) · `tree()` (analyse) · `named_symbols()` / `sole_symbol(shape)` / `declared_freq()` / `as_pick()` · `for_symbol` / `for_series` to derive one. Keeps both forms because `NodeSpec` is `Deserialize`-only, so a typed walk would be a second ~142-arm table | `src/spec/root.rs` |
+| Blessed series of an overlay group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::basket::leg_root(sym)` / `spec::multi_asset::leg_root(sym)` — all three now return a `RootSpec` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
 | Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` and each shape's `*Spec::try_build` — `Err(String)` with the `!tag > ` breadcrumb. `spec::backtest::build_error(e)` renders as `anyhow`; `spec::backtest::validated(...)` is the discard-value form | `src/spec/expr.rs`, `src/spec/backtest.rs` |
 | Overlay build that errors instead of aborting | `spec::overlay::build_overlay(spec, schema, root) -> Result<..>` | `src/spec/overlay.rs` |
 | CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
-| Which series a document **reads but does not trade** (every `!pick { symbol }`) | `spec::reads::{picked_symbols, picked_symbols_of}` — a structural walk of the *loaded document*, not of `NodeSpec`: `!pick` is the only tag naming an asset, so a new tag can't silently fall out of it. Joined in by `cli::run::{read_only_series, attach_read_series}` (**left** join — a read series never adds bars); threaded as `RunOptions::reads`, probed per subgrid in `optimize::probe_reads` | `src/spec/reads.rs`, `src/cli/{run,optimize}.rs` |
+| Which series a document **reads but does not trade** (every `!pick { symbol }`) | `spec::reads::{picked_symbols, picked_symbols_of}` — a structural walk of the *loaded document*, not of `NodeSpec`: `!pick` is the only tag naming an asset, so a new tag can't silently fall out of it. Skips the `TRADED_KEYS` (`root`/`left`/`right`), since a root **is** a `!pick` now and a traded series is not a read. Joined in by `cli::run::{read_only_series, attach_read_series}` (**left** join — a read series never adds bars); threaded as `RunOptions::reads`, probed per subgrid in `optimize::probe_reads` | `src/spec/reads.rs`, `src/cli/{run,optimize}.rs` |
 | Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
 | Scope symbol `\:` escape (`BTC/USDT:USDT` vs. the `SYMBOL[FREQ]:` prefix) | `calendar::{unescape_symbol, escape_symbol, is_escaped, looks_like_body}` — only **scope** grammars need it; `get` spec heads take the symbol verbatim | `src/spec/calendar.rs`, `src/cli/overlay.rs`, `src/spec/costs/spec.rs` |
 | Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |

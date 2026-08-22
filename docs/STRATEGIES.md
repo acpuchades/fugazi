@@ -23,7 +23,7 @@ identical across all five.
 
 | Prefix | Shape | Document | Traded symbols |
 | --- | --- | --- | --- |
-| none, or `single:` | [`SingleAssetStrategy`](../src/strategies/single_asset.rs) | [Single-asset](#single-asset-documents) | one, named by `symbol` |
+| none, or `single:` | [`SingleAssetStrategy`](../src/strategies/single_asset.rs) | [Single-asset](#single-asset-documents) | one, named by `root` |
 | `pairs:` | [`PairsStrategy`](../src/strategies/pairs.rs) | [Pairs](#pairs-documents) | two, named by `left` / `right` |
 | `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — cross-sectional rank across the input universe |
 | `multi:` | [`MultiAssetStrategy`](../src/strategies/multi_asset.rs) | [Multi-asset](#multi-asset-documents) | N — same signals applied independently per symbol |
@@ -187,7 +187,7 @@ scheduler, a strategy registry — to keep its own record next to a strategy it
 generated or stores. **`meta:` is that place.**
 
 ```yaml
-symbol: BTC/USDT
+root: BTC/USDT
 meta:
   service: strategy-lab
   id: 4f1c-9a2b
@@ -213,7 +213,7 @@ Three things worth knowing:
 
 - **On a preset, `meta:` goes *inside* the tag.** A preset document *is* the tag
   (`!buy_and_hold { … }`), so there is no sibling position for a second key —
-  write `!buy_and_hold { symbol: BTC, meta: { … } }`. A sibling `meta:` would
+  write `!buy_and_hold { root: BTC, meta: { … } }`. A sibling `meta:` would
   stop the document being recognized as a preset at all.
 - **A portfolio child has two of them.** `meta:` on the child entry describes
   the *slot* (why this child is in this portfolio); `meta:` inside its
@@ -241,7 +241,7 @@ The default shape (no prefix, or `single:`). A mapping with these fields
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `symbol` | string | — (**required**) | the instrument to trade |
+| `root` | source (atom) | — (**required**) | the **evaluation root**: the series every `source:`-omitted leaf reads, and the instrument this document trades. `root: BTCUSDT` is sugar for `root: !pick { symbol: BTCUSDT }`. An expression like any other slot, so `!param` reaches it (see [Parameterizing the root](#parameterizing-the-root)) |
 | `long` | side | none | the long entry/exit (see [Sides](#sides)) |
 | `short` | side | none | the short entry/exit |
 | `sizing` | source | `!value 1.0` | position-size multiplier (see [Sizing](#sizing)) |
@@ -283,7 +283,7 @@ extreme). They are checked every bar, so they fire intra-bar, independently of
 
 ```yaml
 # Long on a breakout, with a 5% trailing stop and a fixed 15% take-profit.
-symbol: BTC
+root: BTC
 long:
   # `!lag` is load-bearing: the raw channel includes today's bar, so `close`
   # can never exceed it. See "Extremum sources include the current bar".
@@ -296,7 +296,7 @@ long:
 
 ```yaml
 # Always-in reversal: no exits needed — each side's enter reverses the other.
-symbol: BTC
+root: BTC
 long:
   enter:  !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
 short:
@@ -305,7 +305,7 @@ short:
 
 ```yaml
 # Long/flat: an explicit exit returns to flat (no short side).
-symbol: AAPL
+root: AAPL
 long:
   enter:  !crosses_above { lhs: !sma { period: 50 }, rhs: !sma { period: 200 } }
   exit:   !crosses_below { lhs: !sma { period: 50 }, rhs: !sma { period: 200 } }
@@ -354,7 +354,7 @@ as a fraction of *equity*, and `sizing` is the multiplier on that fraction:
 real-valued expression makes the size dynamic.
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
 sizing: !vol_target { target: 0.20, window: 30, bars_per_year: 365 }
@@ -880,7 +880,7 @@ inside its `strategy:` belongs to the nested document — see
 children:
   - name: trend
     group: momentum
-    strategy: !ma_crossover { symbol: BTC, fast: 10, slow: 30 }
+    strategy: !ma_crossover { root: BTC, fast: 10, slow: 30 }
   - name: spread
     strategy:
       left: BTC
@@ -984,7 +984,7 @@ rebalance_policy: !proportional
 children:
   - name: btc_trend
     strategy:
-      symbol: BTC
+      root: BTC
       long:
         enter: !crosses_above { lhs: !sma { period: 10 }, rhs: !sma { period: 30 } }
         exit:  !crosses_below { lhs: !sma { period: 10 }, rhs: !sma { period: 30 } }
@@ -1105,7 +1105,7 @@ Both fields are optional: `symbol` names the asset, `freq` disambiguates a
 cross-frequency snapshot (`!pick { symbol: BTC, freq: 1h }`, the same `N<unit>`
 alphabet `--frequency` uses). An empty `!pick {}` — and every leaf that omits
 `source:` — resolves to the context's **blessed series**: the document's own
-`symbol:` in a single-asset spec, the leg's symbol in a basket or multi-asset
+`root:` in a single-asset spec, the leg's symbol in a basket or multi-asset
 one. A pairs document has no blessed series — two legs, neither privileged — so
 it must root every leaf through an explicit `!pick`, and so must a portfolio's
 `weights:` and any `rebalance_on:`.
@@ -1113,6 +1113,51 @@ it must root every leaf through an explicit `!pick`, and so must a portfolio's
 Anything source-generic composes on top of a pick, not just the candle fields:
 `!atr { period: 14, source: !current { source: !pick { symbol: BTC } } }` is
 BTC's ATR, `!year { source: !pick { symbol: BTC } }` reads BTC's bar time.
+
+#### Parameterizing the root
+
+`root:` is an expression slot, so `!param` reaches into it like any other. That
+is what lets **one document be swept over instruments**:
+
+```yaml
+root: !pick { symbol: !param { key: SYM, default: BTC } }
+long:
+  enter: !gt { lhs: !close, rhs: !sma { period: 20 } }
+```
+
+```console
+$ fugazi run @strategy.yml -s @prices.csv --params SYM=ETH
+$ fugazi optimize @strategy.yml -s @prices.csv --grid 'SYM=["BTC","ETH"]' --grid FAST=5..20:5
+```
+
+`optimize` prepares **one bar stream per distinct traded series** and each row
+evaluates its own, so a row's metrics equal what the same document produces on
+its own through `run`. Two consequences to know:
+
+- **A root axis is a batch, not a sweep.** Rows no longer evaluate the same bars,
+  so they are separate backtests rather than a like-for-like comparison of
+  parameters. `optimize` warns when it sees one.
+- **`--walkforward` refuses a root axis**, because a fold index would span a
+  different period per row. Sweep the root or walk forward, not both. A `pairs:`
+  grid also still refuses one: a pairs run evaluates the *inner join* of its two
+  legs, so a different pair is a different timeline.
+
+A root that names no symbol, or more than one, is a **build error** — `check`
+reports it before any bar is read:
+
+```console
+$ fugazi check strategy @broken.yml
+  status  error · root `root:` names no symbol, so there is nothing to trade or
+          to slice the input by — name one, e.g. `root: !pick { symbol: BTCUSDT }`
+```
+
+`root:` may also declare the bar cadence, which joins the resolution chain one
+rung below the CLI flag — `-f/--frequency` → `root:`'s `freq` → the input's
+`freq` column → detection from the timestamps:
+
+```yaml
+root: !pick { symbol: BTCUSDT, freq: 4h }
+```
 
 #### Reading an asset you do not trade
 
@@ -1122,7 +1167,7 @@ a given state:
 
 ```yaml
 # Trade ETH, but only while BTC is above its 200-day.
-symbol: ETHUSDT
+root: ETHUSDT
 long:
   enter: !gt
     lhs: !close { source: !pick { symbol: BTCUSDT } }
@@ -1155,8 +1200,10 @@ with zero fills and nothing said.
 
 Two consequences worth being explicit about:
 
-- **A read does not change what is traded.** `symbol:` still names the traded
+- **A read does not change what is traded.** `root:` still names the traded
   asset, and it is still the blessed series every `source:`-omitted leaf reads.
+  A `!pick` under `root:` is the traded series, so it is deliberately *not*
+  reported by `check`'s `reads` line.
   The same holds for a pairs document's two legs and a portfolio's children.
 - **A read does not change the timeline.** The read series is *left-joined* onto
   the bars the document trades, so a bar the traded asset never had is never
@@ -1230,14 +1277,14 @@ take `risk_free_rate:`; every one except `!max_drawdown` takes `bars_per_year:`
 to annualize.
 
 ```yaml
-symbol: BTCUSDT
+root: BTCUSDT
 long:
   # only go long when a simple trend-follower has been working lately
   enter: !gt
     lhs: !sharpe
       period: 60
       bars_per_year: 365
-      strategy: !ma_crossover { symbol: BTCUSDT, fast: 10, slow: 50 }
+      strategy: !ma_crossover { root: BTCUSDT, fast: 10, slow: 50 }
     rhs: !value 0.5
   exit: !value false
 ```
@@ -1567,7 +1614,7 @@ held (repeated) value on every base tick, distorting the recurrence.
 ```yaml
 # Base bars: 1h. Higher timeframe: 4h. Enter long when the 1h close crosses
 # above the EMA-20 computed on 4h candles.
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: close
@@ -1675,7 +1722,7 @@ Any value in the document can be a **placeholder** resolved at run time with
 symbol) without editing:
 
 ```yaml
-symbol: !param { key: SYM, default: BTC }
+root: !param { key: SYM, default: BTC }
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: !param { key: FAST } }              # required
@@ -1721,7 +1768,7 @@ the earliest field that references the subtree — and alias it from every
 later site:
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
   exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
@@ -1738,7 +1785,7 @@ inside an anchored subtree is substituted at every reuse site in the same pass.
 An RSI mean-reversion, long/flat:
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above { lhs: !rsi { period: 14 }, rhs: !value 30 }  # cross up out of oversold
   exit:  !above         { source: !rsi { period: 14 }, level: 70 }    # leave on overbought
@@ -1749,7 +1796,7 @@ the textbook spelling — `close` crossing above `!donchian_upper` — can never
 fire, and the lag is not optional:
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: close

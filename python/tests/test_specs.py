@@ -237,7 +237,7 @@ def test_load_spec_with_params():
 def test_load_spec_explicit_kind_override():
     """Passing `kind=` bypasses auto-detection."""
     spec = ta.load_spec(
-        "symbol: BTC\nlong:\n  enter: !value true\n",
+        "root: BTC\nlong:\n  enter: !value true\n",
         kind="single",
     )
     assert spec.kind == "single"
@@ -273,14 +273,14 @@ def test_spec_meta_round_trips_as_plain_python():
 
 def test_spec_meta_is_none_when_absent():
     """Absent `meta:` reads None — not an empty dict a caller has to disambiguate."""
-    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n")
+    spec = ta.load_spec("root: BTC\nlong:\n  enter: !value true\n")
     assert spec.meta is None
 
 
 def test_spec_meta_is_available_on_every_shape():
     """All five shapes carry it, so a caller never has to branch on `kind`."""
     docs = {
-        "single": "symbol: BTC\nmeta: {tag: x}\nlong:\n  enter: !value true\n",
+        "single": "root: BTC\nmeta: {tag: x}\nlong:\n  enter: !value true\n",
         "pairs": (
             "left: BTC\nright: ETH\nmeta: {tag: x}\n"
             "enter: !gt {lhs: !close {source: !pick {symbol: BTC}}, rhs: !value 0}\n"
@@ -303,7 +303,7 @@ def test_spec_meta_is_available_on_every_shape():
 
 def test_spec_meta_does_not_change_a_run():
     """The whole contract: adding `meta:` cannot move a number."""
-    body = "symbol: BTC\nlong:\n  enter: !value true\n"
+    body = "root: BTC\nlong:\n  enter: !value true\n"
     snaps = _snaps_single("BTC", [100.0, 101.0, 99.0, 104.0, 108.0])
 
     def equity(yaml):
@@ -315,7 +315,7 @@ def test_spec_meta_does_not_change_a_run():
 def test_a_misspelled_field_is_still_an_error():
     """`meta:` widens the surface by exactly one key, not by everything."""
     with pytest.raises(ValueError, match="sizng"):
-        ta.load_spec("symbol: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n")
+        ta.load_spec("root: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1446,20 +1446,34 @@ def test_spec_reads_lists_cross_asset_picks():
 
 def test_spec_reads_is_empty_without_cross_asset_picks():
     """The common document reads only what it trades, and says so with `[]`."""
-    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n")
+    spec = ta.load_spec("root: BTC\nlong:\n  enter: !value true\n")
     assert spec.reads == []
 
 
-def test_spec_reads_ignores_the_documents_own_symbol_key():
-    """Only a `symbol:` *inside a* `!pick` counts — not the traded-asset key."""
+def test_spec_reads_ignores_the_documents_own_root_key():
+    """Only a `symbol:` *inside a* `!pick` counts — not the traded-series key.
+
+    Load-bearing now that `root:` is itself an expression, and usually a
+    `!pick`: a naive walk would report every document's own traded symbol as a
+    read.
+    """
     spec = ta.load_spec(
-        "symbol: BTC\nlong:\n  enter: !gt {lhs: !close {source: !pick {symbol: BTC}}, "
+        "root: BTC\nlong:\n  enter: !gt {lhs: !close {source: !pick {symbol: BTC}}, "
         "rhs: !value 0}\n"
     )
     # `BTC` is picked explicitly here, so it *is* a read — the point is that a
     # document naming no `!pick` at all (above) reports nothing, rather than
-    # reporting its own `symbol:`.
+    # reporting its own `root:`.
     assert spec.reads == ["BTC"]
+
+
+def test_spec_reads_excludes_a_root_that_is_the_only_pick():
+    """The regression the key-skip exists for: a `root:` is a `!pick`, but a
+    traded series is not a read-only one."""
+    spec = ta.load_spec(
+        "root: !pick {symbol: BTC}\nlong:\n  enter: !gt {lhs: !close, rhs: !value 0}\n"
+    )
+    assert spec.reads == []
 
 
 def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
@@ -1612,9 +1626,7 @@ def test_errors_subclass_value_error_so_old_handlers_still_catch():
 
 
 def test_a_document_that_will_not_build_raises_spec_error():
-    bad = (
-        "symbol: BTC\nlong:\n  enter: !gt { lhs: !get { key: absent }, rhs: !value 1 }"
-    )
+    bad = "root: BTC\nlong:\n  enter: !gt { lhs: !get { key: absent }, rhs: !value 1 }"
     with pytest.raises(ta.SpecError):
         ta.load_spec(bad).run(ta.PaperWallet(1000.0), _trend_snaps())
     # ...and the `!tag > ` breadcrumb still reaches the message.

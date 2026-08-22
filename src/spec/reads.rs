@@ -92,6 +92,21 @@ pub fn picked_symbols_of_no_imports(
     )?))
 }
 
+/// The document keys that name a series the shape **trades**: a single-asset or
+/// portfolio-child `root:`, and a pair's two legs.
+///
+/// Skipped by [`collect`], because this walk answers "what does the document
+/// *read*" and a traded series is not a read-only one. It mattered less when
+/// those keys held plain strings — the walk only ever looked at `!pick` bodies,
+/// so they fell out for free. Now that a root *is* an expression, and usually a
+/// `!pick`, excluding them has to be said out loud.
+///
+/// Safe to apply at any depth rather than only at the document root: no
+/// expression tag has a field by any of these names (the binary operators spell
+/// theirs `lhs`/`rhs`), so a nested match is always a document key — which is
+/// exactly what a portfolio child is.
+const TRADED_KEYS: [&str; 3] = ["root", "left", "right"];
+
 /// Recurse structurally, recording the `symbol:` of every `!pick` on the way
 /// down. A `!pick` node is descended into as well — its `symbol:` is a scalar,
 /// but nesting is the tree's business, not this walk's.
@@ -103,7 +118,10 @@ fn collect(value: &serde_json::Value, out: &mut BTreeSet<String>) {
             {
                 out.insert(sym.clone());
             }
-            for v in map.values() {
+            for (k, v) in map {
+                if TRADED_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
                 collect(v, out);
             }
         }

@@ -239,7 +239,7 @@ Rather keep the strategy as data than as code? The same thing as a document:
 import fugazi as ta
 
 spec = ta.load_spec("""
-symbol: AAPL
+root: AAPL
 long:
   enter: !crosses_above { lhs: !sma { period: 2 }, rhs: !sma { period: 5 } }
   exit:  !crosses_below { lhs: !sma { period: 2 }, rhs: !sma { period: 5 } }
@@ -964,7 +964,7 @@ placeholder.
 import fugazi as ta
 
 spec = ta.load_spec("""
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: 3 }
@@ -989,7 +989,7 @@ stores the strategy, and it is available on all five shapes:
 
 ```python
 spec = ta.load_spec("""
-symbol: BTC
+root: BTC
 meta:
   service: strategy-lab
   id: 4f1c-9a2b
@@ -1011,7 +1011,7 @@ are yours to construct, so the check is yours too:
 
 ```python
 spec = ta.load_spec("""
-symbol: ETH
+root: ETH
 long:
   enter: !gt
     lhs: !close { source: !pick { symbol: BTC } }
@@ -1068,7 +1068,7 @@ rebuild wherever you like:
 import numpy as np
 import fugazi as ta
 
-spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !crosses_above"
+spec = ta.load_spec("root: BTC\nlong:\n  enter: !crosses_above"
                     " { lhs: !sma { period: 3 }, rhs: !sma { period: 10 } }")
 snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
          for v in [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]]
@@ -1090,7 +1090,7 @@ Preset tags (`!buy_and_hold`, `!ma_crossover`, `!rsi_reversal`,
 `!donchian_breakout`, `!keltner_breakout`) work directly:
 
 ```python
-spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
+spec = ta.load_spec("!buy_and_hold { root: BTC }")
 ```
 
 The five shapes are auto-detected by top-level YAML key:
@@ -1100,7 +1100,7 @@ The five shapes are auto-detected by top-level YAML key:
 | `children:`             | `portfolio`   |
 | `left:` + `right:`      | `pairs`       |
 | `selection:`            | `basket`      |
-| `symbol:` or preset tag | `single`      |
+| `root:` or preset tag   | `single`      |
 | (bare mapping)          | `multi`       |
 
 Pass `kind="single"` / `"pairs"` / ... to override detection, and
@@ -1118,7 +1118,7 @@ or a live deployment can stop and pick up exactly where it left off:
 
 ```python
 text = """
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: 3 }
@@ -1168,7 +1168,7 @@ every pause.
 
 ```python
 spec = ta.load_spec("""
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: 3 }
@@ -1192,7 +1192,7 @@ rep, state = spec.run_resumable(wallet, snaps[20:], resume=state)
 
 ```python
 spec_yaml = """
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: !param FAST }
@@ -1229,7 +1229,7 @@ walk-forward validation:
 
 ```python
 wf_yaml = """
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: !param FAST }
@@ -1278,7 +1278,7 @@ is folded into the key first) and applies per fold under `walkforward=`.
 
 ```python
 smooth_yaml = """
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: !param FAST }
@@ -1315,7 +1315,7 @@ costs = ta.TradingCostsConfig({
     "commission": {"percentage": {"rate": 0.001}},
     "spread":     {"bps": {"bps": 5}},
 })
-cost_yaml = "!buy_and_hold { symbol: BTC }"
+cost_yaml = "!buy_and_hold { root: BTC }"
 cost_snaps = [
     ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
     for v in [100, 101, 102, 103, 104]
@@ -1775,7 +1775,7 @@ strategy and will fail identically on the next bar; a `WalletError` is a propert
 of the account *right now* and may well succeed on the next one.
 
 ```python
-spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
+spec = ta.load_spec("!buy_and_hold { root: BTC }")
 snaps = [ta.Snapshot({"BTC": c}) for c in stream]
 
 try:

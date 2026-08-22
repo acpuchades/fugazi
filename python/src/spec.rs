@@ -411,7 +411,7 @@ pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
     if map.contains_key("selection") {
         return "basket";
     }
-    if map.contains_key("symbol") {
+    if map.contains_key("root") {
         return "single";
     }
     // Bare per-side factories or a lone `long:` / `short:` mapping — that's

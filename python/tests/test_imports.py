@@ -42,7 +42,7 @@ def test_load_spec_import_within_base_dir_still_works(tmp_path):
         "!gt { lhs: close, rhs: !value 10 }\n"
     )
     spec = ta.load_spec(
-        "symbol: BTC\nlong:\n  enter: !import shared/enter.yml\n",
+        "root: BTC\nlong:\n  enter: !import shared/enter.yml\n",
         base_dir=str(tmp_path),
     )
     assert spec.kind == "single"
@@ -68,12 +68,12 @@ def test_load_spec_imports_false_rejects_import_inside_a_template_body():
 
 
 def test_load_spec_imports_false_leaves_import_free_documents_unaffected():
-    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n", imports=False)
+    spec = ta.load_spec("root: BTC\nlong:\n  enter: !value true\n", imports=False)
     assert spec.kind == "single"
 
 
 def test_optimize_imports_false_rejects_import():
-    yaml = "symbol: BTC\nlong:\n  enter: !import x.yml\n"
+    yaml = "root: BTC\nlong:\n  enter: !import x.yml\n"
     snaps = [ta.Snapshot({"BTC": ta.Candle(1.0, 1.0, 1.0, 1.0, 1.0)})]
     with pytest.raises(ta.SpecError, match="disabled"):
         ta.optimize(yaml, snaps, grid=[{}], imports=False)

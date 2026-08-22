@@ -278,7 +278,7 @@ pub fn parse_probe<T: DeserializeOwned>(value: Json) -> Result<(), String> {
 
 /// Does `value` hold a placeholder sentinel anywhere inside it?
 ///
-/// The structural twin of [`names_a_hole`], for the callers that inspect a tree
+/// The structural twin of `names_a_hole`, for the callers that inspect a tree
 /// rather than a parse error: a `check`-mode hole stands in for a value nobody
 /// supplied, so a validation that would judge the *shape* of what it stands for
 /// has to stand down. See [`crate::spec::root::RootSpec`]'s atom demand.

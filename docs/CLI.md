@@ -102,8 +102,8 @@ cargo run --bin fugazi -- optimize \
 
 Backtest one strategy against one dataset and write the result files.
 Every candle in the input series is fed to the strategy in `time` order;
-the strategy's `symbol` (from its YAML spec) is what the driver filters
-on when the frame carries several symbols.
+the symbol the strategy's `root:` names (from its YAML spec) is what the
+driver filters on when the frame carries several symbols.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
@@ -162,7 +162,7 @@ The strategy positional accepts an optional shape prefix:
   [Basket documents](STRATEGIES.md#basket-documents).
 - `multi:` — an N-symbol `MultiAssetStrategy` file (`multi:@multi.yml`);
   the *same* rule applied independently to every symbol in the input, so
-  any subset can be long / short / flat at once. No `symbol:` key — it
+  any subset can be long / short / flat at once. No `root:` key — it
   runs across many by construction. See
   [Multi-asset documents](STRATEGIES.md#multi-asset-documents).
 - `portfolio:` — N *different* strategies sharing one account
@@ -368,7 +368,7 @@ position wants. It is for iterating on a document that isn't finished — scaffo
 check, fill in, repeat — without inventing throwaway `!param` names.
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !above
     source: !sma { period: !undefined }
@@ -381,7 +381,7 @@ needs <number> at long.enter.above.source.sma.period
 needs <number> at long.enter.above.level
 
 result
-  status  ok · symbol BTC
+  status  ok · root BTC
 ```
 
 Each one is located by its **path in the document**, since it has no name to be
@@ -1383,7 +1383,7 @@ fugazi run @examples/strategy.params.yml \
 **Placeholders in the YAML** (`!param`):
 
 ```yaml
-symbol: !param { key: SYM, default: BTC }      # optional, default BTC
+root: !param { key: SYM, default: BTC }      # optional, default BTC
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: !param { key: FAST } }  # required
@@ -1827,21 +1827,21 @@ of spelling out the sides. A preset builds the exact same strategy as its
 
 ```yaml
 # strat.yml — a whole document is just the preset tag:
-!ma_crossover { symbol: BTC, fast: 3, slow: 8 }
+!ma_crossover { root: BTC, fast: 3, slow: 8 }
 ```
 
 ```sh
 fugazi run @strat.yml -s @btc.csv -o out/ --crypto -f 1d
 # or inline as a trailing tag's strategy:
 fugazi get binance:BTCUSDT[1d] \
-  -x 'sharpe=!sharpe { strategy: !buy_and_hold { symbol: BTCUSDT }, period: 60, bars_per_year: 365 }'
+  -x 'sharpe=!sharpe { strategy: !buy_and_hold { root: BTCUSDT }, period: 60, bars_per_year: 365 }'
 ```
 
 Presets are single-asset only, and are not swept by `optimize` (they carry no
 `!param` axes — use a full spec for grids).
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: 3 }
@@ -1948,7 +1948,7 @@ site — the earliest field that references the subtree — and alias it from
 every later site:
 
 ```yaml
-symbol: BTC
+root: BTC
 long:
   enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
   exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }

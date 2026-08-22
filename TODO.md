@@ -482,12 +482,57 @@ half first would ship the ambiguity as a feature.
 Revisit when there is a concrete strategy shape asking for it; the answer starts
 with what a cross-cadence leaf reads between bars, not with the tag.
 
+**A document *may* now declare its own cadence, and that is a different lever.**
+`root: !pick { symbol: BTC, freq: 4h }` feeds the **frame loader** — it joins the
+cadence precedence chain one rung below `-f/--frequency`, so `cadence::apply`
+prunes the frame to that cadence before any snapshot is built
+(`RootSpec::declared_freq`). The ambiguity above never arises, because each run
+still sees exactly one cadence and a cadence *sweep* is N separate runs, one per
+grid row. Nothing about `Selector`, `Pick`, or the `None` freq tag the drivers
+push changed. The entry below stays open on its own terms: reading *two*
+cadences inside one run is still the unanswered question.
+
 **Not to be confused with cross-*symbol* `!pick`, which does work under `run`.**
 A document of any shape may read a symbol it does not trade — the runners carry
 `traded ∪ !pick`-named and refuse a name the input lacks (see `spec::reads`).
 That case has none of the ambiguity above: two symbols on one cadence share a
 bar grid, so "absent" means absent and there is nothing to forward-fill. The
 `freq` half is still open for exactly the reason stated.
+
+### `optimize` sweeps the traded series; pairs and walk-forward still refuse
+
+Before `root:`, `optimize` bound one atom slice and one snapshot stream to a
+probe symbol for the whole grid. Cross-subgrid disagreement was refused with a
+message; disagreement *within* one subgrid was not checked at all, so a
+`SYM=[...]` axis silently backtested the probe symbol's bars on every row and
+emitted a grid of plausible, wrong numbers. That refusal was never recorded
+here, and the silent half was a bug.
+
+Now `distinct_roots` resolves **every combo** — not the per-subgrid probe point,
+which is what missed the within-subgrid case — and one stream is prepared per
+distinct `(symbol, freq)`, memoized. A row's metrics equal what the same
+document produces standalone through `run`; `tests/cross_asset_reads.rs` pins
+exactly that, because a test asserting only "the rows differ" would have passed
+the old behaviour too.
+
+Two refusals kept, deliberately:
+
+- **`--walkforward` + a root axis.** Folds are laid out over one bar timeline;
+  two instruments have different bar counts, so fold *k* would span a different
+  period per row. There is no reading of that number worth emitting.
+- **A `pairs:` grid varying its legs.** A pairs run evaluates the **inner join**
+  of its two legs. Widening the stream to the union of every swept pair would
+  change which bars each row sees, so a row would stop matching the same
+  document run through `run` — the one property that makes the single-asset
+  sweep trustworthy. Sweeping pairs needs a per-pair join, which is a bigger
+  change than the stream map.
+
+And one warning, not an error: a root axis means rows evaluate different bars,
+so the grid is a batch of separate backtests rather than the like-for-like
+parameter comparison the rest of `optimize` is built around (`--smooth`, the
+grid-wide `max(stable_bars)`). Refusing it would be wrong — comparing an
+instrument's best parameters *is* the use case — but leaving it unsaid would
+let a reader trust a ranking the numbers don't support.
 
 ## Repo hygiene
 

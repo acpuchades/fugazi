@@ -1192,7 +1192,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   `selection`, `score`, `sizing`, optional `universe`. `!equal_weight <N>` is a sizing
   sugar rewritten to `!value <1/N>` via `rewrite_sugar_tags`.
 - `multi_asset.rs` — `MultiAssetStrategySpec` + `MultiSideSpec`, `sizing`, optional
-  `universe`. No `symbol:` field.
+  `universe`. No `root:` field.
 - `portfolio.rs` — `PortfolioSpec` + `PortfolioChildSpec` + `PortfolioChildStrategy`
   (`Single | Pairs | Basket | Multi`, routed by distinctive top-level key). `weights:`
   is `Option<SpecTemplate<NodeSpec>>` with a `deserialize_with` running
@@ -1335,7 +1335,7 @@ now share `expr::UNARY_WRAPPERS`.
 **`scope` says where a form is legal, because `group` doesn't.** `document` is a *provenance*
 label — resolved by a `Value` pass before the typed parse — and reading it as a position claim
 is wrong for half of that group. `!param` and `!import` genuinely go anywhere a value goes (an
-expression slot, `period:`, `symbol:`, a list element). `!arg` is `scope: "template"`: it is
+expression slot, `period:`, `root:`, a list element). `!arg` is `scope: "template"`: it is
 substituted only inside a deferred `SpecTemplate` body (a basket's `score:`/`sizing:`, a
 multi-asset side's `enter:`, a portfolio's `weights:`), and one written elsewhere is a hard
 parse error — `check` included, since no pass touches it. `!undefined` is `scope: "internal"`.

@@ -1187,9 +1187,23 @@ fn meta_ref() -> serde_json::Value {
     })
 }
 
+/// A document's `root:` — a bare symbol string, or any atom-valued expression.
+///
+/// The string branch is the `root: BTCUSDT` sugar; the `$ref` branch is the
+/// general form, of which `!pick { symbol, freq }` is the only spelling the
+/// grammar can currently produce a bar from. Left as the whole node schema
+/// rather than a hand-written `!pick` shape so the day a second atom-output tag
+/// lands, this needs no edit.
+fn root_ref() -> serde_json::Value {
+    serde_json::json!({
+        "anyOf": [{ "type": "string" }, node_ref()],
+        "$comment": "The traded series: a bare symbol, or `!pick { symbol, freq }`.",
+    })
+}
+
 fn doc_single() -> serde_json::Value {
     object(&[
-        ("symbol", serde_json::json!({ "type": "string" }), true),
+        ("root", root_ref(), true),
         ("long", def_ref("side"), false),
         ("short", def_ref("side"), false),
         ("sizing", node_ref(), false),
@@ -1200,8 +1214,8 @@ fn doc_single() -> serde_json::Value {
 
 fn doc_pairs() -> serde_json::Value {
     object(&[
-        ("left", serde_json::json!({ "type": "string" }), true),
-        ("right", serde_json::json!({ "type": "string" }), true),
+        ("left", root_ref(), true),
+        ("right", root_ref(), true),
         ("enter", node_ref(), false),
         ("exit", node_ref(), false),
         ("stop_loss", node_ref(), false),
