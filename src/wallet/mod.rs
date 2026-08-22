@@ -88,6 +88,38 @@ pub trait Wallet<Sym> {
     /// [`Strategy::on_fill`](crate::Strategy::on_fill) by the driver.
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>>;
 
+    /// Advance the account by one bar, given **every** `(symbol, candle)` that
+    /// bar carries, and return the fills it booked.
+    ///
+    /// This is the call a driver should make — [`update`](Wallet::update) is
+    /// the single-symbol special case. Handing the whole bar over at once is
+    /// what lets an implementor phase the work: mark every symbol *before*
+    /// pricing any fill, and settle cash-crediting fills before cash-consuming
+    /// ones so a rotation is funded by its own proceeds. Doing it symbol by
+    /// symbol cannot: whichever symbol the caller happened to pass first has
+    /// its fill priced against a half-marked account, so the result depends on
+    /// an order that carries no meaning.
+    ///
+    /// `bars` may hold at most one entry per symbol; a repeated symbol takes
+    /// the last. Implementors must not assume any particular order — the
+    /// booked fills must be identical under any permutation of `bars`.
+    ///
+    /// The default is the naive per-symbol loop, which is correct for any
+    /// wallet whose `update` is genuinely independent per symbol — every live
+    /// venue, where the venue owns fills and `update` only marks a price.
+    /// [`PaperWallet`] overrides it, because it is the one implementor that
+    /// simulates fills against a shared cash balance.
+    fn advance(&mut self, bars: &[(Sym, Candle)]) -> Vec<Order<Sym>>
+    where
+        Sym: Clone,
+    {
+        let mut fills = Vec::new();
+        for (symbol, candle) in bars {
+            fills.extend(self.update(symbol.clone(), *candle));
+        }
+        fills
+    }
+
     /// Drive `target.symbol` to `target.amount` signed units as a **market
     /// order**, returning an [`Ack`]. [`PaperWallet`] queues the move and fills at
     /// the next bar's `open` ([`Ack::Working`]); a live impl routes it to the

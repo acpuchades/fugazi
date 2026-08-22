@@ -132,6 +132,13 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
     }
+    /// Delegates, so the inner wallet's whole-bar phasing survives the sleeve.
+    /// Taking the trait default would re-serialise the bar into per-symbol
+    /// `update` calls and reintroduce exactly the order-dependence `advance`
+    /// exists to remove.
+    fn advance(&mut self, bars: &[(Sym, Candle)]) -> Vec<Order<Sym>> {
+        self.inner.advance(bars)
+    }
     fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {
         let amount = self.base(&target.symbol) + target.amount;
         self.inner.set_position(Units {

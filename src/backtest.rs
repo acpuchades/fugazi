@@ -225,6 +225,8 @@ where
         };
     }
 
+    // Reused across bars so the per-bar collection is not an allocation per bar.
+    let mut bar_candles: Vec<(Sym, crate::Candle)> = Vec::new();
     for (bar, snap) in iter.enumerate() {
         let snap: Snapshot<Sym> = snap.into();
         // Price the wallet for every tagged entry in the snapshot — one
@@ -233,6 +235,14 @@ where
         // orders filling at this bar's `open`, plus resting protective legs
         // this candle's `[low, high]` triggered), routed through the
         // strategy's `on_fill` and collected into the blotter.
+        // Collected and handed over as one bar rather than fed symbol by
+        // symbol: the wallet has to mark every symbol before it prices any fill
+        // (a `value_frac` sized against a half-marked account reads this bar's
+        // close for the symbols already fed — lookahead), and it has to settle
+        // this bar's sales before its purchases (a rotation is funded by its own
+        // proceeds). Neither is expressible one symbol at a time. See
+        // [`Wallet::advance`].
+        bar_candles.clear();
         for (sym, _freq, atom) in snap.iter() {
             let Some(sym) = sym else { continue };
             // An overlay-only series carries no price, so it is not something
@@ -241,10 +251,11 @@ where
             // position to nothing, and a `NaN` would pass every `close <= 0.0`
             // guard and poison the equity curve without a single error.
             let Some(candle) = atom.candle else { continue };
-            for fill in wallet.update(sym.clone(), candle) {
-                strategy.on_fill(&fill);
-                fills.push(Fill { bar, order: fill });
-            }
+            bar_candles.push((sym.clone(), candle));
+        }
+        for fill in wallet.advance(&bar_candles) {
+            strategy.on_fill(&fill);
+            fills.push(Fill { bar, order: fill });
         }
         // Refusals booked while pricing — a queued market order that turned out
         // infeasible at this bar's open, or a protective leg that triggered but

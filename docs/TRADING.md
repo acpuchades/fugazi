@@ -32,9 +32,10 @@ live venue.
 
 Per bar, in this exact order:
 
-1. **Price the wallet**, once per tagged, priceable entry in the snapshot —
-   `wallet.update(sym, candle)`. This is where fills are born (§2). Each returned
-   `Order` goes to `strategy.on_fill(&order)` and into the report's blotter.
+1. **Price the wallet** — collect every tagged, priceable entry in the snapshot
+   and hand the whole bar over in one call, `wallet.advance(&bars)`. This is
+   where fills are born (§2). Each returned `Order` goes to
+   `strategy.on_fill(&order)` and into the report's blotter.
 2. **Drain rejections** — `wallet.take_rejections()` → `strategy.on_reject`.
    Routed *before* `update`, alongside the fills they occurred with.
 3. **Drain out-of-band fills** — `wallet.poll_fills()`. A live venue fills on its
@@ -48,6 +49,30 @@ Per bar, in this exact order:
    venue; `PaperWallet` accepts at submit time and fails at fill time instead).
 6. **Record equity** — one `wallet.equity()` reading per bar, post
    mark-to-market.
+
+**Why the whole bar goes over at once.** `advance` takes every `(symbol,
+candle)` together rather than being called per symbol, because two things in the
+wallet are shared across a bar and neither is expressible one symbol at a time:
+
+- **The mark that values equity.** A `value_frac` fill resolves against equity,
+  and equity marks every *other* position at its last fed price. Feeding symbols
+  one at a time makes "last fed" mean *this* bar's close for the symbols already
+  fed and the *previous* bar's close for the rest — so a fill trading at the
+  open gets sized off a co-held asset's close, which is information from later
+  in the same bar.
+- **The single cash balance.** A rotation that sells one holding to fund another
+  is only affordable once the sale has settled. Priced first, the buy is
+  silently scaled down to whatever residual cash happened to be lying around
+  (see the shrink in §3) — no rejection, just a small fill.
+
+Both made the run depend on the order the snapshot's rows happened to be in,
+which is an artefact of how the snapshot was assembled (`--series` order in the
+CLI, dict insertion order in the Python bindings) and carries no meaning. The
+contract is now explicit: **the booked fills must be identical under any
+permutation of a bar's symbols**, and `tests/bar_phasing.rs` asserts it.
+`Wallet::update` remains as the single-symbol special case, and `advance`'s
+trait default is the per-symbol loop — correct for every live venue, where the
+venue owns fills and `update` only marks a price.
 
 **Why fills come before `update`.** A queued order settles at the *next* bar's
 open, so by the time the strategy sees bar N it must already know about the fill
@@ -107,30 +132,54 @@ something that will be silently dropped at fill time.
 > a `(signal, action)` table. Adding one — including wiring `set_limit` into the
 > signal slots — is a design change, not an extension.
 
-## 3. Fill — `PaperWallet::update`, in order
+## 3. Fill — `PaperWallet::advance`, in phases
 
-`src/wallet/paper.rs`. Given `(symbol, candle)`:
+`src/wallet/paper.rs`. Given every `(symbol, candle)` the bar carries, in six
+phases. Each phase completes across *all* symbols before the next begins — that
+is what makes the result independent of the order they arrive in.
 
-1. **Insert the bar first**, so a queued fill validates against *this* bar's
-   range (its `open` is trivially inside it).
-2. **Flush the queued market order** at `candle.open`.
-   - `Pending::Target(units)` fills straight at the open.
+1. **Mark every symbol**, before anything is priced, so a queued fill validates
+   against *this* bar's range (its `open` is trivially inside it) and every
+   sizing sees the same book.
+2. **Resolve the queued market orders** against **one** equity, built from this
+   bar's *opens*.
+   - `Pending::Target(units)` is already an absolute target.
    - `Pending::Sized(side, size)` resolves the `Size` **at the fill price**, so
-     an all-in stays exact. Equity for the resolution marks the fill symbol at
-     `open` — the price it is actually trading at — not the just-inserted
-     `close`, or a reversal would size off information from later in the bar.
-   - A *fractional* sizing (`value_frac` / `funds_frac`) is then shrunk to fit
-     available cash after spread, slippage and commission. Without this an all-in
-     `value_frac(1.0)` under any positive cost model would size the notional to
-     the entire equity, fail the affordability check, and silently drop the fill.
-     An explicit `Size::Units(n)` or `position_frac(f)` carries a specific intent
-     and is **left alone** — an infeasible request there is a caller error, not a
-     sizing target to be quietly truncated.
-3. **Test the resting protective bracket** (§4).
-4. **Test the resting limit** — last, deliberately. A protective leg guards a
+     an all-in stays exact. Equity marks every symbol in this bar at its own
+     `open` — the price fills actually trade at — and any other position the
+     wallet holds at the last close it was fed. Reading a close for a symbol
+     that *is* in this bar would size the fill off information from later in the
+     same bar.
+   - The shrink is deliberately **not** applied here: it reads live cash, so it
+     has to happen at the moment each fill is booked, once this bar's credits
+     have landed.
+3. **Book the market fills that credit cash** — sales and position reductions.
+4. **Book the market fills that consume cash.** A *fractional* sizing
+   (`value_frac` / `funds_frac`) is shrunk here to fit available cash after
+   spread, slippage and commission. Without this an all-in `value_frac(1.0)`
+   under any positive cost model would size the notional to the entire equity,
+   fail the affordability check, and silently drop the fill. An explicit
+   `Size::Units(n)` or `position_frac(f)` carries a specific intent and is
+   **left alone** — an infeasible request there is a caller error, not a sizing
+   target to be quietly truncated.
+5. **Test the resting protective brackets** (§4) — every symbol's trigger
+   evaluated before any is booked, then crediting exits (a long stopping out)
+   settled before debiting ones (a short being covered).
+6. **Test the resting limits** — last, deliberately. A protective leg guards a
    position that already exists; letting a fresh entry fill ahead of the exit it
    was meant to trigger would leave the strategy holding something it had asked
    to be out of.
+
+**Ties break by `OrderId`, never by symbol or by position in the bar.** Two buys
+that both want cash and neither of which funds the other have no
+funding-derived ordering, so the tie falls to submission order — what the
+strategy expressed, and what a venue would honour first-come-first-served.
+
+> **A stop does not fund a market entry on the same bar**, and that is
+> chronology rather than an oversight: the market order fills at the `open`, the
+> stop triggers only when the bar later trades through its level. Phases 3–4
+> therefore precede phase 5. Pinned by a test, because it is easy to "fix" into
+> lookahead.
 
 Every one of those paths goes through the same private engine, `fill_at`.
 

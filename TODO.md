@@ -73,6 +73,68 @@ wallet loop by hand who needs rejections *during* the loop rather than after.
 Noted in the Python README's `Strategy` section as not bound. Drop to the wallet
 loop for those.
 
+## Wallet and execution
+
+### Cash contention between two buys breaks by submission order, not pro-rata
+
+`PaperWallet::advance` settles a bar in phases so that cash-crediting fills land
+before cash-consuming ones — a rotation is funded by its own sale regardless of
+the order the snapshot's rows happen to be in. That fixes the case with a
+*funding-derived* answer. It leaves one that has none: two buys that both want
+cash, neither of which funds the other, against a balance too small for both.
+
+The tie breaks on `OrderId` — submission order. Two alternatives were weighed:
+
+- **Pro-rata**, scaling every contending buy by the same factor. Arguably the
+  better semantic for a basket: asked for three legs of ⅓ and can afford 90%,
+  you want all three at 0.9, not two whole ones and a starved third. Rejected
+  for now because `shrink_buy_to_fit` is a fixed-point iteration against an
+  opaque cost pipeline, so a pro-rata split means giving each buy a *budget*
+  rather than the live balance, and the budgets have to be re-solved as each
+  fill lands. Real work, for a case that only arises when a spec asks for more
+  than 100% of equity.
+- **Symbol order.** Deterministic and needs no plumbing, but it is an arbitrary
+  preference dressed up as a rule — "AAVE before ZEC" is not a market
+  microstructure.
+
+Submission order is what the strategy actually expressed, and it is what a venue
+would honour first-come-first-served, so it is the honest default. **What would
+change this:** a shape where contention is routine rather than a
+mis-specification — leveraged baskets, or a `weights:` policy that deliberately
+oversubscribes — at which point pro-rata stops being a nicety.
+
+Note the residual: a strategy that iterates a `HashMap` to submit (basket, multi)
+picks its own submission order from hash order, so under contention its result is
+stable for a given build but not meaningful. Sorting *there* was considered and
+rejected — it would make an arbitrary answer deterministic rather than making the
+answer not matter, which is what the phase split does for every non-contended
+case.
+
+### A cash-bound buy is scaled down without saying so
+
+`shrink_buy_to_fit` scales an unaffordable buy toward feasibility instead of
+refusing it, and records nothing. That is deliberate for its designed purpose —
+an all-in `value_frac(1.0)` must shed a sliver to make room for commission, or
+it would fail the affordability check and drop the fill entirely — but the same
+silence covers a buy starved down to 2% of its target. A 17× reduction and a
+rounding adjustment are indistinguishable in the blotter, and the CLI's "N orders
+were refused by the wallet" line does not cover either, because neither is a
+refusal.
+
+Not fixed here, because the obvious version does not work: *any* reduction means
+the buy was cash-bound, so a naive counter fires on every all-in trade under any
+positive cost model and reads as noise. Distinguishing "shed room for costs" from
+"starved" needs either a materiality threshold (a magic number) or the requested
+magnitude carried alongside the filled one so the consumer can judge.
+
+**The shape it should take:** `requested_units` on `Order`, beside `units`.
+It costs one field, needs no new drain or retention policy, rides the blotter
+that already reaches `fills.csv` and the Python report, and lets the CLI count
+whatever it wants to call material. **What would change the priority:** it was
+the phase bug that made this matter — with rotations funded correctly, a
+cash-bound fractional buy now means the spec really did ask for more than the
+account has.
+
 ## Metrics
 
 ### A flow-neutralizing curve helper

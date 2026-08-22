@@ -103,6 +103,24 @@ struct RestingLimit {
     id: OrderId,
 }
 
+/// One queued market order, resolved against the bar's opens and awaiting its
+/// turn in [`PaperWallet::advance`]'s credit-then-debit ordering.
+///
+/// `sizing` is `Some` only for a [`Pending::Sized`] submission, and carries what
+/// [`PaperWallet::shrink_buy_to_fit`] needs to re-fit the buy against cash as it
+/// stands when the fill is finally booked — which is the whole point of holding
+/// the order here rather than filling it where it was resolved.
+struct QueuedFill<Sym> {
+    symbol: Sym,
+    candle: Candle,
+    target: Real,
+    sizing: Option<(Side, Size)>,
+    id: OrderId,
+    /// Whether booking this fill *adds* cash. Credits settle first, so a
+    /// rotation's sale funds its replacement buy.
+    credits: bool,
+}
+
 /// The built-in **pure**, in-memory [`Wallet`]: a paper book of `funds`,
 /// per-symbol positions, the prices fed to it, a queue of market orders awaiting
 /// their next-open fill, the resting protective brackets, and a blotter of
@@ -661,7 +679,12 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// The order is consumed whether or not it books — a limit that triggers
     /// but can't be afforded is a rejection, not something to silently retry
     /// next bar at a price the market has already left behind.
-    fn match_limit(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
+    /// Whether `symbol`'s resting limit triggers on `candle`, and the price it
+    /// would fill at. **Pure** — the split from [`execute_limit`] is what lets
+    /// [`advance`](Wallet::advance) evaluate every symbol's trigger before
+    /// booking any of them, so no fill is priced against a cash balance that
+    /// depends on which symbol the caller listed first.
+    fn limit_trigger(&self, symbol: &Sym, candle: &Candle) -> Option<(RestingLimit, Real)> {
         let resting = *self.limits.get(symbol)?;
         let fill = match resting.side {
             Side::Buy if candle.low <= resting.limit + POSITION_EPSILON => {
@@ -672,6 +695,19 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             }
             _ => return None,
         };
+        Some((resting, fill))
+    }
+
+    /// Book a limit fill [`limit_trigger`] has already found. Sizing resolves
+    /// here, not at trigger time, so it sees the cash balance as of this
+    /// phase — after every credit this bar has settled.
+    fn execute_limit(
+        &mut self,
+        symbol: &Sym,
+        resting: RestingLimit,
+        fill: Real,
+        candle: &Candle,
+    ) -> Option<Order<Sym>> {
         self.limits.remove(symbol);
 
         let position = self.positions.get(symbol).copied().unwrap_or(0.0);
@@ -719,7 +755,10 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         }
     }
 
-    fn match_protective(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
+    /// Whether a resting protective leg on `symbol` triggers on `candle`, and
+    /// the price and kind it would fill at. **Pure**, for the same reason
+    /// [`limit_trigger`] is.
+    fn protective_trigger(&self, symbol: &Sym, candle: &Candle) -> Option<(Leg, Real, OrderKind)> {
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
         let prot = *self.protective.get(symbol)?;
         // Downside exits (long stop, short target) fill at the level, or lower at
@@ -752,11 +791,24 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         } else {
             return None;
         };
-        // A protective leg that triggers but cannot be booked is the worst
-        // silent failure in the wallet: the strategy believes its stop is
-        // protecting it, and the bracket stays resting (`fill_at` only clears it
-        // on success) so it retries next bar — but without this nobody is ever
-        // told the exit did not happen.
+        Some((leg, fill, kind))
+    }
+
+    /// Book a protective fill [`protective_trigger`] has already found.
+    ///
+    /// A protective leg that triggers but cannot be booked is the worst
+    /// silent failure in the wallet: the strategy believes its stop is
+    /// protecting it, and the bracket stays resting (`fill_at` only clears it
+    /// on success) so it retries next bar — but without this nobody is ever
+    /// told the exit did not happen.
+    fn execute_protective(
+        &mut self,
+        symbol: &Sym,
+        leg: Leg,
+        fill: Real,
+        kind: OrderKind,
+    ) -> Option<Order<Sym>> {
+        let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
         // Reduce-only: resolve the leg's size at the fill price, clamp it to the
         // position's magnitude, and step *toward* zero. `position_frac(1.0)` —
         // what every whole-position exit passes — resolves to `|pos|` and so
@@ -827,82 +879,179 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     }
 
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
-        // Mark the new bar first so a queued fill validates against *this* bar's
-        // range (its `open` is trivially within it), then flush any queued market
-        // order at the open, then test the resting protective legs.
+        // The single-symbol special case of `advance`, and routed through it so
+        // there is exactly one fill path. With one entry every phase below
+        // degenerates to the straight-line sequence this used to be.
+        self.advance(&[(symbol, candle)])
+    }
+
+    /// Fill a whole bar in phases, so the booked fills do not depend on the
+    /// order `bars` happens to be in.
+    ///
+    /// Two things make the naive per-symbol loop order-dependent, and each gets
+    /// a phase here:
+    ///
+    /// 1. **Marking is interleaved with pricing.** A fill priced while only
+    ///    part of the bar is marked sizes its `value_frac` against an equity
+    ///    built from *this* bar's close for the symbols already marked and the
+    ///    *previous* bar's close for the rest. The first is lookahead — the
+    ///    close is information from later in the bar than the `open` the fill
+    ///    trades at. Phase 1 marks everything, and phase 2 computes one equity
+    ///    from every symbol's `open`, which is what a fill at the open may see.
+    ///
+    /// 2. **Cash is shared, and buys are shrunk to fit it.** A rotation that
+    ///    sells one holding to fund another is only affordable once the sale
+    ///    has settled, so a buy priced first gets silently scaled down to
+    ///    whatever residual cash was lying around (see the shrink helper
+    ///    `shrink_buy_to_fit`). Phases 3–6 settle
+    ///    every cash-crediting fill before any cash-consuming one, so a
+    ///    rotation is funded by its own proceeds no matter what order the
+    ///    symbols arrive in.
+    ///
+    /// Within a phase, ties break by [`OrderId`] — submission order, which the
+    /// strategy chose and a venue would honour — never by symbol or by
+    /// position in `bars`. Cash contention *between* two buys is therefore
+    /// resolved first-come-first-served rather than arbitrarily.
+    fn advance(&mut self, bars: &[(Sym, Candle)]) -> Vec<Order<Sym>> {
+        // Phase 1 — mark every symbol, before anything is priced.
+        //
         // `get_mut`-then-`insert` rather than a bare `insert`: after the first
         // bar the key is already present, and `insert` would clone the symbol
         // every bar only to drop the clone again. For `Sym = Symbol` — what the
         // spec/CLI layer uses — that is one heap allocation per symbol per bar
         // for the whole run.
-        match self.bars.get_mut(&symbol) {
-            Some(slot) => *slot = candle,
-            None => {
-                self.bars.insert(symbol.clone(), candle);
+        for (symbol, candle) in bars {
+            match self.bars.get_mut(symbol) {
+                Some(slot) => *slot = *candle,
+                None => {
+                    self.bars.insert(symbol.clone(), *candle);
+                }
             }
         }
-        let mut fills = Vec::new();
-        if let Some(pending) = self.pending.remove(&symbol) {
-            let (target, id) = match pending {
-                Pending::Target(amount, id) => (amount, id),
-                // Resolve the size at the fill price, so an all-in stays exact.
-                // Equity marks the fill symbol at `open` (the actual fill price),
-                // not the just-inserted `close` — otherwise a reversal sizes off
-                // information from later in this bar.
+
+        // Phase 2 — resolve every queued market order against ONE equity, built
+        // from this bar's opens.
+        //
+        // A market order queued last bar fills at this bar's `open`, so the
+        // account it sizes against is the account as of the open: every symbol
+        // this bar carries marked at its own `open`, and any other position the
+        // wallet holds at the last close it was fed. Reading a close for a
+        // symbol that *is* in this bar would size the fill off information from
+        // later in the same bar.
+        let equity_at_open = self
+            .marked_equity(|s| match bars.iter().find(|(sym, _)| sym == s) {
+                Some((_, candle)) => candle.open,
+                None => self.bars.get(s).map_or(0.0, |c| c.close),
+            })
+            .0;
+        // `(symbol, candle, target-or-sizing, id)`. The shrink is deliberately
+        // NOT applied here — it reads live cash, so it has to happen at the
+        // moment the fill is booked, after this bar's credits have landed.
+        let mut queued: Vec<QueuedFill<Sym>> = Vec::new();
+        for (symbol, candle) in bars {
+            let Some(pending) = self.pending.remove(symbol) else {
+                continue;
+            };
+            let position = self.positions.get(symbol).copied().unwrap_or(0.0);
+            let (target, sizing, id) = match pending {
+                Pending::Target(amount, id) => (amount, None, id),
                 Pending::Sized(side, size, id) => {
-                    let position = self.positions.get(&symbol).copied().unwrap_or(0.0);
-                    let equity_at_open = self
-                        .marked_equity(|s| {
-                            if *s == symbol {
-                                candle.open
-                            } else {
-                                self.bars.get(s).map_or(0.0, |c| c.close)
-                            }
-                        })
-                        .0;
                     let magnitude = size.resolve(candle.open, position, self.funds, equity_at_open);
-                    // For a fractional sizing ("as much of my equity/funds as
-                    // fits"), shrink a net buy so spread + slippage +
-                    // commission fit available cash. Without this, an all-in
-                    // `value_frac(1.0)` under any positive cost model would
-                    // size the notional to the entire equity, and paying
-                    // commission on top would fail the affordability check in
-                    // `fill_at` and silently drop the fill. An explicit
-                    // `Size::Units(n)` or `Size::PositionFraction(f)` carries
-                    // a specific unit intent and is left alone — an infeasible
-                    // request is a caller error, not a sizing target.
-                    let magnitude = match size {
-                        Size::ValueFraction(_) | Size::FundsFraction(_) => self.shrink_buy_to_fit(
-                            &symbol,
-                            side,
-                            position,
-                            magnitude,
-                            FillPricing {
-                                bar: &candle,
-                                price: candle.open,
-                                kind: OrderKind::Market,
-                            },
-                        ),
-                        Size::Units(_) | Size::PositionFraction(_) => magnitude,
-                    };
-                    (side.sign() * magnitude, id)
+                    (side.sign() * magnitude, Some((side, size)), id)
                 }
             };
-            match self.fill_at(symbol.clone(), target, candle.open, OrderKind::Market, id) {
+            queued.push(QueuedFill {
+                symbol: symbol.clone(),
+                candle: *candle,
+                target,
+                sizing,
+                id,
+                // Classified on the *unshrunk* target: `shrink_buy_to_fit`
+                // returns early once the delta is non-positive, so shrinking can
+                // never turn a buy into a sell and the classification is stable.
+                credits: target - position <= 0.0,
+            });
+        }
+        queued.sort_by_key(|q| (!q.credits, q.id));
+
+        let mut fills = Vec::new();
+        // Phases 3 and 4 — market credits, then market debits.
+        for q in queued {
+            let position = self.positions.get(&q.symbol).copied().unwrap_or(0.0);
+            // For a fractional sizing ("as much of my equity/funds as fits"),
+            // shrink a net buy so spread + slippage + commission fit available
+            // cash. Without this, an all-in `value_frac(1.0)` under any positive
+            // cost model would size the notional to the entire equity, and
+            // paying commission on top would fail the affordability check in
+            // `fill_at` and silently drop the fill. An explicit `Size::Units(n)`
+            // or `Size::PositionFraction(f)` carries a specific unit intent and
+            // is left alone — an infeasible request is a caller error, not a
+            // sizing target.
+            let target = match q.sizing {
+                Some((side, Size::ValueFraction(_) | Size::FundsFraction(_))) => {
+                    side.sign()
+                        * self.shrink_buy_to_fit(
+                            &q.symbol,
+                            side,
+                            position,
+                            q.target.abs(),
+                            FillPricing {
+                                bar: &q.candle,
+                                price: q.candle.open,
+                                kind: OrderKind::Market,
+                            },
+                        )
+                }
+                _ => q.target,
+            };
+            match self.fill_at(
+                q.symbol.clone(),
+                target,
+                q.candle.open,
+                OrderKind::Market,
+                q.id,
+            ) {
                 Ok(Some(order)) => fills.push(order),
                 Ok(None) => {}
-                Err(error) => self.push_rejection(&symbol, id, error, OrderKind::Market),
+                Err(error) => self.push_rejection(&q.symbol, q.id, error, OrderKind::Market),
             }
         }
-        if let Some(order) = self.match_protective(&symbol, &candle) {
-            fills.push(order);
+
+        // Phase 5 — protective legs, triggers evaluated across the whole bar
+        // before any is booked. Reduce-only, so the cash direction follows the
+        // sign of the position it is closing: exiting a long credits, covering
+        // a short debits.
+        let mut triggered: Vec<(usize, Leg, Real, OrderKind, bool)> = Vec::new();
+        for (i, (symbol, candle)) in bars.iter().enumerate() {
+            if let Some((leg, fill, kind)) = self.protective_trigger(symbol, candle) {
+                let credits = self.positions.get(symbol).copied().unwrap_or(0.0) > 0.0;
+                triggered.push((i, leg, fill, kind, credits));
+            }
         }
-        // Limits come last: a protective leg guards a position that already
+        triggered.sort_by_key(|(_, leg, _, _, credits)| (!*credits, leg.id));
+        for (i, leg, fill, kind, _) in triggered {
+            if let Some(order) = self.execute_protective(&bars[i].0, leg, fill, kind) {
+                fills.push(order);
+            }
+        }
+
+        // Phase 6 — limits last: a protective leg guards a position that already
         // exists, so letting a fresh entry fill ahead of the exit it was meant
         // to trigger would leave the strategy holding something it had asked to
-        // be out of.
-        if let Some(order) = self.match_limit(&symbol, &candle) {
-            fills.push(order);
+        // be out of. Classified by the resting side, which is what decides the
+        // cash direction in every case but a buy that reduces an existing long.
+        let mut resting: Vec<(usize, RestingLimit, Real)> = Vec::new();
+        for (i, (symbol, candle)) in bars.iter().enumerate() {
+            if let Some((limit, fill)) = self.limit_trigger(symbol, candle) {
+                resting.push((i, limit, fill));
+            }
+        }
+        resting.sort_by_key(|(_, limit, _)| (limit.side == Side::Buy, limit.id));
+        for (i, limit, fill) in resting {
+            let (symbol, candle) = &bars[i];
+            if let Some(order) = self.execute_limit(symbol, limit, fill, candle) {
+                fills.push(order);
+            }
         }
         fills
     }
