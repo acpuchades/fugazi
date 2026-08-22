@@ -341,10 +341,10 @@ mod tests {
             "!crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }",
         );
 
-        let value = resolve_text("symbol: BTC\nlong:\n  enter: !import enter.yml\n", &dir).unwrap();
+        let value = resolve_text("root: BTC\nlong:\n  enter: !import enter.yml\n", &dir).unwrap();
 
         let expected = crate::spec::input::parse_value(
-            "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }\n",
+            "root: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }\n",
         )
         .unwrap();
         assert_eq!(value, expected);

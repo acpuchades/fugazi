@@ -50,7 +50,7 @@ def synth_candles(n: int) -> list[tuple[float, float, float, float, float]]:
 
 
 SMA_YAML = """
-symbol: {sym}
+root: {sym}
 long:
   enter: !crosses_above
     lhs: !sma {{ source: close, period: 5 }}
