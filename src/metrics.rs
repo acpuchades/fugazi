@@ -631,8 +631,7 @@ pub(crate) fn ulcer_performance_index_with_ulcer(
 // Higher-moment / multiple-testing Sharpe corrections
 // ---------------------------------------------------------------------------
 
-/// Euler–Mascheroni constant, used in [`deflated_sharpe`]'s max-Sharpe
-/// expectation.
+/// Euler–Mascheroni constant, used in [`expected_max_sharpe`].
 const EULER_MASCHERONI: Real = 0.577_215_664_901_532_9;
 
 /// Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012): the probability
@@ -733,6 +732,53 @@ pub fn probabilistic_sharpe_from_stats(
     Some(Normal::standard().cdf(z))
 }
 
+/// The expected **maximum** annualized Sharpe under a normal null across
+/// `n_trials` independent trials — the selection-bias-adjusted benchmark
+/// [`deflated_sharpe`] measures PSR against, read out on its own.
+///
+/// Answers *"how high would the best of my `n_trials` be expected to score by
+/// luck alone?"*, which is the legible half of a DSR: *the best of your 200
+/// trials would be expected to score 1.21 by chance; yours scored 1.35*.
+///
+/// Unlike [`deflated_sharpe_from_stats`] this needs neither a returns vector
+/// nor the winner's higher moments — only the size and dispersion of the trial
+/// population. So it is readable exactly where DSR is not: a stored `optimize`
+/// grid that kept each point's metrics but no per-point equity curve has
+/// `n_trials` and the trial Sharpe variance, and nothing else it would need.
+///
+/// # Arguments
+///
+/// * `n_trials` — number of candidate trials the maximum was taken over (e.g.
+///   size of the parameter grid). Must be `≥ 2`.
+/// * `trial_sharpe_variance` — variance of the **annualized** Sharpe estimates
+///   across those trials, as in [`deflated_sharpe`]. The result carries
+///   whatever annualization this input was measured in.
+///
+/// Returns `None` when `n_trials < 2` or `trial_sharpe_variance` is not
+/// strictly positive and finite — the same domain [`deflated_sharpe_from_stats`]
+/// declines on, and for the same reason: with one trial there is no maximum to
+/// take, and with no dispersion there is no null to beat.
+///
+/// # Formula
+///
+/// `√V[SR] · [(1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))]` (`γ` =
+/// Euler–Mascheroni) — the standard closed form for the expectation of the
+/// maximum of `N` iid standard normals, rescaled by the trial dispersion.
+/// Grows like `√(2 ln N)`: **slowly, but without bound**, which is the whole
+/// point of the correction.
+pub fn expected_max_sharpe(n_trials: usize, trial_sharpe_variance: Real) -> Option<Real> {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    if n_trials < 2 || !(trial_sharpe_variance > 0.0 && trial_sharpe_variance.is_finite()) {
+        return None;
+    }
+    let normal = Normal::standard();
+    let n = n_trials as Real;
+    let q1 = normal.inverse_cdf(1.0 - 1.0 / n);
+    let q2 = normal.inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
+    Some(trial_sharpe_variance.sqrt() * ((1.0 - EULER_MASCHERONI) * q1 + EULER_MASCHERONI * q2))
+}
+
 /// Deflated Sharpe Ratio (Bailey & López de Prado, 2014): the probability
 /// that the true per-bar Sharpe exceeds the expected maximum Sharpe under a
 /// normal null across `n_trials` independent trials — i.e. PSR against the
@@ -780,10 +826,9 @@ pub fn deflated_sharpe(
 
 /// The Deflated Sharpe Ratio from pre-aggregated statistics — the stats-only
 /// twin of [`deflated_sharpe`], matching [`probabilistic_sharpe_from_stats`]'s
-/// input shape. The expected max Sharpe under the null is approximated by the
-/// standard closed form `√V[SR] · [(1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))]`
-/// (with `γ` = Euler–Mascheroni) and passed as the benchmark to
-/// [`probabilistic_sharpe_from_stats`].
+/// input shape. The benchmark it tests against is [`expected_max_sharpe`],
+/// passed straight through to [`probabilistic_sharpe_from_stats`] — so the
+/// two readings of one sweep can never disagree on convention.
 #[allow(clippy::too_many_arguments)]
 pub fn deflated_sharpe_from_stats(
     sharpe_annualized: Option<Real>,
@@ -794,17 +839,7 @@ pub fn deflated_sharpe_from_stats(
     n_trials: usize,
     trial_sharpe_variance: Real,
 ) -> Option<Real> {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
-    if n_trials < 2 || !(trial_sharpe_variance > 0.0 && trial_sharpe_variance.is_finite()) {
-        return None;
-    }
-    let normal = Normal::standard();
-    let n = n_trials as Real;
-    let q1 = normal.inverse_cdf(1.0 - 1.0 / n);
-    let q2 = normal.inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
-    let sr0_annualized =
-        trial_sharpe_variance.sqrt() * ((1.0 - EULER_MASCHERONI) * q1 + EULER_MASCHERONI * q2);
+    let sr0_annualized = expected_max_sharpe(n_trials, trial_sharpe_variance)?;
     probabilistic_sharpe_from_stats(
         sharpe_annualized,
         skewness_biased,
@@ -2584,6 +2619,69 @@ mod tests {
         // Non-positive trial variance: SR₀ is undefined.
         assert!(deflated_sharpe(&ret, 0.0, 252.0, 50, 0.0).is_none());
         assert!(deflated_sharpe(&ret, 0.0, 252.0, 50, -0.1).is_none());
+    }
+
+    #[test]
+    fn expected_max_sharpe_matches_closed_form() {
+        // Reference values from the closed form evaluated independently
+        // (Python `statistics.NormalDist().inv_cdf`).
+        let e = expected_max_sharpe(50, 0.25).unwrap();
+        assert!((e - 1.138_151_546_710_174).abs() < 1e-12, "got {e}");
+        let e = expected_max_sharpe(200, 0.09).unwrap();
+        assert!((e - 0.829_657_171_390_064).abs() < 1e-12, "got {e}");
+    }
+
+    #[test]
+    fn expected_max_sharpe_is_the_benchmark_dsr_uses() {
+        // The whole reason it is exposed: reading it out and testing PSR
+        // against it by hand must reproduce DSR exactly. If these ever
+        // diverge, the two numbers on a sweep page stopped being comparable.
+        let ret = psr_test_returns();
+        for (n_trials, var) in [(2usize, 1.0), (50, 0.25), (1000, 0.04)] {
+            let sr0 = expected_max_sharpe(n_trials, var).unwrap();
+            let by_hand = probabilistic_sharpe(&ret, 0.0, 252.0, sr0).unwrap();
+            let dsr = deflated_sharpe(&ret, 0.0, 252.0, n_trials, var).unwrap();
+            assert_eq!(dsr, by_hand, "n_trials={n_trials}, var={var}");
+        }
+    }
+
+    #[test]
+    fn expected_max_sharpe_scales_with_trial_dispersion() {
+        // The bracket depends only on N, so the benchmark is linear in √V.
+        let base = expected_max_sharpe(100, 1.0).unwrap();
+        let quarter = expected_max_sharpe(100, 0.25).unwrap();
+        assert!(
+            (quarter - base / 2.0).abs() < 1e-12,
+            "{quarter} vs {base}/2"
+        );
+    }
+
+    #[test]
+    fn expected_max_sharpe_grows_without_bound_in_n_trials() {
+        // ~√(2 ln N): slowly, but the ordering must never invert.
+        let mut prev = expected_max_sharpe(2, 0.25).unwrap();
+        for n in [10usize, 100, 1_000, 10_000, 1_000_000] {
+            let next = expected_max_sharpe(n, 0.25).unwrap();
+            assert!(next > prev, "N={n}: {next} not above {prev}");
+            prev = next;
+        }
+        assert!(prev.is_finite());
+    }
+
+    #[test]
+    fn expected_max_sharpe_none_domain_matches_dsr() {
+        // Same rejections as `deflated_sharpe`, so a caller that reads both
+        // never gets a benchmark for a DSR that declined (or vice versa).
+        let ret = psr_test_returns();
+        for (n_trials, var) in [(1usize, 0.25), (0, 0.25), (50, 0.0), (50, -0.1)] {
+            assert!(
+                expected_max_sharpe(n_trials, var).is_none(),
+                "{n_trials}/{var}"
+            );
+            assert!(deflated_sharpe(&ret, 0.0, 252.0, n_trials, var).is_none());
+        }
+        assert!(expected_max_sharpe(50, Real::INFINITY).is_none());
+        assert!(expected_max_sharpe(50, Real::NAN).is_none());
     }
 
     #[test]

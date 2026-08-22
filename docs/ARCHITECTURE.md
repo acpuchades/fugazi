@@ -853,7 +853,9 @@ builders**:
 **Catalogue** (each a `pub fn`): return moments, risk-adjusted (`sharpe`, `sortino`,
 `calmar`, `omega`, `ulcer_index`, …), Sharpe corrections (`probabilistic_sharpe` —
 Bailey/LdP 2012; `deflated_sharpe` — 2014; `*_from_stats` variants take pre-aggregated
-stats so `optimize` computes DSR per row without re-scanning), drawdown, trade-level.
+stats so `optimize` computes DSR per row without re-scanning; `expected_max_sharpe`
+exposes the selection benchmark DSR tests against, which needs only `(n_trials,
+Var[SR])` — no returns vector, no higher moments), drawdown, trade-level.
 
 **Values in natural units** (`0.15` = +15%). Vanishing-denom ratios return
 `Option<Real>`; always-defined ones return `Real` (`0.0` on empty). PSR/DSR use

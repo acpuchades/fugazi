@@ -260,7 +260,7 @@ byte-for-byte).
 
 Not part of the `Metrics` document — a *trailing column* emitted only
 where a meaningful trial population exists. There is currently one metric
-in this section:
+in this section, plus the library-only benchmark it is measured against:
 
 ### `selection.deflated_sharpe` — DSR (Bailey & López de Prado, 2014)
 
@@ -312,6 +312,43 @@ n_returns, bpy, n_trials, trial_var)`.
   `optimize -w` still emits DSR because the cross-window mean of the
   winning cell is still a max-of-many statistic — the correction is worth
   applying even after the mean smooths the point estimate.
+
+### Reading the benchmark itself — `expected_max_sharpe`
+
+DSR is a probability, which is the honest reading but not the legible
+one. The quantity it tests against is an annualized Sharpe, directly
+comparable to the one on the page: *the best of your 200 trials would be
+expected to score 1.21 by luck alone; yours scored 1.35*. That benchmark
+is `metrics::expected_max_sharpe(n_trials, trial_sharpe_variance)`
+(Python: `fugazi.metrics.expected_max_sharpe`) —
+
+```
+√V[SR] · [(1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))]
+```
+
+with `γ` the Euler–Mascheroni constant. `deflated_sharpe_from_stats`
+calls it for its own benchmark, so the two readings of one sweep cannot
+drift apart on convention.
+
+**It is defined where DSR is not.** DSR additionally needs the winner's
+returns — or at least its Sharpe, skewness, kurtosis and bar count. A
+stored sweep that kept each point's *metrics* but no per-point equity
+curve has `n_trials` and the trial Sharpe variance and nothing more, so
+`deflated_sharpe_from_stats` is unreachable there while
+`expected_max_sharpe` is not.
+
+**Same `None` domain as DSR**: fewer than two trials (no maximum was
+taken) or a non-positive trial variance (no null to beat). Same units as
+the variance you feed it — pass the variance of *annualized* trial
+Sharpes and the benchmark comes back annualized.
+
+**It is a null, not a hurdle.** `E[max SR]` is where the best of `N`
+lands by chance under a *normal* null with iid trials. Beating it is
+necessary, not sufficient: a grid whose cells are near-copies of each
+other has an effective `N` well below its row count, so the benchmark is
+too low, and fat tails push the true maximum above the normal one. It
+grows like `√(2 ln N)` — slowly, but without bound, which is why a wide
+enough search always produces an impressive-looking winner.
 
 ## Cross-cutting caveats
 

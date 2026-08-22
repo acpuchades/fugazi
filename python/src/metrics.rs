@@ -488,6 +488,21 @@ pub(crate) fn probabilistic_sharpe_from_stats(
     )
 }
 
+/// The expected **maximum** annualized Sharpe under a normal null across
+/// `n_trials` independent trials — the selection-bias-adjusted benchmark
+/// `deflated_sharpe` measures against, read out on its own: "the best of your
+/// 200 trials would be expected to score 1.21 by luck alone".
+///
+/// `trial_sharpe_variance` is the variance of the annualized Sharpe estimates
+/// across the trials; the result carries that same annualization. Needs no
+/// returns vector and no higher moments, so it is readable from a stored grid
+/// of per-point metrics where `deflated_sharpe_from_stats` is not. `None` when
+/// `n_trials < 2` or the trial variance is not strictly positive and finite.
+#[pyfunction]
+pub(crate) fn expected_max_sharpe(n_trials: usize, trial_sharpe_variance: Real) -> Option<Real> {
+    core_metrics::expected_max_sharpe(n_trials, trial_sharpe_variance)
+}
+
 /// Deflated Sharpe Ratio (Bailey & López de Prado, 2014): PSR against the
 /// selection-bias-adjusted benchmark `E[max SR]` across `n_trials` candidates.
 /// `trial_sharpe_variance` is the variance of the annualized Sharpe estimates
@@ -848,6 +863,7 @@ pub(crate) fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         probabilistic_sharpe_from_stats,
         deflated_sharpe,
         deflated_sharpe_from_stats,
+        expected_max_sharpe,
         max_drawdown,
         max_drawdown_duration,
         average_drawdown,

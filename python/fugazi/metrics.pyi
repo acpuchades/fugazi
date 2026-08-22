@@ -116,6 +116,13 @@ def drawdown_segments(equity_curve: Sequence[float] | Any) -> list[DrawdownSegme
 def expectancy(trades: Any) -> float:
     """Mean PnL per trade. `None` on empty input."""
     ...
+def expected_max_sharpe(n_trials: Any, trial_sharpe_variance: Any) -> float:
+    """The expected **maximum** annualized Sharpe under a normal null across `n_trials`
+    independent trials — the selection-bias-adjusted benchmark `deflated_sharpe`
+    measures against, read out on its own: "the best of your 200 trials would be
+    expected to score 1.21 by luck alone".
+    """
+    ...
 def exposure_ratio(fills: Sequence[Fill] | None, total_bars: Any) -> float:
     """Fraction of bars during which the wallet held a non-zero position. `0.0` when
     `total_bars == 0`.

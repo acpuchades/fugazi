@@ -2433,6 +2433,34 @@ def test_probabilistic_and_deflated_sharpe():
     assert metrics.probabilistic_sharpe([0.0] * 20, 0.0, 252.0, 0.0) is None
 
 
+def test_expected_max_sharpe():
+    from fugazi import metrics
+
+    returns = [0.010 if i % 2 == 0 else -0.008 for i in range(200)]
+
+    # The benchmark DSR tests against, readable on its own — and testing PSR
+    # against it by hand must land exactly on DSR.
+    sr0 = metrics.expected_max_sharpe(50, 0.25)
+    assert sr0 == pytest.approx(1.138151546710174, abs=1e-12)
+    assert metrics.deflated_sharpe(returns, 0.0, 252.0, 50, 0.25) == (
+        metrics.probabilistic_sharpe(returns, 0.0, 252.0, sr0)
+    )
+
+    # Linear in the trial dispersion, increasing in the trial count.
+    assert metrics.expected_max_sharpe(100, 0.25) == pytest.approx(
+        metrics.expected_max_sharpe(100, 1.0) / 2.0, abs=1e-12
+    )
+    assert metrics.expected_max_sharpe(1000, 0.25) > metrics.expected_max_sharpe(
+        10, 0.25
+    )
+
+    # Same `None` domain as `deflated_sharpe`: no maximum over one trial, no
+    # null to beat without dispersion.
+    assert metrics.expected_max_sharpe(1, 0.25) is None
+    assert metrics.expected_max_sharpe(50, 0.0) is None
+    assert metrics.expected_max_sharpe(50, -0.1) is None
+
+
 def test_drawdown_pipeline():
     from fugazi import metrics
 
