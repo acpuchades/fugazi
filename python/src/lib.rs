@@ -89,7 +89,7 @@ use crate::constructors::{
 // Unpickling entry points. Not surface — but `__reduce__` names its callable by
 // `module.qualname`, so each has to be a real, importable module member.
 use crate::classes::{_rebuild_schema, _rebuild_snapshot};
-use crate::sources::fetch;
+use crate::sources::{fetch, tickers};
 use crate::spec::{
     load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
     spec_json_schema, spec_tags,
@@ -279,6 +279,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         max_drawdown_of,
         calmar_of,
         fetch,
+        tickers,
         load_spec,
         optimize,
         slot_demand,

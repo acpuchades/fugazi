@@ -651,3 +651,51 @@ def test_the_wallet_abc_claims_only_what_all_three_have():
         f"all three wallets share {sorted(shared - claimed)} but ta.Wallet does "
         "not claim it — add it to WALLET_SURFACE"
     )
+
+
+# --- providers ---------------------------------------------------------------
+
+#: Every provider *class* in the bindings. `fugazi.fetch` also accepts
+#: `"binance-vision-futures"`, which has no class of its own — it is
+#: `BinanceVision(market="futures")`.
+PROVIDER_CLASSES = ("Binance", "BinanceVision", "Coinbase", "CoinGecko", "Okx", "Yahoo")
+
+
+def _known_providers(fn, *args):
+    """The provider ids `fn` accepts, parsed out of its own rejection message.
+
+    Every dispatcher answers an unknown id with `Known providers: ...`, so the
+    accepted set can be read without a network call — and without a second
+    hand-maintained list here that could itself go stale.
+    """
+    try:
+        fn("definitely-not-a-provider", *args)
+    except ValueError as e:
+        return {p.strip() for p in str(e).split("Known providers:")[1].split(",")}
+    raise AssertionError(f"{fn.__name__} accepted a bogus provider id")
+
+
+def test_tickers_accepts_exactly_the_providers_fetch_accepts():
+    """The two dispatchers are separate matches on the same strings. A provider
+    added to one and not the other is invisible until a caller hits it: the
+    whole point of `fugazi.tickers` is that any id `fetch` takes can be
+    enumerated, so a gap makes the function a liar rather than merely
+    incomplete."""
+    assert _known_providers(ta.tickers) == _known_providers(ta.fetch, "BTCUSDT")
+
+
+def test_every_provider_class_spells_enumeration_the_same_way():
+    """`tickers` is the name in `SeriesSource`, in `fugazi list tickers` and on
+    every provider class. It used to be `tickers` on two, `symbols` on one,
+    `ids` on another and absent from `Binance` — so a caller holding a provider
+    could not ask it for its vocabulary without knowing which class it held."""
+    for name in PROVIDER_CLASSES:
+        cls = getattr(ta, name)
+        assert callable(getattr(cls, "tickers", None)), (
+            f"{name}.tickers() is missing — every provider enumerates under "
+            "that name; see python/src/sources.rs"
+        )
+        for old in ("symbols", "ids"):
+            assert not hasattr(cls, old), (
+                f"{name}.{old}() is back; the canonical spelling is .tickers()"
+            )

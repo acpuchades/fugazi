@@ -457,6 +457,16 @@ impl PyBinance {
         let out = CandlesOutput::from_kwarg(output)?;
         fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
+
+    /// Every spot symbol currently trading, sorted — the vocabulary `symbol`
+    /// accepts. Read from `/api/v3/exchangeInfo`.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
 }
 
 /// An OKX candlesticks client (spot).
@@ -668,6 +678,20 @@ impl PyYahoo {
         let out = CandlesOutput::from_kwarg(output)?;
         fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
+
+    /// Always raises `FetchError`. Yahoo publishes no endpoint that enumerates
+    /// its universe — as most retail equity APIs do not — so there is nothing
+    /// to return. The method exists rather than being absent so that every
+    /// provider answers `.tickers()` the same way: a caller holding some
+    /// provider can ask, and handle "this one cannot" as an exception instead
+    /// of as an `AttributeError` it has to special-case by class.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
 }
 
 /// A CoinGecko client — market-cap / volume / supply columns, **no OHLCV**.
@@ -759,8 +783,11 @@ impl PyCoinGecko {
         fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 
-    /// Every coin id CoinGecko exposes, sorted — the vocabulary `symbol` accepts.
-    pub(crate) fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+    /// Every coin id CoinGecko exposes, sorted — the vocabulary `symbol`
+    /// accepts. CoinGecko's are slugs (`"bitcoin"`), not exchange tickers, but
+    /// the method is spelled `tickers` on every provider so a caller holding
+    /// one of these clients need not know which it has.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let client = self.inner.clone();
         py.detach(|| sources_runtime().block_on(async move { client.tickers().await }))
             .map_err(source_error_to_py)
@@ -802,9 +829,10 @@ impl PyCoinGecko {
 /// settlement, and the `metrics` archive starts years after `fundingRate` does.
 /// An absent column reads as an absent sample rather than as a zero.
 ///
-/// `symbol` is a contract symbol (`"BTCUSDT"`), which mostly coincides with the
-/// spot vocabulary but is not the same list. `.symbols()` enumerates it — read
-/// from the live exchange, since the archive has no index endpoint.
+/// `symbol` follows `market`: a spot symbol for `"spot"`, a perpetual contract
+/// symbol for `"futures"` (`"BTCUSDT"` names both, but the two lists are not
+/// the same). `.tickers()` enumerates whichever one this client reads — from
+/// the live exchange, since the archive has no index endpoint.
 #[pyclass(name = "BinanceVision", module = "fugazi", frozen)]
 pub(crate) struct PyBinanceVision {
     pub(crate) inner: BinanceVision,
@@ -864,8 +892,11 @@ impl PyBinanceVision {
         fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 
-    /// Every perpetual contract symbol currently trading, sorted.
-    pub(crate) fn symbols(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+    /// Every symbol currently trading in **this client's market**, sorted —
+    /// spot symbols for `market="spot"`, perpetual contract symbols for
+    /// `market="futures"`. The archive publishes no index, so the list comes
+    /// from the matching live-exchange endpoint.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let client = self.inner.clone();
         py.detach(|| {
             sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
@@ -956,6 +987,48 @@ pub(crate) fn fetch(
             since_ts,
             until_ts,
         ),
+        other => Err(PyValueError::new_err(format!(
+            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg, \
+             binance-vision, binance-vision-futures"
+        ))),
+    }
+}
+
+/// Every symbol a named provider exposes, sorted.
+///
+/// ```python
+/// syms = fugazi.tickers("binance")            # ['1000CATUSDT', ..., 'ZRXUSDT']
+/// syms = fugazi.tickers("binance-vision-futures")
+/// ```
+///
+/// The counterpart to [`fetch`] and the same dispatch: every id `fetch`
+/// accepts is enumerable here, so a caller that builds a symbol input from a
+/// provider id never has to map that id onto a client class. That matters
+/// because the same instrument is spelled differently per venue — `BTCUSDT` on
+/// Binance, `BTC-USDT` on OKX, `BTC-USD` on Coinbase, `bitcoin` on CoinGecko —
+/// and a wrong spelling is not an error, it is an empty series.
+///
+/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"cg"` (CoinGecko),
+/// `"binance-vision"` and `"binance-vision-futures"`. `"yfinance"` is accepted
+/// by `fetch` but raises `FetchError` here — Yahoo publishes no endpoint that
+/// enumerates its universe, and most retail equity APIs are the same. It is a
+/// `FetchError` and not a `ValueError` on purpose: the id is real, the
+/// provider just will not serve this request.
+#[pyfunction]
+pub(crate) fn tickers(py: Python<'_>, provider: &str) -> PyResult<Vec<String>> {
+    /// One provider's enumeration, run off the GIL on the shared runtime.
+    fn list_of<S: SeriesSource + Send + 'static>(py: Python<'_>, src: S) -> PyResult<Vec<String>> {
+        py.detach(|| sources_runtime().block_on(async move { src.tickers().await }))
+            .map_err(source_error_to_py)
+    }
+    match provider {
+        "binance" => list_of(py, Binance::new()),
+        "okx" => list_of(py, Okx::new()),
+        "coinbase" => list_of(py, Coinbase::new()),
+        "yfinance" => list_of(py, Yahoo::new()),
+        "cg" => list_of(py, CoinGecko::new()),
+        "binance-vision" => list_of(py, BinanceVision::new()),
+        "binance-vision-futures" => list_of(py, BinanceVision::futures()),
         other => Err(PyValueError::new_err(format!(
             "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg, \
              binance-vision, binance-vision-futures"

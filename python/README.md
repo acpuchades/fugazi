@@ -1486,6 +1486,23 @@ the same call — handy when the provider name is itself a variable:
 df = ta.fetch(provider="yfinance", symbol="AAPL", freq="1d", since="2020-01-01")
 ```
 
+`fugazi.tickers(provider)` is its counterpart, over the same provider ids: every
+symbol that provider exposes, sorted. Every provider class answers the same
+question as `.tickers()`, so a caller holding a client need not know which class
+it has:
+
+```python
+ta.tickers("binance")[:3]                  # ['1000CATUSDT', '1000CHEEMSUSDT', ...]
+ta.Okx().tickers()[:3]                     # ['ADA-USDT', 'AGLD-USDT', ...]
+```
+
+Worth reaching for because the same instrument is spelled differently at every
+venue — `BTCUSDT` on Binance, `BTC-USDT` on OKX, `BTC-USD` on Coinbase,
+`bitcoin` on CoinGecko — and a wrong spelling is not an error: it fetches an
+empty series. `"yfinance"` is the one id that raises (`FetchError`) rather than
+answering; Yahoo publishes no endpoint that enumerates its universe, as most
+retail equity APIs do not.
+
 ### Overlay data (no OHLCV)
 
 Every provider fetches through the same `.fetch(...)` method, but `CoinGecko`
@@ -1502,7 +1519,8 @@ caps = cg.fetch(symbol="bitcoin", freq="1d", since="30d ago")
 ```
 
 `symbol` is a CoinGecko **coin id** (`"bitcoin"`, not `"BTC"` and not `"BTCUSDT"`);
-`cg.ids()` lists the vocabulary. `circulating_supply` is derived as
+`cg.tickers()` lists the vocabulary (they are slugs rather than exchange
+tickers, but the method is spelled the same on every provider). `circulating_supply` is derived as
 `market_cap / price`. To use these alongside prices, join the two frames on
 `time` — market cap and supply are not derivable from OHLCV at all, which is the
 whole reason the provider exists.
@@ -1537,9 +1555,11 @@ They are different instruments, not two spellings of one — a perp's funding ra
 belongs to the contract it is charged on, and pairing it with a spot bar would
 quietly assert the two are the same thing. Spot admits the whole kline
 vocabulary (`"1m"` through `"1M"`); futures is `"1h"` through `"1d"`, the range
-`premiumIndexKlines` publishes. `symbol` is a contract symbol, which mostly
-coincides with the spot vocabulary but is not the same list; `spot.symbols()`
-enumerates it.
+`premiumIndexKlines` publishes. `symbol` follows `market` — a spot symbol for
+`"spot"`, a perpetual contract symbol for `"futures"`. The two mostly coincide
+but are not the same list, and `.tickers()` enumerates whichever one that client
+reads: `spot.tickers()` and `perp.tickers()` return different vocabularies, read
+from the two different live-exchange endpoints (the archive publishes no index).
 
 Unlike CoinGecko's, these columns need no join — they ride alongside the bar.
 They do aggregate differently within it, because they are different kinds of

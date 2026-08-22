@@ -160,6 +160,7 @@ RETURNS = {
     "optimize": "Sweep | WalkForwardResult",
     "evaluate_report": "dict[str, Any]",
     "fetch": "Any",
+    "tickers": "list[str]",
     "slot_demand": "list[str] | None",
     "slot_demands": "dict[str, list[str] | None]",
     "spec_tags": "dict[str, list[str]]",
@@ -258,10 +259,12 @@ MEMBER_RETURNS = {
         ).split()
     },
     # --- providers and live wallets -----------------------------------------
-    ("BinanceVision", "symbols"): "list[str]",
-    ("CoinGecko", "ids"): "list[str]",
+    ("Binance", "tickers"): "list[str]",
+    ("BinanceVision", "tickers"): "list[str]",
+    ("CoinGecko", "tickers"): "list[str]",
     ("Coinbase", "tickers"): "list[str]",
     ("Okx", "tickers"): "list[str]",
+    ("Yahoo", "tickers"): "list[str]",
     ("OkxWallet", "demo"): "OkxWallet",
     ("OkxWallet", "mainnet"): "OkxWallet",
     ("CoinbaseWallet", "mainnet"): "CoinbaseWallet",
