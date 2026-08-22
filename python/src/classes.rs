@@ -1662,19 +1662,26 @@ impl PyIndicator {
     }
 
     // --- lookback / rolling -> Indicator --------------------------------------
-    /// `self` delayed by `period` steps.
+    /// `self` delayed by `period` steps (one, the previous bar, by default).
+    #[pyo3(signature = (period = 1))]
     pub(crate) fn lag(&self, period: usize) -> PyIndicator {
         PyIndicator::wrap(map_rooted!(self, |s| s.lag(period)))
     }
-    /// Discrete difference over `period` steps (`x[t] - x[t-n]`).
+    /// Discrete difference over `period` steps (`x[t] - x[t-n]`); `period`
+    /// defaults to one, the first difference.
+    #[pyo3(signature = (period = 1))]
     pub(crate) fn diff(&self, period: usize) -> PyIndicator {
         PyIndicator::wrap(map_rooted!(self, |s| s.diff(period)))
     }
-    /// Ratio to the value `period` steps ago (`x[t] / x[t-n]`).
+    /// Ratio to the value `period` steps ago (`x[t] / x[t-n]`); `period`
+    /// defaults to one bar.
+    #[pyo3(signature = (period = 1))]
     pub(crate) fn ratio(&self, period: usize) -> PyIndicator {
         PyIndicator::wrap(map_rooted!(self, |s| s.ratio(period)))
     }
-    /// Percentage rate of change over `period` steps.
+    /// Percentage rate of change over `period` steps; `period` defaults to
+    /// one, so `roc()` is the per-bar return.
+    #[pyo3(signature = (period = 1))]
     pub(crate) fn roc(&self, period: usize) -> PyIndicator {
         PyIndicator::wrap(map_rooted!(self, |s| s.roc(period)))
     }

@@ -507,8 +507,10 @@ mod tests {
 
     #[test]
     fn exp_defaults_to_natural_and_inverts_log() {
-        // Default base: the natural exponential (`e`).
-        let bare: NodeSpec = serde_norway::from_str("!exp").unwrap();
+        // Default base: the natural exponential (`e`). `source:` is required —
+        // `e^close` overflows on any real price, so there is nothing for it to
+        // default to (see the tag's docs).
+        let bare: NodeSpec = serde_norway::from_str("!exp { source: close }").unwrap();
         let mut e = bare
             .build(
                 &Position::new(),
@@ -524,7 +526,7 @@ mod tests {
         }
 
         // Explicit base: 2, and the round trip back through `!log`.
-        let spec: NodeSpec = serde_norway::from_str("!exp { base: 2.0 }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!exp { source: close, base: 2.0 }").unwrap();
         let mut exp2 = spec
             .build(
                 &Position::new(),
@@ -563,9 +565,9 @@ mod tests {
             "!log { base: 0.0 }",
             "!log { base: 1.0 }",
             "!log { base: -2.0 }",
-            "!exp { base: 0.0 }",
-            "!exp { base: 1.0 }",
-            "!exp { base: -2.0 }",
+            "!exp { source: close, base: 0.0 }",
+            "!exp { source: close, base: 1.0 }",
+            "!exp { source: close, base: -2.0 }",
         ] {
             let spec: NodeSpec = serde_norway::from_str(text).unwrap();
             let Err(err) = spec.try_build(

@@ -849,7 +849,7 @@ mod tests {
             "!add { lhs: close, rhs: close }",
             "!lag { period: 1 }",
             "!log { base: 2.718281828459045 }",
-            "!exp { base: 2.718281828459045 }",
+            "!exp { source: close, base: 2.718281828459045 }",
             "!rolling_max { period: 3 }",
             "!latch { source: close }",
             "!unstable { source: close }",

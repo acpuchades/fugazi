@@ -136,6 +136,48 @@ Both spellings are equivalent and both are reported by `fugazi grammar` (each of
 these tags carries two entries in its `forms` list). `!not` has only the map
 form — it is a plain newtype, with no `source:` key.
 
+### Parameter defaults
+
+Two rules run through every tag's key list, and `fugazi list indicators` prints
+the result of both:
+
+**Order is required-first, then knobs, then the series slot.** A tag declares
+its keys the way you would fill them in: whatever has no default, then the
+parameters you actually tune, then the `source:` / `candle_source:` / `high:` /
+`low:` plumbing that is right by default. `!bb_upper { period, k, source }`,
+`!macd_line { fast, slow, signal, source }`, `!above { source, level }`. Tooling
+reads the order straight off the grammar descriptor, so completions arrive in
+that order too.
+
+**A default is a convention, not a guess.** An indicator published with a
+canonical parameterization carries it, so the terse spelling is the textbook
+one:
+
+| Tag | Default | Where it comes from |
+| --- | --- | --- |
+| `!rsi`, `!atr`, `!adx`, `!plus_di`, `!minus_di`, `!dmi_plus_di`, `!dmi_minus_di` | `period: 14` | Wilder |
+| `!mfi`, `!williams_r`, `!stochastic`, `!aroon_*` | `period: 14` | the conventional charting default |
+| `!cci` | `period: 20` | Lambert's original |
+| `!donchian_*` | `period: 20` | the Turtles' 20-day breakout |
+| `!bb_*` | `period: 20`, `k: 2.0` | the standard band |
+| `!macd_*` | `fast: 12`, `slow: 26`, `signal: 9` | Appel |
+| `!keltner_*` | `ema_period: 20`, `atr_period: 10`, `multiplier: 2.0` | the standard channel |
+| `!stoch_rsi` | `rsi_period: 14`, `stoch_period: 14` | Chande & Kroll |
+| `!sar` | `step: 0.02`, `max: 0.2` | Wilder |
+| `!lag`, `!diff`, `!ratio`, `!roc` | `period: 1` | one bar — the first difference |
+| `!percentile` | `pct: 0.5` | the median |
+| `!variance_ratio` | `lag: 2` | the shortest horizon the ratio is defined over |
+
+Everything else keeps its period **required**, because there is nothing to
+default it *to*. `!sma`, `!ema`, `!wma`, `!hma`, `!rma`, `!stddev`, `!zscore`,
+`!skewness`, `!kurtosis`, `!percentile_rank`, `!rolling_max`, `!rolling_min`,
+`!linreg_*`, `!correlation`, `!covariance`, `!beta`, `!vwap` and the range
+volatility estimators all have windows that *are* the modelling decision; a
+30 invented here would be a silent one. The same reasoning applies to a
+`source:` with no meaningful fallback — see
+[Threshold comparisons](#threshold-comparisons--source-level) and the note under
+[Transforms](#transforms).
+
 ## Metadata — `meta:`
 
 Every fugazi document rejects unknown fields, deliberately: a typo'd `symbl:` or
@@ -1203,18 +1245,24 @@ long:
 The embedded strategy blesses its own series, so leaves inside `strategy:` read
 the symbol *it* names, not the outer document's.
 
-### Price-series indicators — `{ source = close, period }`
+### Price-series indicators — `{ period, source = close }`
 
 `!sma`, `!ema`, `!rma` (Wilder/SMMA), `!wma`, `!hma` (Hull), `!rsi`, `!stddev`,
 `!cci`, `!stochastic`.
 
-`!stoch_rsi { source = close, rsi_period, stoch_period }` — the stochastic of an
-RSI.
+The ones published with a conventional period carry it as a default, so `!rsi {}`
+is `!rsi { period: 14 }` and `!cci {}` is `!cci { period: 20 }` — see
+[Parameter defaults](#parameter-defaults). A moving average has no such
+convention, so `!sma` / `!ema` / `!rma` / `!wma` / `!hma` and the plain rolling
+statistics still want an explicit `period`.
 
-### Rolling statistics — `{ source = close, period }`
+`!stoch_rsi { rsi_period = 14, stoch_period = 14, source = close }` — the
+stochastic of an RSI.
+
+### Rolling statistics — `{ period, source = close }`
 
 `!skewness`, `!kurtosis` (raw, ~3 for a normal), `!zscore`,
-`!correlation { lhs, rhs, period }`, `!variance_ratio { source, period, lag }`.
+`!correlation { lhs, rhs, period }`, `!variance_ratio { period, lag = 2, source = close }`.
 
 `!covariance { lhs, rhs, period }` — correlation without the normalisation, so
 it keeps the units and the magnitude correlation throws away.
@@ -1233,7 +1281,7 @@ does not difference behind your back:
   period: 60
 ```
 
-### Linear regression — `{ source = close, period }`
+### Linear regression — `{ period, source = close }`
 
 `!linreg_slope`, `!linreg_intercept`, `!linreg_value`, `!linreg_r2`: the
 least-squares fit of `source` against the bar index, over a rolling window.
@@ -1270,7 +1318,7 @@ measured: an `Arc<Mutex<_>>`-shared source costs more per bar than recomputing
 these does. See *Do not reach for `.shared()`* in
 [PERFORMANCE.md](PERFORMANCE.md).
 
-`!percentile { source = close, period, pct }` — the `pct`-quantile over the
+`!percentile { period, pct = 0.5, source = close }` — the `pct`-quantile over the
 window, linearly interpolated (R type-7, the same convention the report-level
 percentiles use). `pct: 0.5` is the rolling median. This is the adaptive-threshold
 primitive: rather than a hardcoded RSI level of 70, ask the series where *its own*
@@ -1285,7 +1333,7 @@ enter: !gt
 For the extremes, prefer `!rolling_max` / `!rolling_min` over `pct: 1.0` /
 `pct: 0.0` — those are O(1) per bar; `!percentile` is O(period).
 
-`!percentile_rank { source = close, period }` — the inverse question: where does
+`!percentile_rank { period, source = close }` — the inverse question: where does
 *today's* reading sit in its own distribution, as `count(v <= x) / period` in
 `(0, 1]`. The current sample counts itself, so a fresh high reads exactly `1.0`
 and a fresh low `1/period`. Useful as a cross-sectional score, since each symbol
@@ -1327,13 +1375,13 @@ Each line of a multi-output indicator is its own source tag:
 
 | Tags | Fields (`source` defaults to `close`) |
 | --- | --- |
-| `!macd_line`, `!macd_signal`, `!macd_histogram` | `{ source, fast, slow, signal }` |
-| `!bb_upper`, `!bb_middle`, `!bb_lower` | `{ source, period, k }` |
-| `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ source, candle_source = !current, ema_period, atr_period, multiplier }` |
-| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` — the channel **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
-| `!adx`, `!plus_di`, `!minus_di` | `{ period }` (the ADX/DI components) |
-| `!dmi_plus_di`, `!dmi_minus_di` | `{ period }` (raw +DI/−DI, no ADX smoothing) |
-| `!aroon_up`, `!aroon_down`, `!aroon_oscillator` | `{ period }` |
+| `!macd_line`, `!macd_signal`, `!macd_histogram` | `{ fast = 12, slow = 26, signal = 9, source }` |
+| `!bb_upper`, `!bb_middle`, `!bb_lower` | `{ period = 20, k = 2.0, source }` |
+| `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ ema_period = 20, atr_period = 10, multiplier = 2.0, source, candle_source = !current }` |
+| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ period = 20, high = high, low = low }` — the channel **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
+| `!adx`, `!plus_di`, `!minus_di` | `{ period = 14 }` (the ADX/DI components) |
+| `!dmi_plus_di`, `!dmi_minus_di` | `{ period = 14 }` (raw +DI/−DI, no ADX smoothing) |
+| `!aroon_up`, `!aroon_down`, `!aroon_oscillator` | `{ period = 14 }` |
 
 #### Extremum sources include the current bar
 
@@ -1378,8 +1426,9 @@ compared.
 
 ### Bar indicators (consume the whole candle)
 
-`!atr { period }`, `!mfi { period }`, `!williams_r { period }`,
-`!vwap { period }`, `!sar { step, max }`; the range-based volatility estimators
+`!atr { period = 14 }`, `!mfi { period = 14 }`, `!williams_r { period = 14 }`,
+`!vwap { period }`, `!sar { step = 0.02, max = 0.2 }`; the range-based volatility
+estimators
 `!parkinson { period }`, `!garman_klass { period }` and
 `!rogers_satchell { period }`, which read more of the bar than a close-to-close
 stddev does (high/low, plus open/close for the latter two, so they estimate the
@@ -1433,19 +1482,27 @@ candle-field leaves.
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!pow` | `{ lhs, rhs }` | `lhs` to the power `rhs`; `None` where the result is not a finite real (a negative base at a fractional exponent, `0` to a negative power, an overflow) |
 | `!max`, `!min` | `{ lhs, rhs }` | the larger / smaller of two sources, **bar by bar** — not `!rolling_max`, which maximises one source over a window |
-| `!clamp` | `{ source = close, lower, upper }` | `source` held inside a band. Both bounds are expressions. Inverted bounds collapse to `upper`, which is what the `!min`-of-`!max` form it stands for does |
-| `!abs`, `!sign` | `{ source = close }` | absolute value; sign (`1` / `-1` / `0` at exactly zero) |
-| `!sqrt` | `{ source = close }` | square root; `None` on negative samples |
-| `!tanh`, `!sigmoid` | `{ source = close }` | squash the whole real line into `(-1, 1)` / `(0, 1)` — a bounded sizing response that stays smooth where a `!clamp` has corners |
-| `!cum_sum`, `!cum_max`, `!cum_min` | `{ source = close }` | running total / extremum since the **first bar of the run**, unbounded. `!obv` and `!ad` are hard-wired instances of `!cum_sum`; `!cum_max` is what makes a drawdown of an arbitrary series, [see below](#running-accumulators--cum_sum-cum_max-cum_min) |
+| `!clamp` | `{ source, lower, upper }` | `source` held inside a band. Both bounds are expressions. Inverted bounds collapse to `upper`, which is what the `!min`-of-`!max` form it stands for does |
+| `!abs`, `!sign` | `{ source }` | absolute value; sign (`1` / `-1` / `0` at exactly zero) |
+| `!sqrt` | `{ source }` | square root; `None` on negative samples |
+| `!tanh`, `!sigmoid` | `{ source }` | squash the whole real line into `(-1, 1)` / `(0, 1)` — a bounded sizing response that stays smooth where a `!clamp` has corners |
+| `!cum_sum`, `!cum_max`, `!cum_min` | `{ source }` | running total / extremum since the **first bar of the run**, unbounded. `!obv` and `!ad` are hard-wired instances of `!cum_sum`; `!cum_max` is what makes a drawdown of an arbitrary series, [see below](#running-accumulators--cum_sum-cum_max-cum_min) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
-| `!exp` | `{ source = close, base = e }` | exponential of `source` (`base^x`), the inverse of `!log`; `None` where the result overflows to infinity |
-| `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
-| `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
+| `!exp` | `{ source, base = e }` | exponential of `source` (`base^x`), the inverse of `!log`; `None` where the result overflows to infinity |
+| `!lag`, `!diff`, `!ratio`, `!roc` | `{ period = 1, source = close }` | lookback vs. `period` bars ago; `period` defaults to one bar, so `!roc {}` is the per-bar return and `!diff {}` the first difference |
+| `!rolling_max`, `!rolling_min` | `{ period, source = close }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` or `<source>` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (one `source:` slot for any output type, signals included) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
+
+The pointwise and accumulating transforms — `!clamp`, `!abs`, `!sign`,
+`!sqrt`, `!tanh`, `!sigmoid`, `!exp`, `!cum_sum`, `!cum_max`, `!cum_min` — take a
+**required** `source:`. They are the tags with no sensible default series: the
+absolute value of a price is the price, `!tanh` and `!sigmoid` of one saturate at
+`1` for every bar a real instrument ever prints, and `e^close` overflows outright.
+A defaulted `close` there would build, run, and mean nothing. `!log` keeps its
+default, because the log of a price is a thing people write.
 
 #### Branching — `!if_else`
 
@@ -1554,10 +1611,15 @@ own units — "ignore moves under a tick". It is absolute and is not rescaled:
 enter: !gt { lhs: !close, rhs: !sma { period: 20 }, epsilon: 0.5 }   # ignore sub-50c crossings
 ```
 
-### Threshold comparisons — `{ source = close, level }`
+### Threshold comparisons — `{ source, level }`
 
 `!above` (`source > level`), `!below` (`source < level`) — compare a source
 against a constant, the common case of `!gt`/`!lt` against a number.
+
+Both keys are **required**. A level is meaningless without the series it is a
+level *of*: the `70` in `!above { level: 70 }` is an RSI reading, not a price, and
+defaulting the omitted series to `close` built a document that runs and never
+fires. Write the series out — `!above { source: !rsi {}, level: 70 }`.
 
 ### Crossovers — `{ lhs, rhs }`
 

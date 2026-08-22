@@ -267,6 +267,10 @@ CONSTRUCTORS = {
     "atr": (["atr"], {}),
     "cci": (["cci"], {}),
     "stochastic": (["stochastic"], {}),
+    "mfi": (["mfi"], {}),
+    "williams_r": (["williams_r"], {}),
+    "percentile": (["percentile"], {}),
+    "variance_ratio": (["variance_ratio"], {}),
 }
 
 
@@ -601,6 +605,32 @@ def test_indicator_periods_stay_positional():
     assert ta.keltner(src, 20, 10, 2.0) is not None
     assert ta.stoch_rsi(src, 14, 14) is not None
     assert ta.sar(0.02, 0.2) is not None
+
+
+def test_conventional_periods_are_omissible():
+    """An indicator published with a canonical period carries it, so the terse
+    call is the textbook one. The values themselves are pinned against the
+    descriptor above; this pins that they can be *omitted* at all."""
+    src = ta.close()
+    for call in (
+        lambda: ta.rsi(src),
+        lambda: ta.cci(src),
+        lambda: ta.stochastic(src),
+        lambda: ta.atr(),
+        lambda: ta.mfi(),
+        lambda: ta.williams_r(),
+        lambda: ta.adx(),
+        lambda: ta.dmi(),
+        lambda: ta.aroon(),
+        lambda: ta.donchian(ta.high(), ta.low()),
+        lambda: ta.percentile(src, 20),
+        lambda: ta.variance_ratio(src, 20),
+        lambda: src.roc(),
+        lambda: src.diff(),
+        lambda: src.lag(),
+        lambda: src.ratio(),
+    ):
+        assert call() is not None
 
 
 # --------------------------------------------------------------------------

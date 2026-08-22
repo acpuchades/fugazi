@@ -1411,10 +1411,29 @@ pub(crate) fn every(period: usize) -> PyResult<PySignal> {
     ))))
 }
 
+// The trailing `$default` is the tag's conventional period, mirroring the
+// `#[serde(default)]` on the YAML side — `ta.rsi(close)` and `!rsi {}` have to
+// agree, and `test_constructor_signatures_match_the_descriptor` pins them to the
+// `spec::expr` const. Omit it and the period stays required, which is the answer
+// for every window that is a modelling choice rather than a convention.
+//
+// **`$default:tt`, not `:expr` or `:literal`.** Both of those substitute as an
+// invisible-delimiter group, which pyo3 cannot stringify — the generated
+// `__text_signature__` then reads `period=Ellipsis` and `inspect.signature`
+// reports `...` instead of `14`, which is exactly the drift the parity test is
+// there to catch (and it does: it compares against the descriptor's literal).
+// A `tt` substitutes verbatim.
 macro_rules! src_period {
     ($name:ident, $ty:ident, $doc:literal) => {
+        src_period!(@build $name, $ty, $doc, (source, period));
+    };
+    ($name:ident, $ty:ident, $doc:literal, $default:tt) => {
+        src_period!(@build $name, $ty, $doc, (source, period = $default));
+    };
+    (@build $name:ident, $ty:ident, $doc:literal, $signature:tt) => {
         #[doc = $doc]
         #[pyfunction]
+        #[pyo3(signature = $signature)]
         pub(crate) fn $name(
             source: PyRef<'_, PyIndicator>,
             period: usize,
@@ -1447,7 +1466,8 @@ src_period!(hma, Hma, "Hull moving average of `source` over `period`.");
 src_period!(
     rsi,
     Rsi,
-    "Relative strength index of `source` over `period`."
+    "Relative strength index of `source` over `period` (Wilder's 14 by default).",
+    14
 );
 src_period!(
     stddev,
@@ -1523,6 +1543,7 @@ src_period!(
 ///
 /// For the extremes prefer `rolling_max` / `rolling_min`, which are O(1).
 #[pyfunction]
+#[pyo3(signature = (source, period, pct = 0.5))]
 pub(crate) fn percentile(
     source: PyRef<'_, PyIndicator>,
     period: usize,
@@ -1629,6 +1650,7 @@ pub(crate) fn beta(
 /// O(1)) — see the Rust docs. A dispersion-free window (constant one-period
 /// returns) reads `1.0`.
 #[pyfunction]
+#[pyo3(signature = (source, period, lag = 2))]
 pub(crate) fn variance_ratio(
     source: PyRef<'_, PyIndicator>,
     period: usize,
@@ -1649,12 +1671,14 @@ pub(crate) fn variance_ratio(
 src_period!(
     stochastic,
     Stochastic,
-    "Stochastic %K of `source` over `period`."
+    "Stochastic %K of `source` over `period` (14 by default).",
+    14
 );
 src_period!(
     cci,
     Cci,
-    "Commodity channel index of `source` over `period`."
+    "Commodity channel index of `source` over `period` (Lambert's 20 by default).",
+    20
 );
 
 /// Logarithm of `source` in `base` (defaults to natural log, `e`). Emits
@@ -1704,8 +1728,15 @@ fn ensure_base(what: &str, base: f64) -> PyResult<()> {
 
 macro_rules! bar_period {
     ($name:ident, $ty:ident, $doc:literal) => {
+        bar_period!(@build $name, $ty, $doc, (period));
+    };
+    ($name:ident, $ty:ident, $doc:literal, $default:tt) => {
+        bar_period!(@build $name, $ty, $doc, (period = $default));
+    };
+    (@build $name:ident, $ty:ident, $doc:literal, $signature:tt) => {
         #[doc = $doc]
         #[pyfunction]
+        #[pyo3(signature = $signature)]
         pub(crate) fn $name(period: usize) -> PyResult<PyIndicator> {
             ensure_period(period)?;
             // `Identity::<Candle>` rather than `CurrentBar` (which is
@@ -1719,7 +1750,8 @@ macro_rules! bar_period {
 bar_period!(
     atr,
     Atr,
-    "Average true range over `period` (consumes the full bar)."
+    "Average true range over `period` (Wilder's 14 by default; consumes the full bar).",
+    14
 );
 bar_period!(
     parkinson,
@@ -1739,7 +1771,8 @@ bar_period!(
 bar_period!(
     mfi,
     Mfi,
-    "Money-flow index over `period` (consumes the full bar)."
+    "Money-flow index over `period` (14 by default; consumes the full bar).",
+    14
 );
 bar_period!(
     vwap,
@@ -1749,7 +1782,8 @@ bar_period!(
 bar_period!(
     williams_r,
     WilliamsR,
-    "Williams %R over `period` (consumes the full bar)."
+    "Williams %R over `period` (14 by default; consumes the full bar).",
+    14
 );
 
 macro_rules! bar_noarg {
@@ -1776,8 +1810,15 @@ bar_noarg!(true_range, TrueRange, "True range of the current bar.");
 
 macro_rules! bar_period_multi {
     ($name:ident, $ty:ident, $doc:literal) => {
+        bar_period_multi!(@build $name, $ty, $doc, (period));
+    };
+    ($name:ident, $ty:ident, $doc:literal, $default:tt) => {
+        bar_period_multi!(@build $name, $ty, $doc, (period = $default));
+    };
+    (@build $name:ident, $ty:ident, $doc:literal, $signature:tt) => {
         #[doc = $doc]
         #[pyfunction]
+        #[pyo3(signature = $signature)]
         pub(crate) fn $name(period: usize) -> PyResult<PyMulti> {
             ensure_period(period)?;
             Ok(PyMulti {
@@ -1793,10 +1834,21 @@ macro_rules! bar_period_multi {
 bar_period_multi!(
     adx,
     Adx,
-    "Average directional index: {plus_di, minus_di, adx}."
+    "Average directional index: {plus_di, minus_di, adx} (Wilder's 14 by default).",
+    14
 );
-bar_period_multi!(dmi, Dmi, "Directional movement index: {plus_di, minus_di}.");
-bar_period_multi!(aroon, Aroon, "Aroon indicator: {up, down, oscillator}.");
+bar_period_multi!(
+    dmi,
+    Dmi,
+    "Directional movement index: {plus_di, minus_di} (Wilder's 14 by default).",
+    14
+);
+bar_period_multi!(
+    aroon,
+    Aroon,
+    "Aroon indicator: {up, down, oscillator} (14 by default).",
+    14
+);
 
 /// Parabolic SAR. `step` is the acceleration increment, `max` its cap.
 #[pyfunction]
@@ -1884,8 +1936,10 @@ pub(crate) fn keltner(
 }
 
 /// Donchian channel from a `high` source and a `low` source: {upper, middle,
-/// lower}. Both sources must be rooted in the same domain.
+/// lower}. Both sources must be rooted in the same domain. `period` defaults to
+/// the Turtles' 20-bar breakout.
 #[pyfunction]
+#[pyo3(signature = (high, low, period = 20))]
 pub(crate) fn donchian(
     high: PyRef<'_, PyIndicator>,
     low: PyRef<'_, PyIndicator>,

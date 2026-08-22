@@ -294,12 +294,24 @@ Foo { source, period } => dyn_indicator::wrap(
   atom-input leaf takes.
 - Give the `source:` field a `#[serde(default = "default_source")]` so a bare
   `!foo { period: 20 }` means "of the close".
-- **Declare the required fields first**, defaulted ones after — `period` before
-  `source`, not the other way round. Field order is nothing to YAML (mappings
-  are unordered) but it is what `spec_grammar()` reports and what every consumer
-  renders: `!sma { period, source=!close }` leads with what you must write.
-  Nothing enforces this, so it is on you; the payoff is that no consumer has to
-  re-sort, which is why the ordering lives here and not in `cli::list`.
+- **Declare the fields required-first, then knobs, then the series slot** —
+  `period` before `source`, `fast, slow, signal` before `source`, and a
+  *required* series slot (`!above`'s) before the scalar it is compared to.
+  Field order is nothing to YAML (mappings are unordered) but it is what
+  `spec_grammar()` reports and what every consumer renders — `fugazi list
+  indicators`, and the editor completions downstream: `!sma { period,
+  source=!close }` leads with what you must write. Nothing enforces this, so it
+  is on you; the payoff is that no consumer has to re-sort, which is why the
+  ordering lives here and not in `cli::list`.
+- **Default a parameter only where the convention is one somebody published.**
+  `!rsi`'s 14 is Wilder's, `!cci`'s 20 is Lambert's, `!macd_*`'s 12/26/9 is
+  Appel's — the terse spelling is then the textbook one. An arbitrary window
+  (`!sma`, `!zscore`, `!vwap`) stays **required**: inventing a 30 makes the
+  modelling decision on the user's behalf and hides it. The value lives once, as
+  a `pub const` in `spec::expr`, read by the `#[serde(default = "…")]` fn, the
+  grammar descriptor, and (test-pinned) the pyo3 signature. Same test for a
+  defaulted `source:`: `!ema`'s `!close` is right; `!abs`'s would be a no-op and
+  `!above`'s would build a document that never fires, so those are required.
 - **Document it** *(test-enforced)*. Every variant **and every field** needs a
   one-line `///` doc — `spec_grammar()`'s prose is the generated end-user
   reference, and `spec_grammar::tests::every_tag_and_field_is_documented` fails

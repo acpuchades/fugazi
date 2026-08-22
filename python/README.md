@@ -374,27 +374,29 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `open() high() low() close() volume() typical() median()` | the candle field |
 | `identity()` | the raw value stream (root for a bare numeric series) |
 | `value(x)` | a constant |
-| `sma ema rma wma hma rsi stddev stochastic cci (source, period)` | a value |
+| `sma ema rma wma hma stddev (source, period)` | a value |
+| `rsi(source, period=14) stochastic(source, period=14) cci(source, period=20)` | a value — the conventional period is the default |
 | `skewness kurtosis zscore (source, period)` | a value (distribution shape / normalization; `kurtosis` is raw, ~3 for normal) |
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
-| `percentile(source, period, pct)` | the `pct`-quantile over the window (`pct=0.5` is the rolling median), linearly interpolated like numpy's default |
+| `percentile(source, period, pct=0.5)` | the `pct`-quantile over the window (`pct=0.5` is the rolling median), linearly interpolated like numpy's default |
 | `percentile_rank(source, period)` | where the current reading sits in its own window: `count(v <= x)/period`, in `(0, 1]` |
 | `get(schema, key, source=None)` | the overlay column, typed by its declaration (real→Indicator, bool→Signal, str→StrSource); `source=pick(sym)` reads another series' column |
 | `bars_since(signal)` | bars since `signal` was last true (`0` on the firing bar); `None` until it has fired once, so thresholds read false until then |
 | `bars_since_high bars_since_low (source, period)` | bars since the source set a new `period`-bar extreme, in `[0, period-1]` |
-| `variance_ratio(source, period, lag)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
+| `variance_ratio(source, period, lag=2)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
-| `atr mfi williams_r vwap (period)` | a value |
+| `atr(period=14) mfi(period=14) williams_r(period=14)` | a value |
+| `vwap(period)` | a value (a rolling VWAP has no conventional window) |
 | `parkinson garman_klass rogers_satchell (period)` | range-based volatility estimate (uses the full candle; more efficient than close-to-close stddev) |
 | `obv() ad() true_range()` | a value |
 | `sar(step=0.02, max=0.2)` | a value |
 | `macd(source, fast=12, slow=26, signal=9)` | dict `{macd, signal, histogram}` |
 | `bollinger(source, period=20, k=2.0)` | dict `{upper, middle, lower}` |
 | `keltner(source, ema_period=20, atr_period=10, multiplier=2.0)` | dict `{upper, middle, lower}` |
-| `donchian(high, low, period)` | dict `{upper, middle, lower}` |
-| `adx(period)` | dict `{plus_di, minus_di, adx}` |
-| `dmi(period)` | dict `{plus_di, minus_di}` |
-| `aroon(period)` | dict `{up, down, oscillator}` |
+| `donchian(high, low, period=20)` | dict `{upper, middle, lower}` |
+| `adx(period=14)` | dict `{plus_di, minus_di, adx}` |
+| `dmi(period=14)` | dict `{plus_di, minus_di}` |
+| `aroon(period=14)` | dict `{up, down, oscillator}` |
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
 | `unstable(x)` | Passthrough that reports `unstable_bars() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |

@@ -471,19 +471,22 @@ mod tests {
         // whole point of the descriptor's tagged `default`. `period` is
         // required, so it renders bare.
         assert_eq!(sig("sma"), "!sma { period, source=!close }");
-        // Both arms of `GrammarDefault`, on one tag.
+        // Both arms of `GrammarDefault`, on one tag. The tunable knobs lead and
+        // the series slot trails — the declaration order every variant follows.
         assert_eq!(
             sig("bb_upper"),
-            "!bb_upper { source=!close, period=20, k=2.0 }"
+            "!bb_upper { period=20, k=2.0, source=!close }"
         );
-        // A node default that isn't a price series. `period` leads: required
-        // keys come first, whatever order the variant declares them in.
-        assert_eq!(sig("atr"), "!atr { period, source=!current }");
+        // A node default that isn't a price series, on a tag whose period is
+        // itself conventional.
+        assert_eq!(sig("atr"), "!atr { period=14, source=!current }");
         assert_eq!(
             sig("donchian_upper"),
-            "!donchian_upper { period, high=!high, low=!low }",
-            "the two defaulted keys are declared first and still render last",
+            "!donchian_upper { period=20, high=!high, low=!low }"
         );
+        // A required series slot leads, because required keys come first: a
+        // level test has no default series to fall back on.
+        assert_eq!(sig("above"), "!above { source, level }");
         assert_eq!(
             sig("top_bottom"),
             "!top_bottom { longs, shorts, of=!everything }"

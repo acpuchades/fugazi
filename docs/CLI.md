@@ -1127,7 +1127,7 @@ crossovers, MACD, moving averages, oscillators, placeholders, position
 anchors, rolling extrema, stability gate, trend/directional). Each entry shows
 the tag's YAML surface, **required keys first**, with an omissible key rendered
 as `name=<default>` when the descriptor says what omitting it is equivalent to —
-`!sma { period, source=!close }`, `!bb_upper { source=!close, period=20, k=2.0 }`
+`!sma { period, source=!close }`, `!bb_upper { period=20, k=2.0, source=!close }`
 — and as `name?` when there is nothing to say (`!pick`'s `symbol`, or a
 cross-asset `source:`, which defaults to the strategy's own series and so names
 no tag). The order is the variants' own — required fields are *declared* first —
@@ -1907,8 +1907,8 @@ Real-valued indicators, one YAML tag per fugazi constructor:
   true (`0` on the firing bar, `None` until it has fired once);
   `!bars_since_high`/`!bars_since_low { source, period }`.
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
-- **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, period }`.
-- **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.
+- **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { period = 1, source = close }`.
+- **Rolling extremum**: `!rolling_max`/`!rolling_min { period, source = close }`.
 
 ### Signals
 
@@ -1917,7 +1917,7 @@ Boolean-valued nodes:
 - **Comparisons** (`Real, Real → bool`, tolerance-aware; `epsilon` defaults
   to `1e-8`): `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`.
 - **Level comparisons** (`Real, level → bool`): `!above`/`!below
-  { source, level }`.
+  { source, level }` — both keys required; a level has no default series.
 - **Crossovers**: `!crosses_above`/`!crosses_below { lhs, rhs }` — the
   comparison being true **and** the transition just happening.
 - **Logic**: `!and`/`!or`/`!xor { lhs, rhs }`, `!all [signal, …]`,
