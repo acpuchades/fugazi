@@ -6,7 +6,7 @@ mod common;
 
 use common::cli::{Cmd, assert_metrics_shape, at, scratch_file};
 
-const FILLS_HEADER: &str = "time,symbol,side,units,price";
+const FILLS_HEADER: &str = "time,symbol,side,units,requested_units,price,kind";
 const TRADES_HEADER: &str =
     "entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held";
 

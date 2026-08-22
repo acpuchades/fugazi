@@ -38,6 +38,7 @@ fn report(bars: usize) -> RunReport<Symbol> {
                 price: candles[bar].close,
                 kind: OrderKind::Market,
                 commission: 0.0,
+                requested_units: 1.0,
             },
         })
         .collect();

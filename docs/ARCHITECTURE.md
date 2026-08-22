@@ -398,7 +398,7 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   fills; `Portfolio::assert_books_balance(&wallet)` checks it. Netted **buys** go
   out as `Size::value_frac` calibrated to the intended target (equity is unchanged
   by a fill, so several symbols in one bar resolve against the same number, and it's
-  the one size the wallet will `shrink_buy_to_fit`). Sells and short targets use
+  the one size the wallet will `fit_to_account`). Sells and short targets use
   `set_position`. **The blotter (`report.fills`) is account-level**; per-child truth
   stays in the ledgers and each child's own `on_fill`.
 - **Crossing.** Two children on opposite sides of a symbol in one bar net down:
@@ -576,6 +576,26 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   unconditional core at the default-on `sources` feature and hand every downstream
   `Wallet` implementor a registry it cannot extend; a name is the widest thing both
   halves already agree on.
+- **`leverage(&sym) -> Option<Real>`** — the fourth introspection read, and the
+  only **per-symbol** one, because venues configure it that way (OKX carries a
+  `(instId, mgnMode)` setting, not an account-wide one). Default `None` = "does
+  not say", never `1x`. `CoinbaseWallet` answers `None` *structurally* — spot has
+  nothing borrowed to parameterise, the same fact `can_short() == false` reports
+  the other way. `OkxWallet` answers from a cache filled for free off the
+  positions payload's `lever` field and, for a symbol the account is flat in, by
+  an explicit `refresh_leverage(sym)`; the accessor takes `&self` and every
+  account read here answers from cache rather than blocking on REST.
+  `PaperWallet` answers `Some(max_gross)` — unlike a currency label this one it
+  *knows*, because it is a rule it applies to every fill.
+  **Reporting, not control**: nothing in fugazi sets a venue's leverage. A live
+  account's is configured out of band and can change under a running strategy, so
+  the point is that a deployment can *record* what its fills executed at and
+  reconcile it against the `max_gross` the backtest it tracks was run under —
+  without which a live equity curve is uninterpretable against that backtest.
+  Wrappers delegate; `LedgerWallet` delegates *here* like `data_sources` and
+  unlike `quote_ccy`, since an `Option<Real>` is a copy and borrows nothing from
+  the portfolio guard (cached per symbol as `PortfolioInner::account_leverage`,
+  over the universe the portfolio has seen priced).
 - **`take_rejections() -> Vec<Rejection<Sym>>`** — the **failure stream**, twin of
   `update`'s fill stream. `Rejection { symbol, id, error, kind }`. Default empty;
   **any impl that can drop an order must override**. `PaperWallet` books all three
@@ -689,7 +709,11 @@ handed, so total ruin is caught at this one site with no per-shape branch, while
 a single child *ledger* going negative is notional attribution netted against
 its siblings on one real balance, not insolvency. A margin model — maintenance
 thresholds, liquidation before zero — is deliberately not here; it needs venue
-assumptions this does not.
+assumptions this does not. `PaperWallet::with_max_gross` is **not** that model:
+it bounds gross exposure at fill time and never re-checks a book that drifts
+over the line on a mark, which is exactly the part a real venue liquidates on.
+It exists so a levered backtest and the live account it tracks agree on how much
+the strategy may hold, not to simulate a margin call.
 
 `run<Sym, S, W, I, A>` where `A: Into<Snapshot<Sym>>`. `Vec<Atom>` / `Vec<Candle>`
 produce untagged size-1 snapshots; single-series callers use `Snapshot::single(sym,

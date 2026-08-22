@@ -1519,7 +1519,13 @@ def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
 
 
 def _doomed_yaml():
-    """A short held from the first bar and never covered, at a sweepable size."""
+    """A short held from the first bar and never covered, at a sweepable size.
+
+    Swept above 1x, so the runs that use it hand `optimize` a `max_gross` to
+    match: an unlevered account fits a `sizing: 3.0` short back to 1x, and a 1x
+    short does not get wiped out by this rally. The `LEVERAGE` axis only means
+    what its name says if the account will carry it.
+    """
     return """
     root: BTC
     sizing: !param LEVERAGE
@@ -1567,6 +1573,7 @@ def test_optimize_reports_ruin_but_never_selects_it():
         _doomed_yaml(),
         _rally_snaps(),
         cash=1000.0,
+        max_gross=3.0,
         grid=[{"LEVERAGE": [0.2, 3.0]}],
         metric_names=["returns.var_95", "returns.cagr_pct", "run.ruin_bar"],
         best_by="returns.var_95",
@@ -1599,6 +1606,7 @@ def test_optimize_smooth_gives_a_ruined_cell_no_weight():
         _doomed_yaml(),
         _rally_snaps(),
         cash=1000.0,
+        max_gross=3.0,
         grid=[{"LEVERAGE": [0.2, 0.4, 3.0]}],
         metric_names=["returns.var_95"],
         best_by="returns.var_95",

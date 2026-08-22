@@ -656,6 +656,15 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             let mut inner = self.inner.lock().expect("portfolio lock poisoned");
             inner.account_can_short = wallet.can_short();
             inner.account_data_sources = wallet.data_sources();
+            // Per-symbol, over the universe the portfolio has seen priced: a
+            // child's handle has no way to reach the account, and the leverage
+            // its notional intent actually nets onto is the account's, not a
+            // property of the slice.
+            let symbols: Vec<Sym> = inner.marks.keys().cloned().collect();
+            for symbol in symbols {
+                let leverage = wallet.leverage(&symbol);
+                inner.account_leverage.insert(symbol, leverage);
+            }
         }
 
         // Ordering: children trade first (against their own pre-rebalance

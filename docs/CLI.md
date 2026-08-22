@@ -120,6 +120,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-o`, `--output-dir <DIR>` | Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
+| `--max-gross <X>` | Most gross notional the account may hold, as a multiple of equity. Default `1` — an unlevered book: no fill may leave `Σ \|position\| × price` above equity. **The one bound both sides share** — a buy is limited by the cash it spends, but a short *credits* cash, so without this `sizing: 3.0` took 1x long and 3x short under one spec value. For a long-only book at `1` it is the cash rule restated, so an unlevered long backtest is unchanged. Raise it to model a margined account (cash may then go negative — that is what borrowing is). A `sizing:` above the cap is scaled to it and the ask recorded in `fills.csv`'s `requested_units`; an explicit unit target is refused instead. Exits are always exempt. |
 | `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). Mutually exclusive. |
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the cadence comes from the input's `freq` column, else is auto-detected from the `time` column. Also **selects** which cadence to trade when a symbol carries more than one — see [Bar cadence](#bar-cadence). Combines with the calendar to derive `bars_per_year`. |
@@ -462,6 +463,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
+| `--max-gross <X>` | Most gross notional each grid point's account may hold, as a multiple of equity. Same meaning as `run --max-gross`. Default `1`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). |
 | `-f`, `--frequency <CODE>` | Bar cadence. |
 | `--bars-per-year <N>` | Explicit annualization override. |
@@ -1977,6 +1979,7 @@ protective triggers alike. The wallet's raw operation log; each row is one
 | `symbol` | Instrument, per-fill (multi-symbol strategies stay correct). |
 | `side` | `buy` or `sell`. |
 | `units` | Fill size, in instrument units. |
+| `requested_units` | Fill size the sizing **asked** for, before the wallet fitted it to the account — always `>= units`, and equal to it on a fill taken at face value. A fractional sizing (`Size::value_frac` / `funds_frac`) is fitted to available cash and to `--max-gross` rather than refused, so this is what tells a rounding adjustment apart from a request scaled to a third of itself. Always present: *any* reduction is true on nearly every costed all-in (commission has to come from somewhere), so the column's presence would carry no signal — its value does. |
 | `price` | Fill price. Market orders fill at the next bar's `open`; protective legs fill at their trigger level (or the bar's `open` on a gap). With [`--costs`](#--costs) active, this is the *final* price — post-spread, post-slippage. |
 | `kind` | `market`, `stop`, or `take_profit`. |
 | `commission` | Commission paid on this fill, in reference currency (from the [`--costs`](#--costs) commission leg). **Only present when `--costs` is active.** Omitted otherwise so a zero-cost `fills.csv` matches the pre-costs schema byte-for-byte. |

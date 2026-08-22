@@ -114,6 +114,12 @@ pub struct OkxWallet {
     equity: Real,
     /// Signed positions in **base units** (converted from the venue's contracts).
     positions: SymMap<Symbol, Real>,
+    /// Cached per-instrument leverage, reported by [`leverage`](Wallet::leverage).
+    ///
+    /// `Some(x)` is the venue's answer; `None` is a read that was attempted and
+    /// failed, held so a broken endpoint costs one request rather than one per
+    /// bar. A symbol absent from the map has never been asked about.
+    leverage: SymMap<Symbol, Option<Real>>,
 }
 
 impl OkxWallet {
@@ -160,6 +166,7 @@ impl OkxWallet {
             available_balance: 0.0,
             equity: 0.0,
             positions: SymMap::default(),
+            leverage: SymMap::default(),
         }
     }
 
@@ -214,6 +221,14 @@ impl OkxWallet {
             let Some(inst) = p.get("instId").and_then(|s| s.as_str()) else {
                 continue;
             };
+            // `lever` rides along on every open position, so a symbol the
+            // account actually holds keeps its leverage fresh every bar at no
+            // extra request. A flat one has to be asked for — see
+            // [`refresh_leverage`](Self::refresh_leverage).
+            if let Some(lever) = num_field(p, "lever") {
+                self.leverage
+                    .insert(crate::types::symbol(inst), Some(lever));
+            }
             let contracts = num_field(p, "pos").unwrap_or(0.0);
             if contracts.abs() <= POSITION_EPSILON {
                 continue;
@@ -230,6 +245,42 @@ impl OkxWallet {
                 .insert(crate::types::symbol(inst), grid.base_units(contracts));
         }
         Ok(())
+    }
+
+    /// Read `symbol`'s leverage from the venue now
+    /// (`GET /api/v5/account/leverage-info`, under this wallet's margin mode)
+    /// and cache it for [`leverage`](Wallet::leverage).
+    ///
+    /// **This is the only path that fetches leverage for a symbol the account
+    /// is flat in.** An open position carries `lever` on the positions payload,
+    /// so [`refresh_account`](Self::refresh_account) keeps anything actually
+    /// held current for free; nothing else asks. `leverage` itself cannot — it
+    /// takes `&self`, and the whole account surface here answers from cache
+    /// rather than blocking on a REST call inside an accessor.
+    ///
+    /// So: call this once per instrument at connect to record what the account
+    /// is configured at, and again when reconciling. OKX's leverage is set out
+    /// of band — in the web UI — and can change under a running strategy, which
+    /// is exactly why it is worth recording rather than assuming.
+    ///
+    /// A failure is cached as "asked and did not get an answer", so a broken or
+    /// unauthorised endpoint costs one request rather than one per call. Call
+    /// again to retry.
+    pub fn refresh_leverage(&mut self, symbol: &Symbol) -> Result<Real, LiveError> {
+        let params = [
+            ("instId", symbol.to_string()),
+            ("mgnMode", self.td_mode.clone()),
+        ];
+        let outcome = self
+            .signed(Method::GET, "/api/v5/account/leverage-info", &params, None)
+            .and_then(|value| {
+                let rows = ok_data(&value)?;
+                rows.first()
+                    .and_then(|row| num_field(row, "lever"))
+                    .ok_or_else(|| LiveError::Decode(format!("no leverage reported for {symbol}")))
+            });
+        self.leverage.insert(symbol.clone(), outcome.clone().ok());
+        outcome
     }
 
     // --- REST plumbing -----------------------------------------------------
@@ -526,6 +577,24 @@ impl Wallet<Symbol> for OkxWallet {
     /// contract count rather than a quote-currency volume.
     fn data_sources(&self) -> &'static [&'static str] {
         &["okx"]
+    }
+
+    /// The leverage OKX has this instrument configured at, from cache.
+    ///
+    /// Filled for free on every symbol the account holds a position in (the
+    /// positions payload carries `lever`), and on demand for anything else
+    /// through [`refresh_leverage`](OkxWallet::refresh_leverage). `None` means
+    /// this wallet has not been able to ask — never `1x`, and never "no
+    /// leverage": a swap account always has one.
+    ///
+    /// **Reporting, not control.** Nothing here sets the number. It is
+    /// configured out of band in OKX's own UI, under the `(instId, mgnMode)`
+    /// pair this wallet trades — which is why the answer is per-symbol, and why
+    /// a strategy that wants its live curve to be comparable to a backtest
+    /// should record this at connect and check it on reconcile rather than
+    /// assume the account still sits where it was left.
+    fn leverage(&self, symbol: &Symbol) -> Option<Real> {
+        self.leverage.get(symbol).copied().flatten()
     }
 
     fn price(&self, symbol: &Symbol) -> Option<Reference> {

@@ -14,8 +14,8 @@ mod common;
 
 use common::cli::{Artefacts, Cmd, at, scratch_file};
 
-const NO_COSTS_HEADER: &str = "time,symbol,side,units,price,kind";
-const COSTS_HEADER: &str = "time,symbol,side,units,price,kind,commission";
+const NO_COSTS_HEADER: &str = "time,symbol,side,units,requested_units,price,kind";
+const COSTS_HEADER: &str = "time,symbol,side,units,requested_units,price,kind,commission";
 
 /// `fugazi run examples/strategy.yml` with zero or more `--costs` terms.
 fn run_with(costs_flags: &[&str], out_name: &str) -> Artefacts {
@@ -407,10 +407,10 @@ fn pairs_commission_rates(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
     let (mut a, mut b) = (Vec::new(), Vec::new());
     for row in fills.lines().skip(1) {
         let cols: Vec<&str> = row.split(',').collect();
-        assert_eq!(cols.len(), 7, "unexpected fills.csv row: {row}");
+        assert_eq!(cols.len(), 8, "unexpected fills.csv row: {row}");
         let units: f64 = cols[3].parse().expect("units");
-        let price: f64 = cols[4].parse().expect("price");
-        let commission: f64 = cols[6].parse().expect("commission");
+        let price: f64 = cols[5].parse().expect("price");
+        let commission: f64 = cols[7].parse().expect("commission");
         let rate = commission / (units * price);
         match cols[1] {
             "A" => a.push(rate),

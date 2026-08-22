@@ -237,7 +237,8 @@ pub(crate) struct PyOrder {
 impl PyOrder {
     /// A `side` order for `units` units of `symbol`, filled at `price`.
     #[new]
-    #[pyo3(signature = (symbol, side, units, price, *, kind = "market", id = 0, commission = 0.0))]
+    #[pyo3(signature = (symbol, side, units, price, *, kind = "market", id = 0, commission = 0.0, requested_units = None))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         symbol: String,
         side: &str,
@@ -246,17 +247,22 @@ impl PyOrder {
         kind: &str,
         id: u64,
         commission: f64,
+        requested_units: Option<f64>,
     ) -> PyResult<Self> {
+        let inner = Order::new(
+            intern(symbol),
+            parse_side(side)?,
+            units,
+            price,
+            parse_kind(kind)?,
+            OrderId(id),
+        )
+        .with_commission(commission);
         Ok(PyOrder {
-            inner: Order::new(
-                intern(symbol),
-                parse_side(side)?,
-                units,
-                price,
-                parse_kind(kind)?,
-                OrderId(id),
-            )
-            .with_commission(commission),
+            inner: match requested_units {
+                Some(requested) => inner.with_requested_units(requested),
+                None => inner,
+            },
         })
     }
 
@@ -295,6 +301,25 @@ impl PyOrder {
     pub(crate) fn commission(&self) -> f64 {
         self.inner.commission
     }
+    /// How many units this order **would** have traded had the wallet not
+    /// fitted it to the account — always `>= units`, and exactly `units` on a
+    /// fill taken at face value.
+    ///
+    /// A fractional sizing (`Size.value_frac` / `Size.funds_frac`) is fitted to
+    /// what the account can carry rather than refused: an all-in has to shed a
+    /// sliver to leave room for commission, and a `sizing:` above what the
+    /// wallet's `max_gross` allows is scaled back to it. Both used to be
+    /// invisible. Compare against `units`, or read `fill_ratio`, and decide for
+    /// yourself which gaps are material.
+    #[getter]
+    pub(crate) fn requested_units(&self) -> f64 {
+        self.inner.requested_units
+    }
+    /// `units / requested_units`, in `(0, 1]` — `1.0` when nothing was fitted.
+    #[getter]
+    pub(crate) fn fill_ratio(&self) -> f64 {
+        self.inner.fill_ratio()
+    }
     /// `+units` for a buy, `-units` for a sell.
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         crate::classes::reduce_with(
@@ -308,6 +333,7 @@ impl PyOrder {
                 self.kind(),
                 self.id(),
                 self.commission(),
+                self.requested_units(),
             ),
         )
     }
@@ -324,8 +350,16 @@ impl PyOrder {
         } else {
             format!(", commission={}", self.inner.commission)
         };
+        // Elided when it matches `units` — the un-fitted case, and the common
+        // one — for the same reason: an ordinary fill's repr stays short, and
+        // the interesting one stays `eval`-able.
+        let requested = if self.inner.requested_units == self.inner.units {
+            String::new()
+        } else {
+            format!(", requested_units={}", self.inner.requested_units)
+        };
         format!(
-            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={}{})",
+            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={}{}{})",
             self.inner.symbol,
             self.side(),
             self.inner.units,
@@ -333,6 +367,7 @@ impl PyOrder {
             self.kind(),
             self.inner.id.0,
             commission,
+            requested,
         )
     }
 }
@@ -369,16 +404,33 @@ impl PyWallet {
     /// converts, and a labelled wallet trades identically to an unlabelled one;
     /// it is there so a simulation can carry the fact a live wallet reports from
     /// its venue instead of leaving a caller to assume dollars.
+    ///
+    /// `max_gross` is the most gross notional the account may hold, as a
+    /// multiple of equity — `1.0`, unlevered, by default, and readable back off
+    /// `leverage(symbol)`. It is the one bound both sides of the book share: a
+    /// buy is limited by the cash it spends, but a short *credits* cash, so
+    /// without it a `sizing: 3.0` document took 1x long and 3x short under one
+    /// spec value. Set it to the leverage of the live account you are modelling
+    /// so the two curves measure the same strategy.
+    ///
+    /// # Raises
+    ///
+    /// `ValueError` if `max_gross` is not finite and strictly positive.
     #[new]
-    #[pyo3(signature = (funds, quote_ccy=None))]
-    pub(crate) fn new(funds: f64, quote_ccy: Option<String>) -> Self {
-        let inner = PaperWallet::new(funds);
-        PyWallet {
+    #[pyo3(signature = (funds, *, quote_ccy=None, max_gross=1.0))]
+    pub(crate) fn new(funds: f64, quote_ccy: Option<String>, max_gross: f64) -> PyResult<Self> {
+        if !(max_gross > 0.0 && max_gross.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "max_gross must be finite and > 0, got {max_gross}"
+            )));
+        }
+        let inner = PaperWallet::new(funds).with_max_gross(max_gross);
+        Ok(PyWallet {
             inner: match quote_ccy {
                 Some(ccy) => inner.with_quote_ccy(ccy),
                 None => inner,
             },
-        }
+        })
     }
 
     /// The available cash balance.
@@ -434,6 +486,22 @@ impl PyWallet {
     #[getter]
     pub(crate) fn data_sources(&self) -> Vec<&'static str> {
         self.inner.data_sources().to_vec()
+    }
+
+    /// The gross-exposure multiple this wallet enforces — the `max_gross` it was
+    /// built with, the same for every symbol, so `symbol` is accepted and
+    /// ignored.
+    ///
+    /// Unlike `quote_ccy`, which a paper wallet can only answer if it was told,
+    /// this one it *knows*: the number is a rule it applies to every fill.
+    /// `1.0` from a default wallet is a claim about behaviour — an unlevered
+    /// book — not the "does not say" that a live wallet's `None` means.
+    ///
+    /// Which is the point of answering: a live account's leverage is set out of
+    /// band and readable only from the venue, so the paper side has to be able
+    /// to state its own for the two to be compared.
+    pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
+        self.inner.leverage(&intern(symbol))
     }
 
     #[getter]
@@ -838,6 +906,38 @@ impl PyOkxWallet {
         self.inner.data_sources().to_vec()
     }
 
+    /// The leverage OKX has `symbol` configured at, from cache — or `None` when
+    /// this wallet has not been able to ask.
+    ///
+    /// Filled for free on every symbol the account holds a position in (the
+    /// positions payload carries it), and on demand for anything else through
+    /// `refresh_leverage(symbol)`. `None` is never `1x` and never "no
+    /// leverage": a swap account always has one.
+    ///
+    /// **Reporting, not control.** Nothing here sets the number — it is
+    /// configured out of band in OKX's own UI, under the `(instId, margin mode)`
+    /// pair this wallet trades, and can change under a running strategy. Record
+    /// it at connect and check it on reconcile rather than assuming the account
+    /// still sits where it was left; compare it against the `max_gross` of the
+    /// `PaperWallet` whose backtest this deployment is meant to be tracking.
+    pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
+        self.inner.leverage(&intern(symbol))
+    }
+
+    /// Read `symbol`'s leverage from the venue now and cache it for
+    /// `leverage(symbol)`. Raises `ValueError` on a venue error.
+    ///
+    /// The only path that fetches it for a symbol the account is flat in —
+    /// `leverage` itself answers from cache and never blocks on a request.
+    /// A failure is cached as "asked and did not get an answer", so a broken or
+    /// unauthorised endpoint costs one request rather than one per call; call
+    /// again to retry.
+    pub(crate) fn refresh_leverage(&mut self, symbol: &str) -> PyResult<f64> {
+        self.inner
+            .refresh_leverage(&intern(symbol))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
     /// Force an account-state refresh (balance + positions) now. Raises
     /// `ValueError` on a REST failure. `update` calls this each bar; call it
     /// directly for a one-off sync (e.g. right after construction).
@@ -1094,6 +1194,17 @@ impl PyCoinbaseWallet {
     #[getter]
     pub(crate) fn data_sources(&self) -> Vec<&'static str> {
         self.inner.data_sources().to_vec()
+    }
+
+    /// `None`, structurally — the same fact `can_short` reports as `False`, said
+    /// the other way.
+    ///
+    /// Advanced Trade is **spot**: a position is an owned base-asset balance, so
+    /// there is nothing borrowed and no multiple to configure. `symbol` is
+    /// accepted and ignored.
+    pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
+        let _ = symbol;
+        None
     }
 
     /// Force an account-state refresh (balances) now. Raises `ValueError` on a
@@ -3353,8 +3464,18 @@ pub(crate) fn _rebuild_order(
     kind: &str,
     id: u64,
     commission: f64,
+    requested_units: f64,
 ) -> PyResult<PyOrder> {
-    PyOrder::new(symbol, side, units, price, kind, id, commission)
+    PyOrder::new(
+        symbol,
+        side,
+        units,
+        price,
+        kind,
+        id,
+        commission,
+        Some(requested_units),
+    )
 }
 
 /// Rebuild a [`RunReport`](PyRunReport) with every field positional.
@@ -3386,6 +3507,7 @@ const WALLET_SURFACE: &[&str] = &[
     "can_short",
     "quote_ccy",
     "data_sources",
+    "leverage",
     "update",
     "set",
     "set_position",

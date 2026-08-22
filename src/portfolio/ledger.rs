@@ -214,6 +214,28 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
             .account_data_sources
     }
 
+    /// The **account's** answer, cached per symbol alongside
+    /// [`can_short`](Wallet::can_short) — and delegated, for
+    /// [`data_sources`](Wallet::data_sources)'s reason rather than refused for
+    /// [`quote_ccy`](Wallet::quote_ccy)'s: an `Option<Real>` is a copy, so it
+    /// crosses the guard without borrowing from it.
+    ///
+    /// It is the account's leverage because that is the only leverage there is.
+    /// A ledger is notional attribution — it holds no margin of its own, and
+    /// its intent is netted against its siblings onto one real balance, which is
+    /// where the borrowing happens. A child asking what its exposure is
+    /// ultimately bounded by should get that number, not a `None` from a handle
+    /// that margins nothing.
+    fn leverage(&self, symbol: &Sym) -> Option<Real> {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .account_leverage
+            .get(symbol)
+            .copied()
+            .flatten()
+    }
+
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
         // The driver feeds the account wallet the portfolio trades, not a child
         // handle. A handle receiving update() means the caller wired the driver

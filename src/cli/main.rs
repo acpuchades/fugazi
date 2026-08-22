@@ -228,6 +228,16 @@ struct RunArgs {
     #[arg(short, long, default_value_t = 10_000.0)]
     cash: f64,
 
+    /// Most gross notional the account may hold, as a multiple of equity.
+    ///
+    /// `1` — the default — is an unlevered book: no fill may leave
+    /// `sum(|position| * price)` above equity. It is the one bound both sides
+    /// share, since a short credits cash and so is never limited by it. Raise it
+    /// to model a margined account; a `sizing:` above the cap is scaled to it,
+    /// and `fills.csv` records what was asked for beside what traded.
+    #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
+    max_gross: f64,
+
     /// Resolve the strategy's `param` placeholders. Like `--series`: a
     /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
     /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
@@ -559,6 +569,11 @@ struct OptimizeArgs {
     /// Initial cash for each backtest (per grid point).
     #[arg(short, long, default_value_t = 10_000.0)]
     cash: f64,
+
+    /// Most gross notional each backtest's account may hold, as a multiple of
+    /// equity. Same meaning as `run --max-gross`, applied to every grid point.
+    #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
+    max_gross: f64,
 
     /// US-equity trading calendar. Same semantics as `run --stocks`.
     #[arg(long, group = "asset_class")]
@@ -1176,6 +1191,7 @@ fn run(args: RunArgs) -> Result<()> {
     .with_context(|| parse_error_hint(&args.strategy))?;
     let opts = run::RunOptions {
         cash: args.cash,
+        max_gross: args.max_gross,
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
@@ -1282,6 +1298,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
 
     let opts = optimize::OptimizeOptions {
         cash: args.cash,
+        max_gross: args.max_gross,
         strategy_kind: args.strategy.kind,
         strategy_text: &text,
         strategy_dir: &args.strategy.base_dir(),

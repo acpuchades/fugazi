@@ -690,6 +690,7 @@ wallet.orders()              # the blotter: list of Order(symbol, side, units)
 wallet.can_short             # can this account hold a negative position?
 wallet.quote_ccy             # what currency are these numbers in? (or None)
 wallet.data_sources          # which providers quote this account? (list[str])
+wallet.leverage("AAPL")      # how much may it hold, as a multiple of equity? (or None)
 ```
 
 `can_short` is what an account *can* do, asked before trading: `True` on a
@@ -732,6 +733,63 @@ It introspects, it does not fetch — and it answers at venue granularity, which
 all a provider name has room to say: the OKX account above trades swaps, so the
 matching bars are that provider's **swap** instrument id, not the `BTC-USDT` spot
 pair it will also serve. Empty means "does not say", never "nothing quotes this".
+
+### Leverage — and what `sizing` above `1.0` means
+
+`leverage(symbol)` is the fourth question of the same shape, and the only one
+that is per-symbol, because venues configure it that way. It is **reporting, not
+control**: nothing here sets a venue's leverage.
+
+A `PaperWallet` answers the cap it enforces — `max_gross`, `1.0` by default:
+
+```python
+wallet = ta.PaperWallet(10_000.0, max_gross=3.0)
+wallet.leverage("BTC-USDT-SWAP")   # 3.0
+```
+
+**That cap is the one bound both sides of the book share.** A buy is limited by
+the cash it spends; a short *credits* cash, so cash alone never bounds one. Until
+this existed, `sizing: 3.0` meant 1x on a long leg (quietly scaled back to what
+cash could pay for) and 3x on a short leg, under one spec value — so a long/short
+backtest reported a number describing neither. What the wallet bounds now is
+gross notional: no fill may leave `sum(|position| * price)` above
+`max_gross * equity`. For a long-only book at `1.0` that is not a new rule,
+it is the old one restated, so an unlevered long backtest is unchanged.
+
+A request above the cap is *fitted* to it rather than refused, and the fill says
+so:
+
+```py
+order = report.fills[0].order
+order.units             # 100.0 — what traded
+order.requested_units   # 300.0 — what `sizing: 3.0` asked for
+order.fill_ratio        # 0.333…
+```
+
+`requested_units` exists because "was this shrunk?" is a useless question: under
+any positive commission an all-in sheds a sliver on every trade, so a flag would
+fire constantly. Carrying the requested magnitude beside the filled one lets you
+pick the gap that matters to you. An explicit unit count (`Size.units`,
+`set_position`) is never fitted — it raises `WalletError` instead, on both sides.
+
+On the live side, `OkxWallet` answers from the venue. It is filled for free for
+any symbol the account holds a position in, and read on demand for anything else:
+
+```py
+wallet = ta.OkxWallet.demo(key, secret, passphrase)
+wallet.refresh_leverage("BTC-USDT-SWAP")   # ask OKX now, and cache it
+wallet.leverage("BTC-USDT-SWAP")           # 3.0
+```
+
+`CoinbaseWallet` answers `None` structurally — spot has nothing borrowed to
+parameterise, the same fact it reports as `can_short == False`. `None` means
+"does not say", never `1x`.
+
+Record the live number at connect and check it on reconcile: OKX's leverage is
+set out of band, in its own UI, and can change under a running strategy. Set the
+`PaperWallet`'s `max_gross` to match, and the two curves measure the same
+strategy. Without that, a live equity curve is uninterpretable against the
+backtest it is supposed to be tracking.
 
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,

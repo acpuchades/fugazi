@@ -187,30 +187,40 @@ fn contending_buys_break_ties_by_submission_not_by_bar_order() {
 /// long's proceeds have landed. Reaching it first refuses it outright
 /// (`InsufficientFunds`), which leaves the strategy holding a short it had asked
 /// to be out of.
+///
+/// **Reaching that state takes an adverse mark**, and the leverage cap is why.
+/// Within `max_gross = 1.0`, `funds >= 2 x short notional` falls straight out of
+/// `gross <= equity`, so at the moment a short is *booked* the cash to cover it
+/// is always there twice over. What the cap does not do is track marks between
+/// fills — so a short that more than doubles against the account outruns the
+/// balance that was set aside for it, and this becomes reachable again. That is
+/// the setup below: a small short at 100 that gaps to 260, beside a long large
+/// enough to have drained the cash.
 #[test]
 fn crediting_protective_exits_settle_before_debiting_ones() {
     let mut fills = Vec::new();
     for order in permutations(("A", flat(100.0)), ("B", flat(100.0))) {
         let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
         w.advance(&order);
-        // Short B (credits cash), then put nearly everything into a long A, so
-        // the account ends the setup with a large book and very little cash.
-        w.set("B".into(), Side::Sell, Size::units(100.0)).unwrap();
+        // Short a little B (credits cash), then put the rest into a long A —
+        // 9,000 + 1,000 of gross against 10,000 of equity is exactly 1x, the
+        // most an unlevered wallet will carry, and it leaves 2,000 in cash.
+        w.set("B".into(), Side::Sell, Size::units(10.0)).unwrap();
         w.advance(&order);
-        w.set("A".into(), Side::Buy, Size::units(190.0)).unwrap();
+        w.set("A".into(), Side::Buy, Size::units(90.0)).unwrap();
         w.advance(&order);
         assert!(
-            w.funds().0 < 1_500.0,
+            w.funds().0 < 2_500.0,
             "test needs a cash-tight book, has {}",
             w.funds().0
         );
 
-        // Both brackets trigger on the next bar: A's stop sells 190 (credit
-        // ~18.8k), B's stop covers 100 (debit ~10.5k). The cover alone does not
-        // fit the ~1k on hand.
+        // Both brackets trigger on the next bar: A's stop sells 90 at 99
+        // (credit 8,910), B's stop covers 10 at 260 (debit 2,600) after the
+        // short gaps against it. The cover alone does not fit the 2,000 on hand.
         w.set_stop("A".into(), Reference(99.0), Size::position_frac(1.0))
             .unwrap();
-        w.set_stop("B".into(), Reference(105.0), Size::position_frac(1.0))
+        w.set_stop("B".into(), Reference(250.0), Size::position_frac(1.0))
             .unwrap();
         let a_bar = Candle {
             open: 100.0,
@@ -220,10 +230,10 @@ fn crediting_protective_exits_settle_before_debiting_ones() {
             volume: 1.0,
         };
         let b_bar = Candle {
-            open: 100.0,
-            high: 106.0,
-            low: 100.0,
-            close: 106.0,
+            open: 260.0,
+            high: 260.0,
+            low: 260.0,
+            close: 260.0,
             volume: 1.0,
         };
         let bar = if order[0].0 == "A" {

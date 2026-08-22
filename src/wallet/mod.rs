@@ -324,6 +324,42 @@ pub trait Wallet<Sym> {
         true
     }
 
+    /// The leverage this account trades `symbol` at — the multiple of equity it
+    /// may hold as gross notional — or `None` when the venue has no such
+    /// concept.
+    ///
+    /// **`None` means "this wallet does not say", never "1x"** — the same
+    /// reading [`quote_ccy`](Self::quote_ccy)'s `None` and
+    /// [`data_sources`](Self::data_sources)'s empty slice ask for, and the
+    /// default every impl inherits. A **spot** account answers `None`
+    /// structurally, for the reason it answers `false` to
+    /// [`can_short`](Self::can_short): there is no borrowing to parameterise.
+    /// A [`PaperWallet`] answers the cap it actually enforces
+    /// ([`with_max_gross`](PaperWallet::with_max_gross), `1.0` by default) —
+    /// unlike a currency label, this one is not a fact it has to be told, it is
+    /// a rule it applies on every fill.
+    ///
+    /// This is **introspection, not control**: nothing in this trait sets a
+    /// venue's leverage, and answering here does not bind the account to the
+    /// number. A live venue's leverage is configured out of band and can change
+    /// under a running strategy; the point is that a caller can *record* what
+    /// its fills executed at, and reconcile that against the
+    /// [`max_gross`](PaperWallet::max_gross) the backtest it is tracking was run
+    /// under. A live curve is only comparable to a paper one if the two agree,
+    /// and until this method existed there was no way to ask.
+    ///
+    /// Per-symbol because venues configure it that way — OKX carries a
+    /// `(instId, mgnMode)` leverage setting, not an account-wide one.
+    ///
+    /// A wrapper delegates to what it wraps, for [`can_short`](Self::can_short)'s
+    /// reason: leverage is a fact about the account underneath, not about the
+    /// view onto it. The `Option<Real>` answer borrows from nothing, so — like
+    /// `data_sources` and unlike `quote_ccy` — a wrapper that reads through a
+    /// lock can delegate it too.
+    fn leverage(&self, _symbol: &Sym) -> Option<Real> {
+        None
+    }
+
     /// The currency this wallet's [`funds`](Wallet::funds) and quote leg are
     /// denominated in — `"USDT"` for a linear USDⓈ-M swap account, `"USD"` or
     /// `"EUR"` for a spot one.

@@ -201,14 +201,7 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
         for (sym, costs) in per_symbol_costs {
             let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
         }
-        let (warm, evaluated) = snapshots.split_at(warmup.min(snapshots.len()));
-        if warm.is_empty() {
-            return drive_over(self, evaluated, &mut wallet, resume, flatten);
-        }
-        warm_up_over_wallet(self, warm, &mut wallet, resume)?;
-        // `resume` is already applied — restoring it a second time would rewind
-        // the state the warm-up just advanced.
-        drive_over(self, evaluated, &mut wallet, None, flatten)
+        drive_warmed_over_wallet(self, snapshots, warmup, &mut wallet, resume, flatten)
     }
 
     /// The shape's name, used to stamp and validate a [`RunState`]. Mirrors
@@ -342,6 +335,29 @@ pub trait RunnableStrategyExt: RunnableStrategy {
         wallet: &mut W,
         resume: Option<&RunState>,
     ) -> Result<RunState, String>;
+
+    /// [`RunnableStrategy::drive_resumable_warmed`] over a wallet you supply —
+    /// the warm-up-prefix form of
+    /// [`drive_resumable_with`](Self::drive_resumable_with), and the exact body
+    /// the fresh-`PaperWallet` spelling delegates to once it has built one.
+    ///
+    /// Reach for it when the account needs configuring beyond the cash it
+    /// starts with — a leverage cap
+    /// ([`PaperWallet::with_max_gross`](crate::PaperWallet::with_max_gross)), a
+    /// currency label, a retention bound — while still wanting `--from`'s
+    /// "warm the chains over this prefix, evaluate the rest" split. Composing
+    /// [`warm_up_over`](Self::warm_up_over) and `drive_resumable_with` by hand
+    /// gets the `resume` handling subtly wrong: the state is restored once,
+    /// before the prefix, and restoring it again would rewind what the warm-up
+    /// just advanced.
+    fn drive_warmed_over<W: Wallet<Symbol>>(
+        &mut self,
+        snapshots: &[Snapshot<Symbol>],
+        warmup: usize,
+        wallet: &mut W,
+        resume: Option<&RunState>,
+        flatten: bool,
+    ) -> Result<(RunReport<Symbol>, RunState), String>;
 }
 
 impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
@@ -363,6 +379,39 @@ impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
     ) -> Result<RunState, String> {
         warm_up_over_wallet(self, snapshots, wallet, resume)
     }
+
+    fn drive_warmed_over<W: Wallet<Symbol>>(
+        &mut self,
+        snapshots: &[Snapshot<Symbol>],
+        warmup: usize,
+        wallet: &mut W,
+        resume: Option<&RunState>,
+        flatten: bool,
+    ) -> Result<(RunReport<Symbol>, RunState), String> {
+        drive_warmed_over_wallet(self, snapshots, warmup, wallet, resume, flatten)
+    }
+}
+
+/// The body behind [`RunnableStrategyExt::drive_warmed_over`], and — once it
+/// has built its own [`PaperWallet`] — behind
+/// [`RunnableStrategy::drive_resumable_warmed`] too. One body, so the warm-up
+/// split and the `resume`-once rule cannot drift between the two spellings.
+fn drive_warmed_over_wallet<W: Wallet<Symbol>>(
+    strategy: &mut (impl RunnableStrategy + ?Sized),
+    snapshots: &[Snapshot<Symbol>],
+    warmup: usize,
+    wallet: &mut W,
+    resume: Option<&RunState>,
+    flatten: bool,
+) -> Result<(RunReport<Symbol>, RunState), String> {
+    let (warm, evaluated) = snapshots.split_at(warmup.min(snapshots.len()));
+    if warm.is_empty() {
+        return drive_over(strategy, evaluated, wallet, resume, flatten);
+    }
+    warm_up_over_wallet(strategy, warm, wallet, resume)?;
+    // `resume` is already applied — restoring it a second time would rewind
+    // the state the warm-up just advanced.
+    drive_over(strategy, evaluated, wallet, None, flatten)
 }
 
 /// The body behind [`RunnableStrategyExt::warm_up_over`]; see there.

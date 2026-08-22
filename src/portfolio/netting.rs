@@ -117,6 +117,17 @@ pub(super) struct PortfolioInner<Sym> {
     /// account has been seen yet", which is why this one needs no permissive
     /// special case the way `account_can_short` does.
     pub(super) account_data_sources: &'static [&'static str],
+
+    /// The account wallet's [`leverage`](Wallet::leverage), cached the same way
+    /// and per **symbol** — the trait scopes it that way because venues do
+    /// (OKX carries a `(instId, mgnMode)` setting, not an account-wide one).
+    ///
+    /// Refreshed over the symbols in `marks`, which is the universe the
+    /// portfolio has actually seen priced. A symbol absent from the map has not
+    /// been asked about yet, and reads back as the trait default (`None`, "the
+    /// account does not say") — the same reading an empty
+    /// `account_data_sources` carries before the first bar.
+    pub(super) account_leverage: HashMap<Sym, Option<Real>>,
 }
 
 // `snapshot`/`restore` are consumed only by `Portfolio::{save_state,restore_state}`,
@@ -194,6 +205,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             seeds,
             account_can_short: true,
             account_data_sources: &[],
+            account_leverage: HashMap::new(),
         }
     }
 
@@ -246,6 +258,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         // its first `trade`.
         self.account_can_short = true;
         self.account_data_sources = &[];
+        self.account_leverage.clear();
     }
 
     // ---- intent recording (called from LedgerWallet) --------------------

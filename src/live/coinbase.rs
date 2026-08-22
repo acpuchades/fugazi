@@ -510,6 +510,18 @@ impl Wallet<Symbol> for CoinbaseWallet {
         &["coinbase"]
     }
 
+    /// `None`, structurally — the same fact [`can_short`](Wallet::can_short)
+    /// reports as `false`, said the other way.
+    ///
+    /// Advanced Trade is **spot**: a position is an owned base-asset balance, so
+    /// there is nothing borrowed and no multiple to configure. This is the one
+    /// place the trait's `None` is not "the wallet does not say" but "the venue
+    /// has no such setting", and the two are indistinguishable to a caller on
+    /// purpose — neither one licenses assuming a number.
+    fn leverage(&self, _symbol: &Symbol) -> Option<Real> {
+        None
+    }
+
     fn price(&self, symbol: &Symbol) -> Option<Reference> {
         self.core.mark(symbol).map(Reference)
     }

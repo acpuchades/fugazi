@@ -202,7 +202,12 @@ impl Size {
             Size::Units(units) => units.abs(),
             Size::FundsFraction(fraction) => {
                 if price > 0.0 {
-                    (fraction.abs() * funds) / price
+                    // `funds.max(0.0)`: a margined wallet can carry a negative
+                    // cash balance, and a negative magnitude here would come
+                    // back through `side.sign() * magnitude` as a fill on the
+                    // *opposite* side. "A fraction of nothing" is the honest
+                    // answer when there is no cash to take a fraction of.
+                    (fraction.abs() * funds.max(0.0)) / price
                 } else {
                     0.0
                 }
@@ -255,9 +260,10 @@ pub enum OrderKind {
 
 /// A single filled order: a `symbol`, a [`Side`], a strictly-positive number of
 /// instrument units, the `price` it filled at, the [`OrderKind`] that produced
-/// it, the [`OrderId`] of the submission it fills, and the per-fill
-/// `commission` paid on top of the notional (in reference currency; `0.0`
-/// unless a cost model set it).
+/// it, the [`OrderId`] of the submission it fills, the per-fill `commission`
+/// paid on top of the notional (in reference currency; `0.0` unless a cost
+/// model set it), and the `requested_units` the sizing asked for before the
+/// wallet fitted it to the account.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Order<Sym> {
     pub symbol: Sym,
@@ -276,12 +282,33 @@ pub struct Order<Sym> {
     /// whose [`TradingCosts::commission`](crate::costs::TradingCosts::commission)
     /// leg is non-trivial.
     pub commission: Real,
+    /// How many units this order **would** have traded had the wallet not
+    /// fitted it to the account — always `>= units`, and exactly `units` on any
+    /// fill that was taken at face value.
+    ///
+    /// A [`PaperWallet`](crate::PaperWallet) shrinks a *fractional* sizing
+    /// ([`ValueFraction`](Size::ValueFraction) / [`FundsFraction`](Size::FundsFraction))
+    /// to what the account can carry rather than refusing it: an all-in
+    /// [`value_frac(1.0)`](Size::value_frac) has to shed a sliver to leave room
+    /// for commission, and refusing *that* would drop the fill entirely. The
+    /// same silence used to cover a buy starved down to 2% of its target, or a
+    /// `sizing: 3.0` document quietly executing at 1x — a rounding adjustment
+    /// and a 17× reduction were indistinguishable in the blotter.
+    ///
+    /// This field is what tells them apart. It carries the *requested*
+    /// magnitude beside the filled one and leaves the consumer to decide what
+    /// is material — see [`fill_ratio`](Self::fill_ratio). An explicit
+    /// [`Size::Units`] target is never shrunk (it fails loudly instead), so on
+    /// those the two are equal by construction.
+    pub requested_units: Real,
 }
 
 impl<Sym> Order<Sym> {
     /// A `side` order for `units` units of `symbol`, filled at `price` as `kind`,
-    /// belonging to submission `id`. `commission` defaults to `0.0`; set it
-    /// with [`with_commission`](Self::with_commission).
+    /// belonging to submission `id`. `commission` defaults to `0.0` and
+    /// `requested_units` to `units` — the "nothing was shrunk" reading; set
+    /// them with [`with_commission`](Self::with_commission) /
+    /// [`with_requested_units`](Self::with_requested_units).
     pub fn new(
         symbol: Sym,
         side: Side,
@@ -298,6 +325,7 @@ impl<Sym> Order<Sym> {
             kind,
             id,
             commission: 0.0,
+            requested_units: units,
         }
     }
 
@@ -308,6 +336,30 @@ impl<Sym> Order<Sym> {
     pub fn with_commission(mut self, commission: Real) -> Self {
         self.commission = commission;
         self
+    }
+
+    /// Set this order's [`requested_units`](Self::requested_units) — the
+    /// magnitude the caller's sizing resolved to before the wallet fitted it to
+    /// the account. Values below `units` are ignored, so this can only ever
+    /// widen the gap it reports.
+    pub fn with_requested_units(mut self, requested: Real) -> Self {
+        self.requested_units = requested.max(self.units);
+        self
+    }
+
+    /// What fraction of the requested magnitude this order actually traded:
+    /// `units / requested_units`, in `(0, 1]`. `1.0` when nothing was shrunk.
+    ///
+    /// The materiality threshold is deliberately the *caller's*: an all-in
+    /// under any positive commission lands a hair under `1.0` every time, so a
+    /// counter that fires on "not exactly 1.0" reads as noise. Compare against
+    /// whatever gap matters to you.
+    pub fn fill_ratio(&self) -> Real {
+        if self.requested_units > 0.0 {
+            self.units / self.requested_units
+        } else {
+            1.0
+        }
     }
 
     /// The order that moves `symbol`'s position by `delta` units, filled at
@@ -372,9 +424,24 @@ pub enum WalletError {
     /// The requested fill price lies outside the symbol's current candle range
     /// `[low, high]`, so it could not have traded on this bar.
     PriceOutOfRange,
-    /// A net buy would drive cash below zero, and the wallet allows no margin.
-    /// (A short sale credits cash, so selling is always feasible.)
+    /// A net buy would drive cash below zero on a wallet that allows no margin
+    /// (see [`PaperWallet::with_max_gross`](crate::PaperWallet::with_max_gross)).
     InsufficientFunds,
+    /// The fill would leave the account holding more **gross notional** than
+    /// its leverage allows — `Σ |position| × price > max_gross × equity`.
+    ///
+    /// The bound a short runs into, where [`InsufficientFunds`](Self::InsufficientFunds)
+    /// is the one a long runs into: a sale credits cash, so cash alone places
+    /// no limit on how much exposure a short can pile up. For a long-only book
+    /// at the default `max_gross` of `1.0` the two conditions are algebraically
+    /// the same one (`gross <= equity` **is** `funds >= 0`), which is why the
+    /// cash check is reported under its own name and this variant is what a
+    /// short, a reversal, or a genuinely levered request gets.
+    ///
+    /// **Never returned for a fill that reduces exposure.** Flattening, an exit,
+    /// and a protective leg are exempt by construction, so an account that
+    /// drifts over its limit on a mark can always trade its way back.
+    ExceedsMaxGross,
     /// The operation is not supported by this wallet implementation. Returned
     /// by the default [`Wallet::adjust_funds`](crate::Wallet::adjust_funds) impl, which live-broker impls
     /// selectively override when their venue exposes a deposit / withdrawal /
@@ -405,6 +472,9 @@ impl fmt::Display for WalletError {
                 f.write_str("the fill price is outside the current candle's range")
             }
             WalletError::InsufficientFunds => f.write_str("insufficient funds for this buy"),
+            WalletError::ExceedsMaxGross => {
+                f.write_str("this fill would exceed the account's gross exposure limit")
+            }
         }
     }
 }
@@ -417,8 +487,10 @@ impl std::error::Error for WalletError {}
 ///
 /// The wallet stashes one of these on every silent drop so a driver can
 /// inspect why a bar produced no fill (typically `InsufficientFunds` for a
-/// `Size::Units` buy larger than cash on hand, after the shrink helper
-/// exempts fractional sizings). Query with
+/// `Size::Units` buy larger than cash on hand, or `ExceedsMaxGross` for one
+/// that would breach the account's leverage — the shrink helper exempts
+/// fractional sizings from both, and records the gap on
+/// [`Order::requested_units`] instead). Query with
 /// [`PaperWallet::rejections`](crate::PaperWallet::rejections)(crate::PaperWallet::rejections).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rejection<Sym> {

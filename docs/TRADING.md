@@ -198,9 +198,25 @@ Every one of those paths goes through the same private engine, `fill_at`.
    liquidity rather than taking it, and anything else would let the pipeline fill
    it worse than the price a limit order exists to guarantee. Per-symbol cost
    overrides win over the wallet's default bundle.
-4. **No margin.** A net buy plus its commission cannot drive cash below zero;
-   otherwise `InsufficientFunds`.
-5. Move cash and the position, push to the blotter, return the `Order`.
+4. **Solvency, in two rules.** *Cash*: on an unlevered wallet a net buy plus its
+   commission cannot drive cash below zero, otherwise `InsufficientFunds`.
+   *Leverage*: no fill may leave gross notional (`Σ |position| × price`) above
+   `max_gross × equity`, otherwise `ExceedsMaxGross`.
+
+   For a **long-only** book at the default `max_gross = 1.0` these are the same
+   inequality — `gross <= equity` *is* `funds >= 0` when nothing is short — so
+   the second changes nothing there. What it adds is the same bound on the
+   **short** side, where a sale credits cash and the first can never fire.
+   Without it `sizing: 3.0` meant 1x long and 3x short under one spec value.
+   Raising `max_gross` above `1.0` lifts the cash rule too: the account borrows,
+   which is what leverage is.
+
+   **Only a fill that raises the position's magnitude is bound.** An exit, a
+   protective leg and `flatten` are exempt outright, so an account carried over
+   its limit by a mark can always trade its way back.
+5. Move cash and the position, push to the blotter, return the `Order` — carrying
+   `requested_units` beside `units`, so a magnitude that was fitted to either
+   rule is visible rather than reported as if it were what was asked for.
 6. **A fill that flattens or flips the sign voids the resting bracket**, so a
    bare market exit or reversal drops a now-stale stop without an explicit
    cancel.

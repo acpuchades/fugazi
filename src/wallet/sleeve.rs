@@ -129,6 +129,14 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn data_sources(&self) -> &'static [&'static str] {
         self.inner.data_sources()
     }
+    /// Delegates, for the same reason again: the margin a sleeve's positions are
+    /// carried on is the account's, not the sleeve's. (A sleeve's *own* equity
+    /// nets out an external baseline, so its share of the account's gross may
+    /// be a different multiple of that — this reports the account's rule, which
+    /// is the one that decides whether a fill books.)
+    fn leverage(&self, symbol: &Sym) -> Option<Real> {
+        self.inner.leverage(symbol)
+    }
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
     }

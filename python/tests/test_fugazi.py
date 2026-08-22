@@ -1751,10 +1751,95 @@ def test_impossible_market_orders_never_fill():
     with pytest.raises(ValueError, match="insufficient funds"):
         w.set("X", "buy", 3.0)
     assert not w.positions()
-    # A short sale credits cash, so selling is always feasible.
-    w.set("X", "sell", 3.0)
+    # A short sale credits cash, so the *cash* rule can never bound it — which is
+    # why the leverage rule has to. 3 units at 50 is 150 of gross against 100 of
+    # equity, and an unlevered wallet refuses it just as it refused the buy.
+    with pytest.raises(ValueError, match="gross exposure limit"):
+        w.set("X", "sell", 3.0)
+    assert not w.positions()
+    # 2 units short is 100 of gross against 100 of equity — exactly 1x, the
+    # mirror image of the 2-unit long the cash rule allows.
+    w.set("X", "sell", 2.0)
     w.update("X", 50.0)
-    assert w.position("X") == pytest.approx(-3.0)
+    assert w.position("X") == pytest.approx(-2.0)
+
+
+def test_one_sizing_value_means_one_exposure_on_both_sides():
+    """Same document, same account, same bars — only the side differs.
+
+    `sizing: 3.0` used to mean two different things. A buy was bounded by the
+    cash it spent, so the long leg was quietly scaled back to 1x; a sale
+    *credits* cash, so nothing bounded the short and it took the full 3x. What
+    bounds both is gross notional.
+    """
+    bars = [
+        ta.Snapshot(
+            {
+                "S": ta.Atom(
+                    ta.Candle(100, 100, 100, 100, 1),
+                    None,
+                    1_700_000_000_000 + i * 86_400_000,
+                )
+            }
+        )
+        for i in range(4)
+    ]
+
+    def carried(side, sizing, **kw):
+        spec = f"root: S\n{side}:\n  enter: !gt {{ lhs: !close, rhs: 0 }}\nsizing: {sizing}\n"
+        w = ta.PaperWallet(10_000.0, **kw)
+        report = ta.load_spec(spec).run(w, bars)
+        gross = abs(w.position("S")) * 100.0 / w.equity
+        return gross, report
+
+    long_gross, long_report = carried("long", 3.0)
+    short_gross, short_report = carried("short", 3.0)
+    assert long_gross == pytest.approx(short_gross), (
+        f"long took {long_gross:.2f}x and short took {short_gross:.2f}x under one spec value"
+    )
+    assert long_gross == pytest.approx(1.0)
+
+    # Neither is a rejection — the fill happened, at a size nobody asked for —
+    # so the ask rides on the order instead.
+    for report in (long_report, short_report):
+        assert not report.rejections
+        order = report.fills[0].order
+        assert order.units == pytest.approx(100.0)
+        assert order.requested_units == pytest.approx(300.0)
+        assert order.fill_ratio == pytest.approx(1 / 3)
+
+    # And the knob lifts both by the same multiple, which is what makes a 3x
+    # live account comparable to a backtest at all.
+    for side in ("long", "short"):
+        gross, report = carried(side, 3.0, max_gross=3.0)
+        assert gross == pytest.approx(3.0), f"{side} carried {gross:.2f}x"
+        order = report.fills[0].order
+        assert order.units == pytest.approx(order.requested_units)
+
+
+def test_leverage_is_readable_off_every_wallet():
+    """`None` is "does not say", never `1x` — and a paper wallet does say,
+    because the cap is a rule it enforces rather than a label it was handed."""
+    assert ta.PaperWallet(1_000.0).leverage("S") == pytest.approx(1.0)
+    assert ta.PaperWallet(1_000.0, max_gross=2.5).leverage("S") == pytest.approx(2.5)
+    # Answered for a symbol it has never been fed: the cap is a property of the
+    # account, not of the instrument.
+    assert ta.PaperWallet(1_000.0, max_gross=2.5).leverage(
+        "never-seen"
+    ) == pytest.approx(2.5)
+    # A spot venue answers None structurally, as it answers False to can_short.
+    # Checked on the class: constructing one needs a real EC private key.
+    assert "leverage" in dir(ta.CoinbaseWallet)
+    # A live swap wallet has one, but has not been able to ask yet.
+    okx = ta.OkxWallet.demo("key", "secret", "passphrase")
+    assert okx.leverage("BTC-USDT-SWAP") is None
+    assert okx.can_short
+
+
+def test_max_gross_must_be_finite_and_positive():
+    for bad in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="max_gross"):
+            ta.PaperWallet(1_000.0, max_gross=bad)
 
 
 def test_order_carries_fill_price():

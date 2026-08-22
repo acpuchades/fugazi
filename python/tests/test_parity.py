@@ -336,6 +336,7 @@ WALLET_BOUND = {
     "can_short",
     "quote_ccy",
     "data_sources",
+    "leverage",
     "update",
     "set",
     "set_position",
@@ -406,6 +407,7 @@ OKX_WALLET_BOUND = {
     "can_short",
     "quote_ccy",
     "data_sources",
+    "leverage",
     # Order flow.
     "update",
     "set",
@@ -420,6 +422,9 @@ OKX_WALLET_BOUND = {
     "poll_fills",
     # Live-only extras.
     "refresh_account",
+    # The only path that reads leverage for a symbol the account is flat in —
+    # an open position carries it on the positions payload for free.
+    "refresh_leverage",
     "errors",
 }
 
@@ -468,6 +473,7 @@ COINBASE_WALLET_BOUND = {
     "can_short",
     "quote_ccy",
     "data_sources",
+    "leverage",
     # Order flow.
     "update",
     "set",
@@ -552,6 +558,9 @@ KEYWORD_ONLY_AFTER_METHOD = {
     ("StrategySpec", "evaluate"): "snapshots",
     ("StrategySpec", "run_resumable"): "snapshots",
     ("Order", "__init__"): "price",
+    # `funds` is the account; the currency label and the leverage cap are how it
+    # is configured.
+    ("PaperWallet", "__init__"): "funds",
     ("RunReport", "__init__"): "initial_equity",
     ("MonteCarloConfig", "__init__"): None,
     ("Yahoo", "__init__"): None,

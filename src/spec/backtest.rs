@@ -31,7 +31,7 @@ use crate::prelude::*;
 use crate::spec::calendar::Frequency;
 use crate::spec::costs::CostConfig;
 use crate::spec::metrics;
-use crate::spec::runnable::StrategySpec;
+use crate::spec::runnable::{RunnableStrategyExt, StrategySpec};
 use crate::types::Symbol;
 
 /// Build a strategy once and discard it, turning a malformed document into an
@@ -253,6 +253,15 @@ pub struct SummaryRow {
 /// used to be.
 pub struct EvalContext<'a> {
     pub cash: Real,
+    /// The most gross notional the run's account may hold, as a multiple of
+    /// equity — `1.0` (unlevered) unless the caller says otherwise, and handed
+    /// straight to [`PaperWallet::with_max_gross`].
+    ///
+    /// Part of the *account*, like `cash`, rather than of the strategy: it
+    /// bounds what any document can carry rather than changing what one asks
+    /// for. A `sizing:` above it is fitted to it and the gap recorded on
+    /// [`Order::requested_units`](crate::Order::requested_units).
+    pub max_gross: Real,
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
     pub cost_config: &'a CostConfig,
@@ -284,6 +293,19 @@ pub struct EvalContext<'a> {
 }
 
 impl EvalContext<'_> {
+    /// The [`PaperWallet`] this run trades: seeded with `cash`, capped at
+    /// `max_gross`, and primed with `per_symbol_costs`.
+    ///
+    /// One place, so the priced run and its zero-cost twin cannot end up on
+    /// differently-configured accounts.
+    pub fn account(&self, per_symbol_costs: &[(String, TradingCosts)]) -> PaperWallet<Symbol> {
+        let mut wallet = PaperWallet::new(self.cash).with_max_gross(self.max_gross);
+        for (sym, costs) in per_symbol_costs {
+            let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
+        }
+        wallet
+    }
+
     /// Resolve one symbol's [`TradingCosts`] at this run's cadence.
     pub fn costs_for_one(&self, symbol: &str) -> TradingCosts {
         self.cost_config.resolve(symbol, self.effective_freq)
@@ -354,11 +376,11 @@ pub fn measured_report_any(
         ctx.effective_freq,
         &universe,
     )?;
-    let (report, _) = built.drive_resumable_warmed(
+    let mut wallet = ctx.account(&per_symbol_costs);
+    let (report, _) = built.drive_warmed_over(
         snapshots,
         ctx.warmup_bars.unwrap_or(0),
-        ctx.cash,
-        &per_symbol_costs,
+        &mut wallet,
         None,
         false,
     )?;
@@ -465,20 +487,18 @@ pub fn run_iteration_resumable(
         ctx.effective_freq,
         &universe,
     )?;
-    let (report, final_state) = priced.drive_resumable_warmed(
-        snapshots,
-        warmup,
-        ctx.cash,
-        &per_symbol_costs,
-        resume,
-        flatten,
-    )?;
+    let mut wallet = ctx.account(&per_symbol_costs);
+    let (report, final_state) =
+        priced.drive_warmed_over(snapshots, warmup, &mut wallet, resume, flatten)?;
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;
+        // The zero-cost twin has to carry the *same* leverage cap, or the two
+        // curves would differ by more than the costs they were run to isolate.
+        let mut gross_wallet = ctx.account(&[]);
         Some(
             gross
-                .drive_resumable_warmed(snapshots, warmup, ctx.cash, &[], None, flatten)?
+                .drive_warmed_over(snapshots, warmup, &mut gross_wallet, None, flatten)?
                 .0,
         )
     } else {

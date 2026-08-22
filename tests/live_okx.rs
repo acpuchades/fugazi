@@ -103,6 +103,113 @@ fn a_swap_account_names_the_provider_that_quotes_it() {
     );
 }
 
+/// Leverage is **read** off the venue, never assumed and never set.
+///
+/// An account's leverage is configured out of band — in OKX's own UI — so a
+/// deployment cannot report what its fills executed at unless it asks. Two
+/// paths fill the cache and this pins both: a symbol the account holds carries
+/// `lever` on the positions payload, so `refresh_account` keeps it current for
+/// free; a symbol the account is flat in has to be asked for explicitly, since
+/// `leverage` takes `&self` and every account read here answers from cache
+/// rather than blocking on a request.
+#[test]
+fn leverage_is_read_from_the_venue_for_held_and_flat_symbols() {
+    const FLAT: &str = "ETH-USDT-SWAP";
+
+    let held = serde_json::json!({
+        "code": "0",
+        "data": [{
+            "instId": SYMBOL, "posSide": "net", "pos": "3", "avgPx": "27000",
+            "lever": "5"
+        }]
+    });
+    let mock = serve(move |server| {
+        let held = held.clone();
+        Box::pin(async move {
+            Mock::given(method("GET"))
+                .and(path("/api/v5/public/instruments"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(instruments()))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/balance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(balance()))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/positions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(held))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/leverage-info"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "code": "0",
+                    "data": [{ "instId": FLAT, "mgnMode": "cross", "lever": "10" }]
+                })))
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = wallet(mock.uri.clone());
+    // Nothing asked yet: `None` is "this wallet has not been able to ask",
+    // never `1x` and never "no leverage" — a swap account always has one.
+    assert_eq!(w.leverage(&intern(SYMBOL)), None);
+
+    // A held symbol comes for free, off the payload the account refresh
+    // already fetches.
+    w.refresh_account().expect("refresh");
+    assert_eq!(w.leverage(&intern(SYMBOL)), Some(5.0));
+    // ...and a flat one stays unknown until asked, rather than inheriting it.
+    assert_eq!(w.leverage(&intern(FLAT)), None);
+
+    assert_eq!(w.refresh_leverage(&intern(FLAT)).expect("leverage"), 10.0);
+    assert_eq!(w.leverage(&intern(FLAT)), Some(10.0));
+}
+
+/// A venue that will not answer leaves the reading absent rather than inventing
+/// one — and does not re-ask on every call.
+///
+/// `None` has to keep meaning "does not say" here too: a wallet that fell back
+/// to `1.0` would let a deployment report a leverage its fills never executed
+/// at, which is the whole failure this method exists to prevent.
+#[test]
+fn an_unanswered_leverage_read_stays_unknown_and_is_not_retried() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let asks = Arc::new(AtomicUsize::new(0));
+    let counter = asks.clone();
+    let mock = serve(move |server| {
+        let counter = counter.clone();
+        Box::pin(async move {
+            Mock::given(method("GET"))
+                .and(path("/api/v5/account/leverage-info"))
+                .respond_with(move |_req: &wiremock::Request| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": "51000", "msg": "parameter instId error", "data": []
+                    }))
+                })
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = wallet(mock.uri.clone());
+    assert!(w.refresh_leverage(&intern(SYMBOL)).is_err());
+    assert_eq!(w.leverage(&intern(SYMBOL)), None);
+    // Cached as "asked and did not get an answer", so reading it back costs
+    // nothing — a broken or unauthorised endpoint is one request, not one per
+    // call from a strategy that checks each bar.
+    assert_eq!(w.leverage(&intern(SYMBOL)), None);
+    assert_eq!(asks.load(Ordering::SeqCst), 1);
+    // Asking again is the caller's explicit choice, and does re-try.
+    assert!(w.refresh_leverage(&intern(SYMBOL)).is_err());
+    assert_eq!(asks.load(Ordering::SeqCst), 2);
+}
+
 /// The one real translation this backend does: OKX sizes a swap in
 /// **contracts**, the trait speaks base units. `ctVal = 0.01`, so a `0.03 BTC`
 /// target must reach the wire as `3.0`.

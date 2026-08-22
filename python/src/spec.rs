@@ -882,6 +882,9 @@ impl PyStrategySpec {
                 .map_err(|e| SpecError::new_err(format!("cost config: {e}")))?;
             let ctx = spec_backtest::EvalContext {
                 cash: report.initial_equity,
+                // No wallet is built here — this reduces a report that already
+                // exists — so the cap has nothing to bound.
+                max_gross: 1.0,
                 bars_per_year,
                 risk_free_rate,
                 cost_config: &empty_costs,
@@ -1512,6 +1515,7 @@ pub(crate) fn build_subgrids(
     // API by accident.
     *,
     cash = 1.0,
+    max_gross = 1.0,
     params = None,
     grid = None,
     kind = "auto",
@@ -1537,6 +1541,7 @@ pub(crate) fn optimize(
     text: &str,
     snapshots: &Bound<'_, PyAny>,
     cash: Real,
+    max_gross: Real,
     params: Option<&Bound<'_, PyAny>>,
     grid: Option<&Bound<'_, PyAny>>,
     kind: &str,
@@ -1647,6 +1652,7 @@ pub(crate) fn optimize(
             smoothing.as_ref(),
             jobs,
             cash,
+            max_gross,
             bars_per_year,
             risk_free_rate,
             seconds_per_bar,
@@ -1662,6 +1668,7 @@ pub(crate) fn optimize(
         || -> anyhow::Result<spec_optimize::Sweep> {
             let ctx = spec_backtest::EvalContext {
                 cash,
+                max_gross,
                 bars_per_year,
                 risk_free_rate,
                 cost_config: &cost_config,
@@ -1981,6 +1988,7 @@ pub(crate) fn run_walkforward(
     smoothing: Option<&spec_optimize::Smoothing>,
     jobs: Option<usize>,
     cash: Real,
+    max_gross: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
     seconds_per_bar: Option<Real>,
@@ -2007,6 +2015,7 @@ pub(crate) fn run_walkforward(
             let probe_snapshot = snaps.first().cloned().unwrap_or_default();
             let wf_ctx = spec_backtest::EvalContext {
                 cash,
+                max_gross,
                 bars_per_year,
                 risk_free_rate,
                 cost_config,

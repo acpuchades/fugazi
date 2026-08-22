@@ -64,6 +64,11 @@ use fugazi::spec::StrategySpec;
 pub struct RunOptions<'a> {
     /// Initial cash for the paper wallet.
     pub cash: Real,
+    /// Most gross notional the account may hold, as a multiple of equity
+    /// (`--max-gross`; `1.0` is unlevered). Handed to the run's
+    /// [`PaperWallet`](fugazi::PaperWallet) via
+    /// [`EvalContext::max_gross`](fugazi::spec::backtest::EvalContext).
+    pub max_gross: Real,
     /// Directory to write `fills.csv` / `trades.csv` / `returns.csv` into.
     pub out_dir: &'a Path,
     /// A short label for the strategy source (file path or `(inline)`), echoed
@@ -717,6 +722,7 @@ fn eval_context<'a>(
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
     Ok(EvalContext {
         cash: opts.cash,
+        max_gross: opts.max_gross,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config: opts.cost_config,
@@ -751,6 +757,7 @@ fn emit_run(
     if !opts.quiet {
         print_ruin_warning(&iter.report);
         print_rejection_warning(&iter.report);
+        print_fitted_warning(&iter.report);
     }
     write_trades_csv(iter, &opts.out_dir.join("trades.csv"))?;
 
@@ -1215,23 +1222,30 @@ fn print_pairs_inputs_block(
 
 /// Write `fills.csv` from an [`IterationResult`]: one row per wallet-booked
 /// fill in the order the wallet booked them. `commission` is only present
-/// when the iteration's costs were active.
+/// when the iteration's costs were active. `requested_units` sits beside `units`
+/// on every row: equal to it on a fill taken at face value, larger on one the
+/// wallet fitted to available cash or to the account's leverage.
 fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     let mut w = writer(path)?;
-    let header: &[&str] = if iter.costs_active {
-        &[
-            "time",
-            "symbol",
-            "side",
-            "units",
-            "price",
-            "kind",
-            "commission",
-        ]
-    } else {
-        &["time", "symbol", "side", "units", "price", "kind"]
-    };
-    w.write_record(header)?;
+    // `requested_units` sits beside `units` and is always written — never
+    // conditioned on "was anything scaled", because under any positive cost
+    // model an all-in sheds a sliver to make room for commission and that
+    // predicate is true on essentially every costed run. Its *value* is what
+    // carries the signal, and how large a gap counts as material is the reader's
+    // call (see `MATERIALLY_FITTED` for the one this CLI makes).
+    let mut header: Vec<&str> = vec![
+        "time",
+        "symbol",
+        "side",
+        "units",
+        "requested_units",
+        "price",
+        "kind",
+    ];
+    if iter.costs_active {
+        header.push("commission");
+    }
+    w.write_record(&header)?;
     for fill in &iter.report.fills {
         let order = &fill.order;
         let time = &iter.bars[fill.bar];
@@ -1250,6 +1264,7 @@ fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
             order.symbol.to_string(),
             side.to_string(),
             order.units.to_string(),
+            order.requested_units.to_string(),
             order.price.to_string(),
             kind.to_string(),
         ];
@@ -1530,6 +1545,45 @@ fn print_rejection_warning<Sym>(report: &fugazi::RunReport<Sym>) {
         "{n} order{} refused by the wallet — the equity curve and metrics below \
          reflect trades that did not happen as specified: {detail}",
         if n == 1 { " was" } else { "s were" },
+    )]);
+}
+
+/// How far short of its requested magnitude a fill has to land before the
+/// banner below calls it material.
+///
+/// There has to be a threshold, and it has to be here rather than in the
+/// wallet. *Any* reduction means the fill was bound by cash or by leverage, so
+/// an all-in under any positive commission model lands a hair under 1.0 on
+/// every single trade — a counter that fired on "not exactly what was asked"
+/// would report every costed run as one long anomaly. 1% is comfortably above
+/// the room a commission needs and far below a request that was scaled to a
+/// fraction of itself, which is the case worth a line of output.
+const MATERIALLY_FITTED: f64 = 0.99;
+
+/// The post-run "orders were scaled down" banner.
+///
+/// The other half of [`print_rejection_warning`]: an order the wallet *fitted*
+/// to the account rather than refusing. It is not a rejection — the fill
+/// happened — but past a point it is not the trade the document asked for
+/// either, and it used to be invisible at every layer. A `sizing:` above what
+/// the account's leverage allows, or a rotation whose funding leg did not
+/// arrive, both surface here.
+fn print_fitted_warning<Sym>(report: &fugazi::RunReport<Sym>) {
+    let fitted: Vec<f64> = report
+        .fills
+        .iter()
+        .map(|f| f.order.fill_ratio())
+        .filter(|ratio| *ratio < MATERIALLY_FITTED)
+        .collect();
+    if fitted.is_empty() {
+        return;
+    }
+    let n = fitted.len();
+    let worst = fitted.iter().copied().fold(f64::INFINITY, f64::min);
+    style::print_warns(&[format!(
+        "{n} fill{} scaled down to fit the account — the size traded was not the          size the document asked for (smallest: {:.1}% of the request). Compare          `units` against `requested_units` in fills.csv; raising the wallet's          leverage is what lifts the ceiling",
+        if n == 1 { " was" } else { "s were" },
+        worst * 100.0,
     )]);
 }
 

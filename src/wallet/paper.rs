@@ -70,6 +70,66 @@ struct FillPricing<'a> {
     kind: OrderKind,
 }
 
+/// Every position **except** the one being traded, marked at some set of
+/// prices and summed two ways: `marked` signed (what it contributes to equity)
+/// and `gross` absolute (what it contributes to exposure).
+///
+/// The two sums are what turn the leverage cap into a bound on the one symbol a
+/// fill actually moves — the rest of the book is a constant as far as that fill
+/// is concerned, so the caller measures it once, at whatever prices are honest
+/// for its phase, and hands the result down.
+///
+/// **Which prices those are is the caller's call, and it matters.** A queued
+/// market order fills at the bar's `open`, so
+/// [`advance`](Wallet::advance) marks the rest of the book at *its* opens too —
+/// reading a `close` there would size a fill off information from later in the
+/// same bar. A resting limit fills mid-bar and marks at the last close, the
+/// same prices its own equity-at-fill already uses.
+#[derive(Debug, Clone, Copy, Default)]
+struct RestOfBook {
+    /// `Σ position × mark` over the other symbols — signed, so shorts subtract.
+    marked: Real,
+    /// `Σ |position| × mark` over the other symbols — unsigned, so shorts add.
+    gross: Real,
+}
+
+/// What a fill was *asked* for, and what the rest of the account looks like
+/// underneath it.
+///
+/// Travels with the target into [`PaperWallet::fill_at`] rather than as two
+/// more positional arguments, and keeps the "nothing was shrunk" case a named
+/// constructor instead of a repeated pair of defaults.
+#[derive(Debug, Clone, Copy)]
+struct FillContext {
+    /// The signed target the caller's sizing resolved to **before**
+    /// [`PaperWallet::fit_to_account`] fitted it — equal to the target itself
+    /// on every path that fits nothing. Becomes
+    /// [`Order::requested_units`] once the current position is known.
+    requested: Real,
+    rest: RestOfBook,
+}
+
+impl FillContext {
+    /// A fill whose target is exactly what was asked for, against a book
+    /// measured as `rest`.
+    fn exact(target: Real, rest: RestOfBook) -> Self {
+        Self {
+            requested: target,
+            rest,
+        }
+    }
+
+    /// A fill that can only ever *reduce* the position's magnitude — an exit, a
+    /// protective leg, a [`flatten`](Wallet::flatten).
+    ///
+    /// Nothing was shrunk, and the rest of the book is left unmeasured because
+    /// the leverage cap exempts a reducing fill outright: measuring it would be
+    /// dead work whose only effect could be to refuse an exit.
+    fn reducing(target: Real) -> Self {
+        Self::exact(target, RestOfBook::default())
+    }
+}
+
 /// The half-spread a fill of `kind` crosses.
 ///
 /// Zero for a [`Limit`](OrderKind::Limit): a resting limit provides liquidity
@@ -80,13 +140,23 @@ struct FillPricing<'a> {
 /// is what keeps a limit fill from ever pricing worse than the caller's limit.
 ///
 /// Shared by [`PaperWallet::fill_at`] and
-/// [`shrink_buy_to_fit`](PaperWallet::shrink_buy_to_fit) so the price a buy is
+/// [`fit_to_account`](PaperWallet::fit_to_account) so the price a buy is
 /// sized against and the price it books at can't disagree.
 fn half_spread_for(costs: &TradingCosts, kind: OrderKind, price: Real, bar: &Candle) -> Real {
     match kind {
         OrderKind::Limit => 0.0,
         _ => costs.spread.half_spread(price, bar),
     }
+}
+
+/// The slack the leverage check allows, scaled to the magnitudes being
+/// compared.
+///
+/// Shared by [`PaperWallet::fit_to_account`] and [`PaperWallet::fill_at`] so a
+/// magnitude the shrink just fitted to the cap cannot then be refused by it —
+/// the two sides of the same inequality must not disagree over a ULP.
+fn gross_tolerance(held: Real, equity: Real) -> Real {
+    cash_tolerance(held.abs().max(equity.abs()))
 }
 
 /// A resting limit order: a target `side · size` to be reached once the bar
@@ -107,7 +177,7 @@ struct RestingLimit {
 /// turn in [`PaperWallet::advance`]'s credit-then-debit ordering.
 ///
 /// `sizing` is `Some` only for a [`Pending::Sized`] submission, and carries what
-/// [`PaperWallet::shrink_buy_to_fit`] needs to re-fit the buy against cash as it
+/// [`PaperWallet::fit_to_account`] needs to re-fit the buy against cash as it
 /// stands when the fill is finally booked — which is the whole point of holding
 /// the order here rather than filling it where it was resolved.
 struct QueuedFill<Sym> {
@@ -180,6 +250,11 @@ pub struct PaperWallet<Sym> {
     /// pricing path reads it, because simulated money has no venue to check it
     /// against.
     quote_ccy: Option<String>,
+    /// The most gross notional this account may hold, as a multiple of equity.
+    /// `1.0` — the default — is an unlevered book. See
+    /// [`with_max_gross`](Self::with_max_gross); unlike `quote_ccy` this one is
+    /// enforced on every fill.
+    max_gross: Real,
 }
 
 impl<Sym> PaperWallet<Sym> {
@@ -212,6 +287,7 @@ impl<Sym> PaperWallet<Sym> {
             costs,
             per_symbol_costs: SymMap::default(),
             quote_ccy: None,
+            max_gross: 1.0,
         }
     }
 
@@ -225,6 +301,61 @@ impl<Sym> PaperWallet<Sym> {
     pub fn with_quote_ccy(mut self, ccy: impl Into<String>) -> Self {
         self.quote_ccy = Some(ccy.into());
         self
+    }
+
+    /// The most gross notional this wallet may hold, as a multiple of equity:
+    /// no fill may leave `Σ |position| × price` above `max_gross × equity`.
+    /// Defaults to `1.0` — an unlevered account.
+    ///
+    /// **This is the one bound both sides of the book share.** Cash alone
+    /// cannot provide it: a buy is limited by the funds it spends, but a short
+    /// *credits* cash, so nothing stops one piling up exposure. Before this
+    /// existed a `sizing: 3.0` document executed its long leg at 1x (shrunk to
+    /// what cash could pay for) and its short leg at 3x, under one spec value —
+    /// so a long/short backtest reported a number describing neither leg.
+    ///
+    /// For a **long-only** book at `1.0` this is not a new rule, it is the old
+    /// one restated: `gross <= equity` and `funds >= 0` are the same inequality
+    /// when every position is long, so an unlevered long backtest fills exactly
+    /// as it always did. What changes is that a short is now bounded by the
+    /// same number, and that raising it above `1.0` lets cash go negative — the
+    /// account borrows, which is what leverage *is*.
+    ///
+    /// Set it to the leverage the live account it models runs at, so the two
+    /// curves measure the same strategy; read it back off either wallet with
+    /// [`Wallet::leverage`]. A request that overshoots is fitted to the cap when
+    /// the sizing is fractional (and the gap recorded on
+    /// [`Order::requested_units`]) and refused with
+    /// [`WalletError::ExceedsMaxGross`] when it is an explicit unit count —
+    /// the same split [`InsufficientFunds`](WalletError::InsufficientFunds)
+    /// already draws.
+    ///
+    /// **Exits are exempt.** No fill that leaves the position's magnitude at or
+    /// below where it started is ever refused, so an account carried over its
+    /// limit by a mark can always trade its way back — and
+    /// [`flatten`](Wallet::flatten) always works.
+    ///
+    /// Like the cost models and [`retention`](Self::with_retention), this is
+    /// *configuration*: it is not carried in
+    /// [`snapshot_state`](Self::snapshot_state), so a resumed run takes the cap
+    /// of the wallet the caller constructed.
+    ///
+    /// # Panics
+    ///
+    /// If `max_gross` is not finite and strictly positive.
+    pub fn with_max_gross(mut self, max_gross: Real) -> Self {
+        assert!(
+            max_gross > 0.0 && max_gross.is_finite(),
+            "max_gross must be finite and > 0, got {max_gross}"
+        );
+        self.max_gross = max_gross;
+        self
+    }
+
+    /// The gross-exposure multiple this wallet enforces. See
+    /// [`with_max_gross`](Self::with_max_gross).
+    pub fn max_gross(&self) -> Real {
+        self.max_gross
     }
 
     /// How many blotter / rejection entries to retain, or `None` to keep every
@@ -421,6 +552,48 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         ))
     }
 
+    /// Every position except `traded`, marked at `mark` and summed both signed
+    /// (equity) and absolute (exposure) — see [`RestOfBook`].
+    ///
+    /// The traded symbol contributes `0.0` rather than being filtered out, so
+    /// both sums keep the [`ExactSizeIterator`] [`marked_sum`] needs for its
+    /// stack buffer — and, more to the point, land in the same canonical order
+    /// [`marked_equity`](Self::marked_equity) uses. A leverage check summed in
+    /// `HashMap` order would admit a fill on one run and refuse it on the next.
+    fn rest_of_book(&self, traded: &Sym, mark: impl Fn(&Sym) -> Real) -> RestOfBook {
+        let marked = marked_sum(
+            0.0,
+            self.positions.iter().map(|(symbol, &amount)| {
+                if symbol == traded {
+                    0.0
+                } else {
+                    amount * mark(symbol)
+                }
+            }),
+        );
+        let gross = marked_sum(
+            0.0,
+            self.positions.iter().map(|(symbol, &amount)| {
+                if symbol == traded {
+                    0.0
+                } else {
+                    (amount * mark(symbol)).abs()
+                }
+            }),
+        );
+        RestOfBook { marked, gross }
+    }
+
+    /// Whether holding `held` gross notional against `equity` breaches this
+    /// wallet's [`max_gross`](Self::max_gross), given `others` already on the
+    /// book — and by how much room it is over or under.
+    ///
+    /// Returns the notional the traded symbol is *allowed* to hold. Negative
+    /// means the rest of the book has already used the whole budget.
+    fn gross_budget(&self, equity_after: Real, others: Real) -> Real {
+        self.max_gross * equity_after - others
+    }
+
     /// Book a fill: drive `symbol` to `target` signed units, using
     /// `theoretical_price` as the pre-cost trigger price (bar `open` for a
     /// market order, the trigger level — or the `open` on a gap — for a stop /
@@ -432,7 +605,12 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// resting-order triggers both route here. Returns the [`Order`] (also
     /// pushed to the blotter), `Ok(None)` if already at `target`, or a
     /// [`WalletError`] (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`,
-    /// `InsufficientFunds`).
+    /// `InsufficientFunds`, `ExceedsMaxGross`).
+    ///
+    /// `ctx` carries what the caller *asked* for (which becomes
+    /// [`Order::requested_units`]) and the rest of the book as that caller
+    /// marks it — this is the one place the account's two solvency rules are
+    /// enforced, so it is the one place both have to be answerable.
     fn fill_at(
         &mut self,
         symbol: Sym,
@@ -440,6 +618,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         theoretical_price: Real,
         kind: OrderKind,
         id: OrderId,
+        ctx: FillContext,
     ) -> Result<Option<Order<Sym>>, WalletError> {
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target - current;
@@ -482,19 +661,42 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         let notional = final_price * units;
         let commission = costs.commission.commission(notional, units).max(0.0);
 
-        // No margin: a net buy plus its commission can't drive cash below zero
-        // (tolerant of the epsilon rounding in an all-in `value_frac(1.0)`,
-        // whose cost equals funds when zero-cost).
-        if delta > 0.0 {
+        // Solvency, in two rules — see `fit_to_account`, which fits a
+        // fractional sizing to exactly these before it ever gets here.
+        //
+        // 1. Cash. On an unlevered wallet a net buy plus its commission can't
+        //    drive cash below zero (tolerant of the epsilon rounding in an
+        //    all-in `value_frac(1.0)`, whose cost equals funds when zero-cost).
+        //    Above `max_gross = 1.0` the account may borrow, so this lifts.
+        if delta > 0.0 && self.max_gross <= 1.0 {
             let cost = delta * final_price + commission;
             let tolerance = cash_tolerance(self.funds);
             if cost - self.funds > tolerance {
                 return Err(WalletError::InsufficientFunds);
             }
         }
+        // 2. Leverage. Gross notional after this fill must fit
+        //    `max_gross × equity`. Only a fill that *raises* the position's
+        //    magnitude is bound: an exit lowers gross, so an account carried
+        //    over the line by a mark can always trade its way back — and
+        //    `flatten` can always flatten. For a long-only book at the default
+        //    `1.0` this is rule 1 restated (`gross <= equity` **is**
+        //    `funds >= 0` when nothing is short), which is why an unlevered
+        //    long backtest fills exactly as it did before this existed; what it
+        //    adds is the same bound on the short side, where crediting cash
+        //    means rule 1 never fires.
+        if target.abs() > current.abs() {
+            let equity_after = self.funds + current * final_price + ctx.rest.marked - commission;
+            let allowed = self.gross_budget(equity_after, ctx.rest.gross);
+            let held = target.abs() * final_price;
+            if held - allowed > gross_tolerance(held, equity_after) {
+                return Err(WalletError::ExceedsMaxGross);
+            }
+        }
         let order = Order::from_delta(symbol.clone(), delta, final_price, kind, id)
             .expect("delta exceeds POSITION_EPSILON, so the order is non-empty")
-            .with_commission(commission);
+            .with_commission(commission)
+            .with_requested_units((ctx.requested - current).abs());
         // Pay for a buy, receive for a sell — and pay commission out of cash
         // on both sides.
         self.funds -= order.signed_units() * final_price + commission;
@@ -515,35 +717,54 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         Ok(Some(order))
     }
 
-    /// Shrink a resolved [`Size`] magnitude so a net buy fits within available
-    /// cash *after* spread, slippage and commission. Only fractional sizings
-    /// (`ValueFraction` / `FundsFraction`) hit the funds ceiling this covers —
-    /// [`Size::Units`] is a caller-explicit unit count that should fail loudly
-    /// if it doesn't fit rather than silently truncate, and a sell always
-    /// credits cash. Returns the input magnitude unchanged on any of those.
+    /// Fit a resolved [`Size`] magnitude to what the account can actually
+    /// carry: a net buy within available cash, and **either** side within the
+    /// wallet's [`max_gross`](Self::max_gross) leverage cap.
+    ///
+    /// Only fractional sizings (`ValueFraction` / `FundsFraction`) come through
+    /// here — [`Size::Units`] is a caller-explicit unit count that should fail
+    /// loudly rather than silently truncate. What it returns is what fills; the
+    /// magnitude that was *asked* for rides along to the blotter as
+    /// [`Order::requested_units`], so a rounding adjustment and a 3× reduction
+    /// are no longer the same silence.
+    ///
+    /// **Two constraints, and each binds a different side of the book.**
+    ///
+    /// 1. *Cash*, on a net buy, when the wallet is unlevered
+    ///    (`max_gross <= 1.0`): spread + slippage + commission must fit
+    ///    available funds. Above `1.0` the account may borrow, and this stops
+    ///    applying — a negative cash balance is what leverage buys.
+    /// 2. *Gross exposure*, on any fill that raises the position's magnitude:
+    ///    `|target| × price` plus the rest of the book must stay within
+    ///    `max_gross × equity`. This is the one a **short** runs into. A sale
+    ///    credits cash, so constraint 1 never fires on one; without this a
+    ///    `value_frac(3.0)` short simply took 3× the exposure its long twin
+    ///    took under the same spec value.
+    ///
+    /// A fill that does not raise the magnitude is bounded by neither: an exit
+    /// frees cash and lowers gross, so it is returned untouched.
     ///
     /// The cost pipeline is opaque behind [`CommissionModel`] / [`SpreadModel`]
-    /// / [`SlippageModel`] so the shrink is a fixed-point iteration rather
-    /// than a closed-form invert: probe the cost at the current magnitude,
-    /// scale down by the deficit ratio, repeat. Converges in one step for
-    /// linear cost shapes (`PercentageCommission`, `FixedBpsSpread`), quickly
-    /// for the others; an 8-iteration cap keeps a pathological composite
-    /// bounded.
-    /// Shrink a fractional buy so spread + slippage + commission fit available
-    /// cash, at `price` for a fill of `kind`.
+    /// / [`SlippageModel`] so the fit is a fixed-point iteration rather
+    /// than a closed-form invert: probe both constraints at the current
+    /// magnitude, scale down by the tighter deficit ratio, repeat. Converges in
+    /// one step for linear cost shapes (`PercentageCommission`,
+    /// `FixedBpsSpread`), quickly for the others; an 8-iteration cap keeps a
+    /// pathological composite bounded.
     ///
     /// `price` and `kind` are parameters rather than `candle.open` /
     /// `OrderKind::Market` because a resting limit fills at its own price: sized
     /// against the open, an all-in limit buy below the market would shrink to
     /// the units the *open* could afford rather than the (larger) number its
     /// own cheaper fill can.
-    fn shrink_buy_to_fit(
+    fn fit_to_account(
         &self,
         symbol: &Sym,
         side: Side,
         current: Real,
         magnitude: Real,
         pricing: FillPricing<'_>,
+        rest: RestOfBook,
     ) -> Real {
         let FillPricing {
             bar: candle,
@@ -553,37 +774,59 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         if magnitude <= 0.0 {
             return magnitude;
         }
-        // A sell (delta < 0) credits cash and always fits.
-        let target = side.sign() * magnitude;
-        if target - current <= 0.0 {
+        // A pure reduction — a sell that doesn't flip through zero, or a buy
+        // that only covers part of a short — credits cash and lowers gross.
+        // Neither constraint can bind, so skip pricing it at all.
+        let asked = side.sign() * magnitude;
+        if asked - current <= 0.0 && asked.abs() <= current.abs() {
             return magnitude;
         }
         let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
-        let tolerance = cash_tolerance(self.funds);
         let mut m = magnitude;
         for _ in 0..8 {
-            let delta = side.sign() * m - current;
-            if delta <= 0.0 {
-                return m.max(0.0);
-            }
+            let target = side.sign() * m;
+            let delta = target - current;
+            // Price the fill exactly as `fill_at` will: direction from the
+            // delta's sign, so a reversal's *sell* leg is priced as a sell.
+            let direction = if delta > 0.0 { Side::Buy } else { Side::Sell };
             let half_spread = half_spread_for(costs, kind, price, candle);
-            let post_spread = price + half_spread; // net buy
+            let post_spread = match direction {
+                Side::Buy => price + half_spread,
+                Side::Sell => price - half_spread,
+            };
+            let units = delta.abs();
             let final_price = costs
                 .slippage
-                .adjust(Side::Buy, post_spread, delta, candle, kind);
+                .adjust(direction, post_spread, units, candle, kind);
             if final_price <= 0.0 {
                 return 0.0;
             }
-            let notional = final_price * delta;
-            let commission = costs.commission.commission(notional, delta).max(0.0);
-            let cost = notional + commission;
-            if cost - self.funds <= tolerance {
+            let notional = final_price * units;
+            let commission = costs.commission.commission(notional, units).max(0.0);
+
+            // The tighter of the two deficits wins; `1.0` means nothing binds.
+            let mut scale: Real = 1.0;
+            if delta > 0.0 && self.max_gross <= 1.0 {
+                let cost = notional + commission;
+                if cost - self.funds > cash_tolerance(self.funds) && cost > 0.0 {
+                    scale = scale.min(self.funds / cost);
+                }
+            }
+            if target.abs() > current.abs() {
+                // Equity after this fill is independent of its size (a trade at
+                // its own fill price moves nothing but the commission), so this
+                // is a genuine bound on `|target|` rather than a moving one.
+                let equity_after = self.funds + current * final_price + rest.marked - commission;
+                let allowed = self.gross_budget(equity_after, rest.gross);
+                let held = target.abs() * final_price;
+                if held - allowed > gross_tolerance(held, equity_after) && held > 0.0 {
+                    scale = scale.min((allowed / held).max(0.0));
+                }
+            }
+            if scale >= 1.0 {
                 return m;
             }
-            // Scale toward feasibility. For a linear cost model this converges
-            // in one step; for a non-linear one it monotonically decreases.
-            let scale = (self.funds / cost).clamp(0.0, 1.0);
-            let next = m * scale;
+            let next = m * scale.clamp(0.0, 1.0);
             if (m - next).abs() <= cash_tolerance(m) {
                 return next.max(0.0);
             }
@@ -594,22 +837,24 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
 
     /// Pre-flight a market submission against the last close: reject
     /// synchronously when the symbol has never been priced, its close is
-    /// non-positive, or a net-buy `delta` clearly can't be paid for out of
-    /// cash on hand at that price.
+    /// non-positive, or the move from `current` to `target` clearly breaches
+    /// either solvency rule at that price.
     ///
     /// Used by [`Wallet::set_position`](Wallet::set_position) — the
     /// unit-explicit market path — and mirrors what a live venue does with an
-    /// unfillable order. The affordability check is *approximate* (uses
-    /// last-close as a proxy for the actual fill price at next open, and
-    /// ignores costs), so a submission that just clears here can still be
-    /// dropped into the rejections log at fill time if the open gaps
-    /// meaningfully higher than the close.
-    fn preflight_market(&self, symbol: &Sym, delta: Real) -> Result<(), WalletError> {
+    /// unfillable order. See [`check_solvency`](Self::check_solvency) for why
+    /// the answer is approximate.
+    fn preflight_market(
+        &self,
+        symbol: &Sym,
+        current: Real,
+        target: Real,
+    ) -> Result<(), WalletError> {
         let close = self.price(symbol).ok_or(WalletError::UnknownPrice)?.0;
         if close <= 0.0 {
             return Err(WalletError::InvalidPrice);
         }
-        self.check_buy_affordability(delta, close)
+        self.check_solvency(symbol, current, target, close)
     }
 
     /// Reject a net-buy `delta` whose notional at `price` clearly exceeds
@@ -647,14 +892,49 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         self.trim();
     }
 
-    fn check_buy_affordability(&self, delta: Real, price: Real) -> Result<(), WalletError> {
-        if delta <= 0.0 {
-            return Ok(());
+    /// Refuse a move from `current` to `target` units of `symbol` that the
+    /// account plainly cannot carry at `price` — the submission-time twin of the
+    /// two solvency rules [`fill_at`](Self::fill_at) enforces, in the same order
+    /// and under the same names.
+    ///
+    /// **Approximate on purpose.** It prices at the last close rather than the
+    /// fill the caller will actually get, and ignores the cost pipeline, so a
+    /// submission that just clears here can still land in the rejection log at
+    /// fill time if the open gaps. The point is to refuse the plainly
+    /// infeasible synchronously, the way a live venue does, not to predict the
+    /// fill.
+    ///
+    /// Only unit-explicit paths ([`Size::Units`], [`set_position`](Wallet::set_position))
+    /// come through here: a fractional sizing is *fitted* to both rules at fill
+    /// time instead of refused, so pre-flighting one would reject an order the
+    /// wallet was about to make feasible.
+    fn check_solvency(
+        &self,
+        symbol: &Sym,
+        current: Real,
+        target: Real,
+        price: Real,
+    ) -> Result<(), WalletError> {
+        let delta = target - current;
+        if delta > 0.0 && self.max_gross <= 1.0 {
+            let cost = delta * price;
+            if cost - self.funds > cash_tolerance(self.funds) {
+                return Err(WalletError::InsufficientFunds);
+            }
         }
-        let cost = delta * price;
-        let tolerance = cash_tolerance(self.funds);
-        if cost - self.funds > tolerance {
-            return Err(WalletError::InsufficientFunds);
+        // Only a move that raises exposure is bound — the same exemption that
+        // keeps an exit, and `flatten`, always feasible. This is the check a
+        // short hits: `set_position(sym, -500)` costs no cash at all, so
+        // without it the only thing standing between a spec and a 5× book was
+        // that nobody had asked.
+        if target.abs() > current.abs() {
+            let rest = self.rest_of_book(symbol, |s| self.bars.get(s).map_or(0.0, |c| c.close));
+            let equity = self.funds + current * price + rest.marked;
+            let allowed = self.gross_budget(equity, rest.gross);
+            let held = target.abs() * price;
+            if held - allowed > gross_tolerance(held, equity) {
+                return Err(WalletError::ExceedsMaxGross);
+            }
         }
         Ok(())
     }
@@ -711,27 +991,21 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         self.limits.remove(symbol);
 
         let position = self.positions.get(symbol).copied().unwrap_or(0.0);
-        let equity_at_fill = self.funds
-            + self
-                .positions
-                .iter()
-                .map(|(s, &a)| {
-                    let mark = if s == symbol {
-                        fill
-                    } else {
-                        self.bars.get(s).map_or(0.0, |c| c.close)
-                    };
-                    a * mark
-                })
-                .sum::<Real>();
+        // The rest of the book at its last closes; this symbol at the fill
+        // price. A limit settles late in the bar (phase 6), so the closes are
+        // the honest marks here — the same ones the equity this sizes against
+        // has always used.
+        let rest = self.rest_of_book(symbol, |s| self.bars.get(s).map_or(0.0, |c| c.close));
+        let equity_at_fill = self.funds + position * fill + rest.marked;
         let magnitude = resting
             .size
             .resolve(fill, position, self.funds, equity_at_fill);
+        let requested = resting.side.sign() * magnitude;
         // Same rule as the queued-market path: a fractional sizing means "as
-        // much as fits", so shrink it to leave room for commission; an explicit
+        // much as fits", so fit it to cash and to the leverage cap; an explicit
         // unit count is a specific intent and is left alone.
         let magnitude = match resting.size {
-            Size::ValueFraction(_) | Size::FundsFraction(_) => self.shrink_buy_to_fit(
+            Size::ValueFraction(_) | Size::FundsFraction(_) => self.fit_to_account(
                 symbol,
                 resting.side,
                 position,
@@ -741,12 +1015,20 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
                     price: fill,
                     kind: OrderKind::Limit,
                 },
+                rest,
             ),
             Size::Units(_) | Size::PositionFraction(_) => magnitude,
         };
         let target = resting.side.sign() * magnitude;
 
-        match self.fill_at(symbol.clone(), target, fill, OrderKind::Limit, resting.id) {
+        match self.fill_at(
+            symbol.clone(),
+            target,
+            fill,
+            OrderKind::Limit,
+            resting.id,
+            FillContext::exact(requested, rest),
+        ) {
             Ok(order) => order,
             Err(error) => {
                 self.push_rejection(symbol, resting.id, error, OrderKind::Limit);
@@ -818,7 +1100,14 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             .resolve(fill, pos, self.funds, self.equity().0)
             .min(pos.abs());
         let target = pos - pos.signum() * magnitude;
-        match self.fill_at(symbol.clone(), target, fill, kind, leg.id) {
+        match self.fill_at(
+            symbol.clone(),
+            target,
+            fill,
+            kind,
+            leg.id,
+            FillContext::reducing(target),
+        ) {
             Ok(order) => order,
             Err(error) => {
                 self.push_rejection(symbol, leg.id, error, kind);
@@ -866,6 +1155,22 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// Whatever [`with_quote_ccy`](PaperWallet::with_quote_ccy) was told, and
     /// `None` otherwise — simulated money has no venue to ask, so an unlabelled
     /// paper wallet genuinely does not know what unit it is counting in.
+    /// The gross-exposure multiple this wallet enforces —
+    /// [`max_gross`](PaperWallet::max_gross), the same for every symbol.
+    ///
+    /// Unlike [`quote_ccy`](Wallet::quote_ccy), which a paper wallet can only
+    /// answer if it was told, this one it *knows*: the number is a rule it
+    /// applies to every fill, not a label. `Some(1.0)` from a default wallet is
+    /// a claim about behaviour — an unlevered book — and not the "does not say"
+    /// the trait's `None` means.
+    ///
+    /// Which is the point of answering at all: a live account's leverage is set
+    /// out of band and readable only from the venue, so the paper side has to
+    /// be able to state its own for the two to be compared.
+    fn leverage(&self, _symbol: &Sym) -> Option<Real> {
+        Some(self.max_gross)
+    }
+
     fn quote_ccy(&self) -> Option<&str> {
         self.quote_ccy.as_deref()
     }
@@ -903,7 +1208,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     ///    sells one holding to fund another is only affordable once the sale
     ///    has settled, so a buy priced first gets silently scaled down to
     ///    whatever residual cash was lying around (see the shrink helper
-    ///    `shrink_buy_to_fit`). Phases 3–6 settle
+    ///    `fit_to_account`). Phases 3–6 settle
     ///    every cash-crediting fill before any cash-consuming one, so a
     ///    rotation is funded by its own proceeds no matter what order the
     ///    symbols arrive in.
@@ -966,7 +1271,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 target,
                 sizing,
                 id,
-                // Classified on the *unshrunk* target: `shrink_buy_to_fit`
+                // Classified on the *unshrunk* target: `fit_to_account`
                 // returns early once the delta is non-positive, so shrinking can
                 // never turn a buy into a sell and the classification is stable.
                 credits: target - position <= 0.0,
@@ -978,19 +1283,31 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // Phases 3 and 4 — market credits, then market debits.
         for q in queued {
             let position = self.positions.get(&q.symbol).copied().unwrap_or(0.0);
+            // The rest of the book as of *this bar's opens* — the prices these
+            // fills happen at. Reading a `close` for a symbol that also trades
+            // this bar would let information from later in the bar decide how
+            // big this fill is, which is the lookahead `equity_at_open` above
+            // is built to avoid. Recomputed per fill because the fills ahead of
+            // this one in the phase have already moved the book.
+            let rest =
+                self.rest_of_book(&q.symbol, |s| match bars.iter().find(|(sym, _)| sym == s) {
+                    Some((_, candle)) => candle.open,
+                    None => self.bars.get(s).map_or(0.0, |c| c.close),
+                });
             // For a fractional sizing ("as much of my equity/funds as fits"),
-            // shrink a net buy so spread + slippage + commission fit available
-            // cash. Without this, an all-in `value_frac(1.0)` under any positive
-            // cost model would size the notional to the entire equity, and
-            // paying commission on top would fail the affordability check in
-            // `fill_at` and silently drop the fill. An explicit `Size::Units(n)`
-            // or `Size::PositionFraction(f)` carries a specific unit intent and
-            // is left alone — an infeasible request is a caller error, not a
+            // fit the target to what the account can carry: a net buy to
+            // available cash, either side to the leverage cap. Without the cash
+            // half, an all-in `value_frac(1.0)` under any positive cost model
+            // would size the notional to the entire equity, and paying
+            // commission on top would fail the affordability check in `fill_at`
+            // and silently drop the fill. An explicit `Size::Units(n)` or
+            // `Size::PositionFraction(f)` carries a specific unit intent and is
+            // left alone — an infeasible request is a caller error, not a
             // sizing target.
             let target = match q.sizing {
                 Some((side, Size::ValueFraction(_) | Size::FundsFraction(_))) => {
                     side.sign()
-                        * self.shrink_buy_to_fit(
+                        * self.fit_to_account(
                             &q.symbol,
                             side,
                             position,
@@ -1000,6 +1317,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                                 price: q.candle.open,
                                 kind: OrderKind::Market,
                             },
+                            rest,
                         )
                 }
                 _ => q.target,
@@ -1010,6 +1328,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 q.candle.open,
                 OrderKind::Market,
                 q.id,
+                FillContext::exact(q.target, rest),
             ) {
                 Ok(Some(order)) => fills.push(order),
                 Ok(None) => {}
@@ -1061,7 +1380,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // synchronously (mirroring a live venue's rejection) rather than
         // queuing an order that fill_at will drop into the rejections log.
         let current = self.positions.get(&target.symbol).copied().unwrap_or(0.0);
-        if let Err(e) = self.preflight_market(&target.symbol, target.amount - current) {
+        if let Err(e) = self.preflight_market(&target.symbol, current, target.amount) {
             return Err(self.reject_submission(&target.symbol, e));
         }
         let id = self.mint();
@@ -1072,10 +1391,11 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 
     fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
         // Pre-flight what we can at submission: price validity always, and the
-        // affordability check for an explicit Size::Units target. Fractional
-        // sizings (ValueFraction / FundsFraction) always shrink to fit at
-        // fill time, so they never fail a submission-time affordability
-        // check and only need the price-validity guards here.
+        // solvency checks for an explicit Size::Units target. Fractional
+        // sizings (ValueFraction / FundsFraction) are always fitted to cash and
+        // to the leverage cap at fill time, so they never fail a
+        // submission-time solvency check and only need the price-validity
+        // guards here.
         let close = match self.price(&symbol) {
             Some(p) => p.0,
             None => return Err(self.reject_submission(&symbol, WalletError::UnknownPrice)),
@@ -1086,7 +1406,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         if let Size::Units(units) = size {
             let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
             let target = side.sign() * units.abs();
-            if let Err(e) = self.check_buy_affordability(target - current, close) {
+            if let Err(e) = self.check_solvency(&symbol, current, target, close) {
                 return Err(self.reject_submission(&symbol, e));
             }
         }
@@ -1191,7 +1511,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 continue;
             };
             let id = self.mint();
-            match self.fill_at(symbol.clone(), 0.0, price, OrderKind::Market, id) {
+            match self.fill_at(
+                symbol.clone(),
+                0.0,
+                price,
+                OrderKind::Market,
+                id,
+                FillContext::reducing(0.0),
+            ) {
                 Ok(Some(order)) => fills.push(order),
                 Ok(None) => {}
                 Err(e) => {
@@ -2060,7 +2387,14 @@ mod tests {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         // "X" was never fed a bar. fill_at flags it directly...
         assert_eq!(
-            w.fill_at("X", 1.0, 50.0, OrderKind::Market, OrderId(0)),
+            w.fill_at(
+                "X",
+                1.0,
+                50.0,
+                OrderKind::Market,
+                OrderId(0),
+                FillContext::exact(1.0, RestOfBook::default())
+            ),
             Err(WalletError::UnknownPrice)
         );
         // ...and the submission-time pre-flight refuses to queue an order
@@ -2080,13 +2414,20 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_funds_is_flagged_at_submission_but_shorts_are_free() {
+    fn insufficient_funds_is_flagged_at_submission_and_a_short_is_bounded_too() {
         let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
         w.update("X", bar(50.0));
         // 3 units cost 150 > 100 funds, and there is no margin. fill_at
         // flags it directly...
         assert_eq!(
-            w.fill_at("X", 3.0, 50.0, OrderKind::Market, OrderId(0)),
+            w.fill_at(
+                "X",
+                3.0,
+                50.0,
+                OrderKind::Market,
+                OrderId(0),
+                FillContext::exact(3.0, RestOfBook::default())
+            ),
             Err(WalletError::InsufficientFunds)
         );
         // ...and set/set_position pre-flight against last close so a caller
@@ -2102,10 +2443,219 @@ mod tests {
             }),
             Err(WalletError::InsufficientFunds)
         );
-        // A short sale credits cash, so selling is always feasible.
-        w.set("X", Side::Sell, Size::units(3.0)).unwrap();
+        // A short sale credits cash, so the *cash* rule can never bound it —
+        // which is exactly why the leverage rule has to. 3 units short is 150
+        // of gross against 100 of equity: 1.5x on an unlevered wallet.
+        assert_eq!(
+            w.set("X", Side::Sell, Size::units(3.0)),
+            Err(WalletError::ExceedsMaxGross)
+        );
+        assert_eq!(
+            w.set_position(Units {
+                symbol: "X",
+                amount: -3.0
+            }),
+            Err(WalletError::ExceedsMaxGross)
+        );
+        // 2 units short is 100 of gross against 100 of equity — exactly 1x, and
+        // the mirror image of the 2-unit long the cash rule allows.
+        w.set("X", Side::Sell, Size::units(2.0)).unwrap();
         w.update("X", bar(50.0));
-        assert_eq!(w.position(&"X").amount, -3.0);
+        assert_eq!(w.position(&"X").amount, -2.0);
+        assert_eq!(w.funds().0, 200.0);
+        assert_eq!(w.equity().0, 100.0);
+    }
+
+    /// The bug this cap exists for: one `sizing` value meaning two different
+    /// exposures depending only on which side the document took.
+    ///
+    /// `value_frac(3.0)` used to be shrunk to 1x on the long side (the buy ran
+    /// out of cash) and honoured in full on the short (a sale *credits* cash,
+    /// so nothing bounded it). A long/short document therefore reported a
+    /// number describing neither leg. Both sides now land on the same 1x, and
+    /// both record that 3x was what was asked for.
+    #[test]
+    fn a_short_is_bounded_by_the_same_gross_limit_as_a_long() {
+        let mut sides = Vec::new();
+        for side in [Side::Buy, Side::Sell] {
+            let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+            w.update("X", bar(100.0));
+            w.set("X", side, Size::value_frac(3.0)).unwrap();
+            let fills = w.update("X", bar(100.0));
+
+            assert_eq!(fills.len(), 1);
+            // 100 units at 100 is 10,000 of gross against 10,000 of equity.
+            assert!((fills[0].units - 100.0).abs() < 1e-9, "{:?}", fills[0]);
+            // ...and the blotter says 300 was the ask, so the gap is findable.
+            assert!(
+                (fills[0].requested_units - 300.0).abs() < 1e-9,
+                "{:?}",
+                fills[0]
+            );
+            assert!((fills[0].fill_ratio() - 1.0 / 3.0).abs() < 1e-9);
+            assert!(
+                w.take_rejections().is_empty(),
+                "a fitted fill is not a refusal"
+            );
+
+            let position = w.position(&"X").amount;
+            sides.push(position.abs() * 100.0 / w.equity().0);
+            assert!((position.abs() - 100.0).abs() < 1e-9);
+        }
+        assert!(
+            (sides[0] - sides[1]).abs() < 1e-9,
+            "long took {:.2}x and short took {:.2}x under one spec value",
+            sides[0],
+            sides[1]
+        );
+        assert!(
+            (sides[0] - 1.0).abs() < 1e-9,
+            "expected 1x, got {:.2}x",
+            sides[0]
+        );
+    }
+
+    /// And the knob lifts both sides by the same multiple — which is what makes
+    /// a 3x live account comparable to a backtest at all.
+    #[test]
+    fn max_gross_lifts_both_sides_together() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0).with_max_gross(3.0);
+            w.update("X", bar(100.0));
+            w.set("X", side, Size::value_frac(3.0)).unwrap();
+            let fills = w.update("X", bar(100.0));
+
+            assert_eq!(fills.len(), 1);
+            assert!((fills[0].units - 300.0).abs() < 1e-9, "{:?}", fills[0]);
+            // Nothing was fitted this time, so the two agree.
+            assert!((fills[0].fill_ratio() - 1.0).abs() < 1e-12);
+            assert!((w.position(&"X").amount.abs() - 300.0).abs() < 1e-9);
+            // Equity is untouched by the trade itself; gross is 3x it. On the
+            // long side that means cash went negative — the account borrowed,
+            // which is what leverage is.
+            assert!((w.equity().0 - 10_000.0).abs() < 1e-9);
+            let expect_funds = if side == Side::Buy {
+                -20_000.0
+            } else {
+                40_000.0
+            };
+            assert!((w.funds().0 - expect_funds).abs() < 1e-9, "{}", w.funds().0);
+        }
+    }
+
+    /// An account can drift over its limit on a mark, and must always be able
+    /// to trade its way back. Every fill that lowers exposure is exempt.
+    #[test]
+    fn the_cap_never_blocks_a_way_out() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        assert!((w.position(&"X").amount + 100.0).abs() < 1e-9);
+
+        // The short doubles against the account: 20,000 of gross on 0 of equity.
+        w.update("X", bar(200.0));
+        assert!(w.position(&"X").amount.abs() * 200.0 > w.equity().0);
+
+        // Adding to it is refused (`set` targets an absolute position, so 110
+        // short is the 100 it holds plus 10 more)...
+        assert_eq!(
+            w.set("X", Side::Sell, Size::units(110.0)),
+            Err(WalletError::ExceedsMaxGross)
+        );
+        // ...and so is holding it at the same size but *further* out, while
+        // trimming it is allowed even though the book stays over the line.
+        w.set("X", Side::Sell, Size::units(90.0)).unwrap();
+        // ...but covering it is not, at any size, including all of it. Drain
+        // the deliberate refusal above first, so what is asserted is that
+        // `flatten` books cleanly rather than that nothing was ever refused.
+        let _ = w.take_rejections();
+        let fills = w.flatten();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(w.position(&"X").amount, 0.0);
+        assert!(w.take_rejections().is_empty(), "flatten was refused");
+    }
+
+    /// The cap counts *gross*, so a long and a short share one budget rather
+    /// than each getting their own — the netting a real margin account does not
+    /// give you for free.
+    #[test]
+    fn a_long_and_a_short_share_one_gross_budget() {
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
+        let bars = [
+            (crate::types::symbol("A"), bar(100.0)),
+            (crate::types::symbol("B"), bar(100.0)),
+        ];
+        w.advance(&bars);
+        // Half the budget long...
+        w.set(crate::types::symbol("A"), Side::Buy, Size::value_frac(0.5))
+            .unwrap();
+        w.advance(&bars);
+        // ...leaves half for the short, however much cash the sale credits.
+        w.set(crate::types::symbol("B"), Side::Sell, Size::value_frac(1.0))
+            .unwrap();
+        w.advance(&bars);
+
+        let a = w.position(&crate::types::symbol("A")).amount;
+        let b = w.position(&crate::types::symbol("B")).amount;
+        assert!((a - 50.0).abs() < 1e-9, "A held {a}");
+        assert!(
+            (b + 50.0).abs() < 1e-9,
+            "B held {b} — the short took its own budget"
+        );
+        let gross = (a.abs() + b.abs()) * 100.0;
+        assert!((gross - w.equity().0).abs() < 1e-6, "gross {gross}");
+    }
+
+    /// `leverage` reports the rule the wallet applies, not a label it was
+    /// handed — which is what makes it comparable to a live venue's answer.
+    #[test]
+    fn leverage_reports_the_cap_it_enforces() {
+        let w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        assert_eq!(w.leverage(&"X"), Some(1.0));
+        assert_eq!(w.max_gross(), 1.0);
+
+        let w: PaperWallet<&str> = PaperWallet::new(1_000.0).with_max_gross(2.5);
+        assert_eq!(w.leverage(&"X"), Some(2.5));
+        // Answered for a symbol it has never been fed, because the cap is a
+        // property of the account rather than of the instrument.
+        assert_eq!(w.leverage(&"never-seen"), Some(2.5));
+
+        // A sleeve is a view onto the account, so it reports the account's rule.
+        let sleeve = SleeveWallet::new(w, HashMap::new());
+        assert_eq!(sleeve.leverage(&"X"), Some(2.5));
+    }
+
+    #[test]
+    #[should_panic(expected = "max_gross must be finite and > 0")]
+    fn a_non_positive_max_gross_is_a_construction_error() {
+        let _: PaperWallet<&str> = PaperWallet::new(1_000.0).with_max_gross(0.0);
+    }
+
+    /// An all-in under commission sheds a sliver, and that must stay
+    /// distinguishable from a request scaled to a third of itself — the whole
+    /// reason the requested magnitude is carried rather than a "was shrunk" flag.
+    #[test]
+    fn a_rounding_adjustment_and_a_real_reduction_are_told_apart() {
+        use crate::costs::{FixedBpsSpread, NoSlippage, PercentageCommission};
+        let costs = TradingCosts::new(
+            Box::new(PercentageCommission::new(0.001)),
+            Box::new(FixedBpsSpread::new(0.0)),
+            Box::new(NoSlippage),
+        );
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        let fills = w.update("X", bar(100.0));
+        let ratio = fills[0].fill_ratio();
+        assert!(ratio < 1.0, "an all-in under costs must shed something");
+        assert!(ratio > 0.99, "but only a sliver, got {ratio}");
+
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        let fills = w.update("X", bar(100.0));
+        assert!((fills[0].fill_ratio() - 1.0 / 3.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2114,7 +2664,14 @@ mod tests {
         w.update("X", bar(0.0));
         // fill_at flags a non-positive theoretical price directly...
         assert_eq!(
-            w.fill_at("X", 1.0, 0.0, OrderKind::Market, OrderId(0)),
+            w.fill_at(
+                "X",
+                1.0,
+                0.0,
+                OrderKind::Market,
+                OrderId(0),
+                FillContext::exact(1.0, RestOfBook::default())
+            ),
             Err(WalletError::InvalidPrice)
         );
         // ...and submissions against a symbol whose last close is
@@ -2138,7 +2695,14 @@ mod tests {
         w.update("X", Candle::new(100.0, 110.0, 90.0, 105.0, 0.0));
         // 120 is above the bar's high — it never traded there this bar.
         assert_eq!(
-            w.fill_at("X", 1.0, 120.0, OrderKind::Stop, OrderId(0)),
+            w.fill_at(
+                "X",
+                1.0,
+                120.0,
+                OrderKind::Stop,
+                OrderId(0),
+                FillContext::exact(1.0, RestOfBook::default())
+            ),
             Err(WalletError::PriceOutOfRange)
         );
     }

@@ -110,30 +110,66 @@ rejected — it would make an arbitrary answer deterministic rather than making 
 answer not matter, which is what the phase split does for every non-contended
 case.
 
-### A cash-bound buy is scaled down without saying so
+### A fitted fill is scaled down without saying so — *settled*
 
-`shrink_buy_to_fit` scales an unaffordable buy toward feasibility instead of
-refusing it, and records nothing. That is deliberate for its designed purpose —
-an all-in `value_frac(1.0)` must shed a sliver to make room for commission, or
-it would fail the affordability check and drop the fill entirely — but the same
-silence covers a buy starved down to 2% of its target. A 17× reduction and a
-rounding adjustment are indistinguishable in the blotter, and the CLI's "N orders
-were refused by the wallet" line does not cover either, because neither is a
-refusal.
+**Settled, in the shape this entry called for.** `requested_units` is a
+field on `Order`, beside `units`; `fill_ratio()` is `units / requested_units`;
+`fills.csv` carries the column on every row and the CLI warns past
+`MATERIALLY_FITTED` (1%). The reasoning that picked that shape is kept below,
+because it is what rules out the alternatives if this is ever revisited.
 
-Not fixed here, because the obvious version does not work: *any* reduction means
-the buy was cash-bound, so a naive counter fires on every all-in trade under any
-positive cost model and reads as noise. Distinguishing "shed room for costs" from
-"starved" needs either a materiality threshold (a magic number) or the requested
-magnitude carried alongside the filled one so the consumer can judge.
+*Any* reduction means the fill was bound, so a naive "was it shrunk" counter
+fires on every all-in trade under any positive cost model and reads as noise — an
+all-in `value_frac(1.0)` **must** shed a sliver to make room for commission, or it
+would fail the affordability check and drop the fill entirely. Distinguishing
+"shed room for costs" from "starved" needs either a materiality threshold (a magic
+number) or the requested magnitude carried alongside the filled one so the
+consumer can judge. Carrying the magnitude costs one field, needs no new drain or
+retention policy, rides the blotter that already reaches `fills.csv` and the
+Python report, and leaves the threshold where it belongs — with whoever is
+reading. The CLI picks 1% and says so; nothing else has to.
 
-**The shape it should take:** `requested_units` on `Order`, beside `units`.
-It costs one field, needs no new drain or retention policy, rides the blotter
-that already reaches `fills.csv` and the Python report, and lets the CLI count
-whatever it wants to call material. **What would change the priority:** it was
-the phase bug that made this matter — with rotations funded correctly, a
-cash-bound fractional buy now means the spec really did ask for more than the
-account has.
+What made it urgent was the second half of the same report: the bound itself was
+asymmetric. A buy was limited by the cash it spent and a sale credited cash, so
+`sizing: 3.0` executed at 1x long and 3x short under one spec value, and the
+silence covered *that* too. Both are now bounded by gross notional
+(`PaperWallet::with_max_gross`, `1.0` by default — for a long-only book the same
+inequality as `funds >= 0`, so an unlevered long backtest is unchanged), and a
+request above the cap is fitted and recorded rather than reinterpreted.
+
+### Leverage is bounded at fill time, not tracked between fills
+
+`max_gross` is checked when a fill books and never re-checked afterwards, so a
+book at exactly the cap drifts over it the moment marks move against it. Nothing
+liquidates, nothing warns, and the account simply cannot *add* until it is back
+under — exits stay exempt precisely so it can trade its way out.
+
+That is deliberate, and it is the line `ARCHITECTURE.md` already draws around
+ruin: a maintenance-margin model needs venue assumptions fugazi does not have
+(which marks, what haircut, liquidated at what price, in what order). What is
+here bounds what a *strategy may ask for* so a levered backtest and the live
+account it tracks agree on the size of the book. What is not here is what a venue
+would do to that book afterwards.
+
+**What would change this:** a user reporting that a backtest survived a drawdown
+their real account was liquidated inside. That is the gap, and no amount of
+fill-time bounding closes it.
+
+### Setting a venue's leverage is not exposed
+
+`Wallet::leverage` reads; nothing writes. OKX has
+`POST /api/v5/account/set-leverage` and it would be a small hook, so the omission
+is a choice rather than an oversight: a write here changes a real account's
+configuration out from under whatever else is trading it, and the read half is
+what the honesty problem actually needed — a deployment can now record what its
+fills executed at and reconcile against the `max_gross` its backtest ran under.
+
+**What would change this:** a caller who needs to *set* leverage from fugazi
+rather than in the venue's UI, and can say why the reconcile-and-refuse path
+(read it, compare it to the document's assumption, refuse to start) is not
+enough. Note that the paper counterpart already exists, which was the harder
+half — a control whose backtest silently disagreed would be worse than no
+control.
 
 ## Metrics
 
