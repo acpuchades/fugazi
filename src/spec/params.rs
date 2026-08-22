@@ -15,7 +15,7 @@
 //! ```yaml
 //! period: !param { key: FAST }                # required — must be passed
 //! period: !param { key: SLOW, default: 8 }    # optional — falls back to 8
-//! symbol: !param SYM                           # bare-string shorthand for { key: SYM }
+//! root: !param SYM                             # bare-string shorthand for { key: SYM }
 //! ```
 
 use std::collections::HashMap;
@@ -338,6 +338,13 @@ fn substitute_for_check_inner(
 
 #[cfg(test)]
 mod tests {
+
+    /// The traded symbol of a single-asset spec, via the root analyser.
+    fn sole(spec: &crate::spec::SingleStrategySpec) -> String {
+        spec.root
+            .sole_symbol("single-asset")
+            .expect("root names one symbol")
+    }
     use super::*;
     use crate::spec::SingleStrategySpec;
     use crate::spec::convert::yaml_to_json;
@@ -414,8 +421,8 @@ mod tests {
 
     #[test]
     fn bare_string_shorthand() {
-        let out = sub("symbol: !param SYM", &["SYM=ETH"]).unwrap();
-        assert_eq!(out.get("symbol"), Some(&Value::from("ETH")));
+        let out = sub("root: !param SYM", &["SYM=ETH"]).unwrap();
+        assert_eq!(out.get("root"), Some(&Value::from("ETH")));
     }
 
     #[test]
@@ -432,7 +439,7 @@ mod tests {
         // After substitution, the surviving `!sma`/`!crosses_above` tags (now
         // singleton objects) must still resolve to their enum variants.
         let yaml = r#"
-            symbol: !param { key: SYM, default: BTC }
+            root: !param { key: SYM, default: BTC }
             long:
               enter: !crosses_above
                 lhs: !sma { source: close, period: !param { key: FAST } }
@@ -441,7 +448,7 @@ mod tests {
         let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
         let value = substitute(value, &table_of(&["FAST=3"])).unwrap();
         let spec: SingleStrategySpec = serde_json::from_value(value).unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         assert!(spec.long.is_some());
         let _strat = spec.build(1_000.0, &crate::Schema::empty());
     }
@@ -462,42 +469,50 @@ mod tests {
         // `period` has no default and no value — `check` fills it with a
         // number (the type serde asks for), so the spec still parses.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !crosses_above
                 lhs: !sma { source: close, period: !param { key: FAST } }
                 rhs: !sma { source: close, period: 20 }
         "#;
         let (spec, holes) = check(yaml, &[]).unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         assert_eq!(holes, 1);
     }
 
     #[test]
     fn check_validates_around_an_unset_string_param() {
-        // `symbol` is a `String` field — the hole must satisfy it as a string,
+        // `root` bottoms out in a `String` symbol — the hole must satisfy it as
         // not a number. This is the case a single fixed placeholder can't cover.
-        let (spec, holes) = check("symbol: !param SYM\nlong: { enter: !value true }", &[]).unwrap();
-        assert_eq!(spec.symbol, "");
+        let (spec, holes) = check("root: !param SYM\nlong: { enter: !value true }", &[]).unwrap();
         assert_eq!(holes, 1);
+        // An unset root names nothing, and says so rather than guessing. That
+        // is the whole point of `check` reporting holes: the document is valid
+        // *around* the placeholder, and the instrument is simply not known yet.
+        assert!(
+            spec.root
+                .sole_symbol("single-asset")
+                .unwrap_err()
+                .contains("names no symbol")
+        );
     }
 
     #[test]
     fn check_still_prefers_a_supplied_value_or_default() {
         let (spec, holes) = check(
-            "symbol: !param { key: SYM, default: BTC }\nlong: { enter: !value true }",
+            "root: !param { key: SYM, default: BTC }\nlong: { enter: !value true }",
             &[],
         )
         .unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         assert_eq!(holes, 0);
 
         let (spec, holes) = check(
-            "symbol: !param SYM\nlong: { enter: !value true }",
+            "root: !param SYM\nlong: { enter: !value true }",
             &["SYM=ETH"],
         )
         .unwrap();
-        assert_eq!(spec.symbol, "ETH");
+        assert_eq!(sole(&spec), "ETH");
         assert_eq!(holes, 0);
     }
 
@@ -505,7 +520,7 @@ mod tests {
     fn check_still_rejects_a_malformed_placeholder() {
         // No string `key` is a genuine format error, not a hole to fill.
         let err = check(
-            "symbol: !param { default: BTC }\nlong: { enter: !value true }",
+            "root: !param { default: BTC }\nlong: { enter: !value true }",
             &[],
         )
         .unwrap_err();

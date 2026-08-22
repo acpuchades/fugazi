@@ -840,7 +840,14 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let strategy: spec::StrategyRef = spec::undefined::from_json_value(value)
                 .map_err(anyhow::Error::new)
                 .with_context(parse_err)?;
-            let detail = format!("symbol {}", strategy.symbol());
+            // `root {}` rather than `symbol {}`: the field is an expression
+            // now, and a root that cannot name one instrument is exactly what
+            // `check` exists to report — so surface the analyser's message
+            // rather than a symbol it could not resolve.
+            let detail = match strategy.symbol() {
+                Ok(sym) => format!("root {sym}"),
+                Err(e) => format!("root {e}"),
+            };
             (
                 "parse and validate a strategy spec",
                 detail,
@@ -851,7 +858,13 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let parsed: spec::PairsStrategySpec = spec::undefined::from_json_value(value)
                 .map_err(anyhow::Error::new)
                 .with_context(parse_err)?;
-            let detail = format!("pair {} / {}", parsed.left, parsed.right);
+            let detail = match (
+                parsed.left.sole_symbol("pairs"),
+                parsed.right.sole_symbol("pairs"),
+            ) {
+                (Ok(l), Ok(r)) => format!("pair {l} / {r}"),
+                (Err(e), _) | (_, Err(e)) => format!("pair {e}"),
+            };
             (
                 "parse and validate a pairs strategy spec",
                 detail,

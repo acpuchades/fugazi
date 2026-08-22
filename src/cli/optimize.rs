@@ -8,6 +8,7 @@ use fugazi::types::Symbol;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -287,8 +288,51 @@ fn probe_reads(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<Stri
     Ok(out)
 }
 
-/// The single-asset grid path — probes the strategy's symbol once, fetches
-/// its atom slice, and drives the sweep through a
+/// A traded series a grid row can resolve to: the instrument, and the cadence
+/// its `root:` declared (if it declared one).
+///
+/// Two rows sharing a key share a prepared snapshot stream. Keyed by both parts
+/// because a cadence is a different series of the same instrument, not a
+/// different reading of one stream.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+struct RootKey {
+    symbol: String,
+    freq: Option<String>,
+}
+
+/// The root every combo of every subgrid resolves to, deduplicated.
+///
+/// **Every combo**, not the per-subgrid probe point: a `!param` in the root is
+/// exactly the thing a sweep is meant to vary, so sampling one point per subgrid
+/// would miss an axis that varies the instrument *within* a subgrid — which is
+/// how that case used to end up silently backtesting the probe's bars on every
+/// row. Resolving costs one param substitution and one partial parse per combo,
+/// against a document already in memory.
+fn distinct_roots(base_value: &Value, subgrids: &[Subgrid]) -> Result<Vec<RootKey>> {
+    let mut out: BTreeSet<RootKey> = BTreeSet::new();
+    for subgrid in subgrids {
+        for combo in &subgrid.combos {
+            let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+            out.insert(root_key_of(base_value, &params)?);
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// The [`RootKey`] one grid point resolves to.
+fn root_key_of(base_value: &Value, params: &HashMap<String, Value>) -> Result<RootKey> {
+    let spec = build_spec(base_value, params)?;
+    Ok(RootKey {
+        symbol: spec
+            .root
+            .sole_symbol("single-asset")
+            .map_err(backtest::build_error)?,
+        freq: spec.root.declared_freq().map(str::to_string),
+    })
+}
+
+/// The single-asset grid path — resolves every row's root, prepares one
+/// snapshot stream per distinct traded series, and drives the sweep through a
 /// [`SingleStrategySpec`]-typed closure. Handles walk-forward too (which is
 /// only wired for single-asset strategies).
 fn run_single(
@@ -298,26 +342,35 @@ fn run_single(
     base_value: &Value,
 ) -> Result<()> {
     let started = SystemTime::now();
-    // Resolve the strategy's symbol from a probe built with the first subgrid's
-    // first combo. Every other subgrid must resolve to the same symbol —
-    // otherwise the atoms slice we're about to fetch is only valid for one of
-    // them and the others silently backtest against the wrong data. Cheaper to
-    // validate here than debug later.
-    let probe_spec = build_spec(base_value, &probe_params(&subgrids[0]))?;
-    let probe_symbol = probe_spec.symbol.clone();
-    for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
-        let other = build_spec(base_value, &probe_params(subgrid))?;
-        if other.symbol != probe_symbol {
+    // Which traded series this grid touches. More than one is a *root axis* —
+    // a sweep over instruments or cadences rather than over parameters.
+    let roots = distinct_roots(base_value, &subgrids)?;
+    if roots.len() > 1 {
+        if opts.walkforward.is_some() {
             bail!(
-                "--grid #{} resolves to symbol `{}`, but --grid #1 resolves to `{}` — every \
-                 subgrid must trade the same symbol (loading multiple symbol slices from one \
-                 frame is not supported)",
-                idx + 1,
-                other.symbol,
-                probe_symbol,
+                "--walkforward lays folds out over one bar timeline, but this grid sweeps {} \
+                 traded series ({}) — each has its own bar count, so a fold index means a \
+                 different span per row. Sweep the root or walk forward, not both",
+                roots.len(),
+                roots
+                    .iter()
+                    .map(|r| format!("`{}`", r.symbol))
+                    .collect::<Vec<_>>()
+                    .join(", "),
             );
         }
+        // Not an error, but the comparability the rest of `optimize` is built
+        // around no longer holds: rows are warmed to the grid-wide maximum and
+        // otherwise evaluate *their own* series' bars, so a difference between
+        // two rows is no longer "the parameters and not the window".
+        eprintln!(
+            "  {} this grid sweeps {} traded series — rows evaluate different bars, so their \
+             metrics are a batch of separate backtests rather than a like-for-like comparison",
+            style::yellow("warn"),
+            roots.len(),
+        );
     }
+    let probe_symbol = roots[0].symbol.clone();
     let series = frame.atoms(&probe_symbol)?;
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
@@ -480,7 +533,6 @@ fn run_single(
         .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
         .collect();
     attach_read_series(&sweep_bars, &mut snapshots, &read_only);
-    let snapshots_ref = &snapshots;
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         bars_per_year,
@@ -492,9 +544,77 @@ fn run_single(
         mc: None,
         warmup_bars: sweep_warmup,
     };
-    let ctx_ref = &ctx;
+
+    // One prepared stream per distinct traded series. `roots[0]` is the one
+    // already built above (it drives the console's period line and the `-w`
+    // resolution); the rest are prepared here, each with its **own** cadence,
+    // annualization and `--from`/`--until` slice, because those are properties
+    // of the series and not of the grid.
+    //
+    // Memoized rather than per row: a 200-point grid over two instruments
+    // prepares two streams, not two hundred.
+    let mut streams: HashMap<
+        RootKey,
+        (Vec<fugazi::types::Snapshot<Symbol>>, backtest::EvalContext),
+    > = HashMap::new();
+    streams.insert(roots[0].clone(), (snapshots, ctx));
+    for key in roots.iter().skip(1) {
+        let series = frame.atoms(&key.symbol)?;
+        let other_atoms = series.atoms;
+        let freq = calendar::pick_frequency(opts.frequency, &key.symbol)
+            .or_else(|| {
+                key.freq
+                    .as_deref()
+                    .and_then(|f| fugazi::Frequency::from_str(f).ok())
+            })
+            .or_else(|| frame.declared_frequency(&key.symbol))
+            .or_else(|| calendar::detect_frequency_from_atoms(other_atoms.iter().map(|(_, a)| a)));
+        let bpy = calendar::pick_bars_per_year(opts.bars_per_year, &key.symbol, freq)
+            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, freq));
+        let labels: Vec<String> = other_atoms.iter().map(|(t, _)| t.clone()).collect();
+        let other_slice = optimize_slice(opts, &labels, || Ok(slice.warmup_bars()))?;
+        let warm = (other_slice.warmup_bars() > 0).then(|| other_slice.warmup_bars());
+        let other_atoms = if other_slice.is_everything(other_atoms.len()) {
+            other_atoms
+        } else {
+            other_atoms[other_slice.fed()].to_vec()
+        };
+        let sym = fugazi::types::symbol(&key.symbol);
+        let bars: Vec<String> = other_atoms.iter().map(|(t, _)| t.clone()).collect();
+        let mut snaps: Vec<fugazi::types::Snapshot<Symbol>> = other_atoms
+            .iter()
+            .map(|(_, a)| fugazi::types::Snapshot::single(sym.clone(), a.clone()))
+            .collect();
+        let reads_here = read_only_series(frame, &[key.symbol.as_str()], &reads)?;
+        attach_read_series(&bars, &mut snaps, &reads_here);
+        streams.insert(
+            key.clone(),
+            (
+                snaps,
+                backtest::EvalContext {
+                    cash: opts.cash,
+                    bars_per_year: bpy,
+                    risk_free_rate: opts.risk_free_rate,
+                    cost_config,
+                    effective_freq: freq,
+                    windowed: windowed_bars,
+                    seconds_per_bar,
+                    mc: None,
+                    warmup_bars: warm,
+                },
+            ),
+        );
+    }
+    let streams_ref = &streams;
+
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+        // Which series *this row* trades. Every key was prepared above, so the
+        // lookup cannot miss — `distinct_roots` walked the same combos.
+        let key = root_key_of(base_value, params)?;
+        let (snapshots_ref, ctx_ref) = streams_ref
+            .get(&key)
+            .expect("every grid point's root was prepared by `distinct_roots`");
         Ok(match windowed_n {
             Some(w) => Evaluation::Windowed(
                 backtest::evaluate_windowed_any(&spec, snapshots_ref, ctx_ref, w)
@@ -584,21 +704,39 @@ fn run_multi_symbol(
     // Basket / multi / portfolio take the frame's whole symbol set.
     let universe: Vec<Symbol> = match opts.strategy_kind {
         StrategyKind::Pairs => {
-            let probe = build_typed::<PairsStrategySpec>(base_value, &probe_params(&subgrids[0]))?;
-            let left = probe.left.clone();
-            let right = probe.right.clone();
-            for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
-                let other = build_typed::<PairsStrategySpec>(base_value, &probe_params(subgrid))?;
-                if other.left != left || other.right != right {
-                    bail!(
-                        "--grid #{} resolves to pair `{}`/`{}`, but --grid #1 resolves to \
-                         `{}`/`{}` — every subgrid must trade the same pair",
-                        idx + 1,
-                        other.left,
-                        other.right,
-                        left,
-                        right,
-                    );
+            // A pair's legs are resolved from each combo's roots, and every
+            // combo must land on the same pair.
+            //
+            // Deliberately still a refusal, where the single-asset path now
+            // sweeps: a pairs run trades the **inner join** of its two legs, so
+            // widening the stream to the union of every swept pair would change
+            // which bars each row sees, and a row's result would stop matching
+            // the same document run on its own through `run`. The single-asset
+            // path has no such coupling — each root gets its own stream.
+            let legs = |params: &HashMap<String, Value>| -> Result<(String, String)> {
+                let spec = build_typed::<PairsStrategySpec>(base_value, params)?;
+                Ok((
+                    spec.left
+                        .sole_symbol("pairs")
+                        .map_err(backtest::build_error)?,
+                    spec.right
+                        .sole_symbol("pairs")
+                        .map_err(backtest::build_error)?,
+                ))
+            };
+            let (left, right) = legs(&probe_params(&subgrids[0]))?;
+            for subgrid in subgrids.iter() {
+                for combo in &subgrid.combos {
+                    let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                    let (l, r) = legs(&params)?;
+                    if l != left || r != right {
+                        bail!(
+                            "this grid resolves to pair `{l}`/`{r}` as well as `{left}`/`{right}` \
+                             — every grid point must trade the same pair, because a pairs run \
+                             evaluates the inner join of its two legs and a different pair is a \
+                             different timeline"
+                        );
+                    }
                 }
             }
             vec![fugazi::types::symbol(&left), fugazi::types::symbol(&right)]

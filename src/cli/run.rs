@@ -39,6 +39,7 @@
 use fugazi::types::Symbol;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -255,7 +256,7 @@ fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
 /// narrate the tiered run/trade/result/metrics logs.
 pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
-    let symbol = strategy.symbol().to_string();
+    let symbol = strategy.symbol().map_err(backtest::build_error)?;
     let series = frame.atoms(&symbol)?;
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
@@ -265,12 +266,20 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
     // The effective bar cadence for both annualization and cost-scope
     // matching, best evidence first: a symbol-matching `-f/--frequency` entry,
-    // then the input's own `freq` column, then the cadence detected from the
-    // atoms' `time` field (populated by the loader). The middle term matters
-    // because a provider that told us the cadence outranks arithmetic on the
-    // gaps between the bars it sent — a thinly-traded name's gaps can median
-    // to the wrong cadence outright.
+    // then the cadence the document's own `root:` declares, then the input's
+    // `freq` column, then the cadence detected from the atoms' `time` field
+    // (populated by the loader). The `freq` column outranks arithmetic on the
+    // gaps because a provider that told us the cadence beats a median over the
+    // bars it sent — a thinly-traded name's gaps can median to the wrong
+    // cadence outright — and the document outranks both, because a `root:`
+    // that names a cadence is the author saying so in as many words.
     let effective_freq = calendar::pick_frequency(opts.frequency, &symbol)
+        .or_else(|| {
+            strategy
+                .root()
+                .declared_freq()
+                .and_then(|f| Frequency::from_str(f).ok())
+        })
         .or_else(|| frame.declared_frequency(&symbol))
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
@@ -347,8 +356,18 @@ pub fn run_pairs(
     opts: &RunOptions,
 ) -> Result<Summary> {
     let started = SystemTime::now();
-    let left_series = frame.atoms(&spec.left)?;
-    let right_series = frame.atoms(&spec.right)?;
+    // Each leg's root resolves to exactly one instrument, or the document is
+    // refused before a bar is read.
+    let left = spec
+        .left
+        .sole_symbol("pairs")
+        .map_err(backtest::build_error)?;
+    let right = spec
+        .right
+        .sole_symbol("pairs")
+        .map_err(backtest::build_error)?;
+    let left_series = frame.atoms(&left)?;
+    let right_series = frame.atoms(&right)?;
     let (bars, left_atoms, right_atoms) =
         join_pair_by_time(&left_series.atoms, &right_series.atoms);
 
@@ -357,25 +376,28 @@ pub fn run_pairs(
 
     // Pick the effective cadence off the left leg (both legs are expected to
     // share one cadence — the inner-join filters to the shared timeline).
-    let effective_freq = calendar::pick_frequency(opts.frequency, &spec.left)
-        .or_else(|| calendar::pick_frequency(opts.frequency, &spec.right))
-        .or_else(|| frame.declared_frequency(&spec.left))
-        .or_else(|| frame.declared_frequency(&spec.right))
+    let effective_freq = calendar::pick_frequency(opts.frequency, &left)
+        .or_else(|| calendar::pick_frequency(opts.frequency, &right))
+        .or_else(|| {
+            spec.left
+                .declared_freq()
+                .or_else(|| spec.right.declared_freq())
+                .and_then(|f| Frequency::from_str(f).ok())
+        })
+        .or_else(|| frame.declared_frequency(&left))
+        .or_else(|| frame.declared_frequency(&right))
         .or_else(|| {
             calendar::detect_frequency_from_atoms(left_series.atoms.iter().map(|(_, a)| a))
         });
-    let bars_per_year =
-        calendar::pick_bars_per_year(opts.bars_per_year, &spec.left, effective_freq)
-            .or_else(|| {
-                calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq)
-            })
-            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &left, effective_freq)
+        .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &right, effective_freq))
+        .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
     // Both leg names interned once; each bar then tags with a refcount bump.
-    let left_sym = fugazi::types::symbol(&spec.left);
-    let right_sym = fugazi::types::symbol(&spec.right);
+    let left_sym = fugazi::types::symbol(&left);
+    let right_sym = fugazi::types::symbol(&right);
     let mut snapshots: Vec<fugazi::types::Snapshot<Symbol>> = left_atoms
         .iter()
         .zip(right_atoms.iter())
@@ -390,11 +412,7 @@ pub fn run_pairs(
     // say — joins onto the legs' *inner-joined* timeline. Neither leg is
     // privileged here, so `!pick` is already mandatory on every leaf; this only
     // widens which assets one can name.
-    let read_only = read_only_series(
-        frame,
-        &[spec.left.as_str(), spec.right.as_str()],
-        opts.reads,
-    )?;
+    let read_only = read_only_series(frame, &[left.as_str(), right.as_str()], opts.reads)?;
     attach_read_series(&bars, &mut snapshots, &read_only);
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
     // The slice lands on the *joined* timeline, so two partially-overlapping
@@ -404,12 +422,12 @@ pub fn run_pairs(
     if !opts.quiet {
         let costs_active = costs_active(
             opts.cost_config,
-            [spec.left.as_str(), spec.right.as_str()],
+            [left.as_str(), right.as_str()],
             effective_freq,
         );
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_pairs_inputs_block(opts, spec, &sliced, costs_active);
+        print_pairs_inputs_block(opts, &left, &right, &sliced, costs_active);
     }
 
     let iter = iterate(&any, sliced.bars, &sliced.snapshots, &inputs, opts)?;
@@ -624,12 +642,14 @@ fn portfolio_declared_symbols(spec: &PortfolioSpec) -> Option<Vec<String>> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for child in &spec.children {
         match &child.strategy {
-            Child::Single(s) => {
-                out.insert(s.symbol().to_string());
-            }
+            // A child whose root names anything other than one instrument is
+            // refused when the portfolio is built; here it simply contributes
+            // whatever it named, and `None` stays reserved for the shapes that
+            // genuinely declare nothing.
+            Child::Single(s) => out.extend(s.root().named_symbols()),
             Child::Pairs(p) => {
-                out.insert(p.left.clone());
-                out.insert(p.right.clone());
+                out.extend(p.left.named_symbols());
+                out.extend(p.right.named_symbols());
             }
             // Discovered, not declared — so the portfolio's is too.
             Child::Basket(_) | Child::Multi(_) => return None,
@@ -1170,13 +1190,14 @@ fn join_pair_by_time(
 
 fn print_pairs_inputs_block(
     opts: &RunOptions,
-    spec: &PairsStrategySpec,
+    left: &str,
+    right: &str,
     sliced: &Sliced,
     costs_active: bool,
 ) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
-    style::field("pair", &format!("{} / {}", spec.left, spec.right));
+    style::field("pair", &format!("{left} / {right}"));
     style::field("params", opts.params);
     style::field("period", &period_field(sliced));
     style::field("capital", &format!("{:.2}", opts.cash));

@@ -64,10 +64,12 @@ pub(crate) fn detect_shape(v: &Value) -> ShapeHint {
         ShapeHint::Pairs
     } else if has("selection") {
         ShapeHint::Basket
-    } else if has("symbol") {
+    } else if has("root") {
         ShapeHint::Single
     } else {
-        // The shape with no upfront symbol declaration — its universe floats.
+        // The shape that declares no traded series upfront — its universe
+        // floats. Still defined by the *absence* of the single-asset key; only
+        // the key's name changed when `symbol:` became the `root:` expression.
         ShapeHint::Multi
     }
 }
@@ -100,8 +102,8 @@ mod tests {
     #[test]
     fn a_preset_is_detected_in_both_its_tagged_and_bridged_forms() {
         for v in [
-            parse("!ma_crossover { symbol: X, fast: 2, slow: 4 }"),
-            bridged("!ma_crossover { symbol: X, fast: 2, slow: 4 }"),
+            parse("!ma_crossover { root: X, fast: 2, slow: 4 }"),
+            bridged("!ma_crossover { root: X, fast: 2, slow: 4 }"),
         ] {
             assert_eq!(detect_shape(&v), ShapeHint::Preset, "{v:?}");
         }
@@ -113,7 +115,7 @@ mod tests {
         // bare single-key map, indistinguishable from a multi-asset spec
         // except by the tag name.
         for tag in PRESET_TAGS {
-            let v = bridged(&format!("!{tag} {{ symbol: X }}"));
+            let v = bridged(&format!("!{tag} {{ root: X }}"));
             assert_eq!(detect_shape(&v), ShapeHint::Preset, "{tag}");
         }
     }
@@ -131,7 +133,7 @@ mod tests {
             ShapeHint::Basket,
         );
         assert_eq!(
-            detect_shape(&parse("{ symbol: X, long: {} }")),
+            detect_shape(&parse("{ root: X, long: {} }")),
             ShapeHint::Single
         );
         assert_eq!(

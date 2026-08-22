@@ -14,6 +14,7 @@ use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
+use super::root::RootSpec;
 use crate::runtime::{AnyChain, any};
 use crate::types::Symbol;
 
@@ -63,7 +64,7 @@ impl SideSpec {
     }
 }
 
-/// A whole `strategy.yml`: the traded symbol plus its long/short sides.
+/// A whole `strategy.yml`: the evaluation root plus its long/short sides.
 ///
 /// Sharing a subtree across sides is a plain YAML anchor: define `&name` at
 /// the first use site and reference it with `*name` from every other site.
@@ -72,7 +73,16 @@ impl SideSpec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SingleStrategySpec {
-    pub symbol: String,
+    /// The document's **evaluation root**: the series every `source:`-omitted
+    /// leaf reads, and the instrument this strategy trades.
+    ///
+    /// An ordinary atom-valued expression, so `!param` reaches it like any
+    /// other slot — which is what lets one document be swept over instruments.
+    /// `root: BTCUSDT` is sugar for `root: !pick { symbol: BTCUSDT }`. The
+    /// traded symbol is recovered from it by
+    /// [`RootSpec::sole_symbol`](crate::spec::RootSpec::sole_symbol); a root
+    /// naming none or several is a build error, not a parse error.
+    pub root: RootSpec,
     #[serde(default)]
     pub long: Option<SideSpec>,
     #[serde(default)]
@@ -178,7 +188,7 @@ impl SingleStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
         let mut strat = SingleAssetStrategy::with_initial_equity(
-            crate::types::symbol(&self.symbol),
+            crate::types::symbol(&self.root.sole_symbol("single-asset")?),
             initial_equity,
         );
         // One position + book per strategy, shared by every `entry`/`peak`/`trough`
@@ -186,12 +196,11 @@ impl SingleStrategySpec {
         let anchor = strat.position();
         let book = strat.book();
         // The blessed series: every `source:`-omitted leaf in this spec reads
-        // the symbol the strategy trades. Declaring `symbol:` and having a
+        // the series the strategy trades. Declaring `root:` and having a
         // bare `!close` mean something else would be indefensible — and it
         // lets a single-asset spec run against a multi-symbol `--series`
         // frame instead of tripping the sole-atom panic.
-        let root = Selector::by_symbol(self.symbol.clone());
-        let root = Root::blessed(&root);
+        let root = Root::blessed(&self.root);
         if let Some(long) = &self.long {
             strat = strat.long_on(
                 (long.enter.try_build(&anchor, &book, None, schema, root)?).into_bool()?,

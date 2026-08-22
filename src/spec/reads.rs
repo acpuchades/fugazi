@@ -135,7 +135,7 @@ mod tests {
     fn finds_a_pick_nested_under_a_leaf() {
         let syms = picked(
             r#"
-symbol: ETH
+root: ETH
 long:
   enter: !gt { lhs: !close { source: !pick { symbol: BTC } }, rhs: !value 0 }
 "#,
@@ -149,7 +149,7 @@ long:
     fn ignores_a_symbol_key_outside_a_pick() {
         let syms = picked(
             r#"
-symbol: ETH
+root: ETH
 long:
   enter: !gt { lhs: !close, rhs: !value 0 }
 "#,
@@ -161,7 +161,7 @@ long:
     fn dedupes_and_sorts_across_the_whole_tree() {
         let syms = picked(
             r#"
-symbol: ETH
+root: ETH
 long:
   enter: !gt { lhs: !close { source: !pick { symbol: SOL } }, rhs: !value 0 }
   exit: !lt { lhs: !close { source: !pick { symbol: BTC } }, rhs: !value 0 }
@@ -179,7 +179,7 @@ sizing: !div
     fn a_pick_with_no_symbol_contributes_nothing() {
         let syms = picked(
             r#"
-symbol: ETH
+root: ETH
 long:
   enter: !gt { lhs: !close { source: !pick { freq: 1d } }, rhs: !value 0 }
   exit: !lt { lhs: !close { source: !pick }, rhs: !value 0 }

@@ -32,16 +32,13 @@
 //! [`Indicator::stable_bars`](fugazi::Indicator::stable_bars), so it stays
 //! correct as new indicators enter the library.
 
-use fugazi::types::Symbol;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
-use std::str::FromStr;
-
+use fugazi::Schema;
 use fugazi::sources::Interval;
-use fugazi::{Frequency, Schema, Selector};
 
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
 use crate::dyn_indicator::PayloadIndicator;
@@ -218,11 +215,8 @@ pub fn stable_bars_for(
 /// somehow doesn't parse degrades to a symbol-only selector rather than
 /// failing the fetch — matching on symbol alone is still right whenever a
 /// symbol appears at one cadence, which is the overwhelmingly common case.
-pub fn group_root(symbol: &str, interval: Interval) -> Selector<Symbol> {
-    Selector::<Symbol> {
-        symbol: Some(fugazi::types::symbol(symbol)),
-        freq: Frequency::from_str(&interval.as_token()).ok(),
-    }
+pub fn group_root(symbol: &str, interval: Interval) -> fugazi::spec::RootSpec {
+    fugazi::spec::RootSpec::for_series(symbol, Some(&interval.as_token()))
 }
 
 // ---------------------------------------------------------------------------

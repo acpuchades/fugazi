@@ -276,6 +276,24 @@ pub fn parse_probe<T: DeserializeOwned>(value: Json) -> Result<(), String> {
     }
 }
 
+/// Does `value` hold a placeholder sentinel anywhere inside it?
+///
+/// The structural twin of [`names_a_hole`], for the callers that inspect a tree
+/// rather than a parse error: a `check`-mode hole stands in for a value nobody
+/// supplied, so a validation that would judge the *shape* of what it stands for
+/// has to stand down. See [`crate::spec::root::RootSpec`]'s atom demand.
+pub fn contains_hole(value: &Json) -> bool {
+    match value {
+        Json::Object(map) => {
+            map.keys()
+                .any(|k| [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY].contains(&k.as_str()))
+                || map.values().any(contains_hole)
+        }
+        Json::Array(items) => items.iter().any(contains_hole),
+        _ => false,
+    }
+}
+
 /// Does this parse error mention one of the reserved sentinel keys — i.e. did a
 /// placeholder, rather than the document, cause it? See [`parse_probe`].
 fn names_a_hole(message: &str) -> bool {

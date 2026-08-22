@@ -451,8 +451,8 @@ fn try_build_signal(
 /// per-symbol signal / level / sizing template reads *that leg's* symbol.
 /// Makes `!arg SYM` optional here for the same reason it does in a basket;
 /// see `crate::spec::basket::leg_root`.
-fn leg_root(sym: &str) -> Selector<Symbol> {
-    Selector::by_symbol(crate::types::symbol(sym))
+fn leg_root(sym: &str) -> crate::spec::RootSpec {
+    crate::spec::RootSpec::for_symbol(sym)
 }
 
 fn build_expr(template: &SpecTemplate<NodeSpec>, sym: &str, slot: &'static str) -> NodeSpec {

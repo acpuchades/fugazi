@@ -541,8 +541,8 @@ impl BasketStrategySpec {
 /// through [`build_per_symbol`] exactly as before), and stays the way to read
 /// a *different* symbol per leg — a hedge ratio against a common benchmark,
 /// say — which the implicit root can't express.
-fn leg_root(sym: &str) -> Selector<Symbol> {
-    Selector::by_symbol(crate::types::symbol(sym))
+fn leg_root(sym: &str) -> crate::spec::RootSpec {
+    crate::spec::RootSpec::for_symbol(sym)
 }
 
 /// Resolve a per-symbol template into a concrete `NodeSpec` by supplying

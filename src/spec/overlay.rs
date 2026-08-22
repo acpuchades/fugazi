@@ -49,7 +49,6 @@ use serde_json::Value as Json;
 use crate::indicators::{Book, Position};
 use crate::market::{Atom, OverlayInfo, OverlayType, OverlayValue, Schema};
 use crate::runtime::{AnyChain, PayloadIndicator, PayloadType, PayloadValue};
-use crate::snapshot::Selector;
 use crate::time::Frequency;
 use crate::types::Snapshot;
 
@@ -323,13 +322,14 @@ pub fn compute_snapshots(
         for (sym, freq, atom) in snap.iter() {
             let key: Key = (sym.cloned(), freq);
             if !sets.contains_key(&key) {
-                let root = Selector::<Symbol> {
-                    symbol: key.0.clone(),
-                    freq: key.1,
-                };
                 // An untagged entry has nothing to be rooted on; it falls back
                 // to the sole-atom unpack, same as the single-series path.
-                let root = (!root.is_empty()).then_some(root);
+                let root = key.0.as_ref().map(|sym| {
+                    crate::spec::RootSpec::for_series(
+                        sym.as_str(),
+                        key.1.map(|f| f.as_token()).as_deref(),
+                    )
+                });
                 let (_, prepared) = prepare_for(existing, columns, Root::or_sole(root.as_ref()))?;
                 sets.insert(key.clone(), prepared);
             }

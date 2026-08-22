@@ -16,6 +16,7 @@ use crate::strategies::PairsStrategy;
 
 use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
+use super::root::RootSpec;
 use super::strategy::SideSpec;
 use crate::runtime::AnyChain;
 use crate::types::Symbol;
@@ -81,8 +82,13 @@ use crate::types::Symbol;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "PairsStrategySpecRaw")]
 pub struct PairsStrategySpec {
-    pub left: String,
-    pub right: String,
+    /// The left leg's **evaluation root**. An atom-valued expression, so
+    /// `!param` reaches it; `left: BTCUSDT` is sugar for
+    /// `left: !pick { symbol: BTCUSDT }`. Neither leg is blessed — see
+    /// `try_build` — so this names what is traded, not what a bare leaf reads.
+    pub left: RootSpec,
+    /// The right leg's evaluation root. See [`left`](Self::left).
+    pub right: RootSpec,
     /// The long-spread entry, in the flat spelling. Mutually exclusive with
     /// [`long_spread`](Self::long_spread); one of the two (or a
     /// [`short_spread`](Self::short_spread) block) must be present.
@@ -138,8 +144,8 @@ pub struct PairsStrategySpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairsStrategySpecRaw {
-    left: String,
-    right: String,
+    left: RootSpec,
+    right: RootSpec,
     #[serde(default)]
     enter: Option<BoolNode>,
     #[serde(default)]
@@ -311,11 +317,11 @@ impl PairsStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynPairsStrategy, String> {
-        // The document holds the leg names as `String`; interning here means
-        // every later clone of them (per bar, per fill) is a refcount bump.
+        // Each leg's root names exactly one instrument; interning here means
+        // every later clone of it (per bar, per fill) is a refcount bump.
         let strat = PairsStrategy::with_initial_equity(
-            crate::types::symbol(&self.left),
-            crate::types::symbol(&self.right),
+            crate::types::symbol(&self.left.sole_symbol("pairs")?),
+            crate::types::symbol(&self.right.sole_symbol("pairs")?),
             initial_equity,
         );
         // Anchor level expressions on the left leg's position (see doc note).
@@ -479,8 +485,8 @@ mod tests {
         let spec =
             PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
                 .unwrap();
-        assert_eq!(spec.left, "BTC");
-        assert_eq!(spec.right, "ETH");
+        assert_eq!(spec.left.sole_symbol("pairs").unwrap(), "BTC");
+        assert_eq!(spec.right.sole_symbol("pairs").unwrap(), "ETH");
         assert!(spec.stop_loss.is_some());
         assert!(spec.take_profit.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());

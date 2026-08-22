@@ -3,7 +3,7 @@
 //!
 //! A full [`SingleStrategySpec`] spells out every `long`/`short` signal by
 //! hand; a **preset** names one of the crate's convenience recipes and its
-//! parameters — `!ma_crossover { symbol: BTC, fast: 3, slow: 8 }` builds the
+//! parameters — `!ma_crossover { root: BTC, fast: 3, slow: 8 }` builds the
 //! same strategy [`crate::strategies::trend::ma_crossover`] does. Presets
 //! reuse the Rust catalogue directly (single source of truth — no re-encoding
 //! as a spec tree), so a preset and its Rust twin are identical by construction.
@@ -11,7 +11,7 @@
 //! [`StrategyRef`] is the "either" type accepted anywhere a single-asset
 //! strategy document is: a full spec **or** a preset tag. It backs both the
 //! top-level `fugazi run` strategy document and the `strategy:` field of the
-//! trailing risk indicators (`!sharpe { strategy: !buy_and_hold { symbol: X }, … }`).
+//! trailing risk indicators (`!sharpe { strategy: !buy_and_hold { root: X }, … }`).
 
 use crate::types::Symbol;
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use crate::prelude::*;
 use crate::strategies::{SingleAssetStrategy, composite, mean_reversion, trend};
 
 use super::meta::Meta;
+use super::root::RootSpec;
 use super::strategy::{DynSingleStrategy, SingleStrategySpec};
 
 /// The externally-tagged catalogue of ready-made single-asset strategies.
@@ -37,14 +38,14 @@ pub enum StrategyPreset {
     /// Go all-in long on the first bar and hold. See
     /// [`SingleAssetStrategy::buy_and_hold`].
     BuyAndHold {
-        symbol: String,
+        root: RootSpec,
         #[serde(default)]
         meta: Option<Meta>,
     },
     /// Always-in SMA fast/slow crossover. See
     /// [`crate::strategies::trend::ma_crossover`].
     MaCrossover {
-        symbol: String,
+        root: RootSpec,
         fast: usize,
         slow: usize,
         #[serde(default)]
@@ -54,7 +55,7 @@ pub enum StrategyPreset {
     /// exit when it crosses back above `exit`. See
     /// [`crate::strategies::mean_reversion::rsi_reversal`].
     RsiReversal {
-        symbol: String,
+        root: RootSpec,
         period: usize,
         oversold: Real,
         exit: Real,
@@ -64,7 +65,7 @@ pub enum StrategyPreset {
     /// Always-in Donchian channel breakout. See
     /// [`crate::strategies::trend::donchian_breakout`].
     DonchianBreakout {
-        symbol: String,
+        root: RootSpec,
         period: usize,
         #[serde(default)]
         meta: Option<Meta>,
@@ -72,7 +73,7 @@ pub enum StrategyPreset {
     /// Always-in Keltner channel breakout. See
     /// [`crate::strategies::composite::keltner_breakout`].
     KeltnerBreakout {
-        symbol: String,
+        root: RootSpec,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
@@ -93,14 +94,14 @@ pub(crate) const PRESET_TAGS: &[&str] = &[
 ];
 
 impl StrategyPreset {
-    /// The instrument this preset trades.
-    pub fn symbol(&self) -> &str {
+    /// This preset's evaluation root.
+    pub fn root(&self) -> &RootSpec {
         match self {
-            StrategyPreset::BuyAndHold { symbol, .. }
-            | StrategyPreset::MaCrossover { symbol, .. }
-            | StrategyPreset::RsiReversal { symbol, .. }
-            | StrategyPreset::DonchianBreakout { symbol, .. }
-            | StrategyPreset::KeltnerBreakout { symbol, .. } => symbol,
+            StrategyPreset::BuyAndHold { root, .. }
+            | StrategyPreset::MaCrossover { root, .. }
+            | StrategyPreset::RsiReversal { root, .. }
+            | StrategyPreset::DonchianBreakout { root, .. }
+            | StrategyPreset::KeltnerBreakout { root, .. } => root,
         }
     }
 
@@ -117,42 +118,34 @@ impl StrategyPreset {
     }
 
     /// Build the live strategy by delegating to the `crate::strategies` recipe.
-    fn build_strategy(&self) -> SingleAssetStrategy<Symbol> {
-        match self {
-            StrategyPreset::BuyAndHold { symbol, .. } => {
-                SingleAssetStrategy::buy_and_hold(crate::types::symbol(symbol))
+    ///
+    /// Fallible where it used to be infallible: a preset is still constructed
+    /// entirely in Rust, but its `root:` is an expression now, so "which one
+    /// instrument does this trade" is a question the analysis answers rather
+    /// than a field that already holds the answer.
+    fn build_strategy(&self) -> Result<SingleAssetStrategy<Symbol>, String> {
+        let sym = crate::types::symbol(&self.root().sole_symbol("preset")?);
+        Ok(match self {
+            StrategyPreset::BuyAndHold { .. } => SingleAssetStrategy::buy_and_hold(sym),
+            StrategyPreset::MaCrossover { fast, slow, .. } => {
+                trend::ma_crossover(sym, *fast, *slow)
             }
-            StrategyPreset::MaCrossover {
-                symbol, fast, slow, ..
-            } => trend::ma_crossover(crate::types::symbol(symbol), *fast, *slow),
             StrategyPreset::RsiReversal {
-                symbol,
                 period,
                 oversold,
                 exit,
                 ..
-            } => mean_reversion::rsi_reversal(
-                crate::types::symbol(symbol),
-                *period,
-                *oversold,
-                *exit,
-            ),
-            StrategyPreset::DonchianBreakout { symbol, period, .. } => {
-                trend::donchian_breakout(crate::types::symbol(symbol), *period)
+            } => mean_reversion::rsi_reversal(sym, *period, *oversold, *exit),
+            StrategyPreset::DonchianBreakout { period, .. } => {
+                trend::donchian_breakout(sym, *period)
             }
             StrategyPreset::KeltnerBreakout {
-                symbol,
                 ema_period,
                 atr_period,
                 multiplier,
                 ..
-            } => composite::keltner_breakout(
-                crate::types::symbol(symbol),
-                *ema_period,
-                *atr_period,
-                *multiplier,
-            ),
-        }
+            } => composite::keltner_breakout(sym, *ema_period, *atr_period, *multiplier),
+        })
     }
 }
 
@@ -172,12 +165,21 @@ pub enum StrategyRef {
 }
 
 impl StrategyRef {
-    /// The instrument this strategy trades.
-    pub fn symbol(&self) -> &str {
+    /// This strategy's evaluation root.
+    pub fn root(&self) -> &RootSpec {
         match self {
-            StrategyRef::Spec(s) => &s.symbol,
-            StrategyRef::Preset(p) => p.symbol(),
+            StrategyRef::Spec(s) => &s.root,
+            StrategyRef::Preset(p) => p.root(),
         }
+    }
+
+    /// The one instrument this strategy trades, or a build error naming why the
+    /// root could not say. See [`RootSpec::sole_symbol`].
+    pub fn symbol(&self) -> Result<String, String> {
+        self.root().sole_symbol(match self {
+            StrategyRef::Spec(_) => "single-asset",
+            StrategyRef::Preset(_) => "preset",
+        })
     }
 
     /// This document's free-form `meta:`, if it set one — the same key in both
@@ -198,8 +200,9 @@ impl StrategyRef {
             .unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// The fallible twin of [`build`](Self::build). A preset is constructed in
-    /// Rust and can't fail; only the `Spec` arm can.
+    /// The fallible twin of [`build`](Self::build). Both arms can fail now —
+    /// a preset's recipe is still infallible, but resolving its `root:` to the
+    /// single instrument the recipe wants is not.
     pub fn try_build(
         &self,
         initial_equity: Real,
@@ -207,7 +210,7 @@ impl StrategyRef {
     ) -> Result<DynSingleStrategy, String> {
         match self {
             StrategyRef::Spec(s) => s.try_build(initial_equity, schema),
-            StrategyRef::Preset(p) => Ok(DynSingleStrategy::from_single(p.build_strategy())),
+            StrategyRef::Preset(p) => Ok(DynSingleStrategy::from_single(p.build_strategy()?)),
         }
     }
 
@@ -281,11 +284,11 @@ mod tests {
         // A representative value per variant; if a variant is added without a
         // PRESET_TAGS entry, its `!tag` form parses as a Spec and fails here.
         for text in [
-            "!buy_and_hold { symbol: X }",
-            "!ma_crossover { symbol: X, fast: 3, slow: 8 }",
-            "!rsi_reversal { symbol: X, period: 14, oversold: 30, exit: 50 }",
-            "!donchian_breakout { symbol: X, period: 20 }",
-            "!keltner_breakout { symbol: X, ema_period: 20, atr_period: 10, multiplier: 2.0 }",
+            "!buy_and_hold { root: X }",
+            "!ma_crossover { root: X, fast: 3, slow: 8 }",
+            "!rsi_reversal { root: X, period: 14, oversold: 30, exit: 50 }",
+            "!donchian_breakout { root: X, period: 20 }",
+            "!keltner_breakout { root: X, ema_period: 20, atr_period: 10, multiplier: 2.0 }",
         ] {
             let r: StrategyRef = serde_norway::from_str(text).unwrap();
             assert!(
@@ -298,18 +301,18 @@ mod tests {
     #[test]
     fn a_full_spec_map_parses_as_spec_not_preset() {
         let r: StrategyRef = serde_norway::from_str(
-            "{ symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }",
+            "{ root: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }",
         )
         .unwrap();
         assert!(matches!(r, StrategyRef::Spec(_)));
-        assert_eq!(r.symbol(), "X");
+        assert_eq!(r.symbol().unwrap(), "X");
     }
 
     #[test]
     fn preset_symbol_reads_through() {
         let r: StrategyRef =
-            serde_norway::from_str("!ma_crossover { symbol: BTC, fast: 3, slow: 8 }").unwrap();
-        assert_eq!(r.symbol(), "BTC");
+            serde_norway::from_str("!ma_crossover { root: BTC, fast: 3, slow: 8 }").unwrap();
+        assert_eq!(r.symbol().unwrap(), "BTC");
         let _ = r.build(1_000.0, &Schema::empty());
     }
 }

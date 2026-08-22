@@ -32,6 +32,7 @@ pub mod pairs;
 pub mod portfolio;
 pub mod preset;
 pub mod reads;
+pub mod root;
 pub mod runnable;
 mod shape;
 pub mod strategy;
@@ -160,6 +161,7 @@ pub use pairs::PairsStrategySpec;
 pub use portfolio::DynPortfolio;
 pub use portfolio::{PortfolioChildSpec, PortfolioChildStrategy, PortfolioSpec};
 pub use preset::{StrategyPreset, StrategyRef};
+pub use root::RootSpec;
 pub use runnable::{
     RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, RunnableStrategyExt, StrategySpec,
     drive_over,
@@ -172,6 +174,13 @@ pub use input::{Source, StrategyKind, StrategySource};
 
 #[cfg(test)]
 mod tests {
+
+    /// The traded symbol of a single-asset spec, via the root analyser.
+    fn sole(spec: &crate::spec::SingleStrategySpec) -> String {
+        spec.root
+            .sole_symbol("single-asset")
+            .expect("root names one symbol")
+    }
     use super::*;
     use crate::indicators::{
         BarsSince, BarsSinceHigh, BarsSinceLow, Book, Correlation, Current, Ema, GarmanKlass,
@@ -253,14 +262,14 @@ mod tests {
     #[test]
     fn probe_yaml_tags_survive_conversion_to_value() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { period: 8 } }
         "#;
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
         let json = crate::spec::convert::yaml_to_json(value).unwrap();
         let spec: SingleStrategySpec = serde_json::from_value(json).unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         assert!(spec.long.is_some());
         let _ = spec.build(1_000.0, &Schema::empty());
     }
@@ -586,7 +595,7 @@ mod tests {
     #[test]
     fn parses_full_strategy_with_long_and_short() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
               exit:  !crosses_below { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
@@ -597,7 +606,7 @@ mod tests {
         let spec =
             SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
                 .unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         let _strat = spec.build(1_000.0, &Schema::empty());
     }
 
@@ -605,7 +614,7 @@ mod tests {
     fn stop_loss_with_entry_source_fires_at_the_level() {
         // Enter on the first bar, with a stop at 90% of entry built from `entry`.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
               stop_loss: !mul { lhs: entry, rhs: !value 0.9 }
@@ -759,7 +768,7 @@ mod tests {
         // YAML parser at each `*name` alias, so a shared signal can be defined
         // once on `long` and reused on `short` without repeating the tree.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
               exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
@@ -770,7 +779,7 @@ mod tests {
         let spec =
             SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
                 .unwrap();
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         assert!(spec.long.is_some() && spec.short.is_some());
         let _ = spec.build(1_000.0, &Schema::empty());
     }
@@ -781,7 +790,7 @@ mod tests {
         // strategy's position_sizing slot. Verify parse + build for the
         // vol-target helper.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 252 }
@@ -796,7 +805,7 @@ mod tests {
     #[test]
     fn parses_strategy_with_atr_risk_sizing() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing: !atr_risk { risk_frac: 0.01, period: 14, atr_multiple: 2.0 }
@@ -811,7 +820,7 @@ mod tests {
     #[test]
     fn parses_strategy_with_drawdown_throttle_sizing() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing: !drawdown_throttle { max_drawdown: 0.20 }
@@ -826,7 +835,7 @@ mod tests {
     #[test]
     fn parses_strategy_with_equity_vol_target_sizing() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing: !equity_vol_target { target: 0.15, window: 60, bars_per_year: 252 }
@@ -841,7 +850,7 @@ mod tests {
     #[test]
     fn parses_strategy_with_fractional_kelly_sizing() {
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing: !fractional_kelly { kelly_fraction: 0.5, window: 30 }
@@ -855,12 +864,12 @@ mod tests {
 
     #[test]
     fn parses_an_inline_flow_map_strategy() {
-        let doc = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
+        let doc = r#"{"root":"ETH","long":{"enter":{"crosses_above":
             {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;
         let spec =
             SingleStrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
                 .unwrap();
-        assert_eq!(spec.symbol, "ETH");
+        assert_eq!(sole(&spec), "ETH");
         let _strat = spec.build(1_000.0, &Schema::empty());
     }
 
@@ -1041,7 +1050,7 @@ mod tests {
         // rolling Sharpe over the resulting equity curve. A strictly rising
         // price → a fully-invested rising equity → a positive trailing Sharpe.
         let spec: NodeSpec = serde_norway::from_str(
-            "!sharpe { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+            "!sharpe { strategy: { root: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
@@ -1078,7 +1087,7 @@ mod tests {
         // spec — `!ma_crossover { … }` builds the same strategy the Rust
         // `trend::ma_crossover` recipe does.
         let spec: NodeSpec = serde_norway::from_str(
-            "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
+            "!sharpe { strategy: !ma_crossover { root: X, fast: 2, slow: 4 }, \
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
@@ -1114,7 +1123,7 @@ mod tests {
         // `!tag v` to `{tag: v}` *first*, so `AnyStrategyRef` sees a bare
         // single-key mapping — no `symbol:`, no `left`/`right`, no
         // `selection:`. That is the shape the multi-asset arm swallows.
-        let yaml = "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
+        let yaml = "!sharpe { strategy: !ma_crossover { root: X, fast: 2, slow: 4 }, \
                     period: 4, bars_per_year: 252 }";
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
         let json = crate::spec::convert::yaml_to_json(value).unwrap();
@@ -1295,7 +1304,7 @@ mod tests {
         // `!max_drawdown` needs no rf/bpy. Over a rise-then-dip path the
         // trailing drawdown is a defined non-negative fraction.
         let spec: NodeSpec = serde_norway::from_str(
-            "!max_drawdown { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+            "!max_drawdown { strategy: { root: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 3 }",
         )
         .unwrap();
@@ -1323,7 +1332,7 @@ mod tests {
         // `risk_free_rate` is optional (defaults to 0), so a bare
         // `!sortino { strategy, period, bars_per_year }` parses and builds.
         let spec: NodeSpec = serde_norway::from_str(
-            "!sortino { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+            "!sortino { strategy: { root: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 4, bars_per_year: 365 }",
         )
         .unwrap();
@@ -1595,14 +1604,14 @@ mod tests {
         let params =
             std::collections::HashMap::from([("FAST".to_string(), serde_json::Value::from(3))]);
         let spec = SingleStrategySpec::from_text_with_params_in(
-            "symbol: BTC\nlong:\n  enter: !import enter.yml\n  exit: !value false\n",
+            "root: BTC\nlong:\n  enter: !import enter.yml\n  exit: !value false\n",
             &params,
             &dir,
             "(inline)",
         )
         .unwrap();
 
-        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(sole(&spec), "BTC");
         // The spliced signal fires like a hand-written one: a fast SMA(3)
         // crossing up through a slow SMA(8).
         let mut strat = spec.build(1_000.0, &Schema::empty());
@@ -1749,7 +1758,7 @@ mod tests {
         // substitution), not straight from YAML — so the string literal and
         // the `!str_eq` rhs operand have to normalise on that path too.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !str_eq { lhs: !get { key: regime }, rhs: !value bull }
               exit: !str_ne { lhs: !get { key: regime }, rhs: bull }
@@ -1941,7 +1950,7 @@ mod tests {
             period: 20
             bars_per_year: 252
             strategy:
-              symbol: BTCUSDT
+              root: BTCUSDT
               long:
                 enter: !gt { lhs: !get { key: nope }, rhs: !value 1.0 }
                 exit: !value false
@@ -2273,7 +2282,7 @@ mod tests {
         // (which routes via serde_json) and assert that a nested
         // `!if_else { cond: !and { ... } }` reaches build without erroring.
         let yaml = r#"
-            symbol: BTC
+            root: BTC
             long:
               enter: !value true
             sizing:

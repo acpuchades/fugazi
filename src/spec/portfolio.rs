@@ -12,7 +12,7 @@
 //! weights: !value [0.4, 0.6]        # per-child fixed weights
 //! children:
 //!   - name: trend
-//!     strategy: !ma_crossover { symbol: BTC, fast: 20, slow: 50 }
+//!     strategy: !ma_crossover { root: BTC, fast: 20, slow: 50 }
 //!   - name: mean_reversion
 //!     strategy:
 //!       symbol: ETH
@@ -741,7 +741,7 @@ impl PortfolioSpec {
                     args.insert("CHILD_GROUP".to_string(), Value::String(group.clone()));
                 }
                 if let PortfolioChildStrategy::Single(s) = &c.strategy {
-                    args.insert("SYM".to_string(), Value::String(s.symbol().to_string()));
+                    args.insert("SYM".to_string(), Value::String(s.symbol()?));
                 }
                 // The `child_<idx>` default is still used below as the
                 // template-build-error label for anyone chasing a
@@ -767,9 +767,7 @@ impl PortfolioSpec {
                 // other child shape spans many symbols, so there is no
                 // "this series" and its leaves must name one.
                 let child_root = match &c.strategy {
-                    PortfolioChildStrategy::Single(s) => {
-                        Some(Selector::by_symbol(s.symbol().to_string()))
-                    }
+                    PortfolioChildStrategy::Single(s) => Some(s.root().clone()),
                     _ => None,
                 };
                 let dyn_ind: AnyChain = concrete.try_build(
@@ -1008,10 +1006,10 @@ mod tests {
             weights: !fixed [0.6, 0.4]
             children:
               - name: hold_btc
-                strategy: !buy_and_hold { symbol: BTC }
+                strategy: !buy_and_hold { root: BTC }
               - name: rsi_eth
                 strategy:
-                  symbol: ETH
+                  root: ETH
                   long:
                     enter: !gt { lhs: !close, rhs: !value 0 }
         "#;
@@ -1042,8 +1040,8 @@ mod tests {
         let yaml = r#"
             weights: !drawdown_throtle { source: !portfolio_book, max_drawdown: 0.15 }
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let err = PortfolioSpec::from_text_with_params(yaml, &HashMap::new())
             .expect_err("a misspelled tag must not load");
@@ -1055,8 +1053,8 @@ mod tests {
     fn weights_default_to_equal_when_omitted() {
         let yaml = r#"
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.weights.is_none());
@@ -1074,8 +1072,8 @@ mod tests {
         let yaml = r#"
             weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let Err(err) = spec.try_build(1_000.0, &Schema::empty(), None) else {
@@ -1097,8 +1095,8 @@ mod tests {
             weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
             rebalance_on: !every 28
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.try_build(1_000.0, &Schema::empty(), None).is_ok());
@@ -1113,8 +1111,8 @@ mod tests {
             weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
             rebalance_on: !never
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.try_build(1_000.0, &Schema::empty(), None).is_ok());
@@ -1131,8 +1129,8 @@ mod tests {
                 r#"
                 weights: {weights}
                 children:
-                  - strategy: !buy_and_hold {{ symbol: A }}
-                  - strategy: !buy_and_hold {{ symbol: B }}
+                  - strategy: !buy_and_hold {{ root: A }}
+                  - strategy: !buy_and_hold {{ root: B }}
             "#
             );
             let spec = PortfolioSpec::from_text_with_params(&yaml, &HashMap::new()).unwrap();
@@ -1148,8 +1146,8 @@ mod tests {
         let yaml = r#"
             weights: !fixed [0.75, 0.25]
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let allocations = spec.resolve_allocations(1000.0, 2);
@@ -1204,9 +1202,9 @@ mod tests {
             weights: !fixed [0.6, 0.4]
             children:
               - name: hold_a
-                strategy: !buy_and_hold { symbol: A }
+                strategy: !buy_and_hold { root: A }
               - name: hold_b
-                strategy: !buy_and_hold { symbol: B }
+                strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(10_000.0, &Schema::empty(), None);
@@ -1252,13 +1250,13 @@ mod tests {
         let yaml = r#"
             children:
               - name: hold
-                strategy: !buy_and_hold { symbol: !param SYM }
+                strategy: !buy_and_hold { root: !param SYM }
         "#;
         let mut params = HashMap::new();
         params.insert("SYM".to_string(), Value::String("BTC".to_string()));
         let spec = PortfolioSpec::from_text_with_params(yaml, &params).unwrap();
         match &spec.children[0].strategy {
-            PortfolioChildStrategy::Single(s) => assert_eq!(s.symbol(), "BTC"),
+            PortfolioChildStrategy::Single(s) => assert_eq!(s.symbol().unwrap(), "BTC"),
             _ => panic!("expected a single-asset child"),
         }
     }
@@ -1270,8 +1268,8 @@ mod tests {
         // internally, matching PortfolioBuilder's own default.
         let yaml = r#"
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_policy.is_none());
@@ -1284,8 +1282,8 @@ mod tests {
         let yaml = r#"
             rebalance_policy: !proportional
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(matches!(
@@ -1300,8 +1298,8 @@ mod tests {
         let yaml = r#"
             rebalance_policy: !largest_first
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(matches!(
@@ -1326,14 +1324,14 @@ mod tests {
             children:
               - name: full_a
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 1.0
                   long:
                     enter: !value true
                     exit: !value false
               - name: full_b
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 1.0
                   long:
                     enter: !value true
@@ -1372,8 +1370,8 @@ mod tests {
         // pre-rebalance v1 (ValueBool::false gate, weights drift with P&L).
         let yaml = r#"
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_none());
@@ -1395,8 +1393,8 @@ mod tests {
                     symbol: !arg SYM
             rebalance_on: !every 1
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.weights.is_some());
@@ -1410,8 +1408,8 @@ mod tests {
         let yaml = r#"
             rebalance_on: !every 28
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_some());
@@ -1422,8 +1420,8 @@ mod tests {
         let yaml = r#"
             rebalance_on: !never
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_some());
@@ -1451,14 +1449,14 @@ mod tests {
             children:
               - name: half_a
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
                     exit: !value false
               - name: half_b
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1514,14 +1512,14 @@ mod tests {
             children:
               - name: half_a
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
                     exit: !value false
               - name: half_b
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1564,14 +1562,14 @@ mod tests {
             children:
               - name: a
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
                     exit: !value false
               - name: b
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1610,14 +1608,14 @@ mod tests {
         let yaml_fixed = r#"
             weights: !fixed [0.6, 0.4]
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let yaml_value = r#"
             weights: !value [0.6, 0.4]
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec_fixed = PortfolioSpec::from_text_with_params(yaml_fixed, &HashMap::new()).unwrap();
         let spec_value = PortfolioSpec::from_text_with_params(yaml_value, &HashMap::new()).unwrap();
@@ -1635,8 +1633,8 @@ mod tests {
         let yaml = r#"
             weights: !equal_weight
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let tree = spec.weights.as_ref().unwrap().tree();
@@ -1660,14 +1658,14 @@ mod tests {
             children:
               - name: a
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
                     exit: !value false
               - name: b
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1704,7 +1702,7 @@ mod tests {
         // clear message.
         use super::super::SingleStrategySpec;
         let yaml = r#"
-            symbol: X
+            root: X
             long:
               enter: !gt
                 lhs: !drawdown { source: !portfolio_book }
@@ -1734,8 +1732,8 @@ mod tests {
             weights: !drawdown
             rebalance_on: !every 1
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         // Just check that the build succeeds — the plumbing test above
@@ -1759,8 +1757,8 @@ mod tests {
             weights: !drawdown { source: !portfolio_book }
             rebalance_on: !every 1
             children:
-              - strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+              - strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
@@ -1774,15 +1772,15 @@ mod tests {
             children:
               - name: fast
                 group: momentum
-                strategy: !buy_and_hold { symbol: A }
+                strategy: !buy_and_hold { root: A }
               - name: slow
                 group: momentum
-                strategy: !buy_and_hold { symbol: B }
+                strategy: !buy_and_hold { root: B }
               - name: reverter
                 group: mean_rev
-                strategy: !buy_and_hold { symbol: C }
+                strategy: !buy_and_hold { root: C }
               - name: ungrouped
-                strategy: !buy_and_hold { symbol: D }
+                strategy: !buy_and_hold { root: D }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert_eq!(spec.children[0].group.as_deref(), Some("momentum"));
@@ -1812,7 +1810,7 @@ mod tests {
               - name: mom
                 group: momentum
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1820,7 +1818,7 @@ mod tests {
               - name: mr
                 group: mean_rev
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1861,7 +1859,7 @@ mod tests {
             rebalance_on: !every 1
             children:
               - name: named_but_ungrouped
-                strategy: !buy_and_hold { symbol: A }
+                strategy: !buy_and_hold { root: A }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
@@ -1878,7 +1876,7 @@ mod tests {
             weights: !arg CHILD_NAME
             rebalance_on: !every 1
             children:
-              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { root: A }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
@@ -1905,7 +1903,7 @@ mod tests {
               - name: mom
                 group: momentum
                 strategy:
-                  symbol: A
+                  root: A
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1913,7 +1911,7 @@ mod tests {
               - name: mr
                 group: mean_rev
                 strategy:
-                  symbol: B
+                  root: B
                   sizing: !value 0.5
                   long:
                     enter: !value true
@@ -1952,9 +1950,9 @@ mod tests {
         let yaml = r#"
             children:
               - name: dup
-                strategy: !buy_and_hold { symbol: A }
+                strategy: !buy_and_hold { root: A }
               - name: dup
-                strategy: !buy_and_hold { symbol: B }
+                strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
@@ -1969,8 +1967,8 @@ mod tests {
         let yaml = r#"
             children:
               - name: child_1
-                strategy: !buy_and_hold { symbol: A }
-              - strategy: !buy_and_hold { symbol: B }
+                strategy: !buy_and_hold { root: A }
+              - strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
@@ -1984,9 +1982,9 @@ mod tests {
         let yaml = r#"
             children:
               - name: momentum
-                strategy: !buy_and_hold { symbol: A }
+                strategy: !buy_and_hold { root: A }
               - name: momentum
-                strategy: !buy_and_hold { symbol: B }
+                strategy: !buy_and_hold { root: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let err = spec
@@ -2035,7 +2033,7 @@ mod tests {
             children:
               - name: shorty
                 strategy:
-                  symbol: A
+                  root: A
                   short:
                     enter: !value true
                     exit: !value false

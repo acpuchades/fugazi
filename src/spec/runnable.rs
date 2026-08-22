@@ -589,18 +589,25 @@ impl StrategySpec {
     /// The symbols this strategy may trade — the set per-symbol cost bundles
     /// are resolved for.
     ///
-    /// The two shapes that name their symbols up front say so exactly; the
-    /// N-symbol shapes discover theirs from the stream, which is also what
+    /// The two shapes that name their symbols up front say so exactly — via the
+    /// `!pick` walk over their `root:` expression, which is what "names a
+    /// symbol" means now that the root is an expression rather than a string.
+    /// The N-symbol shapes discover theirs from the stream, which is also what
     /// their runners already did.
     pub fn universe(&self, snapshots: &[Snapshot<Symbol>]) -> Vec<Symbol> {
         match self {
-            StrategySpec::Single(s) => vec![crate::types::symbol(s.symbol())],
-            StrategySpec::Pairs(s) => {
-                vec![
-                    crate::types::symbol(&s.left),
-                    crate::types::symbol(&s.right),
-                ]
-            }
+            StrategySpec::Single(s) => s
+                .root()
+                .named_symbols()
+                .iter()
+                .map(crate::types::symbol)
+                .collect(),
+            StrategySpec::Pairs(s) => s
+                .left
+                .named_symbols()
+                .union(&s.right.named_symbols())
+                .map(crate::types::symbol)
+                .collect(),
             StrategySpec::Basket(_) | StrategySpec::Multi(_) | StrategySpec::Portfolio(_) => {
                 super::backtest::universe_from_snapshots(snapshots)
             }
@@ -626,10 +633,10 @@ impl StrategySpec {
         fn from_child(child: &super::portfolio::PortfolioChildStrategy, out: &mut Vec<String>) {
             use super::portfolio::PortfolioChildStrategy as C;
             match child {
-                C::Single(s) => out.push(s.symbol().to_string()),
+                C::Single(s) => out.extend(s.root().named_symbols()),
                 C::Pairs(s) => {
-                    out.push(s.left.clone());
-                    out.push(s.right.clone());
+                    out.extend(s.left.named_symbols());
+                    out.extend(s.right.named_symbols());
                 }
                 // Discovered from the stream — nothing was declared.
                 C::Basket(_) | C::Multi(_) => {}
@@ -638,10 +645,10 @@ impl StrategySpec {
 
         let mut out = Vec::new();
         match self {
-            StrategySpec::Single(s) => out.push(s.symbol().to_string()),
+            StrategySpec::Single(s) => out.extend(s.root().named_symbols()),
             StrategySpec::Pairs(s) => {
-                out.push(s.left.clone());
-                out.push(s.right.clone());
+                out.extend(s.left.named_symbols());
+                out.extend(s.right.named_symbols());
             }
             StrategySpec::Basket(_) | StrategySpec::Multi(_) => {}
             StrategySpec::Portfolio(p) => {

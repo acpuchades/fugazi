@@ -67,21 +67,22 @@ use std::str::FromStr;
 ///
 /// Distinguishing the two lets the ambiguous case be a *build error* instead,
 /// per the crate's "build errors are values" invariant. Every leaf already
-/// funnels through `pick_root` / `build_pick`, so there is no second table
+/// funnels through `root_source` / `build_pick`, so there is no second table
 /// to keep in sync — a new tag inherits the check for free.
 #[derive(Clone, Copy, Default)]
 pub struct Root<'a> {
-    blessed: Option<&'a Selector<Symbol>>,
+    blessed: Option<&'a super::root::RootSpec>,
     /// Set only when there is no blessed series *and* the shape guarantees
     /// more than one asset. Names the shape, for the error message.
     ambiguous: Option<&'static str>,
 }
 
 impl<'a> Root<'a> {
-    /// This context blesses `selector` — a bare leaf reads that asset.
-    pub fn blessed(selector: &'a Selector<Symbol>) -> Self {
+    /// This context blesses `spec` — a bare leaf reads the series that
+    /// expression names.
+    pub fn blessed(spec: &'a super::root::RootSpec) -> Self {
         Self {
-            blessed: Some(selector),
+            blessed: Some(spec),
             ambiguous: None,
         }
     }
@@ -108,18 +109,34 @@ impl<'a> Root<'a> {
         }
     }
 
-    /// Bless `selector` when the context has one, else fall back to the
+    /// Bless `spec` when the context has one, else fall back to the
     /// sole-atom unpack — for callers holding an `Option` already.
-    pub fn or_sole(selector: Option<&'a Selector<Symbol>>) -> Self {
+    pub fn or_sole(spec: Option<&'a super::root::RootSpec>) -> Self {
         Self {
-            blessed: selector,
+            blessed: spec,
             ambiguous: None,
         }
     }
 
-    /// The blessed selector, if any.
-    pub(super) fn selector(self) -> Option<&'a Selector<Symbol>> {
+    /// The blessed root expression, if any.
+    pub(super) fn spec(self) -> Option<&'a super::root::RootSpec> {
         self.blessed
+    }
+
+    /// The single symbol the blessed root names, when it names exactly one.
+    ///
+    /// Feeds the one place a leaf still needs the *name* rather than the
+    /// series: an explicit `!pick { freq: … }` that omits `symbol:` and means
+    /// "my own series at that cadence". `None` when there is no root, or when
+    /// the root names none or several — in which case the leaf falls back to
+    /// the same sole-atom unpack it would have used without a root.
+    pub(super) fn blessed_symbol(self) -> Option<Symbol> {
+        let named = self.blessed?.named_symbols();
+        let mut it = named.into_iter();
+        match (it.next(), it.next()) {
+            (Some(one), None) => Some(crate::types::symbol(&one)),
+            _ => None,
+        }
     }
 
     /// The error a bare price leaf earns in this context, if it earns one.
@@ -136,12 +153,25 @@ impl<'a> Root<'a> {
 
 /// The implicit atom root of every `source:`-omitted leaf. `Err` when the
 /// context has no blessed series and more than one asset — see [`Root`].
-pub(super) fn pick_root(root: Root<'_>) -> Result<Pick<Symbol>, String> {
-    match root.selector() {
-        Some(selector) => Ok(Pick::<Symbol>::rooted(selector.clone())),
+pub(super) fn root_source(
+    root: Root<'_>,
+    anchor: &Position,
+    book: &Book,
+    portfolio_book: Option<&Book>,
+    schema: &Arc<Schema>,
+) -> Result<AtomChain, String> {
+    match root.spec() {
+        // The root is built with `Root::sole()` as *its* own root, which is
+        // what terminates the recursion: a `root: !pick {}` bottoms out in the
+        // ordinary sole-atom unpack rather than asking for itself again.
+        Some(spec) => {
+            let node = spec.node();
+            let built = node.try_build(anchor, book, portfolio_book, schema, Root::sole())?;
+            built.into_atom().map_err(|e| trail(node, e))
+        }
         None => match root.ambiguity() {
             Some(error) => Err(error),
-            None => Ok(Pick::<Symbol>::new()),
+            None => Ok(crate::runtime::erase(Pick::<Symbol>::new())),
         },
     }
 }
@@ -158,7 +188,7 @@ pub(super) fn pick_root(root: Root<'_>) -> Result<Pick<Symbol>, String> {
 /// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
 /// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
 /// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate.
-/// Contrast with [`pick_root`], which has to either root, unpack a sole
+/// Contrast with [`root_source`], which has to either root, unpack a sole
 /// entry, or refuse — price-field leaves (`!close`, `!high`, …) genuinely
 /// depend on *which* asset.
 ///
@@ -4309,7 +4339,7 @@ fn atom_source_of(
     root: Root<'_>,
 ) -> Result<AtomChain, String> {
     match source {
-        None => Ok(crate::runtime::erase(pick_root(root)?)),
+        None => root_source(root, anchor, book, portfolio_book, schema),
         Some(s) => {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             built.into_atom().map_err(|e| trail(s, e))
@@ -4393,7 +4423,7 @@ impl NodeSpec {
     /// `!get { key }` to look up the column's declared [`OverlayType`] and
     /// dispatch to the right typed leaf; `root` is the **blessed series** —
     /// which asset a `source:`-omitted leaf reads out of the snapshot (see
-    /// `pick_root`). Pass `None` from a context with no single blessed
+    /// `root_source`). Pass `None` from a context with no single blessed
     /// series and every price leaf must name its asset.
     pub fn build(
         &self,
@@ -4535,7 +4565,15 @@ impl NodeSpec {
                 any(crate::indicators::CurrentBar::of(s))
             }
 
-            Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref(), root)?,
+            Pick { symbol, freq } => build_pick(
+                symbol.as_deref(),
+                freq.as_deref(),
+                root,
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+            )?,
 
             Value(ValueLit::Real(x)) => any(self::Value::<Snapshot<Symbol>>::new(*x)),
             Value(ValueLit::Bool(b)) => {
@@ -5234,13 +5272,17 @@ fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
     root: Root<'_>,
+    anchor: &Position,
+    book: &Book,
+    portfolio_book: Option<&Book>,
+    schema: &Arc<Schema>,
 ) -> Result<AnyChain, String> {
     let named = symbol.is_some();
     // The document gives a `&str`; interning happens here, once at build time,
     // so the resulting `Selector` clones as a refcount bump for the whole run.
     let sym = symbol
         .map(crate::types::symbol)
-        .or_else(|| root.selector().and_then(|r| r.symbol.clone()));
+        .or_else(|| root.blessed_symbol());
     let f = match freq {
         Some(s) => {
             Some(Frequency::from_str(s).map_err(|e| format!("invalid frequency {s:?}: {e}"))?)
@@ -5253,10 +5295,10 @@ fn build_pick(
     };
     Ok(if selector.is_empty() {
         // A bare `!pick {}` naming neither symbol nor freq, with no root to
-        // borrow one from: the same unanswerable question `pick_root` refuses.
-        // (A freq-only selector is fine — `Pick::rooted` falls back through
-        // `sole_atom_or_none` and reads `None` rather than panicking.)
-        any(pick_root(root)?)
+        // borrow one from: the same unanswerable question `root_source`
+        // refuses. (A freq-only selector is fine — `Pick::rooted` falls back
+        // through `sole_atom_or_none` and reads `None` rather than panicking.)
+        any(root_source(root, anchor, book, portfolio_book, schema)?)
     } else if named {
         any(Pick::<Symbol>::matching(selector))
     } else {

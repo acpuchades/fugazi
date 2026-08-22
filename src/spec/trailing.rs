@@ -83,10 +83,18 @@ impl AnyStrategyRef {
     /// names no symbol upfront (its universe floats), so it has none — but
     /// they're only ever fed tagged multi-asset snapshots, where the fallback
     /// is never consulted.
+    ///
+    /// A root that names no single symbol lands on the same empty tag as the
+    /// floating shapes. That is not a silent failure: this tag is only ever
+    /// applied to *untagged* entries, and the real "which instrument" question
+    /// is answered — with an error — when the embedded strategy is built.
     fn fallback_symbol(&self) -> Symbol {
+        let sole = |r: &crate::spec::RootSpec| {
+            crate::types::symbol(r.sole_symbol("embedded").unwrap_or_default())
+        };
         match self {
-            AnyStrategyRef::Single(s) => crate::types::symbol(s.symbol()),
-            AnyStrategyRef::Pairs(p) => crate::types::symbol(&p.left),
+            AnyStrategyRef::Single(s) => sole(s.root()),
+            AnyStrategyRef::Pairs(p) => sole(&p.left),
             AnyStrategyRef::Basket(_) | AnyStrategyRef::Multi(_) => crate::types::symbol(""),
         }
     }
