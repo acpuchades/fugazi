@@ -106,14 +106,39 @@ impl Market {
             Market::UsdMFutures => "futures/um",
         }
     }
+
+    /// The live-exchange endpoint whose vocabulary matches this archive tree.
+    /// The two are different hosts *and* different APIs — spot symbols come
+    /// from `api.binance.com`, perpetuals from `fapi.binance.com` — so reading
+    /// one for the other silently returns the wrong list rather than erroring.
+    fn exchange_info_url(self) -> &'static str {
+        match self {
+            Market::Spot => SPOT_EXCHANGE_INFO_URL,
+            Market::UsdMFutures => FUTURES_EXCHANGE_INFO_URL,
+        }
+    }
+
+    /// Whether an `exchangeInfo` entry belongs to this market's vocabulary.
+    ///
+    /// Spot has no `contractType` at all (it deserializes to `""`), so the
+    /// perpetual filter must not be applied there — it would reject every
+    /// symbol and report an empty spot universe.
+    fn admits(self, sym: &ExchangeSymbol) -> bool {
+        sym.status == "TRADING"
+            && match self {
+                Market::Spot => true,
+                Market::UsdMFutures => sym.contract_type == "PERPETUAL",
+            }
+    }
 }
 
 /// The archive host. Static files, no API key, no rate limit.
 const DEFAULT_BASE_URL: &str = "https://data.binance.vision";
 /// Where the ticker list comes from — the archive has no index endpoint, so the
-/// symbol vocabulary is read from the live exchange instead. See
-/// [`BinanceVision::tickers`].
-const EXCHANGE_INFO_URL: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
+/// symbol vocabulary is read from the live exchange instead, from whichever
+/// endpoint matches the client's [`Market`]. See [`Market::exchange_info_url`].
+const SPOT_EXCHANGE_INFO_URL: &str = "https://api.binance.com/api/v3/exchangeInfo";
+const FUTURES_EXCHANGE_INFO_URL: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 const DEFAULT_MIN_DELAY_MS: u64 = 20;
 /// Archive requests outstanding at once, per series. Chosen to hide
 /// round-trip latency on a multi-thousand-file `metrics` range without
@@ -161,15 +186,20 @@ pub fn binance_vision_schema(market: Market) -> &'static Arc<Schema> {
 ///
 /// Cheap to clone (the inner [`reqwest::Client`] is `Arc`-backed).
 ///
-/// The `symbol` is a **perpetual contract** symbol (`BTCUSDT`, `ETHUSDT`) —
-/// which mostly coincides with the spot vocabulary but is not the same list.
-/// Enumerate it with [`SeriesSource::tickers`]
-/// (`fugazi list tickers binance-vision`).
+/// The `symbol` domain follows the client's [`Market`]: a spot symbol
+/// (`BTCUSDT`, `ETHUSDT`) for [`Market::Spot`], a **perpetual contract**
+/// symbol for [`Market::UsdMFutures`]. The two mostly coincide but are not the
+/// same list, so [`SeriesSource::tickers`] enumerates whichever one this
+/// client reads (`fugazi list tickers binance-vision`, or
+/// `binance-vision-futures`).
 #[derive(Debug, Clone)]
 pub struct BinanceVision {
     market: Market,
     client: reqwest::Client,
     base_url: String,
+    /// Overrides [`Market::exchange_info_url`]. `None` means "use the endpoint
+    /// this client's market implies".
+    exchange_info_url: Option<String>,
     min_delay_between_requests: Duration,
     max_in_flight: usize,
 }
@@ -197,6 +227,7 @@ impl BinanceVision {
             market,
             client: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            exchange_info_url: None,
             min_delay_between_requests: Duration::from_millis(DEFAULT_MIN_DELAY_MS),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
@@ -215,6 +246,15 @@ impl BinanceVision {
     /// local mock server.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
+        self
+    }
+
+    /// Override the `exchangeInfo` URL [`SeriesSource::tickers`] reads. This is
+    /// a *different host* from [`with_base_url`](Self::with_base_url) — the
+    /// archive publishes no index, so the vocabulary comes from the live
+    /// exchange. Primarily useful for testing against a local mock server.
+    pub fn with_exchange_info_url(mut self, url: impl Into<String>) -> Self {
+        self.exchange_info_url = Some(url.into());
         self
     }
 
@@ -240,8 +280,13 @@ impl SeriesSource for BinanceVision {
     /// no archive for an early month; that reads as no data.
     fn tickers(&self) -> impl Future<Output = Result<Vec<String>, SourceError>> + Send {
         let client = self.client.clone();
+        let market = self.market;
+        let url = self
+            .exchange_info_url
+            .clone()
+            .unwrap_or_else(|| market.exchange_info_url().to_string());
         async move {
-            let resp = client.get(EXCHANGE_INFO_URL).send().await?;
+            let resp = client.get(&url).send().await?;
             if !resp.status().is_success() {
                 return Err(map_http_error(resp).await);
             }
@@ -252,7 +297,7 @@ impl SeriesSource for BinanceVision {
             let mut out: Vec<String> = info
                 .symbols
                 .into_iter()
-                .filter(|s| s.status == "TRADING" && s.contract_type == "PERPETUAL")
+                .filter(|s| market.admits(s))
                 .map(|s| s.symbol)
                 .collect();
             out.sort();
