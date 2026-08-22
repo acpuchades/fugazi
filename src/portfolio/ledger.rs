@@ -197,6 +197,23 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         None
     }
 
+    /// The **account's** answer, cached alongside
+    /// [`can_short`](Wallet::can_short) — and delegated, unlike
+    /// [`quote_ccy`](Wallet::quote_ccy) directly above.
+    ///
+    /// The lifetime argument that stops `quote_ccy` doesn't apply: a
+    /// `&'static [&'static str]` borrows nothing from the guard it is read
+    /// through, so carrying it across costs a pointer copy and no allocation.
+    /// A child asking which venue's bars its notional slice is priced off gets
+    /// the venue the intent actually nets onto, rather than a silent empty
+    /// answer from a handle that trades no venue of its own.
+    fn data_sources(&self) -> &'static [&'static str] {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .account_data_sources
+    }
+
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
         // The driver feeds the account wallet the portfolio trades, not a child
         // handle. A handle receiving update() means the caller wired the driver

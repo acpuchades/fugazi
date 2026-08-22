@@ -556,6 +556,26 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   `Portfolio::trade` before children run, since a child holds no handle on the
   account). Lets a caller degrade to long-only *before* trading instead of learning
   the limit one rejection at a time.
+- **`data_sources() -> &'static [&'static str]`** — the third introspection read,
+  and the one that crosses a subsystem boundary: which market-data providers quote
+  what this account trades, named as the `sources` layer names them (the `provider:`
+  token a `fugazi get` spec takes). Default `&[]` = **"does not say"**, the reading
+  `quote_ccy`'s `None` asks for; `PaperWallet` takes it (simulated money has no venue
+  whose prices are the *right* ones), `OkxWallet` answers `["okx"]`, `CoinbaseWallet`
+  `["coinbase"]`. **Introspection, not fetching** — the wallet still has no view of
+  the market and is fed prices through `update`; this lets a caller preflight the
+  pairing it was going to make anyway (a live runner warning it is about to drive an
+  OKX account off Yahoo bars). **Venue granularity is all a provider name can carry**:
+  `OkxWallet` trades `instType=SWAP`, so its bars are `okx:` fetched for the *swap*
+  instrument id, not the spot pair the same provider serves — pairing the instrument
+  stays the caller's job. Wrappers delegate; `LedgerWallet` delegates *here* where it
+  declines to for `quote_ccy`, because a `&'static [&'static str]` borrows nothing
+  from the portfolio guard it is read through (cached as
+  `PortfolioInner::account_data_sources` beside `account_can_short`).
+  **Deliberately not a typed handle.** Returning `impl SeriesSource`es would point
+  unconditional core at the default-on `sources` feature and hand every downstream
+  `Wallet` implementor a registry it cannot extend; a name is the widest thing both
+  halves already agree on.
 - **`take_rejections() -> Vec<Rejection<Sym>>`** — the **failure stream**, twin of
   `update`'s fill stream. `Rejection { symbol, id, error, kind }`. Default empty;
   **any impl that can drop an order must override**. `PaperWallet` books all three

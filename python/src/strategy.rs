@@ -422,6 +422,20 @@ impl PyWallet {
     /// no venue to ask. `None` means "unlabelled", never "no currency": the
     /// numbers are always in *some* unit. Pass `quote_ccy=` to the constructor
     /// to set it.
+    /// The market-data providers that quote what this account trades, named as
+    /// a `fugazi get` spec names them (`"okx"`, `"coinbase"`, …). Empty here:
+    /// simulated money has no venue whose prices are the *right* ones, and a
+    /// paper run is fed by whoever ran it. Empty means "does not say", never
+    /// "nothing quotes this market" — the same reading `quote_ccy=None` asks
+    /// for. The live wallets each name their venue.
+    ///
+    /// Introspection, not fetching: answering binds nothing, it lets a caller
+    /// check the pairing it was about to make.
+    #[getter]
+    pub(crate) fn data_sources(&self) -> Vec<&'static str> {
+        self.inner.data_sources().to_vec()
+    }
+
     #[getter]
     pub(crate) fn quote_ccy(&self) -> Option<&str> {
         self.inner.quote_ccy()
@@ -814,6 +828,16 @@ impl PyOkxWallet {
         self.inner.quote_ccy()
     }
 
+    /// `["okx"]` — the venue this wallet trades, whose candlesticks the `okx`
+    /// provider fetches. Venue granularity only: this account trades swaps, so
+    /// the matching bars are that provider's answer for the **swap** instrument
+    /// id (`okx:BTC-USDT-SWAP[1h]`), not the spot pair it serves under
+    /// `BTC-USDT`. Pairing the right instrument is still yours to do.
+    #[getter]
+    pub(crate) fn data_sources(&self) -> Vec<&'static str> {
+        self.inner.data_sources().to_vec()
+    }
+
     /// Force an account-state refresh (balance + positions) now. Raises
     /// `ValueError` on a REST failure. `update` calls this each bar; call it
     /// directly for a one-off sync (e.g. right after construction).
@@ -1060,6 +1084,16 @@ impl PyCoinbaseWallet {
     #[getter]
     pub(crate) fn quote_ccy(&self) -> Option<&str> {
         self.inner.quote_ccy()
+    }
+
+    /// `["coinbase"]` — the venue this wallet trades. The cleanest of the
+    /// pairings: the `coinbase` provider fetches the same Advanced Trade spot
+    /// market, keyed on the very product ids this wallet's symbols already are
+    /// (`BTC-USD`). It publishes no overlay columns and serves fixed cadences
+    /// (1m/5m/15m/30m, 1h/2h/6h, 1d).
+    #[getter]
+    pub(crate) fn data_sources(&self) -> Vec<&'static str> {
+        self.inner.data_sources().to_vec()
     }
 
     /// Force an account-state refresh (balances) now. Raises `ValueError` on a
@@ -3351,6 +3385,7 @@ const WALLET_SURFACE: &[&str] = &[
     "funds",
     "can_short",
     "quote_ccy",
+    "data_sources",
     "update",
     "set",
     "set_position",

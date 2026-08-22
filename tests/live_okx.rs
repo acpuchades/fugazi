@@ -82,6 +82,27 @@ fn a_swap_account_reports_the_currency_its_funds_are_in() {
     );
 }
 
+/// Which provider quotes this account. Venue granularity is all a provider name
+/// has room to say, and the caveat is the point of asserting it: the bars that
+/// match this wallet are `okx:` fetched for the **swap** instrument id, not the
+/// spot pair the same provider serves under `BTC-USDT`. Needs no mock either.
+#[test]
+fn a_swap_account_names_the_provider_that_quotes_it() {
+    use fugazi::sources::{Okx, SeriesSource};
+
+    assert_eq!(
+        wallet("http://127.0.0.1:1".to_string()).data_sources(),
+        &["okx"]
+    );
+    // Asserted against the provider's own `name()` rather than only the
+    // literal: the point of the answer is that it can be handed straight to the
+    // `sources` layer, so a rename on either side has to fail here.
+    assert_eq!(
+        wallet("http://127.0.0.1:1".to_string()).data_sources(),
+        &[Okx::new().name()]
+    );
+}
+
 /// The one real translation this backend does: OKX sizes a swap in
 /// **contracts**, the trait speaks base units. `ctVal = 0.01`, so a `0.03 BTC`
 /// target must reach the wire as `3.0`.

@@ -649,9 +649,14 @@ endpoints, its envelopes, its request bodies, and its signing.
 3. **`impl Wallet<Symbol>`** — one-line delegations to `flow` for the movement
    and the bar loop (`update`, `set_position`, `set_stop`, `set_take_profit`,
    `cancel_protective`, `set_limit`, `cancel_limit`, `cancel`, `poll_fills`),
-   plus the six reads that *are* the account-shape difference: `funds`,
-   `position`, `positions`, `equity`, `can_short`, `quote_ccy`. `take_rejections`
-   is `self.core.log_mut().take_rejections()`.
+   plus the seven reads that *are* the account-shape difference: `funds`,
+   `position`, `positions`, `equity`, `can_short`, `quote_ccy`, `data_sources`.
+   `take_rejections` is `self.core.log_mut().take_rejections()`.
+
+   `data_sources` is the one that reaches outside the wallet: name the
+   `sources` provider(s) that quote your venue, as a `fugazi get` spec spells
+   them. Name none rather than the closest thing — an empty slice reads as "does
+   not say", and a wrong name is worse than no name.
 
    Two of those reads are load-bearing beyond their own answer.
    **`positions()`** is what makes the trait's `flatten` default work and lets a

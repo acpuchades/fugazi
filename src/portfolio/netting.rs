@@ -110,6 +110,13 @@ pub(super) struct PortfolioInner<Sym> {
     /// (matching the trait default), so a child asking before any account has
     /// been seen gets the permissive answer rather than a spurious `false`.
     pub(super) account_can_short: bool,
+
+    /// The account wallet's [`data_sources`](Wallet::data_sources), cached the
+    /// same way and for the same reason. Empty until the first bar, matching the
+    /// trait default — "the account has not said" reads correctly for "no
+    /// account has been seen yet", which is why this one needs no permissive
+    /// special case the way `account_can_short` does.
+    pub(super) account_data_sources: &'static [&'static str],
 }
 
 // `snapshot`/`restore` are consumed only by `Portfolio::{save_state,restore_state}`,
@@ -186,6 +193,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             rejections: Vec::new(),
             seeds,
             account_can_short: true,
+            account_data_sources: &[],
         }
     }
 
@@ -237,6 +245,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         // Back to the permissive default: the next run's account re-caches it on
         // its first `trade`.
         self.account_can_short = true;
+        self.account_data_sources = &[];
     }
 
     // ---- intent recording (called from LedgerWallet) --------------------

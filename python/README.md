@@ -689,6 +689,7 @@ wallet.positions()           # {symbol: units}
 wallet.orders()              # the blotter: list of Order(symbol, side, units)
 wallet.can_short             # can this account hold a negative position?
 wallet.quote_ccy             # what currency are these numbers in? (or None)
+wallet.data_sources          # which providers quote this account? (list[str])
 ```
 
 `can_short` is what an account *can* do, asked before trading: `True` on a
@@ -715,6 +716,22 @@ numeraire is — to label a balance, refuse a mixed-currency universe, or reconc
 against a venue — and answering does not make mixing safe. One caveat on
 `OkxWallet`: `funds` is in `quote_ccy`, but `equity` is OKX's own USD valuation of
 the account, so the two differ by the USDT peg.
+
+`data_sources` is the third question of the same shape, asked about the *feed*:
+`["okx"]` on `OkxWallet`, `["coinbase"]` on `CoinbaseWallet`, `[]` on a
+`PaperWallet`. The names are the ones a `fugazi get` spec takes, so a live runner
+can check the pairing before it drives an account off the wrong bars:
+
+```py
+wallet = ta.OkxWallet.demo(key, secret, passphrase)
+assert wallet.data_sources == ["okx"]
+bars = ta.fetch("okx", "BTC-USDT-SWAP", "1h", since="2024-01-01")
+```
+
+It introspects, it does not fetch — and it answers at venue granularity, which is
+all a provider name has room to say: the OKX account above trades swaps, so the
+matching bars are that provider's **swap** instrument id, not the `BTC-USDT` spot
+pair it will also serve. Empty means "does not say", never "nothing quotes this".
 
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,

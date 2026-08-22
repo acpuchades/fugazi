@@ -84,6 +84,26 @@ fn a_spot_account_reports_the_quote_currency_it_was_built_against() {
     );
 }
 
+/// The cleanest of the wallet-to-provider pairings: the `coinbase` provider
+/// fetches the same Advanced Trade spot market, keyed on the very `product_id`
+/// vocabulary this wallet's symbols already are. Needs no mock — it is a
+/// statement about the venue, not about the account.
+#[test]
+fn a_spot_account_names_the_provider_that_quotes_it() {
+    use fugazi::sources::{Coinbase, SeriesSource};
+
+    assert_eq!(
+        wallet("http://127.0.0.1:1".to_string()).data_sources(),
+        &["coinbase"]
+    );
+    // Same cross-check as the OKX side: the name is only useful if it is the
+    // one the `sources` layer answers to.
+    assert_eq!(
+        wallet("http://127.0.0.1:1".to_string()).data_sources(),
+        &[Coinbase::new().name()]
+    );
+}
+
 #[test]
 fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
     let mock = serve(|server| {

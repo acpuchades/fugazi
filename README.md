@@ -717,7 +717,12 @@ it doesn't enforce. Wrappers delegate: a `SleeveWallet` answers for the account 
 wraps, and a portfolio child's handle answers for the account the portfolio nets
 onto. `Wallet::quote_ccy()` is the same shape for the numeraire — `None` means
 "does not say", not "no currency"; fugazi does no FX, so a run is sound only if one
-numeraire holds throughout.
+numeraire holds throughout. `Wallet::data_sources()` is the third: which providers
+quote what the account trades (`["okx"]`, `["coinbase"]`, empty on a paper wallet),
+named exactly as a `fugazi get` spec names them, so a runner can check the feed it
+is about to drive a live account off. It reports at venue granularity and fetches
+nothing — an OKX account trades swaps, so its bars are `okx:BTC-USDT-SWAP`, not the
+spot pair the same provider serves.
 
 A whole `Portfolio` runs live the same way — it is an ordinary strategy that nets
 its children's intents onto the one wallet it is handed:

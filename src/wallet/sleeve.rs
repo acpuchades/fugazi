@@ -124,6 +124,11 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn quote_ccy(&self) -> Option<&str> {
         self.inner.quote_ccy()
     }
+    /// Delegates, for the same reason again: a sleeve hides part of one
+    /// account's position, it does not move it to another venue.
+    fn data_sources(&self) -> &'static [&'static str] {
+        self.inner.data_sources()
+    }
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
     }

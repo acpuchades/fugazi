@@ -335,6 +335,7 @@ WALLET_BOUND = {
     "equity",
     "can_short",
     "quote_ccy",
+    "data_sources",
     "update",
     "set",
     "set_position",
@@ -404,6 +405,7 @@ OKX_WALLET_BOUND = {
     "equity",
     "can_short",
     "quote_ccy",
+    "data_sources",
     # Order flow.
     "update",
     "set",
@@ -465,6 +467,7 @@ COINBASE_WALLET_BOUND = {
     "equity",
     "can_short",
     "quote_ccy",
+    "data_sources",
     # Order flow.
     "update",
     "set",
@@ -712,6 +715,30 @@ def test_tickers_accepts_exactly_the_providers_fetch_accepts():
     enumerated, so a gap makes the function a liar rather than merely
     incomplete."""
     assert _known_providers(ta.tickers) == _known_providers(ta.fetch, "BTCUSDT")
+
+
+def test_every_wallet_names_providers_fetch_actually_accepts():
+    """`Wallet.data_sources` is only useful if the names it answers are the ones
+    the fetch dispatcher takes — the whole point is that a caller can hand one
+    straight to `ta.fetch`. A rename on either side (or a plausible-looking
+    `"okx-swap"` on a wallet) has to fail here rather than at the first live
+    run."""
+    known = _known_providers(ta.fetch, "BTCUSDT")
+    wallets = [
+        ta.PaperWallet(1_000.0),
+        ta.OkxWallet.demo("key", "secret", "passphrase"),
+    ]
+    for w in wallets:
+        named = w.data_sources
+        assert isinstance(named, list)
+        assert set(named) <= known, (
+            f"{type(w).__name__}.data_sources names {sorted(set(named) - known)}, "
+            "which ta.fetch does not accept"
+        )
+    # A paper account has no venue whose prices are the right ones, so it names
+    # none — empty is "does not say", not "nothing quotes this".
+    assert ta.PaperWallet(1_000.0).data_sources == []
+    assert ta.OkxWallet.demo("key", "secret", "passphrase").data_sources == ["okx"]
 
 
 def test_every_provider_class_spells_enumeration_the_same_way():

@@ -319,6 +319,43 @@ pub trait Wallet<Sym> {
         None
     }
 
+    /// The market-data providers that quote what this account trades, named as
+    /// the `sources` layer names them — the exact token a `fugazi get`
+    /// spec takes in its `provider:` position (`"okx"`, `"coinbase"`,
+    /// `"binance-vision-futures"`, …), which is `SeriesSource::name`'s answer.
+    ///
+    /// **An empty slice means "this wallet does not say", never "nothing quotes
+    /// this market"** — the same reading [`quote_ccy`](Self::quote_ccy)'s `None`
+    /// and [`positions`](Self::positions)'s empty default ask for. A
+    /// [`PaperWallet`] answers empty: simulated money has no venue whose prices
+    /// are the *right* ones, and a paper run is fed by whoever ran it.
+    ///
+    /// This is **introspection, not fetching** — the third method to draw the
+    /// line [`can_short`](Self::can_short) and [`quote_ccy`](Self::quote_ccy)
+    /// draw, and the one where it matters most. A wallet still has no view of
+    /// the market: it is fed prices through [`update`](Self::update) and fugazi
+    /// stays agnostic about where they came from. Answering here does not fetch,
+    /// validate, or bind anything; it lets a caller preflight the pairing it was
+    /// going to make anyway — a live runner warning that it is about to drive an
+    /// OKX account off Yahoo bars, or a CLI defaulting the `provider:` half of a
+    /// spec it is about to fetch.
+    ///
+    /// **Naming a provider does not make the symbol vocabularies match.** The
+    /// answer is at venue granularity, which is all a provider name has room to
+    /// say: the `OkxWallet` in `crate::live` trades `instType=SWAP`
+    /// (`BTC-USDT-SWAP`), so its bars come from `okx:` — but from the *swap*
+    /// instrument id, not the spot pair the same provider will happily serve
+    /// under `BTC-USDT`. Pairing the right instrument is still the caller's job.
+    ///
+    /// A wrapper delegates to what it wraps, for [`can_short`](Self::can_short)'s
+    /// reason: which venue's prices are the account's is a fact about the account
+    /// underneath, not about the view onto it. Unlike `quote_ccy`, the `&'static`
+    /// answer borrows from nothing, so a wrapper that reads through a lock can
+    /// delegate it too.
+    fn data_sources(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Install a per-symbol [`TradingCosts`] override — every fill on
     /// `symbol` thereafter books through this bundle instead of the wallet's
     /// default. Latest-wins per symbol.

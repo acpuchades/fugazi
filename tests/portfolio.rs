@@ -2023,33 +2023,41 @@ fn a_sleeve_lets_a_portfolio_coexist_with_external_positions() {
 }
 
 /// A child trades a `LedgerWallet`, which holds no handle on the account — so
-/// `can_short()` on that handle has to carry the account's answer across, or a
-/// child would size a short the account can never hold.
+/// the two account-level capability reads on that handle have to carry the
+/// account's answers across. `can_short()`, or a child would size a short the
+/// account can never hold; `data_sources()`, or a child would report that
+/// nothing quotes the market its intent actually nets onto.
 #[test]
-fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
+fn a_child_reads_the_accounts_capabilities_through_its_ledger_handle() {
     use std::sync::{Arc, Mutex};
 
+    type Seen = Option<(bool, &'static [&'static str])>;
+
     /// Records what its wallet handle reported, each bar it trades.
-    struct AsksCanShort {
-        seen: Arc<Mutex<Option<bool>>>,
+    struct AsksCapabilities {
+        seen: Arc<Mutex<Seen>>,
     }
-    impl Strategy for AsksCanShort {
+    impl Strategy for AsksCapabilities {
         type Input = Snapshot<&'static str>;
         type Symbol = &'static str;
         fn update(&mut self, _snap: Snapshot<&'static str>) {}
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
-            *self.seen.lock().unwrap() = Some(wallet.can_short());
+            *self.seen.lock().unwrap() = Some((wallet.can_short(), wallet.data_sources()));
         }
         fn reset(&mut self) {
             *self.seen.lock().unwrap() = None;
         }
     }
 
-    /// A spot-shaped account: it cannot hold a negative position and says so.
+    /// A spot-shaped account: it cannot hold a negative position, it is quoted
+    /// by one named provider, and it says both.
     struct SpotAccount(PaperWallet<&'static str>);
     impl Wallet<&'static str> for SpotAccount {
         fn can_short(&self) -> bool {
             false
+        }
+        fn data_sources(&self) -> &'static [&'static str] {
+            &["coinbase"]
         }
         fn funds(&self) -> Reference {
             self.0.funds()
@@ -2107,7 +2115,7 @@ fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
         .with_initial_equity(1_000.0)
         .add(
             "asks",
-            AsksCanShort {
+            AsksCapabilities {
                 seen: Arc::clone(&seen),
             },
         )
@@ -2117,17 +2125,18 @@ fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
     let _ = backtest::run(&mut portfolio, &mut spot, a_rising_b_flat_snapshots());
     assert_eq!(
         *seen.lock().unwrap(),
-        Some(false),
-        "the spot account's answer reaches the child",
+        Some((false, &["coinbase"][..])),
+        "the spot account's answers reach the child",
     );
 
-    // Over an ordinary paper account the same child sees the permissive answer.
+    // Over an ordinary paper account the same child sees the permissive answer
+    // for one and the "does not say" default for the other.
     let seen = Arc::new(Mutex::new(None));
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
         .add(
             "asks",
-            AsksCanShort {
+            AsksCapabilities {
                 seen: Arc::clone(&seen),
             },
         )
@@ -2135,5 +2144,5 @@ fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
         .build();
     let mut paper = PaperWallet::new(1_000.0);
     let _ = backtest::run(&mut portfolio, &mut paper, a_rising_b_flat_snapshots());
-    assert_eq!(*seen.lock().unwrap(), Some(true));
+    assert_eq!(*seen.lock().unwrap(), Some((true, &[][..])));
 }

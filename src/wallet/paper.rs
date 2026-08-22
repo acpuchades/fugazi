@@ -1468,6 +1468,9 @@ mod tests {
         // is no numeraire it would be safe to assume, so silence reads as "does
         // not say" rather than as a guess at dollars.
         assert_eq!(w.quote_ccy(), None);
+        // And the third capability read defaults the same direction as the
+        // denomination: silence is "does not say", not "nothing quotes this".
+        assert!(w.data_sources().is_empty());
     }
 
     #[test]
@@ -1566,6 +1569,73 @@ mod tests {
         let over_plain: SleeveWallet<&str, PaperWallet<&str>> =
             SleeveWallet::new(PaperWallet::new(1_000.0), HashMap::new());
         assert_eq!(over_plain.quote_ccy(), None);
+    }
+
+    #[test]
+    fn data_sources_are_unstated_until_a_venue_answers_and_a_sleeve_delegates_them() {
+        // A paper account has no venue whose prices are the *right* ones — it is
+        // fed by whoever ran it — so it names none rather than guessing. Empty
+        // is "does not say", the same reading `quote_ccy`'s `None` asks for.
+        let paper: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        assert!(paper.data_sources().is_empty());
+
+        // A venue-backed wallet — the shape the live wallets have — names the
+        // provider that quotes what it trades, so a caller can preflight the
+        // pairing instead of discovering a mismatched feed from the fills.
+        struct Venue(PaperWallet<&'static str>);
+        impl Wallet<&'static str> for Venue {
+            fn data_sources(&self) -> &'static [&'static str] {
+                &["coinbase"]
+            }
+            fn funds(&self) -> Reference {
+                self.0.funds()
+            }
+            fn position(&self, s: &&'static str) -> Units<&'static str> {
+                self.0.position(s)
+            }
+            fn price(&self, s: &&'static str) -> Option<Reference> {
+                self.0.price(s)
+            }
+            fn equity(&self) -> Reference {
+                self.0.equity()
+            }
+            fn update(&mut self, s: &'static str, c: Candle) -> Vec<Order<&'static str>> {
+                self.0.update(s, c)
+            }
+            fn set_position(
+                &mut self,
+                t: Units<&'static str>,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                self.0.set_position(t)
+            }
+            fn set_stop(
+                &mut self,
+                s: &'static str,
+                t: Reference,
+                size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                self.0.set_stop(s, t, size)
+            }
+            fn set_take_profit(
+                &mut self,
+                s: &'static str,
+                t: Reference,
+                size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                self.0.set_take_profit(s, t, size)
+            }
+            fn cancel_protective(&mut self, s: &&'static str) -> Result<(), WalletError> {
+                self.0.cancel_protective(s)
+            }
+        }
+
+        // A sleeve is a view, not an account: it does not move what it wraps to
+        // another venue. Both directions, as for `can_short` and `quote_ccy`.
+        let over_venue = SleeveWallet::new(Venue(PaperWallet::new(1_000.0)), HashMap::new());
+        assert_eq!(over_venue.data_sources(), &["coinbase"]);
+        let over_paper: SleeveWallet<&str, PaperWallet<&str>> =
+            SleeveWallet::new(PaperWallet::new(1_000.0), HashMap::new());
+        assert!(over_paper.data_sources().is_empty());
     }
 
     #[test]

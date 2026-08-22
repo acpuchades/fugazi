@@ -1155,6 +1155,18 @@ def test_quote_ccy_reports_the_unit_each_account_counts_in():
     assert "quote_ccy" in dir(ta.CoinbaseWallet)
 
 
+def test_data_sources_names_the_providers_that_quote_each_account():
+    # Introspection about the *feed*, the third question of the same shape as
+    # `can_short` and `quote_ccy`. A paper account is fed by whoever ran it, so
+    # it names nobody rather than guessing; `[]` is "does not say".
+    assert ta.PaperWallet(10_000.0).data_sources == []
+    # A live account names its venue, using the id `ta.fetch` takes. Venue
+    # granularity only: this account trades swaps, so the matching bars are
+    # `okx:BTC-USDT-SWAP`, not the spot pair the same provider also serves.
+    assert ta.OkxWallet.demo("key", "secret", "passphrase").data_sources == ["okx"]
+    assert "data_sources" in dir(ta.CoinbaseWallet)
+
+
 def test_run_rejects_a_non_wallet():
     # `.run(...)` accepts one of the supported wallet types; anything else is a
     # clear TypeError from the wallet-dispatch (not a downstream failure). Match

@@ -308,6 +308,7 @@ MEMBER_RULES = {
     "reset": "None",
     "can_short": "bool",
     "quote_ccy": "str | None",
+    "data_sources": "list[str]",
     "equity": "float",
     "funds": "float",
     "position": "float",

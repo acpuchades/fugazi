@@ -652,10 +652,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // Cache the account's shorting capability before anything trades, so a
         // child querying its `LedgerWallet` — which has no handle on the account
         // — gets the account's answer, not the trait default.
-        self.inner
-            .lock()
-            .expect("portfolio lock poisoned")
-            .account_can_short = wallet.can_short();
+        {
+            let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+            inner.account_can_short = wallet.can_short();
+            inner.account_data_sources = wallet.data_sources();
+        }
 
         // Ordering: children trade first (against their own pre-rebalance
         // equity for `value_frac` sizing), then — if the gate fires — the

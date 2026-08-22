@@ -515,6 +515,19 @@ impl Wallet<Symbol> for OkxWallet {
         Some(QUOTE_CCY)
     }
 
+    /// `["okx"]` — the same venue this wallet trades, whose candlesticks
+    /// endpoint the `okx` provider fetches.
+    ///
+    /// One name, and at venue granularity only: this account trades
+    /// `instType=SWAP`, so the bars that match it are the provider's answer for
+    /// the **swap** instrument id (`okx:BTC-USDT-SWAP[1h]`), not the spot pair
+    /// the same provider serves under `BTC-USDT`. Two of that provider's overlay
+    /// columns read differently on a derivative as well — `vol_ccy` is a
+    /// contract count rather than a quote-currency volume.
+    fn data_sources(&self) -> &'static [&'static str] {
+        &["okx"]
+    }
+
     fn price(&self, symbol: &Symbol) -> Option<Reference> {
         self.core.mark(symbol).map(Reference)
     }

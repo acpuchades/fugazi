@@ -499,6 +499,17 @@ impl Wallet<Symbol> for CoinbaseWallet {
         Some(&self.quote_ccy)
     }
 
+    /// `["coinbase"]` — the same venue this wallet trades, and the cleanest of
+    /// the pairings: the `coinbase` provider fetches the Advanced Trade candles
+    /// endpoint, keyed on the very `product_id` vocabulary this wallet's symbols
+    /// already are (`BTC-USD`), for the same spot market.
+    ///
+    /// It publishes no overlay columns — OHLCV only — and serves fixed cadences
+    /// (1m/5m/15m/30m, 1h/2h/6h, 1d).
+    fn data_sources(&self) -> &'static [&'static str] {
+        &["coinbase"]
+    }
+
     fn price(&self, symbol: &Symbol) -> Option<Reference> {
         self.core.mark(symbol).map(Reference)
     }
