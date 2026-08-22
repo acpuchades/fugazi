@@ -32,7 +32,7 @@ def _snaps_multi(series, volume=1000.0):
 
 def test_load_preset_and_run():
     """A `!buy_and_hold` preset loads, kind='single', and runs against snapshots."""
-    spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
+    spec = ta.load_spec("!buy_and_hold { root: BTC }")
     assert spec.kind == "single"
 
     snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
@@ -47,7 +47,7 @@ def test_load_preset_and_run():
 def test_load_single_spec_map_and_evaluate():
     """A spec-map single (symbol + long enter) loads, runs, and produces metrics."""
     yaml = """
-    symbol: BTC
+    root: BTC
     long:
       enter: !crosses_above
         lhs: !sma { period: 3 }
@@ -161,9 +161,9 @@ def test_load_portfolio_and_run():
     yaml = """
     children:
       - name: c1
-        strategy: !buy_and_hold { symbol: BTC }
+        strategy: !buy_and_hold { root: BTC }
       - name: c2
-        strategy: !buy_and_hold { symbol: ETH }
+        strategy: !buy_and_hold { root: ETH }
     """
     spec = ta.load_spec(yaml)
     assert spec.kind == "portfolio"
@@ -190,8 +190,8 @@ def test_portfolio_weights_without_a_rebalance_gate_are_refused():
     yaml = """
     weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
     children:
-      - strategy: !buy_and_hold { symbol: BTC }
-      - strategy: !buy_and_hold { symbol: ETH }
+      - strategy: !buy_and_hold { root: BTC }
+      - strategy: !buy_and_hold { root: ETH }
     """
     spec = ta.load_spec(yaml)
     snaps = _snaps_multi({"BTC": [100, 101, 102], "ETH": [200, 201, 202]})
@@ -212,8 +212,8 @@ def test_portfolio_weights_build_once_the_document_says_when(gate):
     weights: !drawdown_throttle {{ source: !portfolio_book, max_drawdown: 0.15 }}
     rebalance_on: {gate}
     children:
-      - strategy: !buy_and_hold {{ symbol: BTC }}
-      - strategy: !buy_and_hold {{ symbol: ETH }}
+      - strategy: !buy_and_hold {{ root: BTC }}
+      - strategy: !buy_and_hold {{ root: ETH }}
     """
     spec = ta.load_spec(yaml)
     snaps = _snaps_multi({"BTC": [100, 101, 102], "ETH": [200, 201, 202]})
@@ -224,7 +224,7 @@ def test_portfolio_weights_build_once_the_document_says_when(gate):
 def test_load_spec_with_params():
     """`!param` placeholders resolve from the `params=` dict."""
     yaml = """
-    symbol: BTC
+    root: BTC
     long:
       enter: !crosses_above
         lhs: !sma { period: !param FAST }
@@ -251,7 +251,7 @@ def test_load_spec_explicit_kind_override():
 def test_spec_meta_round_trips_as_plain_python():
     """`meta:` comes back as ordinary dicts/lists/scalars, not an opaque handle."""
     yaml = """
-    symbol: BTC
+    root: BTC
     meta:
       service: strategy-lab
       revision: 17
@@ -292,7 +292,7 @@ def test_spec_meta_is_available_on_every_shape():
         "multi": "meta: {tag: x}\nlong:\n  enter: !value true\n",
         "portfolio": (
             "meta: {tag: x}\nchildren:\n"
-            "  - name: c1\n    strategy: !buy_and_hold {symbol: BTC}\n"
+            "  - name: c1\n    strategy: !buy_and_hold {root: BTC}\n"
         ),
     }
     for kind, yaml in docs.items():
@@ -355,7 +355,7 @@ def test_trading_costs_scoped_shape():
 
 def test_optimize_with_cost_config_lowers_equity():
     """A cost config passed to `ta.optimize` produces a smaller final equity."""
-    yaml = "!buy_and_hold { symbol: BTC }"
+    yaml = "!buy_and_hold { root: BTC }"
     snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
     baseline = ta.optimize(yaml, snaps, cash=1000.0, grid=[{}])
     with_cost = ta.optimize(
@@ -379,7 +379,7 @@ def test_optimize_with_cost_config_lowers_equity():
 
 def _trend_yaml():
     return """
-    symbol: BTC
+    root: BTC
     long:
       enter: !crosses_above
         lhs: !sma { period: !param FAST }
@@ -752,7 +752,7 @@ def test_bad_spec_raises_value_error_not_a_panic():
     to arrive in Python as a normal exception carrying the failing path.
     """
     yaml = """
-symbol: X
+root: X
 long:
   enter: !gt
     lhs: !sma { source: !get { key: no_such_column }, period: 3 }
@@ -772,7 +772,7 @@ long:
 def test_bad_spec_also_fails_evaluate_and_optimize():
     """The same document fails the other two entry points the same way."""
     yaml = """
-symbol: X
+root: X
 long:
   enter: !gt { lhs: !get { key: nope }, rhs: !value 1.0 }
 """
@@ -827,9 +827,9 @@ def test_portfolio_builder_matches_the_equivalent_yaml_document():
     weights: !value [0.6, 0.4]
     children:
       - name: hold_a
-        strategy: !buy_and_hold { symbol: A }
+        strategy: !buy_and_hold { root: A }
       - name: hold_b
-        strategy: !buy_and_hold { symbol: B }
+        strategy: !buy_and_hold { root: B }
     """
     from_yaml = ta.load_spec(yaml).run(ta.PaperWallet(10_000.0), snaps)
 
@@ -923,7 +923,7 @@ def test_portfolio_builder_accepts_every_child_shape():
 
 
 _RESUME_YAML = """
-symbol: X
+root: X
 long:
   enter: !crosses_above
     lhs: !ema { period: 3, source: !close }
@@ -1001,7 +1001,7 @@ rebalance_on: !every 7
 children:
   - name: fast_a
     strategy:
-      symbol: A
+      root: A
       long:
         enter: !crosses_above
           lhs: !ema { period: 3, source: !close }
@@ -1011,7 +1011,7 @@ children:
           rhs: !ema { period: 8, source: !close }
   - name: slow_b
     strategy:
-      symbol: B
+      root: B
       long:
         enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
         exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
@@ -1079,7 +1079,7 @@ def test_run_resumable_matches_uninterrupted_run_across_three_chunks(case, yaml,
 def test_flatten_closes_the_position_in_the_wallet():
     """`flatten=True` must leave a genuinely flat book, not just a flat report."""
     hold = """
-    symbol: X
+    root: X
     long:
       enter: !gt { lhs: !close, rhs: !value 0.0 }
     """
@@ -1167,7 +1167,7 @@ def test_run_resumable_rejects_mismatched_shape():
 # ---------------------------------------------------------------------------
 
 _MC_YAML = """
-symbol: X
+root: X
 long:
   enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
 short:
@@ -1432,7 +1432,7 @@ def test_slot_demand_names_the_tags_that_can_fill_a_slot():
 def test_spec_reads_lists_cross_asset_picks():
     """A regime gate on another asset shows up in `reads`, sorted and deduped."""
     yaml = """
-    symbol: ETH
+    root: ETH
     long:
       enter: !gt
         lhs: !close {source: !pick {symbol: BTC}}
@@ -1468,7 +1468,7 @@ def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
     hand checks which case they are in — the CLI makes the same check against
     `--series` and refuses the run, but here the snapshots are the caller's."""
     yaml = """
-    symbol: A
+    root: A
     long:
       enter: !gt {lhs: !close {source: !pick {symbol: B}}, rhs: !value 100}
       exit: !never
@@ -1507,7 +1507,7 @@ def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
 def _doomed_yaml():
     """A short held from the first bar and never covered, at a sweepable size."""
     return """
-    symbol: BTC
+    root: BTC
     sizing: !param LEVERAGE
     short:
       enter: !lt

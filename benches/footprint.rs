@@ -92,7 +92,7 @@ fn main() {
     row("sma_crossover (Rust)", BARS, allocs, bytes);
 
     let spec = SingleStrategySpec::from_text_with_params_in(
-        "symbol: X\n\
+        "root: X\n\
          long:\n  \
            enter: !crosses_above { lhs: !sma { source: close, period: 5 }, rhs: !sma { source: close, period: 20 } }\n  \
            exit: !crosses_below { lhs: !sma { source: close, period: 5 }, rhs: !sma { source: close, period: 20 } }\n",

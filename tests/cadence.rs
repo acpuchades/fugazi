@@ -61,7 +61,7 @@ fn single_strategy(symbol: &str) -> String {
     let (_, arg) = scratch_file(
         "cadence_single.yml",
         &format!(
-            "symbol: {symbol}\n\
+            "root: {symbol}\n\
              long:\n  \
                enter: !crosses_above {{ lhs: !sma {{ source: close, period: 2 }}, \
                                         rhs: !sma {{ source: close, period: 4 }} }}\n",
@@ -418,7 +418,7 @@ fn an_explicit_frequency_still_wins_over_detection() {
 fn optimize_refuses_an_ambiguous_frame_before_the_sweep() {
     let (_, strategy) = scratch_file(
         "cadence_opt.yml",
-        "symbol: BTC\n\
+        "root: BTC\n\
          long:\n  \
            enter: !crosses_above { lhs: !sma { source: close, period: !param FAST }, \
                                     rhs: !sma { source: close, period: 8 } }\n",
@@ -446,7 +446,7 @@ fn optimize_refuses_an_ambiguous_frame_before_the_sweep() {
 fn optimize_accepts_a_disambiguated_frame() {
     let (_, strategy) = scratch_file(
         "cadence_opt_ok.yml",
-        "symbol: BTC\n\
+        "root: BTC\n\
          long:\n  \
            enter: !crosses_above { lhs: !sma { source: close, period: !param FAST }, \
                                     rhs: !sma { source: close, period: 8 } }\n",

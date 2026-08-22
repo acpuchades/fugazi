@@ -104,6 +104,34 @@ impl RootSpec {
         &self.node
     }
 
+    /// This root's `(symbol, freq)` when it is *exactly* a `!pick` — i.e. a
+    /// plain selector, which is what a root overwhelmingly is.
+    ///
+    /// Lets the build path install the same `Pick::rooted` leaf it always did
+    /// for that case, rather than routing a selector through the general
+    /// expression build. Two reasons, and the first is correctness: the blessed
+    /// root's documented semantics are *match, else fall back to the sole-atom
+    /// unpack*, and only `Pick::rooted` has that fallback — going through
+    /// `!pick`'s own build arm yields the strict `Pick::matching`, which reads
+    /// `None` on the untagged size-1 snapshots the `Vec<Candle>` / `Vec<Atom>`
+    /// drivers produce. The second is cost: a root is rebuilt once per
+    /// `source:`-omitted leaf, and this keeps the common one a bare `Pick`
+    /// instead of a payload round-trip per leaf.
+    pub fn as_pick(&self) -> Option<(Option<&str>, Option<&str>)> {
+        let body = self.tree.get("pick")?.as_object()?;
+        // Anything that isn't a plain string (an `!arg` hole, a nested
+        // expression) is not a selector this shortcut can answer for.
+        let field = |k: &str| match body.get(k) {
+            None => Some(None),
+            Some(serde_json::Value::String(v)) => Some(Some(v.as_str())),
+            Some(_) => None,
+        };
+        if body.keys().any(|k| k != "symbol" && k != "freq") {
+            return None;
+        }
+        Some((field("symbol")?, field("freq")?))
+    }
+
     /// The resolved untyped tree this root parsed from.
     pub fn tree(&self) -> &serde_json::Value {
         &self.tree
@@ -288,6 +316,26 @@ mod tests {
         let e = r.sole_symbol("single").unwrap_err();
         assert!(e.contains("names 2 symbols"), "{e}");
         assert!(e.contains("`BTC`") && e.contains("`ETH`"), "{e}");
+    }
+
+    /// The blessed root must keep `Pick::rooted`'s *match, else sole-atom
+    /// unpack* fallback, not the strict `Pick::matching` that `!pick`'s own
+    /// build arm produces.
+    ///
+    /// Regression: routing every root through the general expression build cost
+    /// that fallback, and any tag that drives a sub-chain over **untagged**
+    /// synthesized bars — `!resample` feeding its `inner:`, the `Vec<Candle>` /
+    /// `Vec<Atom>` drivers — then read `None` on every bar. It silently
+    /// produced a zero-fill backtest, which is the failure this crate goes out
+    /// of its way to make impossible.
+    #[test]
+    fn a_plain_selector_root_is_recognised_for_the_rooted_fast_path() {
+        assert_eq!(root("BTC").as_pick(), Some((Some("BTC"), None)));
+        assert_eq!(
+            root("!pick { symbol: BTC, freq: 4h }").as_pick(),
+            Some((Some("BTC"), Some("4h")))
+        );
+        assert_eq!(root("!pick {}").as_pick(), Some((None, None)));
     }
 
     #[test]

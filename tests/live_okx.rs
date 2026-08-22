@@ -444,7 +444,7 @@ fn a_portfolio_spec_runs_against_a_live_wallet() {
         r#"
         children:
           - name: hold
-            strategy: !buy_and_hold {{ symbol: {SYMBOL} }}
+            strategy: !buy_and_hold {{ root: {SYMBOL} }}
     "#
     );
     let spec = PortfolioSpec::from_text_with_params_in(

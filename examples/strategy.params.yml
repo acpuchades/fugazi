@@ -20,7 +20,7 @@
 #              --params @examples/params.yml,FAST=5 \
 #              --series @examples/candles.csv \
 #              --output-dir out/
-symbol: !param { key: SYM, default: BTC }
+root: !param { key: SYM, default: BTC }
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: !param { key: FAST, default: 3 } }

@@ -68,13 +68,13 @@ fn shapes() -> Vec<Shape> {
         Shape {
             name: "single",
             kind: StrategyKind::Single,
-            body: "symbol: BTC\nlong:\n  enter: !gt { lhs: !close, rhs: !sma { period: 2 } }\n",
+            body: "root: BTC\nlong:\n  enter: !gt { lhs: !close, rhs: !sma { period: 2 } }\n",
             meta_indent: 0,
         },
         Shape {
             name: "preset",
             kind: StrategyKind::Single,
-            body: "buy_and_hold:\n  symbol: BTC\n",
+            body: "buy_and_hold:\n  root: BTC\n",
             meta_indent: 2,
         },
         Shape {
@@ -98,7 +98,7 @@ fn shapes() -> Vec<Shape> {
         Shape {
             name: "portfolio",
             kind: StrategyKind::Portfolio,
-            body: "children:\n  - name: a\n    strategy:\n      symbol: BTC\n      long:\n        enter: !value true\n",
+            body: "children:\n  - name: a\n    strategy:\n      root: BTC\n      long:\n        enter: !value true\n",
             meta_indent: 0,
         },
     ]
@@ -200,7 +200,7 @@ fn import_and_param_resolve_inside_meta() {
     )
     .expect("write import");
 
-    let yaml = "symbol: BTC\n\
+    let yaml = "root: BTC\n\
                 long:\n  enter: !value true\n\
                 meta:\n  owner: !import owner.yml\n  revision: !param REV\n";
     let params = HashMap::from([("REV".to_string(), json!(17))]);
@@ -223,7 +223,7 @@ fn a_portfolio_child_carries_its_own_meta() {
          \x20 - name: a\n\
          \x20   meta: { level: slot }\n\
          \x20   strategy:\n\
-         \x20     symbol: BTC\n\
+         \x20     root: BTC\n\
          \x20     meta: { level: nested }\n\
          \x20     long:\n\
          \x20       enter: !value true\n",
@@ -241,7 +241,7 @@ fn a_portfolio_child_carries_its_own_meta() {
 #[test]
 fn a_typoed_field_is_still_rejected() {
     let value = fugazi::spec::load_value(
-        "symbol: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n",
+        "root: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n",
         &HashMap::new(),
         Path::new("."),
         "(test)",

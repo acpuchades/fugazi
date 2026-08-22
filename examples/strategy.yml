@@ -19,7 +19,7 @@
 # Each side needs only an `enter`: this is an always-in reversal, so the death
 # cross that enters the short already reverses the open long (and vice versa).
 # An explicit `exit` is for a flat rest — long/flat, or long/short with a pause.
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }
 short:

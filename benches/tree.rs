@@ -43,7 +43,7 @@ fn spine_yaml(depth: usize) -> String {
     for i in 1..depth {
         expr = format!("!and {{ lhs: {expr}, rhs: {} }}", leaf(i));
     }
-    format!("symbol: X\nlong:\n  enter: {expr}\n")
+    format!("root: X\nlong:\n  enter: {expr}\n")
 }
 
 fn build(depth: usize) -> DynSingleStrategy {

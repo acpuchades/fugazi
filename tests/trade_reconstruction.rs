@@ -251,7 +251,7 @@ fn portfolio_children_do_not_close_each_other() {
 children:
   - name: a
     strategy:
-      symbol: AAA
+      root: AAA
       long:
         enter: !crosses_above
           lhs: !close
@@ -261,7 +261,7 @@ children:
           rhs: !sma { source: !close, period: 5 }
   - name: b
     strategy:
-      symbol: BBB
+      root: BBB
       long:
         enter: !crosses_above
           lhs: !close

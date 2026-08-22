@@ -55,7 +55,7 @@ fn runs_an_inline_strategy() {
     // A bare (non-`@`) value is the strategy YAML itself.
     let out = run_backtest(
         "fugazi_e2e_inline",
-        "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { source: close, period: 2 }, rhs: !sma { source: close, period: 4 } }\n",
+        "root: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { source: close, period: 2 }, rhs: !sma { source: close, period: 4 } }\n",
     );
 
     assert!(
@@ -243,7 +243,7 @@ fn latch_resample_entry_gated_by_readiness_runs_end_to_end() {
     }
     let (_path, series) = scratch_file("fugazi_e2e_latch_resample_candles.csv", &csv);
 
-    let strategy = r#"symbol: BTC
+    let strategy = r#"root: BTC
 long:
   enter: !gt
     lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
@@ -261,5 +261,44 @@ long:
     assert!(
         fills.lines().count() >= 2,
         "expected at least one fill line beyond the header:\n{fills}"
+    );
+}
+
+/// A `root:` that is a plain selector must install the **blessed** root —
+/// `Pick::rooted`, which falls back to the sole-atom unpack — not the strict
+/// `Pick::matching`.
+///
+/// `!resample` drives its `inner:` expression over *untagged* synthesized
+/// bars, so a strict root reads `None` there on every bar and the run reports a
+/// plausible zero-fill backtest rather than failing. Pinned end-to-end through
+/// the binary because the readiness numbers are identical either way — only the
+/// fills tell the two apart.
+#[test]
+fn a_resampled_inner_expression_still_reads_the_blessed_root() {
+    let mut csv = String::from("symbol;time;open;high;low;close;volume\n");
+    for i in 0..40 {
+        let close = 100.0 + i as f64;
+        csv.push_str(&format!(
+            "BTC;2024-{month:02}-{day:02};{c};{c};{c};{c};1000\n",
+            month = i / 28 + 1,
+            day = i % 28 + 1,
+            c = close
+        ));
+    }
+    let (_path, series) = scratch_file("fugazi_e2e_resample_blessed_root.csv", &csv);
+
+    let out = Cmd::new("run")
+        .arg(
+            "root: BTC\nlong:\n  enter: !gt\n    lhs: !resample { every: 4, inner: !ema { period: 3, source: close } }\n    rhs: !value 0\n",
+        )
+        .series(&series)
+        .output_dir("fugazi_e2e_resample_blessed_root")
+        .ok();
+
+    let fills = out.read("fills.csv");
+    assert!(
+        fills.lines().count() >= 2,
+        "a bare `close` inside `!resample`'s inner expression read nothing — the root lost \
+         its sole-atom fallback:\n{fills}"
     );
 }

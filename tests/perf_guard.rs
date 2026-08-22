@@ -105,7 +105,7 @@ fn snapshots(bars: usize) -> Vec<Snapshot<Symbol>> {
         .collect()
 }
 
-const YAML: &str = "symbol: X\n\
+const YAML: &str = "root: X\n\
      long:\n  \
        enter: !crosses_above { lhs: !sma { source: close, period: 5 }, rhs: !sma { source: close, period: 20 } }\n  \
        exit: !crosses_below { lhs: !sma { source: close, period: 5 }, rhs: !sma { source: close, period: 20 } }\n";

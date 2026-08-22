@@ -469,7 +469,7 @@ fn a_portfolio_is_ruined_on_the_accounts_equity_not_a_childs() {
 /// account was at risk" from every other variable. At 0.2x the short survives the
 /// rally and profits on the crash; leveraged up, it is wiped out during it.
 const SWEEPABLE_SHORT: &str = "\
-symbol: X
+root: X
 sizing: !param LEVERAGE
 short:
   enter: !crosses_above
@@ -1105,7 +1105,7 @@ fn an_all_ruined_grid_has_no_dsr_context() {
 /// and is still short at the spike; a slow one is flat and survives having
 /// traded much worse.
 const RUIN_SWEEPABLE_MA: &str = "\
-symbol: X
+root: X
 sizing: !value 1.0
 short:
   enter: !lt

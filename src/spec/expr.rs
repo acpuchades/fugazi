@@ -161,9 +161,31 @@ pub(super) fn root_source(
     schema: &Arc<Schema>,
 ) -> Result<AtomChain, String> {
     match root.spec() {
-        // The root is built with `Root::sole()` as *its* own root, which is
-        // what terminates the recursion: a `root: !pick {}` bottoms out in the
-        // ordinary sole-atom unpack rather than asking for itself again.
+        // A root that is a plain selector installs `Pick::rooted` directly —
+        // the blessed root's *match, else sole-atom unpack* semantics, which
+        // the strict `Pick::matching` that `!pick`'s own build arm produces
+        // does not have. See `RootSpec::as_pick`.
+        Some(spec) if spec.as_pick().is_some() => {
+            let (symbol, freq) = spec.as_pick().expect("just checked");
+            let f = match freq {
+                Some(s) => Some(
+                    Frequency::from_str(s).map_err(|e| format!("invalid frequency {s:?}: {e}"))?,
+                ),
+                None => None,
+            };
+            let selector = Selector::<Symbol> {
+                symbol: symbol.map(crate::types::symbol),
+                freq: f,
+            };
+            Ok(crate::runtime::erase(if selector.is_empty() {
+                Pick::<Symbol>::new()
+            } else {
+                Pick::<Symbol>::rooted(selector)
+            }))
+        }
+        // Anything richer is built as the expression it is, with `Root::sole()`
+        // as *its* own root — which is what terminates the recursion: a root
+        // cannot ask for itself.
         Some(spec) => {
             let node = spec.node();
             let built = node.try_build(anchor, book, portfolio_book, schema, Root::sole())?;

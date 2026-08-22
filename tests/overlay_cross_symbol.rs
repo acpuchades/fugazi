@@ -328,9 +328,8 @@ fn single_strategy_bare_leaf_reads_its_declared_symbol_in_a_multi_symbol_frame()
     //
     // A's closes are 10,20,30,40,50,60 — `!close > 35` first holds on bar 3
     // (close 40), so the market order fills at bar 4's open, which is 50.
-    let fills = run_spec(
-        "symbol: A\nlong:\n  enter: !gt { lhs: !close, rhs: !value 35 }\n  exit: !never\n",
-    );
+    let fills =
+        run_spec("root: A\nlong:\n  enter: !gt { lhs: !close, rhs: !value 35 }\n  exit: !never\n");
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
     assert_eq!(fills[0].order.symbol.as_ref(), "A");
     assert_eq!(fills[0].bar, 4);
@@ -343,7 +342,7 @@ fn single_strategy_enters_on_another_symbols_price() {
     // B is 100,90,80,70,… so that first holds on bar 3, filling at bar 4's
     // open — and the fill must be in A (50.0), not B (60.0).
     let fills = run_spec(
-        "symbol: A\nlong:\n  enter: !lt { lhs: !close { source: !pick { symbol: B } }, rhs: !value 75 }\n  exit: !never\n",
+        "root: A\nlong:\n  enter: !lt { lhs: !close { source: !pick { symbol: B } }, rhs: !value 75 }\n  exit: !never\n",
     );
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
     assert_eq!(
@@ -367,7 +366,7 @@ fn single_strategy_mixes_its_own_price_with_another_symbols() {
     // series rather than one against itself (which would be false throughout,
     // or true from bar 0).
     let fills = run_spec(
-        "symbol: A\nlong:\n  enter: !gt { lhs: !close, rhs: !close { source: !pick { symbol: B } } }\n  exit: !never\n",
+        "root: A\nlong:\n  enter: !gt { lhs: !close, rhs: !close { source: !pick { symbol: B } } }\n  exit: !never\n",
     );
     assert!(
         fills.is_empty(),
@@ -379,7 +378,7 @@ fn single_strategy_mixes_its_own_price_with_another_symbols() {
     // (60 > 60 is false — so still nothing). Shift the threshold instead:
     // A > B - 15 first holds on bar 4 (50 > 45), filling at bar 5's open = 60.
     let fills = run_spec(
-        "symbol: A\nlong:\n  enter: !gt { lhs: !close, rhs: !sub { lhs: !close { source: !pick { symbol: B } }, rhs: !value 15 } }\n  exit: !never\n",
+        "root: A\nlong:\n  enter: !gt { lhs: !close, rhs: !sub { lhs: !close { source: !pick { symbol: B } }, rhs: !value 15 } }\n  exit: !never\n",
     );
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
     assert_eq!(fills[0].bar, 5);

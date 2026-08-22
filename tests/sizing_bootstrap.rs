@@ -21,7 +21,7 @@ use common::cli::{Cmd, scratch_file};
 fn strategy_with(sizing: &str) -> String {
     format!(
         "\
-symbol: BTCUSDT
+root: BTCUSDT
 long:
   enter: !crosses_above {{ lhs: !sma {{ source: close, period: 5 }}, rhs: !sma {{ source: close, period: 20 }} }}
   exit: !crosses_below {{ lhs: !sma {{ source: close, period: 5 }}, rhs: !sma {{ source: close, period: 20 }} }}

@@ -75,7 +75,7 @@ fn single(text: &str) -> StrategySpec {
 /// is visible in the fill count rather than inferred.
 fn doc(sym: &str) -> String {
     format!(
-        "symbol: {sym}\n\
+        "root: {sym}\n\
          long:\n  \
            enter: !crosses_above {{ lhs: !close, rhs: !sma {{ period: 10 }} }}\n  \
            exit: !crosses_below {{ lhs: !close, rhs: !sma {{ period: 10 }} }}\n"
@@ -129,7 +129,7 @@ fn explicit_pick_leaves_run_too() {
     // The old panic told you to name the asset on every leaf. Measured, that
     // did not help: the panic came from the Position router, which reads the
     // *declared* symbol and never looks at a leaf. This is that document.
-    let text = "symbol: S8USDT\n\
+    let text = "root: S8USDT\n\
                 long:\n  \
                   enter: !crosses_above\n    \
                     lhs: !close { source: !pick { symbol: S8USDT } }\n    \

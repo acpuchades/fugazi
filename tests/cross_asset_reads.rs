@@ -47,7 +47,7 @@ fn frame(symbols: &[(&str, &[f64])]) -> String {
 /// A single-asset document on `TRADED`, entering while `GATE`'s close is above
 /// `100` — the regime-gate shape, the thing that silently did nothing.
 const GATED: &str = "\
-symbol: TRADED
+root: TRADED
 long:
   enter: !gt { lhs: !close { source: !pick { symbol: GATE } }, rhs: !value 100 }
   exit: !never
@@ -58,7 +58,7 @@ sizing: !value 1.0
 /// proves the fixture, not the feature: `TRADED` never exceeds 100, so this
 /// enters never.
 const SELF_GATED: &str = "\
-symbol: TRADED
+root: TRADED
 long:
   enter: !gt { lhs: !close, rhs: !value 100 }
   exit: !never
@@ -201,7 +201,7 @@ fn optimize_refuses_an_absent_series_before_the_sweep() {
     let (_spec, spec_arg) = scratch_file(
         "xread_opt.yml",
         "\
-symbol: TRADED
+root: TRADED
 long:
   enter: !gt { lhs: !close { source: !pick { symbol: GATE } }, rhs: !param LEVEL }
   exit: !never
@@ -243,7 +243,7 @@ fn optimize_resolves_a_parameterised_pick_symbol() {
     let (_spec, spec_arg) = scratch_file(
         "xread_opt_ok.yml",
         "\
-symbol: TRADED
+root: TRADED
 long:
   enter: !gt { lhs: !close { source: !pick { symbol: !param GATE_SYM } }, rhs: !param LEVEL }
   exit: !never
@@ -357,7 +357,7 @@ fn a_portfolio_trades_only_what_its_children_declare() {
 children:
   - name: gated
     strategy:
-      symbol: TRADED
+      root: TRADED
       long:
         enter: !gt { lhs: !close { source: !pick { symbol: GATE } }, rhs: !value 100 }
         exit: !never
@@ -391,4 +391,93 @@ children:
         "the child's gate on GATE never fired:\n{}",
         out.read("fills.csv")
     );
+}
+
+/// A grid may sweep the **traded instrument**, and every row must match what
+/// the same document produces on its own through `run`.
+///
+/// Before `root:` this was refused across subgrids and *silently wrong* within
+/// one: the atom slice and every snapshot tag were bound to the probe symbol
+/// before the sweep started, so each row backtested the probe's bars whatever
+/// its own `symbol:` had resolved to. The equality against a standalone `run`
+/// is the assertion that matters — a grid that merely produced two different
+/// rows would also have passed the old, broken behaviour.
+#[test]
+fn optimize_sweeps_the_traded_symbol() {
+    let (_spec, spec_arg) = scratch_file(
+        "xroot_sweep.yml",
+        "\
+root: !pick { symbol: !param SYM }
+long:
+  enter: !gt { lhs: !close, rhs: !value 0 }
+  exit: !never
+sizing: !value 1.0
+",
+    );
+    let (_data, data_arg) = scratch_file(
+        "xroot_sweep.csv",
+        &frame(&[("TRADED", &TRADED_CLOSES), ("GATE", &GATE_CLOSES)]),
+    );
+    let grid = common::cli::unique_path("xroot_sweep_grid.csv");
+    Cmd::new("optimize")
+        .arg(&spec_arg)
+        .series(&data_arg)
+        .costs("none")
+        .args(&[
+            "--crypto",
+            "-f",
+            "1d",
+            "--grid",
+            "SYM=[\"TRADED\",\"GATE\"]",
+            "--metrics",
+            "returns.total",
+            "-o",
+            grid.to_str().expect("utf-8"),
+        ])
+        .ok();
+    let csv = std::fs::read_to_string(&grid).expect("grid csv written");
+    let header: Vec<&str> = csv.lines().next().expect("a header").split(',').collect();
+    // Located by name, not by position: the writer appends its own columns
+    // (`selection.deflated_sharpe`) after the requested metrics.
+    let col = header
+        .iter()
+        .position(|h| *h == "returns.total")
+        .expect("the requested metric column");
+    let rows: Vec<&str> = csv.lines().skip(1).collect();
+    assert_eq!(rows.len(), 2, "one row per swept symbol:\n{csv}");
+
+    // Each row must equal the same document run standalone on that symbol —
+    // the check the old behaviour could not pass.
+    for sym in ["TRADED", "GATE"] {
+        let out = Cmd::new("run")
+            .arg(&spec_arg)
+            .series(&data_arg)
+            .costs("none")
+            .args(&["--crypto", "-f", "1d", "--params", &format!("SYM={sym}")])
+            .output_dir(&format!("xroot_sweep_run_{sym}"))
+            .ok();
+        // `returns.total`, read out of the `returns:` block of metrics.yml.
+        let metrics = out.read("metrics.yml");
+        let standalone = metrics
+            .lines()
+            .skip_while(|l| !l.starts_with("returns:"))
+            .find_map(|l| l.trim().strip_prefix("total:"))
+            .map(|v| v.trim().parse::<f64>().expect("a number"))
+            .expect("returns.total in metrics.yml");
+        let row = rows
+            .iter()
+            .find(|r| r.starts_with(sym))
+            .unwrap_or_else(|| panic!("a row for {sym} in:\n{csv}"));
+        let swept: f64 = row
+            .split(',')
+            .nth(col)
+            .expect("a metric cell")
+            .parse()
+            .expect("a number");
+        assert!(
+            (swept - standalone).abs() < 1e-9,
+            "row for {sym} reports {swept} but a standalone run reports {standalone} — the \
+             grid is not backtesting that symbol's own bars"
+        );
+    }
 }

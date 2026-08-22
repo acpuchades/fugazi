@@ -291,7 +291,7 @@ fn single_ema_spec() -> SingleStrategySpec {
     parse!(
         SingleStrategySpec,
         r#"
-        symbol: X
+        root: X
         long:
           enter: !crosses_above
             lhs: !ema { period: 3, source: !close }
@@ -382,7 +382,7 @@ fn portfolio_spec() -> PortfolioSpec {
         children:
           - name: fast_a
             strategy:
-              symbol: A
+              root: A
               long:
                 enter: !crosses_above
                   lhs: !ema { period: 3, source: !close }
@@ -392,7 +392,7 @@ fn portfolio_spec() -> PortfolioSpec {
                   rhs: !ema { period: 8, source: !close }
           - name: slow_b
             strategy:
-              symbol: B
+              root: B
               long:
                 enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
                 exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
@@ -412,7 +412,7 @@ fn portfolio_weight_shares_spec() -> PortfolioSpec {
         children:
           - name: fast_a
             strategy:
-              symbol: A
+              root: A
               long:
                 enter: !crosses_above
                   lhs: !ema { period: 3, source: !close }
@@ -422,7 +422,7 @@ fn portfolio_weight_shares_spec() -> PortfolioSpec {
                   rhs: !ema { period: 8, source: !close }
           - name: slow_b
             strategy:
-              symbol: B
+              root: B
               long:
                 enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
                 exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
@@ -435,7 +435,7 @@ fn buy_and_hold_spec() -> SingleStrategySpec {
     parse!(
         SingleStrategySpec,
         r#"
-        symbol: X
+        root: X
         long:
           enter: !gt { lhs: !close, rhs: !value 0.0 }
     "#
@@ -476,7 +476,7 @@ fn single_asset_rsi_reversal_with_atr_stop_resumes_across_three_chunks() {
     let spec = parse!(
         SingleStrategySpec,
         r#"
-        symbol: X
+        root: X
         long:
           enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
           exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
@@ -502,14 +502,14 @@ fn single_asset_gated_on_trailing_sharpe_resumes_across_three_chunks() {
     let spec = parse!(
         SingleStrategySpec,
         r#"
-        symbol: X
+        root: X
         long:
           enter: !gt
             lhs: !sharpe
               period: 5
               bars_per_year: 252.0
               strategy:
-                symbol: X
+                root: X
                 long:
                   enter: !gt { lhs: !close, rhs: !value 0.0 }
             rhs: !value -1000.0
@@ -518,7 +518,7 @@ fn single_asset_gated_on_trailing_sharpe_resumes_across_three_chunks() {
               period: 5
               bars_per_year: 252.0
               strategy:
-                symbol: X
+                root: X
                 long:
                   enter: !gt { lhs: !close, rhs: !value 0.0 }
             rhs: !value -1000.0

@@ -18,7 +18,7 @@ use common::cli::{Cmd, at, scratch_file};
 /// — per `docs/TESTING.md`, shapes are shared but series constants are not, and
 /// a test that pins grid arithmetic shouldn't break when an example is retuned.
 const SWEEPABLE: &str = "\
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: !param FAST }

@@ -82,7 +82,7 @@ fn check_still_skips_the_build_when_a_param_is_unresolved() {
     let (_, spec) = scratch_file(
         "holey.yml",
         "\
-symbol: BTCUSDT
+root: BTCUSDT
 long:
   enter: !gt { lhs: !close, rhs: !param { key: LEVEL } }
   exit: !lt { lhs: !close, rhs: !param { key: LEVEL } }
@@ -101,7 +101,7 @@ fn check_still_skips_the_build_for_an_overlay_column() {
     let (_, spec) = scratch_file(
         "overlayed.yml",
         "\
-symbol: BTCUSDT
+root: BTCUSDT
 long:
   enter: !gt { lhs: !get { key: funding_rate }, rhs: !value 0.0 }
   exit: !lt { lhs: !get { key: funding_rate }, rhs: !value 0.0 }
@@ -120,8 +120,8 @@ sizing: !value 1.0
 const PORTFOLIO_INERT_WEIGHTS: &str = "\
 weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
 children:
-  - strategy: !buy_and_hold { symbol: BTCUSDT }
-  - strategy: !buy_and_hold { symbol: ETHUSDT }
+  - strategy: !buy_and_hold { root: BTCUSDT }
+  - strategy: !buy_and_hold { root: ETHUSDT }
 ";
 
 /// The same document with a cadence, so the weights actually get applied.
@@ -129,8 +129,8 @@ const PORTFOLIO_LIVE_WEIGHTS: &str = "\
 weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
 rebalance_on: !every 28
 children:
-  - strategy: !buy_and_hold { symbol: BTCUSDT }
-  - strategy: !buy_and_hold { symbol: ETHUSDT }
+  - strategy: !buy_and_hold { root: BTCUSDT }
+  - strategy: !buy_and_hold { root: ETHUSDT }
 ";
 
 #[test]

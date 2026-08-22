@@ -20,7 +20,7 @@ use common::single_snapshots;
 const BARS: usize = 50_000;
 
 const MACD_YAML: &str = r#"
-symbol: X
+root: X
 long:
   enter: !crosses_above
     lhs: !macd_line { fast: 12, slow: 26, signal: 9 }
@@ -31,7 +31,7 @@ long:
 "#;
 
 const SMA_YAML: &str = r#"
-symbol: X
+root: X
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: 5 }

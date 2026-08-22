@@ -281,7 +281,7 @@ fn bench_yaml_vs_rust_macd_crossover() {
         .collect();
 
     let yaml = r#"
-        symbol: X
+        root: X
         long:
           enter: !crosses_above
             lhs: !macd_line { fast: 12, slow: 26, signal: 9 }

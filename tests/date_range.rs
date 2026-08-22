@@ -51,7 +51,7 @@ fn wavy_series(n: usize) -> String {
 /// many bars were read back before the first evaluated one is visible in the
 /// result.
 const EMA_CROSS: &str = "\
-symbol: BTC
+root: BTC
 long:
   enter: !crosses_above { lhs: !ema { source: close, period: 5 }, rhs: !ema { source: close, period: 20 } }
 short:

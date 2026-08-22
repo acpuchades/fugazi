@@ -39,7 +39,7 @@ fn ctx<'a>(cost_config: &'a CostConfig) -> EvalContext<'a> {
 /// A single-asset MA-crossover spec — the canonical always-in reversal.
 fn crossover_spec() -> StrategySpec {
     let yaml = r#"
-        symbol: X
+        root: X
         long:
           enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }
         short:

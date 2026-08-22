@@ -132,7 +132,7 @@ fn spec_of(yaml: &str) -> SingleStrategySpec {
 }
 
 const SMA_YAML: &str = r#"
-symbol: X
+root: X
 long:
   enter: !crosses_above
     lhs: !sma { source: close, period: 5 }
@@ -143,7 +143,7 @@ long:
 "#;
 
 const MACD_YAML: &str = r#"
-symbol: X
+root: X
 long:
   enter: !crosses_above
     lhs: !macd_line { fast: 12, slow: 26, signal: 9 }
@@ -166,7 +166,7 @@ fn spine_yaml(depth: usize) -> String {
     for i in 1..depth {
         expr = format!("!and {{ lhs: {expr}, rhs: {} }}", leaf(i));
     }
-    format!("symbol: X\nlong:\n  enter: {expr}\n")
+    format!("root: X\nlong:\n  enter: {expr}\n")
 }
 
 /// The true-range + Wilder recurrence, written the way TA-Lib's C writes it:

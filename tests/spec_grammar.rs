@@ -940,7 +940,7 @@ fn arg_is_scoped_to_templates_and_param_is_not() {
     // The parser's half of the same claim, in a non-template slot.
     let with = |placeholder: &str| {
         format!(
-            "symbol: BTC\nlong:\n  enter: !gt\n    lhs: !sma\n      source: !close\n      \
+            "root: BTC\nlong:\n  enter: !gt\n    lhs: !sma\n      source: !close\n      \
              period: {placeholder}\n    rhs: !value 1\n"
         )
     };
