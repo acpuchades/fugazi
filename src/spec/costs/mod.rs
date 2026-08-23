@@ -142,8 +142,8 @@ mod tests {
             "BTC[1d]:spread=!bps { bps: 2 }",
         ]);
         let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
-        let daily = cfg.resolve("BTC", Some(Frequency::Day(1)));
-        let hourly = cfg.resolve("BTC", Some(Frequency::Hour(1)));
+        let daily = cfg.resolve("BTC", Some(&Frequency::Day(1).as_token()));
+        let hourly = cfg.resolve("BTC", Some(&Frequency::Hour(1).as_token()));
         // Daily gets the more-specific 2 bps; hourly falls back to the 10-bps
         // symbol-only entry.
         assert!((daily.spread.half_spread(100.0, &b) - 0.01).abs() < 1e-9);
@@ -158,7 +158,7 @@ mod tests {
             "BTC[1d]:spread=!bps { bps: 2 }",
         ]);
         let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
-        let daily = cfg.resolve("BTC", Some(Frequency::Day(1)));
+        let daily = cfg.resolve("BTC", Some(&Frequency::Day(1).as_token()));
         assert!((daily.spread.half_spread(100.0, &b) - 0.01).abs() < 1e-9);
     }
 
@@ -209,10 +209,24 @@ mod tests {
         assert!(err.contains("commission"));
     }
 
+    /// **Superseded.** `[NOPE]` used to fail to parse as a cadence. A scope's
+    /// bracket names a *stream* now, matched verbatim, so any id parses — and
+    /// the CLI checks it against the loaded frame instead, which also catches a
+    /// well-formed `1d` against an hourly-only input.
     #[test]
-    fn rejects_bad_scope_prefix() {
-        let err = CostSpec::from_str("BTC[NOPE]:spread=!bps { bps: 1 }").unwrap_err();
-        assert!(err.contains("scope"));
+    fn a_scope_bracket_takes_any_stream_id() {
+        let spec = CostSpec::from_str("BTC[dollar-1e6]:spread=!bps { bps: 1 }")
+            .expect("a stream id is not a malformed cadence");
+        assert_eq!(spec.scoped_streams(), vec!["dollar-1e6"]);
+
+        let cfg = config_of(&["BTC[dollar-1e6]:spread=!bps { bps: 10 }"]);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        // Applies on the stream it names...
+        let on = cfg.resolve("BTC", Some("dollar-1e6"));
+        assert!((on.spread.half_spread(100.0, &b) - 0.05).abs() < 1e-9);
+        // ...and not on another.
+        let off = cfg.resolve("BTC", Some("1d"));
+        assert!(off.spread.half_spread(100.0, &b).abs() < 1e-12);
     }
 
     #[test]

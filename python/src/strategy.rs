@@ -633,11 +633,13 @@ impl PyWallet {
         freq: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let config = coerce_cost_config(Some(costs))?;
-        let freq = freq
+        // A stream id, not a parsed cadence — `coerce_stream` still accepts a
+        // `Frequency` and uses its token, so every existing caller is unchanged.
+        let stream = freq
             .filter(|f| !f.is_none())
-            .map(coerce_frequency)
+            .map(coerce_stream)
             .transpose()?;
-        let resolved = config.resolve(symbol, freq);
+        let resolved = config.resolve(symbol, stream.as_ref().map(StreamId::as_str));
         self.inner
             .set_costs_for(intern(symbol), resolved)
             .map_err(|e| PyWalletError::new_err(e.to_string()))

@@ -358,6 +358,13 @@ Every leg supports per-symbol and per-frequency overrides. Resolution
 picks the winning model in this order (most-specific to least-specific;
 same-specificity ties are broken by insertion order — later wins):
 
+**The bracket names a stream, not a cadence.** `BTC[1d]:` is the common
+spelling, but the id is matched verbatim and never parsed, so
+`BTC[dollar-1e6]:` scopes an entry to an index-sampled series just as well. The
+cost of that: a typo no longer fails to parse, it just scopes the entry to a
+stream that does not exist and the cost silently never applies — so `run` warns
+when a scope names a stream the run does not carry.
+
 1. `scoped[i]` — an entry matching *both* `symbol` and `freq`.
 2. `by_symbol[symbol]` — set via `SYMBOL:key=…` or a preset `by_symbol` map.
 3. `by_interval[freq]` — set via `[FREQ]:key=…` or a preset `by_interval` map.

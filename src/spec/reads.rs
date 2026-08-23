@@ -80,6 +80,19 @@ pub fn picked_symbols_of(
     )?))
 }
 
+/// [`picked_streams`] for a caller holding the document text — the twin of
+/// [`picked_symbols_of`], loaded the same way.
+pub fn picked_streams_of(
+    text: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    base: &std::path::Path,
+    label: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    Ok(picked_streams(&super::load_value(
+        text, params, base, label,
+    )?))
+}
+
 /// [`picked_symbols_of`] for a caller that disables `!import` (see
 /// [`load_value_no_imports`](super::load_value_no_imports)).
 pub fn picked_symbols_of_no_imports(
@@ -111,23 +124,55 @@ const TRADED_KEYS: [&str; 3] = ["root", "left", "right"];
 /// down. A `!pick` node is descended into as well — its `symbol:` is a scalar,
 /// but nesting is the tree's business, not this walk's.
 fn collect(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    collect_field(value, "symbol", true, out)
+}
+
+/// Every **stream** a document names — the `freq:` of every `!pick`.
+///
+/// The twin of [`picked_symbols`], and it exists for the same reason. A stream
+/// id is opaque now, so nothing parses it and nothing would notice a typo:
+/// `!pick { symbol: BTC, freq: 1hh }` builds happily and then matches no entry
+/// on any bar, and the run reports a plausible zero-fill backtest. That is the
+/// exact failure this crate goes out of its way to make impossible, and
+/// checking the named stream against the input is what replaces the cadence
+/// parse that used to catch a subset of it — a strictly wider net, since it
+/// also catches a perfectly well-formed `1d` against an hourly-only input.
+///
+/// Unlike [`picked_symbols`] this does **not** skip the traded keys: a traded
+/// series is not a "read", but a stream named on a `root:` still has to exist,
+/// and there is no separate check that would catch it.
+pub fn picked_streams(doc: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_field(doc, "freq", false, &mut out);
+    out
+}
+
+/// Shared walk: record `!pick`'s `field` everywhere it appears.
+///
+/// `skip_traded` is what separates the two callers — see [`picked_streams`].
+fn collect_field(
+    value: &serde_json::Value,
+    field: &str,
+    skip_traded: bool,
+    out: &mut BTreeSet<String>,
+) {
     match value {
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::Object(body)) = map.get("pick")
-                && let Some(serde_json::Value::String(sym)) = body.get("symbol")
+                && let Some(serde_json::Value::String(found)) = body.get(field)
             {
-                out.insert(sym.clone());
+                out.insert(found.clone());
             }
             for (k, v) in map {
-                if TRADED_KEYS.contains(&k.as_str()) {
+                if skip_traded && TRADED_KEYS.contains(&k.as_str()) {
                     continue;
                 }
-                collect(v, out);
+                collect_field(v, field, skip_traded, out);
             }
         }
         serde_json::Value::Array(items) => {
             for v in items {
-                collect(v, out);
+                collect_field(v, field, skip_traded, out);
             }
         }
         _ => {}
@@ -147,6 +192,50 @@ mod tests {
         )
         .expect("document loads");
         picked_symbols(&doc).into_iter().collect()
+    }
+
+    fn streams(text: &str) -> Vec<String> {
+        let doc = super::super::load_value(
+            text,
+            &Default::default(),
+            std::path::Path::new("."),
+            "(test)",
+        )
+        .expect("document loads");
+        picked_streams(&doc).into_iter().collect()
+    }
+
+    /// The guardrail that replaces the cadence parse: every named stream is
+    /// collected so the runner can check it against the input.
+    #[test]
+    fn finds_every_named_stream() {
+        let found = streams(
+            r#"
+root: !pick { symbol: ETH, freq: 1h }
+long:
+  enter: !gt
+    lhs: !close { source: !pick { symbol: BTC, freq: dollar-1e6 } }
+    rhs: !value 0
+"#,
+        );
+        assert_eq!(found, vec!["1h".to_string(), "dollar-1e6".to_string()]);
+    }
+
+    /// Unlike `picked_symbols`, this does **not** skip the traded keys: a
+    /// stream named on `root:` still has to exist, and nothing else checks it.
+    #[test]
+    fn a_stream_on_the_root_is_not_skipped() {
+        assert_eq!(
+            streams("root: !pick { symbol: BTC, freq: 4h }\nlong:\n  enter: !value true\n"),
+            vec!["4h".to_string()]
+        );
+    }
+
+    /// A document naming no stream at all yields none — every document that
+    /// worked before this existed.
+    #[test]
+    fn no_named_stream_is_an_empty_set() {
+        assert!(streams("root: BTC\nlong:\n  enter: !value true\n").is_empty());
     }
 
     #[test]

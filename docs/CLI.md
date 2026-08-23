@@ -1362,6 +1362,10 @@ must be passed explicitly.
 
 **If you already have a column named `index`,** it is now a reserved name and
 becomes the join key. Rename it (`index_level`, say) to keep it as an overlay.
+You will usually be told: two rows sharing one key **within a single
+`--series`** is refused, and a column of values that repeat — a price level, a
+category — collides immediately. (The same key across *two* `--series` is the
+documented full-outer join and still works.)
 
 **A numeric index orders numerically.** `9` sorts before `10`, which a plain
 string key would not do. An `index` cell that is not an integer stays a label

@@ -328,17 +328,20 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
     // else fall through to the class × cadence calendar.
-    let bars_per_year =
-        match calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq) {
-            Some(v) => v,
-            None => calendar::resolve(
-                None,
-                opts.asset_class,
-                effective_freq,
-                calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
-            )
-            .map_err(anyhow::Error::msg)?,
-        };
+    let bars_per_year = match calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        &symbol,
+        effective_freq.map(|f| f.as_token()).as_deref(),
+    ) {
+        Some(v) => v,
+        None => calendar::resolve(
+            None,
+            opts.asset_class,
+            effective_freq,
+            calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
+        )
+        .map_err(anyhow::Error::msg)?,
+    };
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
@@ -376,7 +379,11 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
     if !opts.quiet {
-        let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
+        let costs_active = costs_active(
+            opts.cost_config,
+            [symbol.as_str()],
+            inputs.stream.as_deref(),
+        );
         style::print_header("run", "backtest a strategy over CSV series");
         style::print_warns(&style::collect_warnings(
             &skipped_overlay_columns,
@@ -444,19 +451,27 @@ pub fn run_pairs(
         .or_else(|| {
             calendar::detect_frequency_from_atoms(left_series.atoms.iter().map(|(_, a)| a))
         });
-    let bars_per_year =
-        match calendar::pick_bars_per_year(opts.bars_per_year, &left, effective_freq)
-            .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &right, effective_freq))
-        {
-            Some(v) => v,
-            None => calendar::resolve(
-                None,
-                opts.asset_class,
-                effective_freq,
-                calendar::measure_bars_per_year(left_series.atoms.iter().map(|(_, a)| a)),
-            )
-            .map_err(anyhow::Error::msg)?,
-        };
+    let bars_per_year = match calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        &left,
+        effective_freq.map(|f| f.as_token()).as_deref(),
+    )
+    .or_else(|| {
+        calendar::pick_bars_per_year(
+            opts.bars_per_year,
+            &right,
+            effective_freq.map(|f| f.as_token()).as_deref(),
+        )
+    }) {
+        Some(v) => v,
+        None => calendar::resolve(
+            None,
+            opts.asset_class,
+            effective_freq,
+            calendar::measure_bars_per_year(left_series.atoms.iter().map(|(_, a)| a)),
+        )
+        .map_err(anyhow::Error::msg)?,
+    };
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
@@ -488,7 +503,7 @@ pub fn run_pairs(
         let costs_active = costs_active(
             opts.cost_config,
             [left.as_str(), right.as_str()],
-            effective_freq,
+            inputs.stream.as_deref(),
         );
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
@@ -589,7 +604,7 @@ fn run_universe(
             .then_some("")
             .into_iter()
             .chain(universe.iter().map(|s| s.as_ref()));
-        let costs_active = costs_active(opts.cost_config, probes, effective_freq);
+        let costs_active = costs_active(opts.cost_config, probes, inputs.stream.as_deref());
         style::print_header("run", headline);
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, &sliced, costs_active, &overlap);
@@ -751,20 +766,23 @@ fn universe_calendar(
                     calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
                 })
         });
-    let bars_per_year =
-        match calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq) {
-            Some(v) => v,
-            None => calendar::resolve(
-                None,
-                opts.asset_class,
-                effective_freq,
-                per_symbol
-                    .iter()
-                    .find(|(s, _)| s.as_ref() == representative)
-                    .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
-            )
-            .map_err(anyhow::Error::msg)?,
-        };
+    let bars_per_year = match calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        representative,
+        effective_freq.map(|f| f.as_token()).as_deref(),
+    ) {
+        Some(v) => v,
+        None => calendar::resolve(
+            None,
+            opts.asset_class,
+            effective_freq,
+            per_symbol
+                .iter()
+                .find(|(s, _)| s.as_ref() == representative)
+                .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
+        )
+        .map_err(anyhow::Error::msg)?,
+    };
     Ok((effective_freq, bars_per_year))
 }
 
@@ -801,6 +819,7 @@ fn eval_context<'a>(
         risk_free_rate: opts.risk_free_rate,
         cost_config: opts.cost_config,
         effective_freq,
+        stream: effective_freq.map(|f| f.as_token()),
         windowed: windowed_bars,
         seconds_per_bar,
         mc: opts.montecarlo.cloned(),
@@ -900,11 +919,11 @@ fn emit_run(
 fn costs_active<'a>(
     cost_config: &fugazi::spec::costs::CostConfig,
     symbols: impl IntoIterator<Item = &'a str>,
-    freq: Option<Frequency>,
+    stream: Option<&str>,
 ) -> bool {
     symbols
         .into_iter()
-        .any(|s| !cost_config.resolve(s, freq).is_none())
+        .any(|s| !cost_config.resolve(s, stream).is_none())
 }
 
 /// suffices.
@@ -1004,6 +1023,87 @@ pub(crate) fn read_only_series(
         out.push((fugazi::types::symbol(sym), frame.atoms(sym)?.atoms));
     }
     Ok(out)
+}
+
+/// Where a named stream came from — decides what the error says to go fix.
+#[derive(Clone, Copy)]
+pub(crate) enum StreamUse {
+    /// A `!pick { freq }` in the document.
+    Pick,
+    /// The `[STREAM]` half of a `--costs` scope.
+    CostScope,
+}
+
+/// Refuse a stream id the input does not carry, whatever named it.
+///
+/// Both callers lost the same guardrail to the same change. `!pick`'s `freq:`
+/// and a `--costs` scope's `[FREQ]` were each parsed as a `Frequency`, so a typo
+/// was a hard error; both are opaque ids now, matched verbatim and never
+/// parsed, so a typo produces silence instead — a `!pick` that reads nothing on
+/// every bar, or a cost entry that never applies. Neither shows up in the
+/// results as anything but a plausible number.
+///
+/// Checking the name against the frame is a strictly wider net than the parse
+/// was: it also catches a perfectly well-formed `1d` against an hourly-only
+/// input, which no parse could.
+pub(crate) fn check_streams(
+    frame: &DataFrame,
+    assigned: &[ScopedFrequency],
+    streams: &BTreeSet<String>,
+    used_as: StreamUse,
+) -> Result<()> {
+    if streams.is_empty() {
+        return Ok(());
+    }
+    // A `-f/--frequency` *assigns* a stream the frame's `freq` column may not
+    // carry — an untagged file labelled `4h` on the command line. That label is
+    // what a freq-scoped `--costs` entry matches on, so a scope naming it is
+    // correct and must not be refused for being absent from the column.
+    let assigned: Vec<String> = assigned.iter().map(|f| f.value.as_token()).collect();
+    let mut available = frame.streams();
+    available.extend(assigned.iter().map(String::as_str));
+    available.sort_unstable();
+    available.dedup();
+    for named in streams {
+        if available.iter().any(|s| s == named) {
+            continue;
+        }
+        // Untagged rows key on `""`, so a frame of unlabelled series carries
+        // exactly one stream whose name is the empty string.
+        let carried = available
+            .iter()
+            .map(|s| if s.is_empty() { "<untagged>" } else { s })
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Refused or warned, on the same rule `crate::cadence` uses.
+        //
+        // A `!pick` naming an absent stream is **ambiguity**: the leaf reads
+        // nothing on every bar and the run reports a backtest of nothing, with
+        // no reading that is right. That is refused.
+        //
+        // A `--costs` scope naming one is **disagreement**: the run is still
+        // well-defined, just cheaper than configured, and the scope may be
+        // deliberate — a mixed-cadence universe where one entry applies to a
+        // series this particular run does not carry. That is warned.
+        match used_as {
+            StreamUse::Pick => anyhow::bail!(
+                "`!pick {{ freq: {named} }}` names a stream that is not in the input.\n\
+                 \n\
+                 The input carries {carried}. A stream id is matched verbatim and never \
+                 parsed, so an id that is not there matches no entry on any bar — the \
+                 run would complete and report a backtest of nothing. Check the \
+                 spelling, or pass the series that carries it with `-s/--series`."
+            ),
+            StreamUse::CostScope => eprintln!(
+                "  {} the `--costs` scope `[{named}]` names a stream this run does not \
+                 carry ({carried}), so that entry never applies. A stream id is matched \
+                 verbatim and never parsed, so a typo looks exactly like a deliberate \
+                 scope — the run is priced without it.",
+                style::yellow("warn"),
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Left-join `read_only` series onto a snapshot stream whose timeline is

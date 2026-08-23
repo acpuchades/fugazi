@@ -1,6 +1,6 @@
 # Index columns — generalising the bar clock
 
-**Status:** Stages 1-3 implemented on `feat/index-columns`, D4 included. B6 (freq-scoped `--costs`) is the one item left — see *Staging*.
+**Status:** complete on `feat/index-columns` — Stages 1-3, D4 and B6.
 **Scope:** replace the assumption "a bar stream is indexed by wall-clock time"
 with "a bar stream is indexed by an *ordered index*, of which time is one kind".
 
@@ -209,10 +209,10 @@ verified to fail against the old code first.
    for most work and need **no new data provider**: no provider serves anything
    but time bars today (`SeriesSource::atoms(symbol, interval, since, until)`).
 9. **D4** — done, see above.
-10. **B6** — freq-scoped `--costs` (`SYMBOL[FREQ]:`) still matches on a parsed
-    `Frequency`. Left open: it is a *scope* grammar, where demanding a duration
-    is defensible, and nothing needs it to accept a stream id yet. The change is
-    mechanical when something does.
+10. **B6** — done. `Scope.freq` is a `String`, so `BTC[dollar-1e6]:` scopes an
+    entry to an index-sampled series. The storage was *already* keyed by the
+    cadence's token (`by_interval: HashMap<String, _>`), so only the parameter
+    type had to change — the parse was the whole restriction.
 
 ### Explicitly not in scope
 
@@ -257,3 +257,36 @@ load-bearing rather than stylistic.
 trait signature change — the timestamp was reaching the wallet and being
 dropped. Worth remembering before assuming the `Wallet` trait needs widening for
 anything else the bar carries.
+
+
+## The guardrail D4 and B6 cost, and how it was repaid
+
+Both changes deleted a `Frequency::from_str`, and each parse was doing double
+duty: interpreting the value *and* rejecting nonsense. Removing it traded a
+build error for silence — a `!pick { freq: 1hh }` that reads nothing on every
+bar, a `--costs BTC[NOPE]:` that never applies. Neither surfaces as anything but
+a plausible number, which is the failure mode this crate works hardest to make
+impossible.
+
+Replaced with a **check against the loaded frame** (`run::check_streams`), which
+is a strictly wider net than the parse ever was: it also catches a perfectly
+well-formed `1d` against an hourly-only input.
+
+The two halves are split on the cadence census's own rule:
+
+- **`!pick` is refused.** Nothing about the run is well-defined — the leaf reads
+  nothing and the report describes a backtest of nothing.
+- **A cost scope is warned.** The run is still well-defined, just cheaper than
+  configured, and the scope may be deliberate. `tests/costs.rs` has a case that
+  depends on this: `-f 4h` against a `BTC[1d]:` scope is an intentional
+  mismatch that must still run.
+
+`-f/--frequency` *assigns* a stream the frame's column may not carry, so the
+available set is `frame.streams() ∪ -f values` — an untagged file labelled `4h`
+on the command line can be scoped by that label.
+
+Separately, the `index` reserved-name hazard is now loud: two rows sharing one
+key **within a single `--series`** are refused, so a pre-existing `index` column
+holding data (a price level, a category) collides on its first repeat instead of
+silently merging rows. The same key across two `--series` is the documented
+full-outer join and still works.

@@ -296,6 +296,23 @@ fn probe_reads(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<Stri
     Ok(out)
 }
 
+/// Every stream any grid row can name — [`probe_reads`] for `!pick { freq }`.
+///
+/// Swept the same way and for the same reason: a `freq:` under a `!param` takes
+/// a different value per row, and a stream id that matches nothing is a silent
+/// zero-fill rather than an error. Checked once against the frame before the
+/// sweep, so one bad grid value fails immediately instead of producing a
+/// full table of empty backtests.
+fn probe_streams(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for subgrid in subgrids {
+        let resolved =
+            fugazi::spec::params::substitute(base_value.clone(), &probe_params(subgrid))?;
+        out.extend(fugazi::spec::reads::picked_streams(&resolved));
+    }
+    Ok(out)
+}
+
 /// A traded series a grid row can resolve to: the instrument, and the cadence
 /// its `root:` declared (if it declared one).
 ///
@@ -388,6 +405,12 @@ fn run_single(
     // silently read `None` for a regime gate would produce a whole grid of
     // plausible zero-trade rows.
     let reads = probe_reads(base_value, &subgrids)?;
+    crate::run::check_streams(
+        frame,
+        opts.frequency,
+        &probe_streams(base_value, &subgrids)?,
+        crate::run::StreamUse::Pick,
+    )?;
     let read_only = read_only_series(frame, &[probe_symbol.as_str()], &reads)?;
 
     // The effective bar cadence, now that the strategy's symbol is known, best
@@ -399,17 +422,20 @@ fn run_single(
     let effective_freq = calendar::pick_frequency(opts.frequency, &probe_symbol)
         .or_else(|| frame.declared_frequency(&probe_symbol))
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
-    let bars_per_year =
-        match calendar::pick_bars_per_year(opts.bars_per_year, &probe_symbol, effective_freq) {
-            Some(v) => v,
-            None => calendar::resolve(
-                None,
-                opts.asset_class,
-                effective_freq,
-                calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
-            )
-            .map_err(anyhow::Error::msg)?,
-        };
+    let bars_per_year = match calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        &probe_symbol,
+        effective_freq.map(|f| f.as_token()).as_deref(),
+    ) {
+        Some(v) => v,
+        None => calendar::resolve(
+            None,
+            opts.asset_class,
+            effective_freq,
+            calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
+        )
+        .map_err(anyhow::Error::msg)?,
+    };
 
     let windowed_bars = opts
         .windowed
@@ -497,6 +523,7 @@ fn run_single(
             risk_free_rate: opts.risk_free_rate,
             cost_config,
             effective_freq,
+            stream: effective_freq.map(|f| f.as_token()),
             windowed: None,
             seconds_per_bar,
             mc: None,
@@ -564,6 +591,7 @@ fn run_single(
         risk_free_rate: opts.risk_free_rate,
         cost_config,
         effective_freq,
+        stream: effective_freq.map(|f| f.as_token()),
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
@@ -594,7 +622,11 @@ fn run_single(
             })
             .or_else(|| frame.declared_frequency(&key.symbol))
             .or_else(|| calendar::detect_frequency_from_atoms(other_atoms.iter().map(|(_, a)| a)));
-        let bpy = match calendar::pick_bars_per_year(opts.bars_per_year, &key.symbol, freq) {
+        let bpy = match calendar::pick_bars_per_year(
+            opts.bars_per_year,
+            &key.symbol,
+            freq.map(|f| f.as_token()).as_deref(),
+        ) {
             Some(v) => v,
             None => calendar::resolve(
                 None,
@@ -633,6 +665,7 @@ fn run_single(
                     risk_free_rate: opts.risk_free_rate,
                     cost_config,
                     effective_freq: freq,
+                    stream: None,
                     windowed: windowed_bars,
                     seconds_per_bar,
                     mc: None,
@@ -800,6 +833,12 @@ fn run_multi_symbol(
     // check and nothing more.
     let traded_refs: Vec<&str> = universe.iter().map(|s| s.as_ref()).collect();
     let reads = probe_reads(base_value, &subgrids)?;
+    crate::run::check_streams(
+        frame,
+        opts.frequency,
+        &probe_streams(base_value, &subgrids)?,
+        crate::run::StreamUse::Pick,
+    )?;
     let read_only = read_only_series(frame, &traded_refs, &reads)?;
     attach_read_series(&bar_keys, &mut snapshots, &read_only);
     if snapshots.is_empty() {
@@ -830,20 +869,23 @@ fn run_multi_symbol(
                     calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
                 })
         });
-    let bars_per_year =
-        match calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq) {
-            Some(v) => v,
-            None => calendar::resolve(
-                None,
-                opts.asset_class,
-                effective_freq,
-                per_symbol
-                    .iter()
-                    .find(|(s, _)| s.as_ref() == representative.as_ref())
-                    .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
-            )
-            .map_err(anyhow::Error::msg)?,
-        };
+    let bars_per_year = match calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        representative,
+        effective_freq.map(|f| f.as_token()).as_deref(),
+    ) {
+        Some(v) => v,
+        None => calendar::resolve(
+            None,
+            opts.asset_class,
+            effective_freq,
+            per_symbol
+                .iter()
+                .find(|(s, _)| s.as_ref() == representative.as_ref())
+                .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
+        )
+        .map_err(anyhow::Error::msg)?,
+    };
 
     let windowed_bars = opts
         .windowed
@@ -932,6 +974,7 @@ fn run_multi_symbol(
         risk_free_rate: opts.risk_free_rate,
         cost_config,
         effective_freq,
+        stream: effective_freq.map(|f| f.as_token()),
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
@@ -1063,6 +1106,7 @@ fn run_multi_symbol_walkforward(
         risk_free_rate: opts.risk_free_rate,
         cost_config,
         effective_freq,
+        stream: effective_freq.map(|f| f.as_token()),
         windowed: None,
         seconds_per_bar,
         mc: None,

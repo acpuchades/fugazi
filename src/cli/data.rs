@@ -37,6 +37,7 @@
 //! group, where the cadence census reports them rather than guessing.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
@@ -349,8 +350,32 @@ impl DataFrame {
         let fallback = sole_declared_cadences(&loaded);
 
         let mut frame = DataFrame::default();
+        // `(series, symbol, stream, index)` seen so far. A *later* `--series`
+        // overwriting an earlier one is the documented full-outer join; the same
+        // key twice **within one series** is not a join, it is a malformed file,
+        // and it silently merged the two rows.
+        let mut seen: HashSet<(&str, String, String, IndexKey)> = HashSet::new();
         for (raw, row) in loaded {
-            frame.insert(raw, row, &fallback)?;
+            let key = frame.insert(raw, row, &fallback)?;
+            if !seen.insert((raw, key.0.clone(), key.1.clone(), key.2.clone())) {
+                bail!(
+                    "series `{raw}`: two rows share `{}`{} at index `{}`.\n\
+                     \n\
+                     Within one series that is a duplicate key, not a join, and the \
+                     rows would silently merge into one bar. The usual cause is an \
+                     `index` column that is not a bar index — `index` is a reserved \
+                     name and becomes the join key when present, so a column of \
+                     values that repeat (a price level, a category) collides here. \
+                     Rename it to keep it as an overlay.",
+                    key.0,
+                    if key.1.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", key.1)
+                    },
+                    key.2,
+                );
+            }
         }
         frame.refuse_mixed_index_kinds()?;
         Ok(frame)
@@ -402,6 +427,19 @@ impl DataFrame {
             .keys()
             .next()
             .is_some_and(|(_, _, k)| k.is_ordinal())
+    }
+
+    /// Every stream tag present in the frame, ascending and deduplicated.
+    ///
+    /// What a `!pick { freq }` is checked against: an id absent from here can
+    /// never match, so naming one is a typo and not an empty read. Untagged
+    /// rows key on `""`, which is deliberately included — it is a real stream
+    /// that a document could name only by not naming one.
+    pub fn streams(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.rows.keys().map(|(_, f, _)| f.as_str()).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// How many rows the frame holds, across every symbol and cadence.
@@ -528,7 +566,7 @@ impl DataFrame {
         spec: &str,
         row: Row,
         untagged_fallback: &HashMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<(String, String, IndexKey)> {
         // A new row can introduce a column, so any schema built from the
         // previous contents is stale. In practice every insert happens inside
         // `from_series` before the first `atoms` call, but nothing in the type
@@ -548,11 +586,9 @@ impl DataFrame {
             .map(str::to_string)
             .or_else(|| untagged_fallback.get(&symbol).cloned())
             .unwrap_or_default();
-        self.rows
-            .entry((symbol, freq, index))
-            .or_default()
-            .extend(row);
-        Ok(())
+        let key = (symbol, freq, index);
+        self.rows.entry(key.clone()).or_default().extend(row);
+        Ok(key)
     }
 
     /// The one overlay [`Schema`] every atom in the frame binds to, built from
@@ -1035,6 +1071,61 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("`index`") && err.contains("`time`"), "{err}");
+    }
+
+    /// **Regression.** `index` is a reserved name now, so a pre-existing column
+    /// called `index` that held *data* — a market index level, a category —
+    /// silently became the join key and merged every row that repeated a value.
+    /// Duplicate keys within one series are refused so the hijack is loud.
+    #[test]
+    fn a_repeated_index_value_within_one_series_is_refused() {
+        let f = tmp_csv(
+            "fugazi_index_hijack.csv",
+            "symbol,time,index,open,high,low,close,volume\n\
+             BTC,2024-01-01T00:00:00Z,4783.45,1,1,1,1,1\n\
+             BTC,2024-01-02T00:00:00Z,4783.45,2,2,2,2,1\n",
+        );
+        let err = DataFrame::from_series(&[format!("@{f}").parse().unwrap()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("two rows share"), "{err}");
+        assert!(err.contains("reserved name"), "names the cause: {err}");
+    }
+
+    /// The same key in two *different* series is the documented full-outer
+    /// join — a fundamentals CSV joining onto a price CSV — and must keep
+    /// working.
+    #[test]
+    fn the_same_key_across_two_series_still_joins() {
+        let a = tmp_csv(
+            "fugazi_join_a.csv",
+            "symbol,time,open,high,low,close,volume\nBTC,2024-01-01T00:00:00Z,1,1,1,1,1\n",
+        );
+        let b = tmp_csv(
+            "fugazi_join_b.csv",
+            "symbol,time,pe_ratio\nBTC,2024-01-01T00:00:00Z,12.5\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("@{a}").parse().unwrap(),
+            format!("@{b}").parse().unwrap(),
+        ])
+        .expect("two series joining on one key is not a duplicate");
+        assert_eq!(frame.len(), 1, "joined into one row");
+    }
+
+    /// Two cadences of one symbol at the same stamp are two streams, not a
+    /// duplicate — the case the `freq` component of the key exists for.
+    #[test]
+    fn two_streams_at_one_stamp_are_not_a_duplicate() {
+        let f = tmp_csv(
+            "fugazi_two_streams.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,1,1,1,1,1\n\
+             BTC,1h,2024-01-01T00:00:00Z,2,2,2,2,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()])
+            .expect("distinct streams are distinct keys");
+        assert_eq!(frame.len(), 2);
     }
 
     fn tmp_csv(name: &str, contents: &str) -> String {

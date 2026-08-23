@@ -523,16 +523,22 @@ pub fn parse_time_to_millis(raw: &str) -> Option<i64> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scope {
     pub symbol: Option<String>,
-    pub freq: Option<Frequency>,
+    /// The **stream** half of a `SYMBOL[STREAM]:` scope, verbatim.
+    ///
+    /// A `String` rather than a `Frequency`: the bracket names which series of
+    /// a symbol the entry applies to, and a cadence is only its most common
+    /// spelling. Parsing it here rejected `BTC[dollar-1e6]:` — a scope naming a
+    /// stream that genuinely exists — as a malformed cadence.
+    pub freq: Option<String>,
 }
 
 impl Scope {
     /// True when both halves match the run's (symbol, effective freq). An
     /// absent half matches anything; a present symbol matches by equality; a
     /// present freq matches only when the run's freq is `Some(_)` and equal.
-    pub fn matches(&self, symbol: &str, freq: Option<Frequency>) -> bool {
+    pub fn matches(&self, symbol: &str, stream: Option<&str>) -> bool {
         let sym_ok = self.symbol.as_deref().is_none_or(|s| s == symbol);
-        let freq_ok = self.freq.is_none_or(|f| Some(f) == freq);
+        let freq_ok = self.freq.as_deref().is_none_or(|f| Some(f) == stream);
         sym_ok && freq_ok
     }
 
@@ -699,11 +705,12 @@ pub fn looks_like_body(text: &str) -> bool {
 /// `--bars-per-year` / `-f/--frequency` prefixes.
 pub fn parse_scope(text: &str) -> Result<Scope, String> {
     let (symbol, freq_str) = parse_scope_parts(text)?;
-    let freq = match freq_str {
-        Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),
-        None => None,
-    };
-    Ok(Scope { symbol, freq })
+    // The bracket is taken verbatim: it names a stream, and a stream id is
+    // matched, never parsed. See `Scope::freq`.
+    Ok(Scope {
+        symbol,
+        freq: freq_str.map(str::to_string),
+    })
 }
 
 /// One `--bars-per-year` argument, parsed as either a plain `N` (the
@@ -746,11 +753,11 @@ impl FromStr for BarsPerYearSpec {
 pub fn pick_bars_per_year(
     specs: &[BarsPerYearSpec],
     symbol: &str,
-    freq: Option<Frequency>,
+    stream: Option<&str>,
 ) -> Option<Real> {
     specs
         .iter()
-        .filter(|s| s.scope.matches(symbol, freq))
+        .filter(|s| s.scope.matches(symbol, stream))
         .max_by_key(|s| s.scope.specificity())
         .map(|s| s.value)
 }
@@ -1112,10 +1119,10 @@ mod tests {
         assert_eq!(spec("BTC:8760").scope.symbol.as_deref(), Some("BTC"));
         assert_eq!(spec("BTC:8760").scope.freq, None);
         assert_eq!(spec("[1h]:8760").scope.symbol, None);
-        assert_eq!(spec("[1h]:8760").scope.freq, Some(Frequency::Hour(1)));
+        assert_eq!(spec("[1h]:8760").scope.freq.as_deref(), Some("1h"));
         let s = spec("BTC[1h]:8760");
         assert_eq!(s.scope.symbol.as_deref(), Some("BTC"));
-        assert_eq!(s.scope.freq, Some(Frequency::Hour(1)));
+        assert_eq!(s.scope.freq.as_deref(), Some("1h"));
         assert_eq!(s.value, 8760.0);
     }
 
@@ -1148,15 +1155,15 @@ mod tests {
         .map(|s| spec(s))
         .collect();
         assert_eq!(
-            pick_bars_per_year(&specs, "BTC", Some(Frequency::Hour(1))),
+            pick_bars_per_year(&specs, "BTC", Some(&Frequency::Hour(1).as_token())),
             Some(4000.0)
         );
         assert_eq!(
-            pick_bars_per_year(&specs, "BTC", Some(Frequency::Day(1))),
+            pick_bars_per_year(&specs, "BTC", Some(&Frequency::Day(1).as_token())),
             Some(1000.0)
         );
         assert_eq!(
-            pick_bars_per_year(&specs, "SOL", Some(Frequency::Hour(1))),
+            pick_bars_per_year(&specs, "SOL", Some(&Frequency::Hour(1).as_token())),
             Some(2000.0)
         );
         assert_eq!(pick_bars_per_year(&specs, "SOL", None), Some(500.0));
@@ -1167,7 +1174,7 @@ mod tests {
         // Only a specific scope declared; the run's (symbol, freq) doesn't match.
         let specs = vec![spec("BTC[1h]:8760")];
         assert_eq!(
-            pick_bars_per_year(&specs, "AAPL", Some(Frequency::Day(1))),
+            pick_bars_per_year(&specs, "AAPL", Some(&Frequency::Day(1).as_token())),
             None
         );
     }

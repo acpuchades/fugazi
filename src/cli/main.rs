@@ -1169,6 +1169,19 @@ fn run(args: RunArgs) -> Result<()> {
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let cost_config = costs::config(&args.costs)?;
+    // A `--costs` scope names a stream the same way a `!pick` does, and loses
+    // the same guardrail to the same change — see `run::check_streams`.
+    run::check_streams(
+        &frame,
+        &args.frequency,
+        &args
+            .costs
+            .iter()
+            .flat_map(|c| c.scoped_streams())
+            .map(str::to_string)
+            .collect(),
+        run::StreamUse::CostScope,
+    )?;
     let costs_were_supplied = !args.costs.is_empty();
 
     let param_table = params::table(&args.params)?;
@@ -1221,6 +1234,21 @@ fn run(args: RunArgs) -> Result<()> {
         &strat_label,
     )
     .with_context(|| parse_error_hint(&args.strategy))?;
+    // A stream id is matched verbatim and never parsed, so a typo builds
+    // cleanly and then reads nothing. Checked against the frame before the run
+    // rather than discovered as an empty backtest afterwards.
+    run::check_streams(
+        &frame,
+        &args.frequency,
+        &spec::reads::picked_streams_of(
+            &text,
+            &param_table,
+            &args.strategy.base_dir(),
+            &strat_label,
+        )
+        .with_context(|| parse_error_hint(&args.strategy))?,
+        run::StreamUse::Pick,
+    )?;
     let opts = run::RunOptions {
         cash: args.cash,
         max_gross: args.max_gross,
@@ -1328,6 +1356,19 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let cost_config = costs::config(&args.costs)?;
+    // A `--costs` scope names a stream the same way a `!pick` does, and loses
+    // the same guardrail to the same change — see `run::check_streams`.
+    run::check_streams(
+        &frame,
+        &args.frequency,
+        &args
+            .costs
+            .iter()
+            .flat_map(|c| c.scoped_streams())
+            .map(str::to_string)
+            .collect(),
+        run::StreamUse::CostScope,
+    )?;
     let costs_were_supplied = !args.costs.is_empty();
 
     let opts = optimize::OptimizeOptions {
