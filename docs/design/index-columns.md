@@ -1,6 +1,6 @@
 # Index columns — generalising the bar clock
 
-**Status:** in progress on `feat/index-columns`.
+**Status:** Stages 1-3 implemented on `feat/index-columns`. Stage 3 item 9 (D4/B6, the stream discriminant) is deliberately still open — see *Staging*.
 **Scope:** replace the assumption "a bar stream is indexed by wall-clock time"
 with "a bar stream is indexed by an *ordered index*, of which time is one kind".
 
@@ -132,11 +132,11 @@ retrofitted.
 | B1 | Calendar leaves (`!day_of_week`, `!is_weekday`) | Already degrade to `None` per bar | none |
 | B2 | `-w` / walk-forward duration form (`src/spec/calendar.rs:262`) | Already errors when `bar_freq` is `None` | reword the message to name the index kind |
 | B3 | Carry `year_fraction` | `CarryContext::year_fraction` is already `Option<Real>` **per call** (`src/costs/mod.rs:190`); only `PaperWallet`'s storage is a run constant (`src/wallet/paper.rs:432`) | derive per bar from consecutive `atom.time` deltas |
-| B4 | `bars_per_year` | `calendar::resolve` falls back rather than refusing | require `--bars-per-year` when there is no time index |
+| B4 | `bars_per_year` | `calendar::resolve` falls back rather than refusing | **superseded — measure it.** Annualization survives event sampling: scaling a dispersion by the root of the sample count is a per-*sample* rule, valid whenever per-bar returns are IID, which event sampling makes *more* defensible. Only the derivation changes. `measure_bars_per_year` reads `timed bars / elapsed years` off the span, and sits *below* the calendar so 252 stays the convention for a series that has a cadence. Refusal is the last resort, not the first |
 | B5 | Cadence census (`src/cli/cadence.rs`) | Medians timestamp gaps, snaps to a named `Frequency`; on dispersed gaps it either errors or confidently reports nonsense | third `Resolution`: index-sampled, no cadence |
 | B6 | Freq-scoped costs `SYMBOL[FREQ]:` | Scoped on `Frequency` | follows D4, Stage 3 |
 | B7 | `volume_participation` slippage (`src/costs/mod.rs:760`) | `units / candle.volume` | **degenerates** under volume bars (constant denominator). Document it; do not silently rescale |
-| B8 | `TrailingSharpe` (`src/indicators/trailing.rs:307`) | multiplies by `bars_per_year` *inside* the run, per bar | genuinely wrong under event bars; gate on a time index |
+| B8 | `TrailingSharpe` (`src/indicators/trailing.rs:307`) | multiplies by `bars_per_year` *inside* the run, per bar | **no change needed** — `bars_per_year` is already a required field on every trailing indicator's spec (no `serde(default)`), so it already refuses to guess |
 
 ## Multi-symbol — narrower than it first looks
 
@@ -189,14 +189,18 @@ verified to fail against the old code first.
    (`src/cli/data.rs:369`, `src/cli/csv_source.rs:143`), and emit whichever the
    input used.
 
-### Stage 3 — in-crate samplers *(the cheap 80%)*
+### Stage 3 — in-crate samplers *(the cheap 80%)* — done except item 9
 
 8. A `!volume_bars` / `!dollar_bars` sampler as a sibling of `Resample` — same
    `Option<Candle>`-emitting shape, different completion predicate, obvious YAML
    home next to `!resample`. Dollar bars built from 1m klines are close enough
    for most work and need **no new data provider**: no provider serves anything
    but time bars today (`SeriesSource::atoms(symbol, interval, since, until)`).
-9. **D4** / **B6** — the stream discriminant, if a concrete shape asks for it.
+9. **D4** / **B6** — the stream discriminant. **Still open, deliberately.** It is
+   not needed for single-symbol event bars, which is where the value is, and
+   TODO.md records that the `freq` tag is never pushed under `run` at all — so
+   widening `Selector.freq` today would be a type change nothing consumes.
+   Revisit alongside the multi-cadence question it actually belongs to.
 
 ### Explicitly not in scope
 
@@ -215,3 +219,28 @@ verified to fail against the old code first.
 - Stage 2 touches the frame's ordering contract: `tests/` fixtures under
   `tests/data/` must be re-verified, not regenerated, since a changed ordering
   would rebaseline silently.
+
+
+## What shipped
+
+| Commit | |
+|---|---|
+| `33405c2` | B3 — carry pro-rated over the interval that elapsed. Also fixed a live bug in *time* bars: a Monday daily bar follows Friday, so carry was billed for one day of a three-day hold — a 3x under-charge across every weekend |
+| `f23b6b2` | B4 (measured annualization), B2 (reworded `-w`), B7 (documented `volume_participation`'s degeneracy), B8 (verified no change needed) |
+| `b791dc7` | D3/B5 — `IndexKey`, the `index` column, the mixed-frame refusal, `Finding::IndexSampled` |
+| `733aada` | Stage 3 — `Accumulate<S, M>`, `!volume_bars` / `!dollar_bars`, Python parity, docs |
+
+Two things worth recording because they changed the design mid-flight:
+
+**The "smart comparator" alternative to `IndexKey` is unsound, not merely
+inelegant.** One `String` with an `Ord` that compares numerically when both
+sides parse as integers is not transitive: `"9" < "10"` numerically, but
+`"10" < "1a"` and `"1a" < "9"` lexicographically. A `BTreeMap` on that key
+corrupts. The two-variant enum is what makes the order well-defined, so D3 is
+load-bearing rather than stylistic.
+
+**`Wallet::observe` already carried the bar's time.** It is handed the whole
+`Atom` immediately before `advance` (`src/backtest.rs:259`), so B3 needed no
+trait signature change — the timestamp was reaching the wallet and being
+dropped. Worth remembering before assuming the `Wallet` trait needs widening for
+anything else the bar carries.
