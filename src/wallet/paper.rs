@@ -173,6 +173,35 @@ struct RestingLimit {
     id: OrderId,
 }
 
+/// What [`PaperWallet::fit_to_account`] made of a fractional sizing: the
+/// magnitude the account can actually carry, and — when that is less than what
+/// was asked for — which of the two solvency rules cut it down.
+///
+/// The `bound` exists for the case where the fit collapses to **no trade at
+/// all**. Shrinking a request to what fits is ordinary and is recorded on the
+/// fill itself as [`Order::requested_units`]; shrinking it to zero produces no
+/// fill to record it on, so without this the leg simply vanished — no order, no
+/// rejection, nothing in the blotter. The same economic situation reached
+/// through an explicit [`Size::Units`] is a loud `InsufficientFunds`, and an
+/// unlevered basket whose earlier legs have used the whole gross budget reaches
+/// it on the last leg routinely.
+#[derive(Debug, Clone, Copy)]
+struct Fitted {
+    magnitude: Real,
+    /// `None` when the whole request fitted.
+    bound: Option<WalletError>,
+}
+
+impl Fitted {
+    /// The request fitted as asked.
+    fn whole(magnitude: Real) -> Self {
+        Self {
+            magnitude,
+            bound: None,
+        }
+    }
+}
+
 /// One queued market order, resolved against the bar's opens and awaiting its
 /// turn in [`PaperWallet::advance`]'s credit-then-debit ordering.
 ///
@@ -1108,24 +1137,25 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         magnitude: Real,
         pricing: FillPricing<'_>,
         rest: RestOfBook,
-    ) -> Real {
+    ) -> Fitted {
         let FillPricing {
             bar: candle,
             price,
             kind,
         } = pricing;
         if magnitude <= 0.0 {
-            return magnitude;
+            return Fitted::whole(magnitude);
         }
         // A pure reduction — a sell that doesn't flip through zero, or a buy
         // that only covers part of a short — credits cash and lowers gross.
         // Neither constraint can bind, so skip pricing it at all.
         let asked = side.sign() * magnitude;
         if asked - current <= 0.0 && asked.abs() <= current.abs() {
-            return magnitude;
+            return Fitted::whole(magnitude);
         }
         let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
         let mut m = magnitude;
+        let mut last_bound = None;
         for _ in 0..8 {
             let target = side.sign() * m;
             let delta = target - current;
@@ -1142,17 +1172,24 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
                 .slippage
                 .adjust(direction, post_spread, units, candle, kind);
             if final_price <= 0.0 {
-                return 0.0;
+                return Fitted {
+                    magnitude: 0.0,
+                    bound: Some(WalletError::InvalidPrice),
+                };
             }
             let notional = final_price * units;
             let commission = costs.commission.commission(notional, units).max(0.0);
 
             // The tighter of the two deficits wins; `1.0` means nothing binds.
+            // `bound` records *which* one did, so a fit that collapses to no
+            // trade at all can say why — see `Fitted`.
             let mut scale: Real = 1.0;
+            let mut bound = None;
             if delta > 0.0 && self.max_gross <= 1.0 {
                 let cost = notional + commission;
                 if cost - self.funds > cash_tolerance(self.funds) && cost > 0.0 {
                     scale = scale.min(self.funds / cost);
+                    bound = Some(WalletError::InsufficientFunds);
                 }
             }
             if target.abs() > current.abs() {
@@ -1163,19 +1200,48 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
                 let allowed = self.gross_budget(equity_after, rest.gross);
                 let held = target.abs() * final_price;
                 if held - allowed > gross_tolerance(held, equity_after) && held > 0.0 {
-                    scale = scale.min((allowed / held).max(0.0));
+                    let gross_scale = (allowed / held).max(0.0);
+                    if gross_scale < scale {
+                        scale = gross_scale;
+                    }
+                    // The *scale* is the tighter of the two deficits; the
+                    // *label* is not, and follows the convention on
+                    // `ExceedsMaxGross`: at `max_gross = 1.0` on a long the two
+                    // rules are algebraically the same condition, and the cash
+                    // check is the one reported under its own name. Saying "this
+                    // fill would exceed the account's gross exposure limit"
+                    // about a one-unit buy on a flat unlevered account — which
+                    // is what an unaffordable flat fee produces, since the fee
+                    // drives `equity_after` negative and the gross budget with
+                    // it — is true and useless.
+                    bound.get_or_insert(WalletError::ExceedsMaxGross);
                 }
             }
             if scale >= 1.0 {
-                return m;
+                // Nothing binds *at this size* — but an earlier pass may be the
+                // reason the size is what it is, and when the shrink converged
+                // all the way to zero this is the iteration that sees a clear
+                // board. Carrying `last_bound` is what keeps a leg that was
+                // fitted out of existence from reporting itself as fitted whole.
+                return Fitted {
+                    magnitude: m,
+                    bound: last_bound,
+                };
             }
             let next = m * scale.clamp(0.0, 1.0);
             if (m - next).abs() <= cash_tolerance(m) {
-                return next.max(0.0);
+                return Fitted {
+                    magnitude: next.max(0.0),
+                    bound,
+                };
             }
             m = next;
+            last_bound = bound;
         }
-        m.max(0.0)
+        Fitted {
+            magnitude: m.max(0.0),
+            bound: last_bound,
+        }
     }
 
     /// Pre-flight a market submission against the last close: reject
@@ -1350,20 +1416,23 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // Same rule as the queued-market path: a fractional sizing means "as
         // much as fits", so fit it to cash and to the leverage cap; an explicit
         // unit count is a specific intent and is left alone.
-        let magnitude = match resting.size {
-            Size::ValueFraction(_) | Size::FundsFraction(_) => self.fit_to_account(
-                symbol,
-                resting.side,
-                position,
-                magnitude,
-                FillPricing {
-                    bar: candle,
-                    price: fill,
-                    kind: OrderKind::Limit,
-                },
-                rest,
-            ),
-            Size::Units(_) | Size::PositionFraction(_) => magnitude,
+        let (magnitude, bound) = match resting.size {
+            Size::ValueFraction(_) | Size::FundsFraction(_) => {
+                let fitted = self.fit_to_account(
+                    symbol,
+                    resting.side,
+                    position,
+                    magnitude,
+                    FillPricing {
+                        bar: candle,
+                        price: fill,
+                        kind: OrderKind::Limit,
+                    },
+                    rest,
+                );
+                (fitted.magnitude, fitted.bound)
+            }
+            Size::Units(_) | Size::PositionFraction(_) => (magnitude, None),
         };
         let target = resting.side.sign() * magnitude;
 
@@ -1375,6 +1444,17 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             resting.id,
             FillContext::exact(requested, rest),
         ) {
+            // See the market path: a fit that removed the trade entirely leaves
+            // no order to carry `requested_units`, so the refusal is booked here
+            // or it is invisible.
+            Ok(None) => {
+                if let Some(error) = bound
+                    && (requested - position).abs() > POSITION_EPSILON
+                {
+                    self.push_rejection(symbol, resting.id, error, OrderKind::Limit);
+                }
+                None
+            }
             Ok(order) => order,
             Err(error) => {
                 self.push_rejection(symbol, resting.id, error, OrderKind::Limit);
@@ -1697,23 +1777,23 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             // `Size::PositionFraction(f)` carries a specific unit intent and is
             // left alone — an infeasible request is a caller error, not a
             // sizing target.
-            let target = match q.sizing {
+            let (target, bound) = match q.sizing {
                 Some((side, Size::ValueFraction(_) | Size::FundsFraction(_))) => {
-                    side.sign()
-                        * self.fit_to_account(
-                            &q.symbol,
-                            side,
-                            position,
-                            q.target.abs(),
-                            FillPricing {
-                                bar: &q.candle,
-                                price: q.candle.open,
-                                kind: OrderKind::Market,
-                            },
-                            rest,
-                        )
+                    let fitted = self.fit_to_account(
+                        &q.symbol,
+                        side,
+                        position,
+                        q.target.abs(),
+                        FillPricing {
+                            bar: &q.candle,
+                            price: q.candle.open,
+                            kind: OrderKind::Market,
+                        },
+                        rest,
+                    );
+                    (side.sign() * fitted.magnitude, fitted.bound)
                 }
-                _ => q.target,
+                _ => (q.target, None),
             };
             match self.fill_at(
                 q.symbol.clone(),
@@ -1724,7 +1804,17 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 FillContext::exact(q.target, rest),
             ) {
                 Ok(Some(order)) => fills.push(order),
-                Ok(None) => {}
+                // No fill. Ordinarily that means the position was already where
+                // it was asked to be — but if the fit is what removed the trade,
+                // the leg did not happen *as specified* and there is no
+                // `requested_units` on any order to say so. Book the refusal.
+                Ok(None) => {
+                    if let Some(error) = bound
+                        && (q.target - position).abs() > POSITION_EPSILON
+                    {
+                        self.push_rejection(&q.symbol, q.id, error, OrderKind::Market);
+                    }
+                }
                 Err(error) => self.push_rejection(&q.symbol, q.id, error, OrderKind::Market),
             }
         }
@@ -4443,5 +4533,136 @@ mod tests {
             "funds {}",
             w.funds().0
         );
+    }
+
+    /// **A fractional sizing fitted out of existence is a refusal, and says so.**
+    ///
+    /// Shrinking a request to what the account can carry is ordinary, and is
+    /// recorded on the fill as `requested_units`. Shrinking it to *zero*
+    /// produces no fill to record it on — so the leg simply vanished: no order,
+    /// no rejection, nothing in the blotter, and a strategy that never traded
+    /// looked like one that chose not to.
+    ///
+    /// The same economic situation reached through an explicit `Size::Units` is
+    /// a loud `InsufficientFunds` at submission, and `value_frac` is what the
+    /// spec layer builds for *every* sizing — so the silent spelling was the
+    /// default one. An unlevered basket whose earlier legs have used the whole
+    /// gross budget reaches it on the last leg routinely.
+    #[test]
+    fn a_sizing_fitted_down_to_no_trade_is_booked_as_a_refusal() {
+        let exhausted = || {
+            let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+            w.update("A", ohlc(100.0, 101.0, 99.0, 100.0));
+            w.update("B", ohlc(100.0, 101.0, 99.0, 100.0));
+            // A takes the entire budget at 1x.
+            w.set("A", Side::Buy, Size::value_frac(1.0)).unwrap();
+            w.advance(&[
+                ("A", ohlc(100.0, 101.0, 99.0, 100.0)),
+                ("B", ohlc(100.0, 101.0, 99.0, 100.0)),
+            ]);
+            assert_eq!(w.position(&"A").amount, 100.0);
+            w
+        };
+
+        // The fractional spelling: no fill, and now a rejection naming why.
+        let mut w = exhausted();
+        w.set("B", Side::Buy, Size::value_frac(0.33)).unwrap();
+        let fills = w.advance(&[
+            ("A", ohlc(100.0, 101.0, 99.0, 100.0)),
+            ("B", ohlc(100.0, 101.0, 99.0, 100.0)),
+        ]);
+        assert!(fills.is_empty(), "nothing should fill: {fills:?}");
+        assert_eq!(w.position(&"B").amount, 0.0);
+        let rejections: Vec<_> = w.rejections().iter().map(|r| (r.symbol, r.error)).collect();
+        assert_eq!(
+            rejections,
+            vec![("B", WalletError::InsufficientFunds)],
+            "the fitted-away leg left no trace"
+        );
+
+        // The explicit spelling reports the same thing, at submission.
+        let mut w = exhausted();
+        assert_eq!(
+            w.set("B", Side::Buy, Size::units(33.0)),
+            Err(WalletError::InsufficientFunds)
+        );
+
+        // A fit that merely *shrinks* still fills, and is not a refusal — the
+        // fill carries what it was asked for instead.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Sell, Size::value_frac(3.0)).unwrap();
+        let fills = w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].requested_units, 300.0);
+        assert!(
+            w.rejections().is_empty(),
+            "a shrunk-but-filled leg is not a refusal: {:?}",
+            w.rejections()
+        );
+
+        // And an ordinary no-op — already at the target — stays silent.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Buy, Size::value_frac(0.5)).unwrap();
+        w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+        w.set("X", Side::Buy, Size::value_frac(0.5)).unwrap();
+        let fills = w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+        assert!(fills.is_empty(), "already there: {fills:?}");
+        assert!(
+            w.rejections().is_empty(),
+            "a no-op is not a refusal: {:?}",
+            w.rejections()
+        );
+    }
+
+    /// A flat per-trade fee is the non-convex case the shrink loop has to
+    /// survive: `cost = notional + fee` cannot fall below `fee`, so the scale
+    /// never reaches `1` and the eight-iteration cap is what ends it. Each of
+    /// these converges to the largest size the account can actually pay for,
+    /// and the one that cannot afford the fee at all reports a refusal rather
+    /// than a silent nothing.
+    #[test]
+    fn a_flat_fee_shrinks_to_what_the_account_can_pay_for() {
+        use crate::costs::{FixedCommission, TradingCosts};
+
+        let attempt = |cash: Real, fee: Real| {
+            let costs = TradingCosts {
+                commission: Box::new(FixedCommission::new(fee)),
+                ..Default::default()
+            };
+            let mut w: PaperWallet<&str> = PaperWallet::with_costs(cash, costs);
+            w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+            w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+            let fills = w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+            (fills, w)
+        };
+
+        // The fee is the whole account: nothing is affordable, and that is a
+        // refusal rather than a leg that quietly never happened.
+        let (fills, w) = attempt(100.0, 500.0);
+        assert!(fills.is_empty());
+        assert_eq!(
+            w.rejections().iter().map(|r| r.error).collect::<Vec<_>>(),
+            vec![WalletError::InsufficientFunds]
+        );
+
+        // Otherwise it converges on exactly what is left after the fee, and
+        // never overdraws.
+        for (cash, fee, units) in [
+            (100.0, 99.0, 0.01),
+            (100.0, 50.0, 0.5),
+            (10_000.0, 5.0, 99.95),
+        ] {
+            let (fills, w) = attempt(cash, fee);
+            assert_eq!(fills.len(), 1, "cash {cash} fee {fee}");
+            assert!(
+                (fills[0].units - units).abs() < 1e-9,
+                "cash {cash} fee {fee}: filled {} not {units}",
+                fills[0].units
+            );
+            assert!(w.funds().0 >= 0.0, "cash {cash} fee {fee} overdrew");
+            assert!(w.rejections().is_empty(), "cash {cash} fee {fee}");
+        }
     }
 }
