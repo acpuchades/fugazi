@@ -1351,6 +1351,14 @@ BTC,0,2024-01-01T00:14:22Z,42010,42120,41990,42080,23.7
 BTC,1,2024-01-01T00:31:05Z,42080,42300,42060,42250,24.1
 ```
 
+**A `time` column is checked.** The name declares a type, so the values have to
+be timestamps: RFC 3339 (`2024-01-01T00:00:00Z`), `YYYY-MM-DD [HH:MM:SS]`, or an
+integer Unix epoch in seconds or milliseconds. A column where **none** parse is
+refused — that column is not a time column, and leaving it unread would silence
+carry, the calendar leaves and measured annualization without failing. Where
+*some* parse it is a warning, since the run is still well-defined. If the values
+are not dates at all, `index` is the column for them.
+
 **Give it a `time` column too whenever you can.** The two are not
 alternatives — the `index` decides *ordering and joining*, the `time` decides
 how much of the calendar layer keeps working. With both present, carry is

@@ -376,6 +376,23 @@ pub enum Finding {
         /// `(cadence, symbols)`, ascending by cadence duration.
         groups: Vec<(Frequency, Vec<String>)>,
     },
+    /// A series has a `time` to read and **none of it parses** — so the column
+    /// is not a time column at all.
+    Untimed {
+        symbol: String,
+        freq: String,
+        total: usize,
+        /// One value, verbatim.
+        example: String,
+    },
+    /// A series' `time` parses for some rows and not others.
+    PartlyTimed {
+        symbol: String,
+        freq: String,
+        unparsed: usize,
+        total: usize,
+        example: String,
+    },
     /// A series' timestamps land outside the calendar, so nothing that reads a
     /// date can answer for them.
     Undatable {
@@ -410,7 +427,10 @@ impl Finding {
     pub fn is_error(&self) -> bool {
         matches!(
             self,
-            Finding::Ambiguous { .. } | Finding::Absent { .. } | Finding::Untagged { .. }
+            Finding::Ambiguous { .. }
+                | Finding::Absent { .. }
+                | Finding::Untagged { .. }
+                | Finding::Untimed { .. }
         )
     }
 }
@@ -481,6 +501,51 @@ impl fmt::Display for Finding {
                 declared.len(),
                 declared.join(", "),
             ),
+            Finding::Untimed {
+                symbol,
+                freq,
+                total,
+                example,
+            } => write!(
+                f,
+                "`{symbol}`{}: none of its {total} `time` value(s) parse as a timestamp \
+                 (e.g. `{example}`).\n\
+                 \n\
+                 A column named `time` promises timestamps, and everything time-denominated \
+                 reads it: carry is pro-rated over it, the calendar leaves (`!day_of_week`, \
+                 `!is_weekday`, …) decompose it, and `bars_per_year` is measured from the \
+                 span it covers. Unparsed, all three go quiet without failing — the run \
+                 completes and reports a strategy that was never charged for carry.\n\
+                 \n\
+                 fugazi reads RFC 3339 (`2024-01-01T00:00:00Z`), `YYYY-MM-DD [HH:MM:SS]`, or \
+                 an integer Unix epoch in seconds or milliseconds. If these are not times at \
+                 all — a bar sequence, a session id — name the column `index` instead, which \
+                 orders and joins on them without claiming they are dates.",
+                if freq.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{freq}]")
+                },
+            ),
+            Finding::PartlyTimed {
+                symbol,
+                freq,
+                unparsed,
+                total,
+                example,
+            } => write!(
+                f,
+                "`{symbol}`{}: {unparsed} of {total} `time` value(s) do not parse as a \
+                 timestamp (e.g. `{example}`), so those bars carry no time. Carry is not \
+                 charged across them, the calendar leaves read `None` there, and the cadence \
+                 detected from the gaps is measured over the rows that did parse — which is \
+                 a different series from the one in the file.",
+                if freq.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{freq}]")
+                },
+            ),
             Finding::Undatable {
                 symbol,
                 freq,
@@ -539,17 +604,67 @@ impl fmt::Display for Finding {
 ///
 /// Errors abort with every error finding in one message: a frame with three
 /// ambiguous symbols should not take three runs to fix.
+/// Census the `time` column: a name that declares a type is checked against it.
+///
+/// Split on the module's own rule. **None parsing is ambiguity** — the column
+/// is not a time column, and there is no reading of it that is right, so it is
+/// refused and the error names `index` as the home for keys that are not dates.
+/// **Some parsing is disagreement** — the run is well-defined, just quietly
+/// missing time on those bars, so it is warned.
+///
+/// Runs before the cadence census proper and before the index-sampled
+/// short-circuit: an index-keyed frame may still carry a `time` column, and it
+/// is exactly the frame where a silently-unread one costs the most, since
+/// measured annualization is the only annualization it has.
+fn census_times(frame: &DataFrame) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for group in frame.time_census() {
+        let Some(example) = group.example.clone() else {
+            continue;
+        };
+        let unparsed = group.with_cell - group.parsed;
+        if group.parsed == 0 {
+            out.push(Finding::Untimed {
+                symbol: group.symbol.to_string(),
+                freq: group.freq.to_string(),
+                total: group.with_cell,
+                example,
+            });
+        } else {
+            out.push(Finding::PartlyTimed {
+                symbol: group.symbol.to_string(),
+                freq: group.freq.to_string(),
+                unparsed,
+                total: group.with_cell,
+                example,
+            });
+        }
+    }
+    out
+}
+
 pub fn apply(frame: &mut DataFrame, specs: &[ScopedFrequency]) -> Result<Vec<Finding>> {
+    let time_findings = census_times(frame);
+    if time_findings.iter().any(Finding::is_error) {
+        let errors: Vec<String> = time_findings
+            .iter()
+            .filter(|f| f.is_error())
+            .map(Finding::to_string)
+            .collect();
+        bail!("{}", errors.join("\n\n"));
+    }
     // An index-sampled frame has no cadence to census, and every finding below
     // is *about* a cadence. Detection would still produce one — the median gap
     // between dollar-bar closes snaps to some named `Frequency` like any other
     // number — and it would be an artefact of how busy the tape was, reported
     // with the same confidence as a real one. Say what the input is instead.
     if frame.is_index_sampled() {
-        return Ok(vec![Finding::IndexSampled {
+        let mut out = time_findings;
+        out.push(Finding::IndexSampled {
             bars: frame.len(),
             timed: frame.has_parseable_times(),
-        }]);
+        });
+        return Ok(out);
     }
     let resolution = Census::of(frame).resolve(specs);
     if resolution.has_errors() {
@@ -561,6 +676,8 @@ pub fn apply(frame: &mut DataFrame, specs: &[ScopedFrequency]) -> Result<Vec<Fin
             .collect();
         bail!("{}", errors.join("\n\n"));
     }
+    let mut findings = time_findings;
+    findings.extend(resolution.findings);
     for (symbol, freq) in &resolution.keep {
         // Only touch symbols that actually had a choice — `retain_cadence`
         // rebuilds the memoized schema, and a single-cadence frame (the
@@ -569,7 +686,7 @@ pub fn apply(frame: &mut DataFrame, specs: &[ScopedFrequency]) -> Result<Vec<Fin
             frame.retain_cadence(symbol, freq);
         }
     }
-    Ok(resolution.findings)
+    Ok(findings)
 }
 
 /// Print the warnings to stderr, one paragraph each.

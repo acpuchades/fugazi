@@ -547,3 +547,81 @@ fn nanosecond_timestamps_are_named_rather_than_silently_ungated() {
         out.stderr
     );
 }
+
+// ------------------------------------------------------- the `time` column
+
+/// **Regression.** A column named `time` promises timestamps. When none of its
+/// values are one, the column is not a time column, and everything
+/// time-denominated used to go quiet without failing: carry charged nothing,
+/// the calendar leaves read `None` on every bar, and `bars_per_year` had no
+/// span to measure. The run completed and reported a strategy that was never
+/// charged for carry.
+#[test]
+fn a_time_column_that_never_parses_stops_the_run() {
+    let body: String = (1..=12)
+        .map(|i| format!("BTC,1d,bucket-{i:03},{c},{c},{c},{c},100\n", c = 100 + i))
+        .collect();
+    let out = Cmd::new("run")
+        .arg(&single_strategy("BTC"))
+        .series(&series_of("cadence_untimed.csv", &body))
+        .output_dir("cadence_untimed")
+        .fails();
+
+    assert!(
+        out.stderr.contains("parse as a timestamp"),
+        "no untimed error:\n{}",
+        out.stderr
+    );
+    // Names the offender and the actual remedy — these are not dates, so the
+    // column they belong in is `index`.
+    assert!(out.stderr.contains("bucket-001"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("`index`"),
+        "does not point at `index`:\n{}",
+        out.stderr
+    );
+}
+
+/// The same values under `index` are exactly what that column is for, so the
+/// run proceeds — refusing above has a remedy, not just a complaint.
+#[test]
+fn the_same_values_under_index_run_fine() {
+    let header = "symbol,index,open,high,low,close,volume\n";
+    let body: String = (1..=12)
+        .map(|i| format!("BTC,{i},{c},{c},{c},{c},100\n", c = 100 + i))
+        .collect();
+    let (_, arg) = scratch_file("cadence_indexed.csv", &format!("{header}{body}"));
+    let out = Cmd::new("run")
+        .arg(&single_strategy("BTC"))
+        .series(&arg)
+        .arg("--bars-per-year")
+        .arg("252")
+        .output_dir("cadence_indexed")
+        .ok();
+    assert!(
+        out.stderr.contains("index-sampled"),
+        "should say what the input is:\n{}",
+        out.stderr
+    );
+}
+
+/// A `time` that parses for *some* rows is disagreement, not ambiguity: the run
+/// is still well-defined, just quietly missing time on those bars. Warned, and
+/// the run proceeds.
+#[test]
+fn a_partly_parseable_time_column_warns_but_runs() {
+    let mut body = daily_series("BTC", 12);
+    body.push_str("BTC,1d,not-a-date,113,113,113,113,100\n");
+    let out = Cmd::new("run")
+        .arg(&single_strategy("BTC"))
+        .series(&series_of("cadence_partly_timed.csv", &body))
+        .output_dir("cadence_partly_timed")
+        .ok();
+
+    assert!(
+        out.stderr.contains("do not parse as a timestamp"),
+        "no partial-time warning:\n{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("not-a-date"), "{}", out.stderr);
+}

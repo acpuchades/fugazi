@@ -315,6 +315,20 @@ impl SeriesSpec {
     }
 }
 
+/// One `(symbol, stream)` group's `time`-column tally — see
+/// [`DataFrame::time_census`].
+#[derive(Debug)]
+pub struct TimeCensus<'a> {
+    pub symbol: &'a str,
+    pub freq: &'a str,
+    /// Rows that carry a time to read at all.
+    pub with_cell: usize,
+    /// How many of those parsed.
+    pub parsed: usize,
+    /// One that did not, verbatim, so the reader can see the shape.
+    pub example: Option<String>,
+}
+
 /// The merged long dataframe: rows keyed by `(symbol, freq, index)`.
 ///
 /// The middle component is the `freq` **cell as written**, trimmed but never
@@ -427,6 +441,60 @@ impl DataFrame {
             .keys()
             .next()
             .is_some_and(|(_, _, k)| k.is_ordinal())
+    }
+
+    /// Per `(symbol, stream)`, how many rows carry a `time` cell and how many
+    /// of those actually parse — plus one that did not, for the message.
+    ///
+    /// The `time` column is the one place a **name declares a type**: a column
+    /// called `time` promises timestamps, and a cell that is not one is either
+    /// malformed or not a time at all. Until this existed neither was reported
+    /// — `Atom::time` simply read `None` and every time-denominated feature
+    /// went quiet: carry charged nothing, the calendar leaves read `None` on
+    /// every bar, and `bars_per_year` had no span to measure.
+    ///
+    /// Counts rows that *have* a non-empty `time` cell. A frame with no `time`
+    /// column at all is not making a promise and is not censused here — that is
+    /// what an `index`-only series is, and it is legitimate.
+    pub fn time_census(&self) -> Vec<TimeCensus<'_>> {
+        let mut by_group: BTreeMap<(&str, &str), TimeCensus<'_>> = BTreeMap::new();
+        for ((sym, freq, index), row) in &self.rows {
+            let Some(cell) = row.get("time").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+                // No `time` column on this row. The key itself is only a time
+                // when the frame is time-keyed, and then `row_time_ms` reads it
+                // — which is what the `else` branch below covers.
+                if row.contains_key("time") || !index.is_ordinal() {
+                    let entry = by_group.entry((sym, freq)).or_insert(TimeCensus {
+                        symbol: sym,
+                        freq,
+                        with_cell: 0,
+                        parsed: 0,
+                        example: None,
+                    });
+                    entry.with_cell += 1;
+                    if row_time_ms(index, row).is_some() {
+                        entry.parsed += 1;
+                    } else if entry.example.is_none() {
+                        entry.example = Some(index.to_string());
+                    }
+                }
+                continue;
+            };
+            let entry = by_group.entry((sym, freq)).or_insert(TimeCensus {
+                symbol: sym,
+                freq,
+                with_cell: 0,
+                parsed: 0,
+                example: None,
+            });
+            entry.with_cell += 1;
+            if calendar::parse_time_to_millis(cell).is_some() {
+                entry.parsed += 1;
+            } else if entry.example.is_none() {
+                entry.example = Some(cell.to_string());
+            }
+        }
+        by_group.into_values().collect()
     }
 
     /// Every stream tag present in the frame, ascending and deduplicated.
