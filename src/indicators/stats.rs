@@ -330,6 +330,26 @@ impl Serialize for WindowStats {
 impl<'de> Deserialize<'de> for WindowStats {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let r = WindowStatsRepr::deserialize(d)?;
+        // `period` sizes the buffer, so a zero would panic in `WindowStats::new`
+        // on a hand-edited blob. Reject it as bad data instead — `load_state`
+        // returns a `Result`, and an abort there kills the resumed run.
+        if r.period == 0 {
+            return Err(serde::de::Error::custom(
+                "window period must be greater than zero",
+            ));
+        }
+        // Over-long is corrupt, and silently truncating it is the worst of the
+        // three options: `sum` is restored verbatim, so a window trimmed on the
+        // way in leaves the running total describing samples that are no longer
+        // there, and every mean for the rest of the run is wrong by a constant.
+        // `LoadWindow` already refuses this; so does everything here now.
+        if r.window.len() > r.period {
+            return Err(serde::de::Error::custom(format!(
+                "window holds {} samples, more than its period of {}",
+                r.window.len(),
+                r.period
+            )));
+        }
         let mut out = WindowStats::new(r.period);
         for x in r.window {
             out.push(x);
@@ -785,6 +805,15 @@ impl<'de> Deserialize<'de> for WindowCovariance {
                 "window period must be greater than zero",
             ));
         }
+        // See `WindowStats`: truncating would leave `sum_x`/`sum_y` describing
+        // samples the window no longer holds.
+        if r.window.len() > r.period {
+            return Err(serde::de::Error::custom(format!(
+                "window holds {} samples, more than its period of {}",
+                r.window.len(),
+                r.period
+            )));
+        }
         Ok(Self {
             period: r.period,
             window: Ring::from_logical(r.period, r.window),
@@ -934,6 +963,15 @@ impl<'de> Deserialize<'de> for WmaState {
                 "WMA period must be greater than zero",
             ));
         }
+        // See `WindowStats`: truncating would leave `sum`/`weighted` describing
+        // samples the window no longer holds.
+        if r.window.len() > r.period {
+            return Err(serde::de::Error::custom(format!(
+                "window holds {} samples, more than its period of {}",
+                r.window.len(),
+                r.period
+            )));
+        }
         Ok(Self {
             period: r.period,
             window: Ring::from_logical(r.period, r.window),
@@ -1004,6 +1042,18 @@ pub(crate) fn cmp_asc(a: &Real, b: &Real) -> std::cmp::Ordering {
 /// [`WindowQuantile`] core and by `metrics`' `value_at_risk` /
 /// `conditional_value_at_risk` / `tail_ratio`, so an indicator's 5th percentile
 /// and a report's 5th percentile mean the same thing.
+///
+/// **`p` is clamped, not asserted.** The indicator front
+/// ([`Percentile`](super::Percentile)) validates its `pct` at construction, but
+/// the report-level fronts do not: `metrics::value_at_risk` takes a caller's
+/// *confidence* and asks for `1 - confidence`, so a `confidence` above `1` or
+/// below `0` — reachable from `fugazi.metrics.value_at_risk` in Python and from
+/// any Rust caller — lands here out of range. Unclamped, `p > 1` indexed past
+/// the end of the slice and panicked, and `p < 0` extrapolated below the
+/// minimum. Clamping saturates to the slice's min/max, which is what
+/// [`montecarlo::percentile`](crate::montecarlo::percentile) already did.
+/// A `NaN` `p` still yields `NaN` — that is bad input answered honestly, not an
+/// abort.
 pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
     if sorted.is_empty() {
         return 0.0;
@@ -1012,8 +1062,10 @@ pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
     if n == 1 {
         return sorted[0];
     }
-    let idx = p * (n - 1) as Real;
-    let lo = idx.floor() as usize;
+    let idx = p.clamp(0.0, 1.0) * (n - 1) as Real;
+    // `idx <= n - 1` after the clamp, so `lo` is in range; the `min` still
+    // matters for `p == 1.0`, where `lo` is the last index and `lo + 1` is not.
+    let lo = (idx.floor() as usize).min(n - 1);
     let hi = (lo + 1).min(n - 1);
     let frac = idx - lo as Real;
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
@@ -1038,13 +1090,58 @@ pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
 ///
 /// Ordering is `NaN`-tolerant via [`cmp_asc`]; a `NaN` in the window sorts
 /// wherever it lands rather than panicking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct WindowQuantile {
     period: usize,
     /// Arrival order — the front is the next sample to evict.
     window: VecDeque<Real>,
     /// The same samples, kept sorted ascending.
     sorted: Vec<Real>,
+}
+
+/// The on-the-wire shape of a [`WindowQuantile`] — the same `{period, window,
+/// sorted}` object the derive produced, so existing run states still load.
+///
+/// The blob's `sorted` array is deliberately **not** a field here — serde
+/// ignores what it does not name, and this reads the arrival order only.
+#[derive(Deserialize)]
+struct WindowQuantileRepr {
+    period: usize,
+    window: VecDeque<Real>,
+}
+
+/// Hand-written rather than derived because the two views are an **invariant,
+/// not two independent fields**: `update` evicts by arrival order and then
+/// binary-searches `sorted` for the same value, so a blob whose halves disagree
+/// leaves them permanently out of step and every later quantile reads a window
+/// that never existed. The arrival order is the authority, so `sorted` is
+/// rebuilt from it and the blob's copy is ignored.
+impl<'de> Deserialize<'de> for WindowQuantile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = WindowQuantileRepr::deserialize(d)?;
+        // `period` is the divisor in `rank_of` and the fullness test; a zero
+        // would report an empty window as full and divide by nothing.
+        if r.period == 0 {
+            return Err(serde::de::Error::custom(
+                "window period must be greater than zero",
+            ));
+        }
+        if r.window.len() > r.period {
+            return Err(serde::de::Error::custom(format!(
+                "window holds {} samples, more than its period of {}",
+                r.window.len(),
+                r.period
+            )));
+        }
+        let window = r.window;
+        let mut sorted: Vec<Real> = window.iter().copied().collect();
+        sorted.sort_unstable_by(cmp_asc);
+        Ok(Self {
+            period: r.period,
+            window,
+            sorted,
+        })
+    }
 }
 
 impl WindowQuantile {
@@ -1157,10 +1254,54 @@ impl<Op> Serialize for WindowExtreme<Op> {
 impl<'de, Op> Deserialize<'de> for WindowExtreme<Op> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let r = WindowExtremeRepr::deserialize(d)?;
+        // Same as every other core here: a zero would panic in
+        // `WindowExtreme::new`, and a corrupt blob is bad data, not a bug.
+        if r.period == 0 {
+            return Err(serde::de::Error::custom(
+                "window period must be greater than zero",
+            ));
+        }
         let mut out = WindowExtreme::new(r.period);
         // A saved deque can never exceed `period` entries, but the blob is
-        // caller-supplied: truncate rather than write out of bounds.
-        for e in r.deque.into_iter().take(r.period) {
+        // caller-supplied: refuse an over-long one rather than write out of
+        // bounds.
+        //
+        // The *indices* need checking too, and for a sharper reason than
+        // tidiness: `since` answers `(count - 1) - front_idx`, in `usize`. An
+        // index at or beyond `count` — trivial to produce by hand-editing a
+        // resume file — underflowed that subtraction, which is a panic in debug
+        // and a nonsense gap of ~2⁶⁴ in release. The deque is also required to
+        // be strictly increasing front-to-back, since every read here assumes
+        // the front is the oldest live entry.
+        let mut prev: Option<usize> = None;
+        for &(idx, _) in &r.deque {
+            if idx >= r.count {
+                return Err(serde::de::Error::custom(format!(
+                    "window entry index {idx} is not behind the sample count {}",
+                    r.count
+                )));
+            }
+            if r.count - idx > r.period {
+                return Err(serde::de::Error::custom(format!(
+                    "window entry index {idx} fell out of the {}-sample window ending at {}",
+                    r.period, r.count
+                )));
+            }
+            if prev.is_some_and(|p| idx <= p) {
+                return Err(serde::de::Error::custom(
+                    "window entries are not in increasing index order",
+                ));
+            }
+            prev = Some(idx);
+        }
+        if r.deque.len() > r.period {
+            return Err(serde::de::Error::custom(format!(
+                "window holds {} entries, more than its period of {}",
+                r.deque.len(),
+                r.period
+            )));
+        }
+        for e in r.deque {
             out.push_back(e);
         }
         out.count = r.count;
@@ -1923,6 +2064,162 @@ mod tests {
             restored.moments().correlation().to_bits(),
             b.moments().correlation().to_bits(),
             "restored correlation is not bit-identical"
+        );
+    }
+
+    /// A hand-edited or truncated run-state blob is **bad data**, not a broken
+    /// invariant: every core that sizes a fixed buffer from a `period` field it
+    /// reads out of the blob must report a zero as an error, not panic in
+    /// `Ring::new`/`vec![…; 0]` on the way past. `load_state` returns a
+    /// `Result`, and an abort there kills a resumed run instead of reporting a
+    /// corrupt file.
+    #[test]
+    fn a_zero_period_in_a_saved_blob_is_an_error_not_a_panic() {
+        assert!(
+            serde_json::from_str::<WmaState>(
+                r#"{"period":0,"window":[],"sum":0.0,"weighted":0.0}"#
+            )
+            .is_err(),
+            "WmaState accepted a zero period"
+        );
+        assert!(
+            serde_json::from_str::<WindowCovariance>(
+                r#"{"period":0,"window":[],"sum_x":0.0,"sum_y":0.0}"#
+            )
+            .is_err(),
+            "WindowCovariance accepted a zero period"
+        );
+        assert!(
+            serde_json::from_str::<WindowStats>(r#"{"period":0,"window":[],"sum":0.0}"#).is_err(),
+            "WindowStats accepted a zero period"
+        );
+        assert!(
+            serde_json::from_str::<WindowExtreme<MaxOp>>(r#"{"period":0,"deque":[],"count":0}"#)
+                .is_err(),
+            "WindowExtreme accepted a zero period"
+        );
+        assert!(
+            serde_json::from_str::<WindowQuantile>(r#"{"period":0,"window":[],"sorted":[]}"#)
+                .is_err(),
+            "WindowQuantile accepted a zero period"
+        );
+    }
+
+    /// `p` outside `[0, 1]` is reachable from a public front:
+    /// `metrics::value_at_risk` asks for `1 - confidence`, and nothing
+    /// validates the caller's confidence. Unclamped, `p > 1` indexed past the
+    /// end of the slice and panicked. Both ends now saturate to the extreme
+    /// order statistic.
+    #[test]
+    fn an_out_of_range_quantile_saturates_rather_than_indexing_past_the_end() {
+        let xs = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(quantile_of_sorted(&xs, 1.5), 4.0);
+        assert_eq!(quantile_of_sorted(&xs, 100.0), 4.0);
+        assert_eq!(quantile_of_sorted(&xs, -0.5), 1.0);
+        assert_eq!(quantile_of_sorted(&xs, Real::NEG_INFINITY), 1.0);
+        assert_eq!(quantile_of_sorted(&xs, Real::INFINITY), 4.0);
+        // In-range behaviour is untouched.
+        assert_eq!(quantile_of_sorted(&xs, 0.0), 1.0);
+        assert_eq!(quantile_of_sorted(&xs, 1.0), 4.0);
+        assert_eq!(quantile_of_sorted(&xs, 0.5), 2.5);
+        // A `NaN` is answered, not aborted on.
+        assert!(quantile_of_sorted(&xs, Real::NAN).is_nan());
+    }
+
+    /// The two halves of a [`WindowQuantile`] are one invariant, not two
+    /// fields: `update` evicts by arrival order and binary-searches the sorted
+    /// view for the same value, so a blob whose halves disagree would leave
+    /// them permanently out of step. The arrival order is the authority.
+    #[test]
+    fn window_quantile_rebuilds_its_sorted_view_from_the_arrival_order() {
+        // `sorted` deliberately disagrees with `window` — and is ignored.
+        let blob = r#"{"period":3,"window":[5.0,1.0,3.0],"sorted":[99.0]}"#;
+        let mut q: WindowQuantile = serde_json::from_str(blob).expect("valid blob");
+        assert!(q.is_full());
+        assert_eq!(q.quantile(0.5), 3.0);
+        // And it keeps tracking correctly: 5.0 ages out, 4.0 arrives.
+        q.update(4.0);
+        assert_eq!(q.quantile(0.0), 1.0);
+        assert_eq!(q.quantile(1.0), 4.0);
+
+        // An over-long window is corrupt, and refused.
+        let blob = r#"{"period":2,"window":[1.0,2.0,3.0,4.0],"sorted":[]}"#;
+        assert!(serde_json::from_str::<WindowQuantile>(blob).is_err());
+    }
+
+    /// `since` answers `(count - 1) - front_idx` in `usize`, so an entry index
+    /// at or beyond the sample count underflows it — a panic in debug, a gap of
+    /// ~2⁶⁴ in release. A resume file is caller-supplied, so the indices are
+    /// checked on the way in rather than trusted.
+    #[test]
+    fn a_window_extreme_blob_with_impossible_indices_is_refused() {
+        // Index ahead of the count.
+        assert!(
+            serde_json::from_str::<WindowExtreme<MaxOp>>(
+                r#"{"period":3,"deque":[[100,5.0]],"count":5}"#
+            )
+            .is_err()
+        );
+        // Index behind the window that ends at `count`.
+        assert!(
+            serde_json::from_str::<WindowExtreme<MaxOp>>(
+                r#"{"period":3,"deque":[[0,5.0]],"count":9}"#
+            )
+            .is_err()
+        );
+        // Not increasing front-to-back.
+        assert!(
+            serde_json::from_str::<WindowExtreme<MaxOp>>(
+                r#"{"period":3,"deque":[[7,5.0],[6,4.0]],"count":9}"#
+            )
+            .is_err()
+        );
+        // A state a real run could have written still loads, and `since`
+        // answers the gap the never-paused twin would.
+        let mut live = WindowExtreme::<MaxOp>::new(3);
+        for x in [1.0, 9.0, 2.0, 3.0, 4.0] {
+            live.update(x);
+        }
+        let json = serde_json::to_string(&live).unwrap();
+        let restored: WindowExtreme<MaxOp> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.since(), live.since());
+    }
+
+    /// A window longer than its period is corrupt input, and **truncating it is
+    /// the silent failure**: every core here restores its running total
+    /// verbatim, so a trimmed window leaves the total describing samples that
+    /// are no longer in it, and every mean for the rest of the run is wrong by a
+    /// constant. `LoadWindow` already refused this; the hand-written
+    /// `Deserialize`s now agree with it.
+    #[test]
+    fn a_window_longer_than_its_period_is_refused_by_every_core() {
+        assert!(
+            serde_json::from_str::<WindowStats>(r#"{"period":2,"window":[1.0,2.0,3.0],"sum":6.0}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WmaState>(
+                r#"{"period":2,"window":[1.0,2.0,3.0],"sum":6.0,"weighted":14.0}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WindowCovariance>(
+                r#"{"period":1,"window":[[1.0,2.0],[3.0,4.0]],"sum_x":4.0,"sum_y":6.0}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WindowExtreme<MaxOp>>(
+                r#"{"period":1,"deque":[[3,5.0],[4,4.0]],"count":5}"#
+            )
+            .is_err()
+        );
+        // Exactly `period` samples is the ordinary full-window case, not an
+        // off-by-one boundary to refuse.
+        assert!(
+            serde_json::from_str::<WindowStats>(r#"{"period":3,"window":[1.0,2.0,3.0],"sum":6.0}"#)
+                .is_ok()
         );
     }
 }

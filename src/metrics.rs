@@ -2538,6 +2538,27 @@ mod tests {
         assert!((conditional_value_at_risk(&ret, 0.95) - 5.0).abs() < 1e-9);
     }
 
+    /// `confidence` is a *caller's* number — these two are public here and
+    /// re-exported to Python as `fugazi.metrics.value_at_risk` — and nothing
+    /// validates it. The quantile it derives, `1 - confidence`, therefore lands
+    /// outside `[0, 1]` for a confidence outside it, which used to index past
+    /// the end of the sorted slice and panic. Both ends saturate now.
+    #[test]
+    fn an_out_of_range_confidence_saturates_rather_than_panicking() {
+        let ret = [-5.0, -3.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        // confidence > 1 → p < 0 → the smallest return, reported as a loss.
+        assert_eq!(value_at_risk(&ret, 2.0), 5.0);
+        // confidence < 0 → p > 1 → the largest return; a "loss" of -6.
+        assert_eq!(value_at_risk(&ret, -1.0), -6.0);
+        // The tail-mean form was already bounded by `tail_cutoff`; pinned so the
+        // two stay consistent with each other.
+        assert_eq!(conditional_value_at_risk(&ret, 2.0), 5.0);
+        assert!((conditional_value_at_risk(&ret, -1.0) - -1.2).abs() < 1e-12);
+        // Degenerate confidences at the exact bounds are ordinary, not special.
+        assert_eq!(value_at_risk(&ret, 1.0), 5.0);
+        assert_eq!(value_at_risk(&ret, 0.0), -6.0);
+    }
+
     #[test]
     fn total_return_and_cagr_match_expectations() {
         let equity = [100.0, 105.0, 110.0, 121.0];
