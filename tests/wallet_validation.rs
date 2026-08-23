@@ -76,6 +76,7 @@ const CONFIGS: [&str; 5] = ["zero", "commission", "spread", "slippage", "full"];
 
 fn costs_for(config: &str) -> TradingCosts {
     let mut costs = TradingCosts {
+        carry: Box::new(fugazi::costs::NoCarry),
         commission: Box::new(NoCommission),
         spread: Box::new(NoSpread),
         slippage: Box::new(NoSlippage),

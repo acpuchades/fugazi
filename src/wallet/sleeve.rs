@@ -137,6 +137,11 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn leverage(&self, symbol: &Sym) -> Option<Real> {
         self.inner.leverage(symbol)
     }
+    /// Delegates: the sleeve hides part of one account's book, it does not
+    /// change what that account's cost models read.
+    fn observe(&mut self, symbol: &Sym, atom: &crate::types::Atom) {
+        self.inner.observe(symbol, atom)
+    }
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
     }

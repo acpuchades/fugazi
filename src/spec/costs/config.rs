@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 
 use crate::costs::{
-    CommissionModel, CompositeCommission, FixedAbsoluteSpread, FixedBpsSlippage, FixedBpsSpread,
-    FixedCommission, MaxCommission, NoCommission, NoSlippage, NoSpread, PerUnitCommission,
+    AnnualRate, CarryModel, CommissionModel, CompositeCarry, CompositeCommission,
+    FixedAbsoluteSpread, FixedBpsSlippage, FixedBpsSpread, FixedCommission, FundingRate,
+    MaxCommission, NoCarry, NoCommission, NoSlippage, NoSpread, PerUnitCommission,
     PercentageCommission, SlippageModel, SpreadModel, TradingCosts, VolumeParticipationSlippage,
 };
 use crate::types::Real;
@@ -53,6 +54,10 @@ const MODEL_VARIANTS: &[&str] = &[
     "absolute",
     // Slippage
     "volume_participation",
+    // Carry
+    "funding",
+    "annual",
+    "both",
 ];
 
 /// Whether `obj` is a model in external-tag form — the `{percentage: {…}}`
@@ -65,12 +70,13 @@ fn is_model(obj: &Map<String, Value>) -> bool {
             .is_some_and(|k| MODEL_VARIANTS.contains(&k.as_str()))
 }
 
-/// The empty accumulator: `{commission: {}, spread: {}, slippage: {}}`.
+/// The empty accumulator: `{commission: {}, spread: {}, slippage: {}, carry: {}}`.
 fn empty_tree() -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("commission".to_string(), Value::Object(Map::new()));
     m.insert("spread".to_string(), Value::Object(Map::new()));
     m.insert("slippage".to_string(), Value::Object(Map::new()));
+    m.insert("carry".to_string(), Value::Object(Map::new()));
     m
 }
 
@@ -113,9 +119,9 @@ fn normalize_preset(value: Value) -> Result<Map<String, Value>> {
             out.insert(leg, node);
             continue;
         }
-        if !matches!(leg.as_str(), "commission" | "spread" | "slippage") {
+        if !matches!(leg.as_str(), "commission" | "spread" | "slippage" | "carry") {
             bail!(
-                "cost preset has unknown leg `{leg}` (expected commission/spread/slippage, \
+                "cost preset has unknown leg `{leg}` (expected commission/spread/slippage/carry, \
                  or `meta` for free-form metadata)"
             );
         }
@@ -388,6 +394,8 @@ pub struct CostConfig {
     pub(super) spread: LegConfig<SpreadSpec>,
     #[serde(default)]
     pub(super) slippage: LegConfig<SlippageSpec>,
+    #[serde(default)]
+    pub(super) carry: LegConfig<CarrySpec>,
     /// Free-form document metadata for external tooling — see
     /// [`spec::meta`](crate::spec::meta). Read back with [`CostConfig::meta`].
     #[serde(default)]
@@ -526,6 +534,81 @@ impl SpreadSpec {
     }
 }
 
+/// The **carry** leg: what holding costs, per bar.
+///
+/// The only leg whose rate can be *data* — `!funding` reads a published series
+/// off an overlay column rather than taking a number here, because a perpetual's
+/// rate changes every settlement and flips sign. `!annual` is for the things
+/// that genuinely are constant (margin interest, a stock borrow fee), and
+/// `!both` is the margined-perp case that pays each.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum CarrySpec {
+    None,
+    /// Per-bar funding, read from `column` (default `funding_rate`).
+    Funding {
+        #[serde(default)]
+        column: Option<String>,
+    },
+    /// A constant annualized rate on the position's notional. `rate` sets both
+    /// sides; `long` / `short` override either.
+    Annual {
+        #[serde(default)]
+        rate: Option<Real>,
+        #[serde(default)]
+        long: Option<Real>,
+        #[serde(default)]
+        short: Option<Real>,
+    },
+    /// Both legs, summed.
+    Both {
+        #[serde(default)]
+        column: Option<String>,
+        #[serde(default)]
+        rate: Option<Real>,
+        #[serde(default)]
+        long: Option<Real>,
+        #[serde(default)]
+        short: Option<Real>,
+    },
+}
+
+impl CarrySpec {
+    /// The `AnnualRate` this spec's rate fields describe. `rate` is the both-sides
+    /// default; `long` / `short` win over it, so `{rate: 0.06, short: 0.01}` is
+    /// "6% to borrow cash, 1% to borrow the stock" in one term.
+    fn annual(rate: Option<Real>, long: Option<Real>, short: Option<Real>) -> AnnualRate {
+        let base = rate.unwrap_or(0.0);
+        AnnualRate::new(long.unwrap_or(base), short.unwrap_or(base))
+    }
+
+    fn build(&self) -> Box<dyn CarryModel> {
+        match self {
+            CarrySpec::None => Box::new(NoCarry),
+            CarrySpec::Funding { column } => Box::new(match column {
+                Some(c) => FundingRate::new(c.clone()),
+                None => FundingRate::default(),
+            }),
+            CarrySpec::Annual { rate, long, short } => Box::new(Self::annual(*rate, *long, *short)),
+            CarrySpec::Both {
+                column,
+                rate,
+                long,
+                short,
+            } => {
+                let funding = match column {
+                    Some(c) => FundingRate::new(c.clone()),
+                    None => FundingRate::default(),
+                };
+                Box::new(CompositeCarry::new(
+                    funding,
+                    Self::annual(*rate, *long, *short),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum SlippageSpec {
@@ -580,7 +663,10 @@ impl CostConfig {
     /// Whether every leg is empty (no default, no scoped, no by-something) —
     /// what `--costs none` and an absent `--costs` flag both resolve to.
     pub fn is_none(&self) -> bool {
-        leg_is_empty(&self.commission) && leg_is_empty(&self.spread) && leg_is_empty(&self.slippage)
+        leg_is_empty(&self.commission)
+            && leg_is_empty(&self.spread)
+            && leg_is_empty(&self.slippage)
+            && leg_is_empty(&self.carry)
     }
 
     /// Whether a per-leg `default` exists (used by the check subcommand's
@@ -589,6 +675,7 @@ impl CostConfig {
         self.commission.default.is_some()
             || self.spread.default.is_some()
             || self.slippage.default.is_some()
+            || self.carry.default.is_some()
     }
 
     /// The document's free-form `meta:`, if it set one — never read by the
@@ -597,12 +684,54 @@ impl CostConfig {
         self.meta.as_ref()
     }
 
+    /// What this config's **carry** leg needs from the run before it can charge
+    /// anything: the overlay columns it reads, and whether any of it is
+    /// time-denominated.
+    ///
+    /// Exists so a caller can check *before* the run rather than discover
+    /// afterwards. Both failure modes are silent by construction — a funding
+    /// model whose column is absent charges nothing on every bar, and an
+    /// annualized rate with no resolvable cadence charges nothing on every bar —
+    /// and both look identical to "carry was free" in the equity curve. That is
+    /// the shape of bug the leverage work exists to remove, so it would be poor
+    /// form to reintroduce it here.
+    ///
+    /// Walks every scope, not just the default: a per-symbol override may read a
+    /// different column from the one the default names.
+    pub fn carry_requirements(&self) -> CarryRequirements {
+        let mut columns: Vec<String> = Vec::new();
+        let mut needs_cadence = false;
+        let mut push = |spec: &CarrySpec| {
+            let model = spec.build();
+            if let Some(column) = model.column()
+                && !columns.iter().any(|c| c == column)
+            {
+                columns.push(column.to_string());
+            }
+            needs_cadence |= model.needs_year_fraction();
+        };
+        for spec in self
+            .carry
+            .default
+            .iter()
+            .chain(self.carry.by_symbol.values())
+            .chain(self.carry.by_interval.values())
+            .chain(self.carry.scoped.iter().map(|entry| &entry.model))
+        {
+            push(spec);
+        }
+        CarryRequirements {
+            columns,
+            needs_cadence,
+        }
+    }
+
     /// The count of scoped entries across every leg, for diagnostic printing.
     pub fn scoped_count(&self) -> usize {
         fn n<T>(leg: &LegConfig<T>) -> usize {
             leg.by_symbol.len() + leg.by_interval.len() + leg.scoped.len()
         }
-        n(&self.commission) + n(&self.spread) + n(&self.slippage)
+        n(&self.commission) + n(&self.spread) + n(&self.slippage) + n(&self.carry)
     }
 
     /// Build the live [`TradingCosts`] for `(symbol, freq)`. A leg whose
@@ -624,7 +753,31 @@ impl CostConfig {
             .resolve(symbol, freq)
             .map(|s| s.build())
             .unwrap_or_else(|| Box::new(NoSlippage));
-        TradingCosts::new(commission, spread, slippage)
+        let carry = self
+            .carry
+            .resolve(symbol, freq)
+            .map(|s| s.build())
+            .unwrap_or_else(|| Box::new(NoCarry));
+        TradingCosts::new(commission, spread, slippage).with_carry(carry)
+    }
+}
+
+/// What a [`CostConfig`]'s carry leg needs fed to it — see
+/// [`CostConfig::carry_requirements`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CarryRequirements {
+    /// Overlay columns some carry model reads a per-bar rate from.
+    pub columns: Vec<String>,
+    /// Whether any carry model is time-denominated, and so needs the run's bar
+    /// cadence to have resolved.
+    pub needs_cadence: bool,
+}
+
+impl CarryRequirements {
+    /// Whether nothing is required — no carry model, or only ones that need
+    /// neither data nor a cadence.
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty() && !self.needs_cadence
     }
 }
 

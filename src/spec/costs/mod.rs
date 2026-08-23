@@ -17,7 +17,7 @@
 //! ```
 //!
 //! The intermediate representation is a `serde_json::Value` tree whose top-level
-//! keys are `commission`, `spread`, `slippage`; each leg carries a `default`
+//! keys are `commission`, `spread`, `slippage`, `carry`; each leg carries a `default`
 //! plus optional `by_symbol` / `by_interval` maps and a `scoped` list. Terms
 //! deep-merge into it, and the final tree is deserialized to a typed
 //! [`CostConfig`] via serde. [`CostConfig::resolve`] then picks the winning
@@ -39,7 +39,7 @@
 mod config;
 mod spec;
 
-pub use config::{CostConfig, config};
+pub use config::{CarryRequirements, CostConfig, config};
 pub use spec::CostSpec;
 
 #[cfg(test)]

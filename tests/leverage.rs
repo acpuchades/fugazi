@@ -159,3 +159,181 @@ fn raising_the_cap_honours_the_request_on_both_sides() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cost of carry, and the margin call
+// ---------------------------------------------------------------------------
+//
+// A levered backtest is wrong in two independent ways without these. Carry makes
+// it *optimistic* — the account holds more than it funded and is charged nothing
+// for the difference. Liquidation is worse than optimistic: a 3x book that draws
+// down past its maintenance ratio is gone, so a run that trades on is describing
+// a strategy nobody could have run.
+
+/// A price path that dips far enough to close out a 3x book, then recovers — so
+/// a run that ignores the margin call reports the recovery of an account that no
+/// longer existed.
+fn drawdown_series() -> String {
+    let mut out = String::from("symbol;freq;time;open;high;low;close;volume;funding_rate\n");
+    let mut prices: Vec<f64> = vec![100.0, 100.0];
+    for i in 0..14 {
+        prices.push(100.0 - 2.0 * f64::from(i));
+    }
+    for i in 0..20 {
+        prices.push(74.0 + 2.0 * f64::from(i));
+    }
+    for (d, p) in prices.iter().enumerate() {
+        let day = 1 + d % 28;
+        let month = 1 + (d / 28) % 12;
+        out += &format!(
+            "S;1d;2024-{month:02}-{day:02}T00:00:00Z;{p:.2};{:.2};{:.2};{p:.2};1000;0.0005\n",
+            p * 1.001,
+            p * 0.999,
+        );
+    }
+    out
+}
+
+fn levered_run(name: &str, extra: &[&str]) -> Outcome {
+    let (_, spec) = scratch_file(&format!("{name}.yml"), &document("long", "3.0"));
+    let (_, csv) = scratch_file(&format!("{name}.csv"), &drawdown_series());
+    // `--costs none` first: cost terms are later-wins, so a trailing `none`
+    // would wipe the very carry leg a caller is trying to add.
+    let mut args = vec![
+        "--crypto",
+        "-f",
+        "1d",
+        "-c",
+        "10000",
+        "--max-gross",
+        "3",
+        "--costs",
+        "none",
+    ];
+    args.extend_from_slice(extra);
+    Cmd::new("run")
+        .arg(&spec)
+        .series(&csv)
+        .args(&args)
+        .output_dir(name)
+        .ok()
+}
+
+fn final_equity(out: &Outcome) -> f64 {
+    let returns = out.read("returns.csv");
+    let last = returns.lines().last().expect("returns.csv has rows");
+    last.split(',')
+        .nth(1)
+        .expect("equity column")
+        .parse()
+        .expect("equity")
+}
+
+/// The gap that makes an unliquidated levered backtest describe a different
+/// strategy: same document, same bars, opposite verdicts.
+#[test]
+fn a_margin_call_is_the_difference_between_a_win_and_a_wipeout() {
+    let survives = levered_run("carry_no_call", &["--quiet"]);
+    let closed = levered_run("carry_call", &["--quiet", "--maintenance-margin", "0.1"]);
+
+    assert!(
+        final_equity(&survives) > 10_000.0,
+        "the unliquidated run should report a profit, got {}",
+        final_equity(&survives),
+    );
+    assert!(
+        final_equity(&closed) < 10_000.0,
+        "the liquidated run should not recover its capital, got {}",
+        final_equity(&closed),
+    );
+
+    // And the forced legs are labelled, so the blotter says which happened.
+    let kinds: Vec<String> = closed
+        .rows("fills.csv")
+        .iter()
+        .map(|r| r.split(',').nth(6).expect("kind").to_string())
+        .collect();
+    assert!(
+        kinds.iter().any(|k| k == "liquidation"),
+        "no liquidation row in fills.csv: {kinds:?}",
+    );
+    assert!(
+        !survives
+            .rows("fills.csv")
+            .iter()
+            .any(|r| r.contains("liquidation")),
+        "nothing should be force-closed without --maintenance-margin",
+    );
+}
+
+/// ...and it is announced rather than left in a column.
+#[test]
+fn a_liquidated_run_says_so() {
+    let out = levered_run("carry_call_banner", &["--maintenance-margin", "0.1"]);
+    assert!(
+        out.stdout.contains("maintenance margin"),
+        "no liquidation banner:\n{}",
+        out.stdout,
+    );
+}
+
+/// Funding and margin interest both bite, and both only when configured.
+#[test]
+fn carry_is_charged_when_configured_and_not_otherwise() {
+    let free = levered_run("carry_free", &["--quiet"]);
+    let funded = levered_run(
+        "carry_funding",
+        &["--quiet", "--costs", "carry=!funding {}"],
+    );
+    let borrowed = levered_run("carry_margin", &["--quiet", "--margin-rate", "0.08"]);
+
+    assert!(
+        final_equity(&funded) < final_equity(&free),
+        "funding should cost something: {} vs {}",
+        final_equity(&funded),
+        final_equity(&free),
+    );
+    assert!(
+        final_equity(&borrowed) < final_equity(&free),
+        "borrowing 20k at 8% should cost something: {} vs {}",
+        final_equity(&borrowed),
+        final_equity(&free),
+    );
+}
+
+/// A carry model that cannot charge is the exact failure this leg exists to
+/// remove, so it is called out before the run rather than left to be noticed.
+#[test]
+fn a_carry_model_that_cannot_charge_warns() {
+    // The column the model reads is not in the series.
+    let (_, spec) = scratch_file("carry_warn.yml", &document("long", "1.0"));
+    let (_, csv) = scratch_file("carry_warn.csv", &series());
+    let out = Cmd::new("run")
+        .arg(&spec)
+        .series(&csv)
+        .args(&["--crypto", "-f", "1d", "-c", "10000"])
+        .costs("carry=!funding {}")
+        .output_dir("carry_warn")
+        .ok();
+    assert!(
+        out.stdout.contains("which the input does not carry"),
+        "no missing-column warning:\n{}",
+        out.stdout,
+    );
+
+    // The series *does* carry it, so nothing is warned about.
+    let (_, spec) = scratch_file("carry_ok.yml", &document("long", "1.0"));
+    let (_, csv) = scratch_file("carry_ok.csv", &drawdown_series());
+    let out = Cmd::new("run")
+        .arg(&spec)
+        .series(&csv)
+        .args(&["--crypto", "-f", "1d", "-c", "10000"])
+        .costs("carry=!funding {}")
+        .output_dir("carry_ok")
+        .ok();
+    assert!(
+        !out.stdout.contains("which the input does not carry"),
+        "warned about a column that is present:\n{}",
+        out.stdout,
+    );
+}

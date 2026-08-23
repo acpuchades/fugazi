@@ -354,6 +354,12 @@ WALLET_BOUND = {
     "orders",
     "reset",
     "retention",
+    # Account configuration, readable back: the leverage cap's two companions
+    # (what borrowing costs, and when the venue closes you out) plus the
+    # coverage counter that says whether a carry model ever got its data.
+    "margin_rate",
+    "maintenance_margin",
+    "carry_coverage",
     # A loop over `set_costs_for`, not a mirror of Rust's `with_costs` — see the
     # method docs for why a single pre-resolved bundle cannot be built here.
     "set_costs_for_all",

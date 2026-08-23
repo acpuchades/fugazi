@@ -238,6 +238,28 @@ struct RunArgs {
     #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
     max_gross: f64,
 
+    /// Annualized interest charged on a negative cash balance, as a decimal
+    /// (`0.06` is 6% a year). Default `0` — nothing is charged.
+    ///
+    /// What a margin account bills for the cash it lent you, which only becomes
+    /// non-zero once `--max-gross` is above 1 and a levered long drives cash
+    /// below zero. Accrued per bar on the balance carried into it, pro-rated by
+    /// the run's **calendar** cadence — so it needs a resolvable bar frequency.
+    #[arg(long = "margin-rate", value_name = "RATE", default_value_t = 0.0)]
+    margin_rate: f64,
+
+    /// Force-close the book when equity falls below this fraction of gross
+    /// notional — a margin call. Off by default.
+    ///
+    /// Off rather than defaulted because the ratio is a *venue* assumption: it
+    /// varies by exchange, instrument and tier, so it is yours to state. Without
+    /// it a levered backtest trades on through drawdowns that would have closed
+    /// the real account, which is a larger error than any cost model. Triggered
+    /// on each bar's adverse extreme; the resulting fills book as `liquidation`
+    /// in `fills.csv`.
+    #[arg(long = "maintenance-margin", value_name = "RATIO")]
+    maintenance_margin: Option<f64>,
+
     /// Resolve the strategy's `param` placeholders. Like `--series`: a
     /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
     /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
@@ -574,6 +596,16 @@ struct OptimizeArgs {
     /// equity. Same meaning as `run --max-gross`, applied to every grid point.
     #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
     max_gross: f64,
+
+    /// Annualized interest on a negative cash balance. Same meaning as
+    /// `run --margin-rate`, applied to every grid point.
+    #[arg(long = "margin-rate", value_name = "RATE", default_value_t = 0.0)]
+    margin_rate: f64,
+
+    /// Maintenance-margin ratio. Same meaning as `run --maintenance-margin`,
+    /// applied to every grid point.
+    #[arg(long = "maintenance-margin", value_name = "RATIO")]
+    maintenance_margin: Option<f64>,
 
     /// US-equity trading calendar. Same semantics as `run --stocks`.
     #[arg(long, group = "asset_class")]
@@ -1192,6 +1224,8 @@ fn run(args: RunArgs) -> Result<()> {
     let opts = run::RunOptions {
         cash: args.cash,
         max_gross: args.max_gross,
+        margin_rate: args.margin_rate,
+        maintenance_margin: args.maintenance_margin,
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
@@ -1299,6 +1333,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let opts = optimize::OptimizeOptions {
         cash: args.cash,
         max_gross: args.max_gross,
+        margin_rate: args.margin_rate,
+        maintenance_margin: args.maintenance_margin,
         strategy_kind: args.strategy.kind,
         strategy_text: &text,
         strategy_dir: &args.strategy.base_dir(),

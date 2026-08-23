@@ -221,6 +221,39 @@ Every one of those paths goes through the same private engine, `fill_at`.
    bare market exit or reversal drops a now-stale stop without an explicit
    cancel.
 
+### Carry — what the gap between fills costs
+
+Before any of this bar's orders resolve, `advance` charges the **cost of
+holding**: each symbol's `CarryModel` on the position carried *into* the bar
+(funding, a borrow fee), plus account-level interest on a negative cash balance
+(`--margin-rate`). Marked at the bar's `open`, on what was held through the
+interval that just ended — so a position opened this bar first pays next bar, and
+one closed this bar has already paid for the time it was held.
+
+It runs *before* the fills so this bar's sizing sees the account the charge left
+behind, rather than one still holding cash it has already spent. Only symbols
+that ticked this bar are charged: a position with no mark this bar has no price
+to value the charge at, and carrying the last close forward would bill against a
+price the bar never saw.
+
+At `--max-gross 1` with no carry configured — the default — this phase does
+nothing and the bar is byte-identical to one without it.
+
+### The margin call
+
+Last in the bar, after every fill: if `--maintenance-margin` is set and equity
+has fallen below `ratio × gross notional`, the whole book is force-closed as
+`OrderKind::Liquidation`. Off unless asked for, because the ratio is a venue
+assumption fugazi will not guess.
+
+The **trigger** marks each position where the bar hurt it most — the `low` for a
+long, the `high` for a short — because a wick is what liquidates a levered
+account, and a close-only test would report a strategy that survived an event it
+did not. The **fill** books at the `close`, which is a simplification: the price
+at which the breach occurred is not recoverable from a single bar once more than
+one symbol is involved. Nothing stops the strategy re-entering next bar; the
+`liquidation` rows in the blotter are what say it happened.
+
 ## 4. Protective legs — stops and take-profits
 
 `match_protective`. A long's stop triggers when `low <= trigger`; its

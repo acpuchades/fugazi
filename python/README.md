@@ -791,19 +791,54 @@ set out of band, in its own UI, and can change under a running strategy. Set the
 strategy. Without that, a live equity curve is uninterpretable against the
 backtest it is supposed to be tracking.
 
-**One thing `max_gross` does not do is charge for the borrowing.** fugazi models
-no cost of carry — no perpetual funding, no margin interest, no borrow fee — and
-the cost pipeline structurally cannot, because commission, spread and slippage
-are all per-*fill* while carry accrues on bars that do not trade. At the default
-`1.0` nothing is borrowed and nothing is missing. Above it, a levered backtest is
-**optimistic**, by an amount that grows with both the leverage and how long
-positions are held: barely visible on a high-turnover strategy, material on one
-that holds for months. Deduct it yourself between bars if it matters at your
-horizon:
+### What a levered account also pays
+
+`max_gross` bounds the size of the book. Two more knobs make holding one cost
+what it really costs, and a third decides whether the account survives:
+
+```python
+wallet = ta.PaperWallet(
+    10_000.0,
+    max_gross=3.0,             # may hold 3x equity
+    margin_rate=0.08,          # 8%/yr on the cash it borrowed to do so
+    maintenance_margin=0.10,   # force-closed if equity drops under 10% of gross
+    bar_freq="1d",             # what an "annual" rate is pro-rated against
+)
+```
+
+**`margin_rate`** is interest on a *negative cash balance* — what a margin
+account bills for the cash it lent you, which only becomes non-zero once
+`max_gross` is above `1.0`. It needs `bar_freq`: an annual rate cannot be split
+across a bar of unknown length, and rather than guess a year, the wallet charges
+nothing and says so.
+
+**`maintenance_margin` is off by default, and turning it on matters more than any
+cost model.** The ratio is a venue assumption — it varies by exchange, instrument
+and tier — so it is yours to state. Leaving it off does not make a backtest
+slightly optimistic; it makes it describe a *different strategy*. A 3x long into
+a 25% drawdown that then recovers reports **+6%** unliquidated and **−60%** with
+a 10% ratio, on the same document and the same bars. Forced fills come back with
+`kind == "liquidation"`.
+
+**Perpetual funding** is a cost model rather than a wallet setting, because its
+rate is *data*: it changes every settlement and flips sign, so a constant is not
+a conservative stand-in for it. It reads a per-bar value off an overlay column —
+which `binance-vision-futures` publishes as `funding_rate`, already summed per
+bar:
 
 ```py
-wallet.adjust_funds(-position_notional * funding_rate)
+wallet.set_costs_for_all(["BTCUSDT"], ta.TradingCostsConfig({
+    "carry": {"default": {"funding": {}}},          # read `funding_rate`
+    # or {"both": {"rate": 0.08}} to add an annualized leg on top
+}))
+...
+wallet.carry_coverage()      # (bars that wanted a rate, bars that got one)
 ```
+
+`carry_coverage` is there because the failure is silent: a funding model whose
+column is absent charges nothing on every bar, which looks exactly like carry
+being free. `(1200, 0)` means it was configured, asked twelve hundred times, and
+never got an answer.
 
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,

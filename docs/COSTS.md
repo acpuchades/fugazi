@@ -55,36 +55,102 @@ Everything is under [`src/costs/`](../src/costs/) as three tiny traits, one
 model per struct, plus a `TradingCosts` bundle that
 [`PaperWallet::with_costs`](../src/strategy.rs) takes.
 
-### What the pipeline cannot express: cost of carry
+### The fourth leg: cost of carry
 
-**All three legs are per-fill.** They are called from `PaperWallet::fill_at` and
-nowhere else, so on a bar where nothing trades they are not called at all — and
-their signatures have nowhere to put the missing information:
-`commission(notional, units)` sees no bar, no elapsed time and no held position.
+The three legs above are per-*fill*. They are called from
+`PaperWallet::fill_at` and nowhere else, so on a bar where nothing trades they
+are not called at all — and their signatures have nowhere to put the missing
+information: `commission(notional, units)` sees no bar, no elapsed time and no
+held position.
 
-That rules out the whole **carry** family, and no preset can work around it,
-because the gap is arity rather than parameters:
+**Carry** is the other half: what *holding* costs. Perpetual funding, margin
+interest, a short's borrow fee — all of it accrues on a position that does
+nothing, so none of it is a function of a trade. It is a separate leg with a
+separate call site, charged once per bar by `advance`:
 
-| Not modelled | What it would need |
-|---|---|
-| Perpetual **funding** (OKX charges it every 8h on an open swap) | the held position, per funding interval |
-| **Margin interest** on a negative cash balance | the cash balance, per elapsed day |
-| **Borrow fee** on a short | the short's notional, per elapsed day |
-| Overnight / weekend financing on CFDs and futures roll | the position, per calendar gap |
+```
+carry(position carried into the bar, marked at the bar's open) → cash
+```
 
-**When this matters.** At the default `max_gross = 1.0` nothing is borrowed, so
-for a long-only unlevered backtest there is nothing missing. The gap opens
-exactly when you raise the cap: a 3x book pays for the 2x it did not fund
-itself, every bar it holds, and omitting that makes a levered backtest
-**optimistic** by an amount that scales with both the leverage and the holding
-period. A high-turnover 3x strategy will barely notice; a 3x position held for
-months is materially mis-stated.
+Charged on what was held **through** the interval, not on what the bar ended
+with — so a position opened this bar first pays next bar — and before the bar's
+fills, so this bar's sizing sees the account the charge left behind. A credit is
+a credit: at a positive funding rate the short side is *paid*, and a model that
+could only charge would be wrong for half the book.
 
-Charge it outside the pipeline if you need it: `Wallet::adjust_funds(-carry)`
-between bars is the seam, and it is what the flow-adjustment note in
-[METRICS.md](METRICS.md) already assumes for external cash movements. See the
-`Cost of carry is not modelled` entry in [TODO.md](../TODO.md) for why a fourth
-leg was not added along with the leverage cap.
+| model | what it charges | rate from |
+|---|---|---|
+| `!none` | nothing (the default) | — |
+| `!funding` | `position × price × rate`, signed | an **overlay column**, per bar |
+| `!annual` | `\|position\| × price × rate × year_fraction` | a constant, per side |
+| `!both` | funding **and** an annual rate, summed | both |
+
+```yaml
+# Perpetual funding, read from the series (default column `funding_rate`).
+carry: !funding {}
+carry: !funding { column: perp_funding }
+
+# 6% a year to borrow cash, 1% a year to borrow the stock.
+carry: !annual { rate: 0.06, short: 0.01 }
+
+# A margined perp account pays both.
+carry: !both { rate: 0.08 }
+```
+
+**Funding's rate is data, not configuration.** It changes every settlement and
+flips sign, so a constant is not a conservative stand-in for it — it is simply
+wrong in a direction nobody chose. `!funding` therefore reads a per-bar value off
+the same atom as the bar it is charged for, which `binance-vision-futures`
+already publishes shaped for exactly this: a bar's `funding_rate` is the **sum**
+of the settlements inside it, so a `1d` bar carries all three of its 8-hourly
+charges and the model needs no notion of settlement cadence.
+
+```sh
+fugazi get binance-vision-futures:BTCUSDT[1d] --since 2023-01-01 -o funding.csv
+fugazi run @strategy.yml -s @btc.csv -s @funding.csv \
+  --max-gross 3 --costs 'carry=!funding {}' --costs commission=!percentage:0.0005
+```
+
+**Two ways it silently charges nothing, and both are checked.** A `!funding`
+whose column is absent from the input reads no sample on every bar; an `!annual`
+with no resolvable bar cadence cannot pro-rate its rate. Either leaves an equity
+curve indistinguishable from one where carry was genuinely free — the exact
+failure this leg exists to remove — so `run` warns before the sweep, and
+`PaperWallet::carry_coverage()` reports `(bars that wanted a rate, bars that got
+one)` after it. An absent sample is **"no carry recorded"**, never "carry was
+nil".
+
+### Cash interest and the margin call
+
+Two more knobs sit on the account rather than in the per-symbol bundle, because
+that is what they are facts about:
+
+- **`--margin-rate`** (`PaperWallet::with_margin_rate`) — annualized interest on
+  a **negative cash balance**. Above `--max-gross 1` a levered long drives cash
+  below zero, and the debt belongs to the account, not to any one position. This
+  is what a levered long actually pays. A positive balance earns nothing:
+  modelling credit interest would flatter a backtest, and this exists to stop one
+  reporting free money.
+- **`--maintenance-margin`** (`PaperWallet::with_maintenance_margin`) — the
+  equity/gross ratio below which the book is force-closed. **Off by default**,
+  because the ratio is a *venue* assumption that varies by exchange, instrument
+  and tier: stating it is yours to do.
+
+Leaving the margin call off is the larger of the two errors. Omitting funding
+makes a levered backtest optimistic by a few percent; omitting liquidation makes
+it describe a **different strategy**, one that traded on through a drawdown the
+real account did not survive. A 3x long into a 25% drawdown that then recovers
+reports `+6%` unliquidated and `-60%` with a 10% maintenance ratio — the same
+document, the same bars.
+
+The trigger reads each bar's **adverse extreme** (a long marked at the `low`, a
+short at the `high`), because a wick is what liquidates a levered account and a
+close-only test would miss the event that actually happened. The forced fills
+book at the bar's `close`, as `OrderKind::Liquidation` — `liquidation` in
+`fills.csv`'s `kind` column — since the price the breach occurred at is not
+recoverable from one bar once more than one symbol is involved. So the trigger is
+conservative, the fill price is a simplification, and the two are stated rather
+than blended into one number that looks exact.
 
 ## Wiring costs into a run
 

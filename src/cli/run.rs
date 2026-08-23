@@ -69,6 +69,11 @@ pub struct RunOptions<'a> {
     /// [`PaperWallet`](fugazi::PaperWallet) via
     /// [`EvalContext::max_gross`](fugazi::spec::backtest::EvalContext).
     pub max_gross: Real,
+    /// Annualized interest on a negative cash balance (`--margin-rate`).
+    pub margin_rate: Real,
+    /// Maintenance-margin ratio, or `None` for no margin call
+    /// (`--maintenance-margin`).
+    pub maintenance_margin: Option<Real>,
     /// Directory to write `fills.csv` / `trades.csv` / `returns.csv` into.
     pub out_dir: &'a Path,
     /// A short label for the strategy source (file path or `(inline)`), echoed
@@ -154,6 +159,29 @@ pub struct Summary {
 /// finalizing open positions if asked, and writing the run's final state to
 /// `--save-state`); otherwise it is the plain cold-start iteration. Shared by
 /// every shape's runner so the resume plumbing lives in one place.
+/// Every overlay column any atom in `snapshots` carries, deduplicated.
+///
+/// Read off the snapshots rather than off the frame because that is what the
+/// wallet will actually see: a column dropped by a join or absent from one
+/// symbol's series is absent *here*, which is the question a carry model's
+/// "will my column be there" check is really asking.
+fn overlay_columns(snapshots: &[fugazi::types::Snapshot<Symbol>]) -> Vec<String> {
+    let mut columns: Vec<String> = Vec::new();
+    for snap in snapshots {
+        for (_, _, atom) in snap.iter() {
+            let Some(overlays) = atom.overlays.as_ref() else {
+                continue;
+            };
+            for key in overlays.schema().keys() {
+                if !columns.iter().any(|c| c == key) {
+                    columns.push(key.to_string());
+                }
+            }
+        }
+    }
+    columns
+}
+
 fn iterate(
     spec: &fugazi::spec::StrategySpec,
     bars: Vec<String>,
@@ -161,6 +189,17 @@ fn iterate(
     inputs: &backtest::EvalContext,
     opts: &RunOptions,
 ) -> Result<backtest::IterationResult> {
+    // Every run shape funnels through here, so this is the one place a carry
+    // model that cannot charge gets called out — before the run rather than
+    // after, since both failure modes leave an equity curve that looks exactly
+    // like carry being free.
+    if !opts.quiet {
+        style::print_warns(&style::carry_warnings(
+            &inputs.cost_config.carry_requirements(),
+            &overlay_columns(snapshots),
+            inputs.effective_freq.is_some(),
+        ));
+    }
     if opts.resume.is_none() && opts.save_state.is_none() && !opts.flatten {
         return backtest::run_iteration_any(spec, bars, snapshots, inputs)
             .map_err(backtest::build_error);
@@ -723,6 +762,8 @@ fn eval_context<'a>(
     Ok(EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        margin_rate: opts.margin_rate,
+        maintenance_margin: opts.maintenance_margin,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config: opts.cost_config,
@@ -758,6 +799,7 @@ fn emit_run(
         print_ruin_warning(&iter.report);
         print_rejection_warning(&iter.report);
         print_fitted_warning(&iter.report);
+        print_liquidation_warning(&iter.report);
     }
     write_trades_csv(iter, &opts.out_dir.join("trades.csv"))?;
 
@@ -1258,6 +1300,7 @@ fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
             OrderKind::Limit => "limit",
+            OrderKind::Liquidation => "liquidation",
         };
         let mut row: Vec<String> = vec![
             time.clone(),
@@ -1383,6 +1426,7 @@ fn stream_fills(iter: &IterationResult) {
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
             OrderKind::Limit => "limit",
+            OrderKind::Liquidation => "liquidation",
         };
         let side_padded = format!("{side_txt:<4}");
         let side_colored = match order.side {
@@ -1587,6 +1631,41 @@ fn print_fitted_warning<Sym>(report: &fugazi::RunReport<Sym>) {
     )]);
 }
 
+/// The post-run "the account was closed out" banner.
+///
+/// A margin call is not a strategy decision, and a run that reports one has
+/// answered a different question than the one the document asked: everything
+/// after the first liquidation is the strategy trading an account that a real
+/// venue had already taken away from it once. That has to be a headline rather
+/// than a `kind` column somebody might read.
+fn print_liquidation_warning<Sym>(report: &fugazi::RunReport<Sym>) {
+    let bars: Vec<usize> = report
+        .fills
+        .iter()
+        .filter(|f| f.order.kind == fugazi::OrderKind::Liquidation)
+        .map(|f| f.bar)
+        .collect();
+    if bars.is_empty() {
+        return;
+    }
+    // Legs of one margin call share a bar; count events, not fills.
+    let mut events = 1;
+    for pair in bars.windows(2) {
+        if pair[1] != pair[0] {
+            events += 1;
+        }
+    }
+    let first = bars[0];
+    style::print_warns(&[format!(
+        "the account hit its maintenance margin and was force-closed {events} time{} \
+         (first at bar {first} of {}) — every bar after that is a strategy trading an \
+         account a real venue would already have closed out. The legs are the \
+         `liquidation` rows in fills.csv",
+        if events == 1 { "" } else { "s" },
+        report.equity_curve.len(),
+    )]);
+}
+
 /// Human label for an [`OrderKind`] inside the rejection banner.
 fn kind_label(kind: fugazi::OrderKind) -> &'static str {
     match kind {
@@ -1594,6 +1673,7 @@ fn kind_label(kind: fugazi::OrderKind) -> &'static str {
         fugazi::OrderKind::Stop => "stop",
         fugazi::OrderKind::TakeProfit => "take-profit",
         fugazi::OrderKind::Limit => "limit",
+        fugazi::OrderKind::Liquidation => "liquidation",
     }
 }
 

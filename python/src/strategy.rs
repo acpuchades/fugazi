@@ -283,7 +283,9 @@ impl PyOrder {
     pub(crate) fn price(&self) -> f64 {
         self.inner.price
     }
-    /// What produced this fill: `"market"`, `"stop"`, or `"take_profit"`.
+    /// What produced this fill: `"market"`, `"stop"`, `"take_profit"`, `"limit"`,
+    /// or `"liquidation"` — a forced close after the account breached its
+    /// maintenance margin, which is the wallet acting rather than the strategy.
     #[getter]
     pub(crate) fn kind(&self) -> &'static str {
         kind_str(self.inner.kind)
@@ -417,20 +419,85 @@ impl PyWallet {
     ///
     /// `ValueError` if `max_gross` is not finite and strictly positive.
     #[new]
-    #[pyo3(signature = (funds, *, quote_ccy=None, max_gross=1.0))]
-    pub(crate) fn new(funds: f64, quote_ccy: Option<String>, max_gross: f64) -> PyResult<Self> {
+    #[pyo3(signature = (funds, *, quote_ccy=None, max_gross=1.0, margin_rate=0.0, maintenance_margin=None, bar_freq=None))]
+    pub(crate) fn new(
+        funds: f64,
+        quote_ccy: Option<String>,
+        max_gross: f64,
+        margin_rate: f64,
+        maintenance_margin: Option<f64>,
+        bar_freq: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         if !(max_gross > 0.0 && max_gross.is_finite()) {
             return Err(PyValueError::new_err(format!(
                 "max_gross must be finite and > 0, got {max_gross}"
             )));
         }
-        let inner = PaperWallet::new(funds).with_max_gross(max_gross);
+        if !(margin_rate >= 0.0 && margin_rate.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "margin_rate must be finite and >= 0, got {margin_rate}"
+            )));
+        }
+        if let Some(ratio) = maintenance_margin
+            && !(ratio > 0.0 && ratio <= 1.0 && ratio.is_finite())
+        {
+            return Err(PyValueError::new_err(format!(
+                "maintenance_margin must be finite and in (0, 1], got {ratio}"
+            )));
+        }
+        let mut inner = PaperWallet::new(funds)
+            .with_max_gross(max_gross)
+            .with_margin_rate(margin_rate);
+        if let Some(ratio) = maintenance_margin {
+            inner = inner.with_maintenance_margin(ratio);
+        }
+        if let Some(freq) = bar_freq {
+            inner = inner.with_bar_frequency(crate::classes::coerce_frequency(freq)?);
+        }
         Ok(PyWallet {
             inner: match quote_ccy {
                 Some(ccy) => inner.with_quote_ccy(ccy),
                 None => inner,
             },
         })
+    }
+
+    /// The annualized rate charged on a negative cash balance — what a margin
+    /// account bills for the cash it lent you. `0.0` charges nothing.
+    ///
+    /// Only bites once `max_gross` is above `1.0` and a levered long drives cash
+    /// below zero. Accrued per bar on the balance carried into it, and pro-rated
+    /// by `bar_freq` — **without one it charges nothing**, because an annual
+    /// rate cannot be split across a bar of unknown length and guessing a year
+    /// would be an invented assumption.
+    #[getter]
+    pub(crate) fn margin_rate(&self) -> f64 {
+        self.inner.margin_rate()
+    }
+
+    /// The equity/gross ratio below which this wallet force-closes the book, or
+    /// `None` when no margin call is modelled (the default).
+    ///
+    /// Off by default because the ratio is a *venue* assumption — it varies by
+    /// exchange, instrument and tier, so it is yours to state. Setting it is
+    /// what makes a levered backtest stop reporting the recovery of an account
+    /// a real venue would have closed out. Forced fills carry
+    /// `kind == "liquidation"`.
+    #[getter]
+    pub(crate) fn maintenance_margin(&self) -> Option<f64> {
+        self.inner.maintenance_margin()
+    }
+
+    /// `(bars that wanted a carry rate, bars that got one)`.
+    ///
+    /// A funding model charges nothing on a bar whose column carried no sample,
+    /// which is the honest reading of a missing value — and also exactly what a
+    /// run against a series that never had the column looks like. The two are
+    /// indistinguishable from the equity curve, so this counts them: `(1200, 0)`
+    /// means the model was configured, wanted a rate twelve hundred times, and
+    /// was silently free every time. `(0, 0)` means nothing asked for data.
+    pub(crate) fn carry_coverage(&self) -> (usize, usize) {
+        self.inner.carry_coverage()
     }
 
     /// The available cash balance.
@@ -1391,8 +1458,9 @@ pub(crate) fn parse_kind(kind: &str) -> PyResult<OrderKind> {
         "stop" => Ok(OrderKind::Stop),
         "take_profit" => Ok(OrderKind::TakeProfit),
         "limit" => Ok(OrderKind::Limit),
+        "liquidation" => Ok(OrderKind::Liquidation),
         _ => Err(PyValueError::new_err(
-            "kind must be 'market', 'stop', 'take_profit' or 'limit'",
+            "kind must be 'market', 'stop', 'take_profit', 'limit' or 'liquidation'",
         )),
     }
 }
@@ -1418,13 +1486,15 @@ pub(crate) fn side_str(side: Side) -> &'static str {
     }
 }
 
-/// The `"market"`/`"stop"`/`"take_profit"`/`"limit"` string for an [`OrderKind`].
+/// The `"market"`/`"stop"`/`"take_profit"`/`"limit"`/`"liquidation"` string for
+/// an [`OrderKind`].
 pub(crate) fn kind_str(kind: OrderKind) -> &'static str {
     match kind {
         OrderKind::Market => "market",
         OrderKind::Stop => "stop",
         OrderKind::TakeProfit => "take_profit",
         OrderKind::Limit => "limit",
+        OrderKind::Liquidation => "liquidation",
     }
 }
 

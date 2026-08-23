@@ -102,10 +102,13 @@ fn parse_term(text: &str) -> Result<CostTerm> {
     if key.iter().any(String::is_empty) {
         bail!("cost term key {key_str:?}: empty segment");
     }
-    if !matches!(key[0].as_str(), "commission" | "spread" | "slippage") {
+    if !matches!(
+        key[0].as_str(),
+        "commission" | "spread" | "slippage" | "carry"
+    ) {
         bail!(
             "cost term key {key_str:?}: first segment must be one of \
-             `commission`, `spread`, `slippage` (got `{}`)",
+             `commission`, `spread`, `slippage`, `carry` (got `{}`)",
             key[0]
         );
     }

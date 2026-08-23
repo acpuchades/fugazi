@@ -312,9 +312,10 @@ pub(crate) fn normalize_cost_dict(value: JsonValue) -> PyResult<JsonValue> {
     };
     let mut out = serde_json::Map::new();
     for (leg, node) in map {
-        if !matches!(leg.as_str(), "commission" | "spread" | "slippage") {
+        if !matches!(leg.as_str(), "commission" | "spread" | "slippage" | "carry") {
             return Err(PyValueError::new_err(format!(
-                "TradingCostsConfig: unknown leg `{leg}` (expected commission/spread/slippage)"
+                "TradingCostsConfig: unknown leg `{leg}` \
+                 (expected commission/spread/slippage/carry)"
             )));
         }
         let JsonValue::Object(obj) = node else {
@@ -883,8 +884,10 @@ impl PyStrategySpec {
             let ctx = spec_backtest::EvalContext {
                 cash: report.initial_equity,
                 // No wallet is built here — this reduces a report that already
-                // exists — so the cap has nothing to bound.
+                // exists — so none of the account settings have anything to act on.
                 max_gross: 1.0,
+                margin_rate: 0.0,
+                maintenance_margin: None,
                 bars_per_year,
                 risk_free_rate,
                 cost_config: &empty_costs,
@@ -1516,6 +1519,8 @@ pub(crate) fn build_subgrids(
     *,
     cash = 1.0,
     max_gross = 1.0,
+    margin_rate = 0.0,
+    maintenance_margin = None,
     params = None,
     grid = None,
     kind = "auto",
@@ -1542,6 +1547,8 @@ pub(crate) fn optimize(
     snapshots: &Bound<'_, PyAny>,
     cash: Real,
     max_gross: Real,
+    margin_rate: Real,
+    maintenance_margin: Option<Real>,
     params: Option<&Bound<'_, PyAny>>,
     grid: Option<&Bound<'_, PyAny>>,
     kind: &str,
@@ -1653,6 +1660,8 @@ pub(crate) fn optimize(
             jobs,
             cash,
             max_gross,
+            margin_rate,
+            maintenance_margin,
             bars_per_year,
             risk_free_rate,
             seconds_per_bar,
@@ -1669,6 +1678,8 @@ pub(crate) fn optimize(
             let ctx = spec_backtest::EvalContext {
                 cash,
                 max_gross,
+                margin_rate,
+                maintenance_margin,
                 bars_per_year,
                 risk_free_rate,
                 cost_config: &cost_config,
@@ -1989,6 +2000,8 @@ pub(crate) fn run_walkforward(
     jobs: Option<usize>,
     cash: Real,
     max_gross: Real,
+    margin_rate: Real,
+    maintenance_margin: Option<Real>,
     bars_per_year: Real,
     risk_free_rate: Real,
     seconds_per_bar: Option<Real>,
@@ -2016,6 +2029,8 @@ pub(crate) fn run_walkforward(
             let wf_ctx = spec_backtest::EvalContext {
                 cash,
                 max_gross,
+                margin_rate,
+                maintenance_margin,
                 bars_per_year,
                 risk_free_rate,
                 cost_config,

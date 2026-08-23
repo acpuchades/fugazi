@@ -1836,6 +1836,130 @@ def test_leverage_is_readable_off_every_wallet():
     assert okx.can_short
 
 
+def _levered_bars(prices, funding=0.0005):
+    """One symbol, a `funding_rate` column, one bar a day."""
+    sch = ta.SchemaBuilder()
+    sch.add_real("funding_rate")
+    schema = sch.finish()
+    day = 86_400_000
+    t0 = 1_700_000_000_000
+    return [
+        ta.Snapshot(
+            {
+                "S": ta.Atom(
+                    ta.Candle(p, p * 1.001, p * 0.999, p, 1.0),
+                    ta.OverlayInfo(schema, [funding]),
+                    t0 + i * day,
+                )
+            }
+        )
+        for i, p in enumerate(prices)
+    ]
+
+
+_LEVERED = "root: S\nlong:\n  enter: !gt { lhs: !close, rhs: 0 }\nsizing: 3.0\n"
+
+
+def test_a_margin_call_is_the_difference_between_a_win_and_a_wipeout():
+    """The gap that makes an unliquidated levered backtest describe a different
+    strategy. A 3x long into a drawdown that then recovers reports a profit if
+    nothing closes it out — but the account it describes did not survive to see
+    the recovery."""
+    # Down 26%, then all the way back and beyond.
+    prices = (
+        [100.0, 100.0]
+        + [100 - 2.0 * i for i in range(14)]
+        + [74 + 2.0 * i for i in range(20)]
+    )
+    bars = _levered_bars(prices)
+
+    survives = ta.PaperWallet(10_000.0, max_gross=3.0)
+    ta.load_spec(_LEVERED).run(survives, bars)
+
+    closed = ta.PaperWallet(10_000.0, max_gross=3.0, maintenance_margin=0.10)
+    report = ta.load_spec(_LEVERED).run(closed, bars)
+
+    assert survives.equity > 10_000.0, (
+        f"unliquidated should profit, got {survives.equity}"
+    )
+    assert closed.equity < 10_000.0, (
+        f"liquidated should not recover, got {closed.equity}"
+    )
+    # And the forced legs say what they were, so the blotter can be read.
+    kinds = {f.order.kind for f in report.fills}
+    assert "liquidation" in kinds, kinds
+    assert closed.maintenance_margin == pytest.approx(0.10)
+    # Off unless asked for — the ratio is a venue assumption, not a default.
+    assert ta.PaperWallet(1_000.0).maintenance_margin is None
+
+
+def test_funding_is_charged_from_the_series_and_counted():
+    """Funding's rate is data, so it is read per bar off an overlay column — and
+    the wallet counts whether it ever actually arrived, because a model that
+    silently charges nothing looks exactly like carry being free."""
+    bars = _levered_bars([100.0] * 60, funding=0.0005)
+
+    free = ta.PaperWallet(10_000.0, max_gross=3.0)
+    ta.load_spec(_LEVERED).run(free, bars)
+    assert free.carry_coverage() == (0, 0), "nothing asked for a rate"
+
+    charged = ta.PaperWallet(10_000.0, max_gross=3.0)
+    charged.set_costs_for_all(
+        ["S"], ta.TradingCostsConfig({"carry": {"default": {"funding": {}}}})
+    )
+    ta.load_spec(_LEVERED).run(charged, bars)
+
+    wanted, got = charged.carry_coverage()
+    assert wanted == got > 0, f"the column was there on every bar: {(wanted, got)}"
+    assert charged.equity < free.equity, "funding should cost the long side something"
+
+    # A model whose column is absent charges nothing — and says so, rather than
+    # leaving the run indistinguishable from one with no carry at all.
+    blind = ta.PaperWallet(10_000.0, max_gross=3.0)
+    blind.set_costs_for_all(
+        ["S"],
+        ta.TradingCostsConfig(
+            {"carry": {"default": {"funding": {"column": "absent"}}}}
+        ),
+    )
+    ta.load_spec(_LEVERED).run(blind, bars)
+    wanted, got = blind.carry_coverage()
+    assert wanted > 0 and got == 0, (
+        f"expected wanted-but-never-got, saw {(wanted, got)}"
+    )
+    assert blind.equity == pytest.approx(free.equity)
+
+
+def test_margin_interest_needs_a_bar_length_and_refuses_to_guess():
+    """An annualized rate cannot be split across a bar of unknown length, so a
+    wallet that was not told charges nothing rather than inventing a year."""
+    bars = _levered_bars([100.0] * 60)
+
+    untimed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
+    ta.load_spec(_LEVERED).run(untimed, bars)
+
+    timed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08, bar_freq="1d")
+    ta.load_spec(_LEVERED).run(timed, bars)
+
+    assert timed.equity < untimed.equity, "borrowing 20k at 8% should cost something"
+    assert timed.margin_rate == pytest.approx(0.08)
+    # An unlevered book never borrows, so it is never billed.
+    flat = ta.PaperWallet(10_000.0, margin_rate=0.08, bar_freq="1d")
+    ta.load_spec("root: S\nlong:\n  enter: !gt { lhs: !close, rhs: 0 }\n").run(
+        flat, bars
+    )
+    assert flat.equity == pytest.approx(10_000.0)
+
+
+def test_margin_settings_reject_nonsense():
+    for bad in (-0.1, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="margin_rate"):
+            ta.PaperWallet(1_000.0, margin_rate=bad)
+    for bad in (0.0, 1.5, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="maintenance_margin"):
+            ta.PaperWallet(1_000.0, maintenance_margin=bad)
+
+
 def test_max_gross_must_be_finite_and_positive():
     for bad in (0.0, -1.0, float("inf"), float("nan")):
         with pytest.raises(ValueError, match="max_gross"):

@@ -596,6 +596,15 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   unlike `quote_ccy`, since an `Option<Real>` is a copy and borrows nothing from
   the portfolio guard (cached per symbol as `PortfolioInner::account_leverage`,
   over the universe the portfolio has seen priced).
+- **`observe(&sym, &atom)`** — the **data** seam, default ignore. The driver
+  hands over each bar's whole atom (candle *plus* overlay columns) before
+  anything is priced, and the wallet takes what its own models asked for. Exists
+  for one thing: a `CarryModel` whose rate is a published series rather than a
+  constant — a perpetual's funding changes every settlement and flips sign, so it
+  has to reach a cost model the way a price does. The inversion matters: nothing
+  above the wallet learns which column a cost bundle was configured with, or that
+  carry exists. Live wallets ignore it (the venue charges its own funding and
+  reports the result in the balance, so simulating it would double-count).
 - **`take_rejections() -> Vec<Rejection<Sym>>`** — the **failure stream**, twin of
   `update`'s fill stream. `Rejection { symbol, id, error, kind }`. Default empty;
   **any impl that can drop an order must override**. `PaperWallet` books all three
@@ -707,13 +716,18 @@ overwriting the final point would un-pin the curve. **Only the account's own
 equity counts**: a portfolio is an ordinary strategy trading the wallet it was
 handed, so total ruin is caught at this one site with no per-shape branch, while
 a single child *ledger* going negative is notional attribution netted against
-its siblings on one real balance, not insolvency. A margin model — maintenance
-thresholds, liquidation before zero — is deliberately not here; it needs venue
-assumptions this does not. `PaperWallet::with_max_gross` is **not** that model:
-it bounds gross exposure at fill time and never re-checks a book that drifts
-over the line on a mark, which is exactly the part a real venue liquidates on.
-It exists so a levered backtest and the live account it tracks agree on how much
-the strategy may hold, not to simulate a margin call.
+its siblings on one real balance, not insolvency.
+
+Ruin is the *floor*, not the margin model. Liquidation before zero is
+`PaperWallet::with_maintenance_margin(ratio)` — **opt-in**, because the ratio is
+a venue assumption fugazi will not guess — which force-closes the book as
+`OrderKind::Liquidation` when equity falls below `ratio × gross`, triggered on
+each bar's adverse extreme. `with_max_gross` is a different bound: it limits what
+a strategy may *ask for* at fill time and never re-checks a book that drifts over
+the line on a mark. What is still absent is the rest of a real margin engine —
+partial liquidation, tiered ratios, continuous marking, and a fill price better
+than the bar's close. See TODO *Liquidation is modelled; a full margin model
+still is not*.
 
 `run<Sym, S, W, I, A>` where `A: Into<Snapshot<Sym>>`. `Vec<Atom>` / `Vec<Candle>`
 produce untagged size-1 snapshots; single-series callers use `Snapshot::single(sym,

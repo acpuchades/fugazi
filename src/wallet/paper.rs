@@ -255,6 +255,25 @@ pub struct PaperWallet<Sym> {
     /// [`with_max_gross`](Self::with_max_gross); unlike `quote_ccy` this one is
     /// enforced on every fill.
     max_gross: Real,
+    /// What fraction of a year one bar spans, on the **calendar**. `None` until
+    /// the caller says; a time-denominated [`CarryModel`] charges nothing
+    /// without it rather than inventing a year length. See
+    /// [`with_bar_year_fraction`](Self::with_bar_year_fraction).
+    bar_year_fraction: Option<Real>,
+    /// Annualized interest charged on a **negative** cash balance. See
+    /// [`with_margin_rate`](Self::with_margin_rate).
+    margin_rate: Real,
+    /// Equity/gross ratio below which the book is force-closed, or `None` for
+    /// no margin call at all (the default). See
+    /// [`with_maintenance_margin`](Self::with_maintenance_margin).
+    maintenance_margin: Option<Real>,
+    /// This bar's carry rate per symbol, as fed by [`observe`](Wallet::observe)
+    /// and consumed by the next [`advance`](Wallet::advance).
+    carry_rates: SymMap<Sym, Real>,
+    /// `(bars a carry model wanted a rate for, bars one actually arrived)` —
+    /// what [`carry_coverage`](Self::carry_coverage) reports.
+    carry_wanted: usize,
+    carry_seen: usize,
 }
 
 impl<Sym> PaperWallet<Sym> {
@@ -288,6 +307,12 @@ impl<Sym> PaperWallet<Sym> {
             per_symbol_costs: SymMap::default(),
             quote_ccy: None,
             max_gross: 1.0,
+            bar_year_fraction: None,
+            margin_rate: 0.0,
+            maintenance_margin: None,
+            carry_rates: SymMap::default(),
+            carry_wanted: 0,
+            carry_seen: 0,
         }
     }
 
@@ -366,6 +391,151 @@ impl<Sym> PaperWallet<Sym> {
     /// [`with_max_gross`](Self::with_max_gross).
     pub fn max_gross(&self) -> Real {
         self.max_gross
+    }
+
+    /// What fraction of a year one bar of this run spans, on the **calendar**.
+    ///
+    /// Required by any time-denominated cost of carry — an annualized margin
+    /// rate has to be pro-rated to the bar before it can be charged. Without it
+    /// [`AnnualRate`](crate::costs::AnnualRate) and
+    /// [`with_margin_rate`](Self::with_margin_rate) charge **nothing**, because
+    /// the alternative is for the wallet to invent a year length and bill
+    /// against it.
+    ///
+    /// **Calendar, not trading time.** `Frequency::calendar_seconds_per_bar /
+    /// SECONDS_PER_YEAR` is the number; the trading-seconds figure the metrics
+    /// layer annualizes returns with is the *wrong* one here and under-charges a
+    /// US equity `1d` bar by nearly 4x. A broker charges interest over the
+    /// weekend; the market does not pay returns over it.
+    ///
+    /// Settlement-denominated carry — [`FundingRate`](crate::costs::FundingRate),
+    /// where the venue states the charge in full and the column already sums it
+    /// per bar — ignores this entirely.
+    ///
+    /// # Panics
+    ///
+    /// If `fraction` is not finite and strictly positive.
+    pub fn with_bar_year_fraction(mut self, fraction: Real) -> Self {
+        assert!(
+            fraction > 0.0 && fraction.is_finite(),
+            "bar_year_fraction must be finite and > 0, got {fraction}"
+        );
+        self.bar_year_fraction = Some(fraction);
+        self
+    }
+
+    /// [`with_bar_year_fraction`](Self::with_bar_year_fraction) resolved from a
+    /// bar cadence — the spelling a caller who knows the run's `Frequency` wants.
+    pub fn with_bar_frequency(self, freq: crate::time::Frequency) -> Self {
+        /// Calendar seconds in a year, matching the 30-day-month / 7-day-week
+        /// convention `Frequency::calendar_seconds_per_bar` uses.
+        const SECONDS_PER_YEAR: Real = 365.25 * 86_400.0;
+        self.with_bar_year_fraction(freq.calendar_seconds_per_bar() as Real / SECONDS_PER_YEAR)
+    }
+
+    /// The fraction of a year one bar spans, if this wallet was told. See
+    /// [`with_bar_year_fraction`](Self::with_bar_year_fraction).
+    pub fn bar_year_fraction(&self) -> Option<Real> {
+        self.bar_year_fraction
+    }
+
+    /// Annualized interest charged on a **negative** cash balance — what a
+    /// margin account bills for the cash it lent you.
+    ///
+    /// Account-level, not per symbol, because that is what the balance is: once
+    /// [`max_gross`](Self::with_max_gross) is above `1.0` a levered long drives
+    /// `funds` below zero, and the debt belongs to the account rather than to
+    /// any one position. Charged once per bar, on the balance carried *into* the
+    /// bar, pro-rated by
+    /// [`bar_year_fraction`](Self::with_bar_year_fraction) — and charged
+    /// nothing at all without one.
+    ///
+    /// A positive balance earns nothing: credit interest is real but small, its
+    /// rate is not the borrow rate, and paying it would flatter a backtest.
+    /// Modelling it would be a second rate, and this one exists to stop a
+    /// levered run reporting free money.
+    ///
+    /// # Panics
+    ///
+    /// If `annual_rate` is negative or not finite.
+    pub fn with_margin_rate(mut self, annual_rate: Real) -> Self {
+        assert!(
+            annual_rate >= 0.0 && annual_rate.is_finite(),
+            "margin_rate must be finite and >= 0, got {annual_rate}"
+        );
+        self.margin_rate = annual_rate;
+        self
+    }
+
+    /// The annualized rate charged on borrowed cash. See
+    /// [`with_margin_rate`](Self::with_margin_rate).
+    pub fn margin_rate(&self) -> Real {
+        self.margin_rate
+    }
+
+    /// Force-close the whole book when equity falls below `ratio × gross
+    /// notional` — a margin call.
+    ///
+    /// **Off by default**, and that default is a deliberate one rather than an
+    /// oversight: liquidation is the one thing here that needs a *venue*
+    /// assumption fugazi does not otherwise make. What the maintenance ratio is,
+    /// which tier it falls in, what the position is marked against — all of it
+    /// varies by exchange and by instrument, so the number is yours to state,
+    /// not the library's to guess. Setting it is you supplying the assumption.
+    ///
+    /// **Why it matters more than carry does.** Omitting funding makes a levered
+    /// backtest optimistic by a few percent. Omitting liquidation makes it
+    /// describe a *different strategy*: a 3x book that draws down 33% is gone,
+    /// and a run that trades on through reports the recovery of an account that
+    /// no longer existed. No amount of cost modelling fixes that.
+    ///
+    /// **Triggered on the bar's adverse extreme, filled at its close.** Equity
+    /// is tested with each position marked where the bar hurt it most — the
+    /// `low` for a long, the `high` for a short — because a wick is exactly what
+    /// liquidates a levered account, and a close-only test would miss the event
+    /// that actually happened. The resulting fills book at the `close`, as
+    /// [`OrderKind::Liquidation`], since the price at which the breach occurred
+    /// is not identifiable from a bar once more than one symbol is involved. So:
+    /// the trigger is conservative, the fill price is a simplification, and the
+    /// two are documented rather than blended into a single number that looks
+    /// exact. See `docs/TRADING.md`.
+    ///
+    /// Nothing stops the strategy re-entering on the next bar. That is
+    /// realistic — a liquidated account with equity left can trade again — and
+    /// the blotter's `liquidation` rows are what tell you it happened.
+    ///
+    /// # Panics
+    ///
+    /// If `ratio` is not finite, or is outside `(0, 1]`.
+    pub fn with_maintenance_margin(mut self, ratio: Real) -> Self {
+        assert!(
+            ratio > 0.0 && ratio <= 1.0 && ratio.is_finite(),
+            "maintenance_margin must be finite and in (0, 1], got {ratio}"
+        );
+        self.maintenance_margin = Some(ratio);
+        self
+    }
+
+    /// The maintenance-margin ratio, or `None` when no margin call is modelled.
+    /// See [`with_maintenance_margin`](Self::with_maintenance_margin).
+    pub fn maintenance_margin(&self) -> Option<Real> {
+        self.maintenance_margin
+    }
+
+    /// `(bars that wanted a carry rate, bars that got one)` since this wallet
+    /// was built.
+    ///
+    /// A data-driven [`CarryModel`](crate::costs::CarryModel) charges nothing on
+    /// a bar whose column carried no sample, which is the honest reading of a
+    /// missing value — and also exactly what a run against a series that never
+    /// had the column looks like. The two are indistinguishable from the equity
+    /// curve, so this counts them: `(1200, 0)` means the funding model was
+    /// configured, wanted a rate on twelve hundred bars, and was silently free
+    /// on every one of them.
+    ///
+    /// `(0, 0)` means no carry model asked for data at all.
+    pub fn carry_coverage(&self) -> (usize, usize) {
+        (self.carry_wanted, self.carry_seen)
     }
 
     /// How many blotter / rejection entries to retain, or `None` to keep every
@@ -592,6 +762,160 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             }),
         );
         RestOfBook { marked, gross }
+    }
+
+    /// Charge one bar of carry — the cost of *holding*, as opposed to the cost
+    /// of trading — and return what was taken out of cash.
+    ///
+    /// Two charges, on two different things:
+    ///
+    /// 1. **Per position**, through each symbol's [`CarryModel`]: funding, a
+    ///    borrow fee, position-denominated interest. Signed, so a credit is a
+    ///    credit.
+    /// 2. **Per account**, on a negative cash balance, at
+    ///    [`margin_rate`](Self::margin_rate). This is what a levered *long*
+    ///    actually pays: above `max_gross = 1.0` cash goes negative, and the
+    ///    debt is the account's rather than any one position's.
+    ///
+    /// Charged on the position and the balance **carried into** the bar, marked
+    /// at that bar's `open` — you pay for what you held through the interval,
+    /// not for what you ended up with. Which is also why this runs before the
+    /// bar's fills and before `equity_at_open`: the charge is a fact about the
+    /// interval that just elapsed, and this bar's sizing should see the account
+    /// it left the caller with.
+    ///
+    /// **Only symbols that ticked this bar are charged.** A position in a
+    /// symbol the snapshot skipped has no mark to value the charge at, and
+    /// carrying the last close forward would bill against a price this bar never
+    /// saw. It is the same rule the wallet's mark-to-market already follows, and
+    /// it means a gappy series under-charges — stated here rather than hidden.
+    fn accrue_carry(&mut self, bars: &[(Sym, Candle)]) -> Real {
+        // The balance the bar opened with, before any of this bar's carry.
+        let opening_funds = self.funds;
+        let mut charge = 0.0;
+
+        for (symbol, candle) in bars {
+            let position = self.positions.get(symbol).copied().unwrap_or(0.0);
+            if position.abs() <= POSITION_EPSILON {
+                continue;
+            }
+            let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
+            let rate = if costs.carry.column().is_some() {
+                self.carry_wanted += 1;
+                let sample = self.carry_rates.get(symbol).copied();
+                if sample.is_some() {
+                    self.carry_seen += 1;
+                }
+                sample
+            } else {
+                None
+            };
+            charge += costs.carry.carry(&crate::costs::CarryContext {
+                position,
+                price: candle.open,
+                year_fraction: self.bar_year_fraction,
+                rate,
+            });
+        }
+
+        // Interest on borrowed cash. `opening_funds` rather than the running
+        // balance, so the per-position leg above cannot change what the account
+        // is billed for having borrowed.
+        if self.margin_rate > 0.0
+            && opening_funds < 0.0
+            && let Some(year_fraction) = self.bar_year_fraction
+        {
+            charge += -opening_funds * self.margin_rate * year_fraction;
+        }
+
+        if charge != 0.0 {
+            self.funds -= charge;
+        }
+        charge
+    }
+
+    /// Whether this bar breached the maintenance margin, marking every position
+    /// where the bar hurt it most.
+    ///
+    /// A long is marked at the `low` and a short at the `high`, because a wick
+    /// is what liquidates a levered account and a close-only test would miss the
+    /// event that actually happened. Symbols the bar skipped keep their last
+    /// close — an unmarked position is still exposure, and dropping it from the
+    /// test would let a gappy series hide a breach.
+    fn breaches_maintenance(&self, bars: &[(Sym, Candle)]) -> bool {
+        let Some(ratio) = self.maintenance_margin else {
+            return false;
+        };
+        let adverse = |symbol: &Sym, amount: Real| -> Real {
+            let candle = bars
+                .iter()
+                .find(|(sym, _)| sym == symbol)
+                .map(|(_, c)| *c)
+                .or_else(|| self.bars.get(symbol).copied());
+            match candle {
+                Some(c) if amount >= 0.0 => c.low,
+                Some(c) => c.high,
+                None => 0.0,
+            }
+        };
+        let gross = marked_sum(
+            0.0,
+            self.positions
+                .iter()
+                .map(|(symbol, &amount)| (amount * adverse(symbol, amount)).abs()),
+        );
+        if gross <= 0.0 {
+            return false;
+        }
+        let equity = marked_sum(
+            self.funds,
+            self.positions
+                .iter()
+                .map(|(symbol, &amount)| amount * adverse(symbol, amount)),
+        );
+        equity < ratio * gross
+    }
+
+    /// Force-close every open position at its last close, as
+    /// [`OrderKind::Liquidation`].
+    ///
+    /// [`flatten`](Wallet::flatten)'s twin, and deliberately a separate body
+    /// rather than a parameter on it: the *kind* is the whole point. A blotter
+    /// that books a margin call as an ordinary market exit cannot answer whether
+    /// a levered run's flat stretch was the strategy standing aside or the
+    /// account being closed out from under it.
+    fn liquidate(&mut self) -> Vec<Order<Sym>> {
+        let mut open: Vec<Sym> = self
+            .positions
+            .iter()
+            .filter(|(_, amount)| amount.abs() > POSITION_EPSILON)
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+        open.sort_by_key(|s| self.bars.get(s).map_or(0, |c| c.close.to_bits()));
+
+        let mut fills = Vec::new();
+        for symbol in open {
+            let Some(price) = self.bars.get(&symbol).map(|c| c.close) else {
+                continue;
+            };
+            let id = self.mint();
+            match self.fill_at(
+                symbol.clone(),
+                0.0,
+                price,
+                OrderKind::Liquidation,
+                id,
+                FillContext::reducing(0.0),
+            ) {
+                Ok(Some(order)) => fills.push(order),
+                Ok(None) => {}
+                Err(error) => self.push_rejection(&symbol, id, error, OrderKind::Liquidation),
+            }
+        }
+        self.pending.clear();
+        self.protective.clear();
+        self.limits.clear();
+        fills
     }
 
     /// Whether holding `held` gross notional against `equity` breaches this
@@ -1181,6 +1505,33 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Some(self.max_gross)
     }
 
+    /// Take this bar's carry rate for `symbol`, if a
+    /// [`CarryModel`](crate::costs::CarryModel) here asked for one.
+    ///
+    /// The wallet reads its own inputs: it looks up the column *its* cost
+    /// bundle for this symbol named, so nothing above has to know that carry
+    /// exists. Per-symbol cost overrides may therefore name different columns,
+    /// and each is read against the atom for the symbol it applies to.
+    ///
+    /// An absent column, or an absent sample on a bar that has the column,
+    /// leaves nothing recorded — and the difference between "no sample" and
+    /// "zero" is preserved all the way to
+    /// [`CarryContext::rate`](crate::costs::CarryContext::rate), because an
+    /// accrual is one of the few places where they are not the same statement.
+    fn observe(&mut self, symbol: &Sym, atom: &crate::types::Atom) {
+        let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
+        let Some(column) = costs.carry.column() else {
+            return;
+        };
+        let Some(overlays) = atom.overlays.as_ref() else {
+            return;
+        };
+        if let Some(crate::types::OverlayValue::Real(rate)) = overlays.get_by_key(column) {
+            let rate = *rate;
+            self.carry_rates.insert(symbol.clone(), rate);
+        }
+    }
+
     fn quote_ccy(&self) -> Option<&str> {
         self.quote_ccy.as_deref()
     }
@@ -1243,6 +1594,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 }
             }
         }
+
+        // Phase 1b — carry, on what was held *through* the interval that just
+        // ended. Before the queued orders resolve, so this bar's sizing sees the
+        // account the charge left behind rather than one that still holds cash
+        // it has already spent on funding.
+        self.accrue_carry(bars);
+        self.carry_rates.clear();
 
         // Phase 2 — resolve every queued market order against ONE equity, built
         // from this bar's opens.
@@ -1381,6 +1739,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             if let Some(order) = self.execute_limit(symbol, limit, fill, candle) {
                 fills.push(order);
             }
+        }
+
+        // Phase 7 — the margin call, last, on the book as this bar leaves it.
+        // Off unless `with_maintenance_margin` was set; see there for why the
+        // trigger reads the bar's adverse extreme while the fill books at its
+        // close.
+        if self.breaches_maintenance(bars) {
+            fills.extend(self.liquidate());
         }
         fills
     }
@@ -2666,6 +3032,218 @@ mod tests {
         w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
         let fills = w.update("X", bar(100.0));
         assert!((fills[0].fill_ratio() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    /// Build an atom carrying one real overlay column.
+    fn atom_with(candle: Candle, key: &str, value: Real) -> crate::types::Atom {
+        use crate::types::{OverlayInfo, OverlayValue, Schema};
+        let mut b = Schema::builder();
+        b.add_real(key);
+        let overlays = OverlayInfo::new(b.finish(), [OverlayValue::Real(value)]);
+        crate::types::Atom::with_overlays(candle, overlays)
+    }
+
+    fn funding_wallet(funds: Real) -> PaperWallet<&'static str> {
+        let costs = TradingCosts::none().with_carry(Box::new(crate::costs::FundingRate::default()));
+        PaperWallet::with_costs(funds, costs)
+    }
+
+    /// Funding is charged on what was held *through* the bar, signed both ways.
+    #[test]
+    fn funding_charges_the_long_and_credits_the_short() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut w = funding_wallet(10_000.0);
+            w.update("X", bar(100.0));
+            w.set("X", side, Size::value_frac(1.0)).unwrap();
+            w.update("X", bar(100.0));
+            let position = w.position(&"X").amount;
+            assert!((position.abs() - 100.0).abs() < 1e-9);
+            let funds_before = w.funds().0;
+
+            // Next bar carries a 1% funding rate. The position was held through
+            // it, so it is charged: a long pays, a short is paid.
+            w.observe(&"X", &atom_with(bar(100.0), "funding_rate", 0.01));
+            w.advance(&[("X", bar(100.0))]);
+
+            let charge = funds_before - w.funds().0;
+            let expected = position * 100.0 * 0.01;
+            assert!(
+                (charge - expected).abs() < 1e-9,
+                "{side:?}: charged {charge}, expected {expected}"
+            );
+            assert_eq!(w.carry_coverage(), (1, 1));
+        }
+    }
+
+    /// A position opened *this* bar pays no carry for it — you are charged for
+    /// what you held through the interval, not for what you ended up with.
+    #[test]
+    fn carry_skips_the_bar_a_position_was_opened_on() {
+        let mut w = funding_wallet(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        let funds_before = w.funds().0;
+
+        // The fill and the funding sample land on the same bar.
+        w.observe(&"X", &atom_with(bar(100.0), "funding_rate", 0.01));
+        w.advance(&[("X", bar(100.0))]);
+
+        // Cash moved by the purchase alone: 100 units at 100, and no carry.
+        assert!((funds_before - w.funds().0 - 10_000.0).abs() < 1e-9);
+        assert_eq!(w.carry_coverage(), (0, 0), "nothing was held to charge");
+    }
+
+    /// The distinction the funding column is built around: an absent sample is
+    /// "no carry recorded", not "carry was nil" — and the wallet counts the
+    /// difference so a run against a series that never had the column is
+    /// findable rather than silently free.
+    #[test]
+    fn a_missing_funding_sample_is_counted_not_assumed_zero() {
+        let mut w = funding_wallet(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        let funds_before = w.funds().0;
+
+        // A bar with no overlay at all — the shape of a series that simply has
+        // no funding history joined onto it.
+        w.advance(&[("X", bar(100.0))]);
+        assert_eq!(w.funds().0, funds_before, "nothing to charge");
+        assert_eq!(
+            w.carry_coverage(),
+            (1, 0),
+            "one bar wanted a rate and none arrived"
+        );
+    }
+
+    /// An annualized rate needs to know how long a bar is, and refuses to guess.
+    #[test]
+    fn an_annual_rate_charges_nothing_without_a_cadence() {
+        let costs = TradingCosts::none().with_carry(Box::new(crate::costs::AnnualRate::flat(0.10)));
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs.clone());
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        let funds_before = w.funds().0;
+        w.advance(&[("X", bar(100.0))]);
+        assert_eq!(w.funds().0, funds_before, "no year fraction, no charge");
+
+        // Told how long a bar is, it charges: 10% a year on 10,000 of notional,
+        // for one day, is 10_000 * 0.10 / 365.25.
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs)
+            .with_bar_frequency(crate::time::Frequency::Day(1));
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        let funds_before = w.funds().0;
+        w.advance(&[("X", bar(100.0))]);
+        let expected = 10_000.0 * 0.10 / 365.25;
+        assert!(
+            (funds_before - w.funds().0 - expected).abs() < 1e-6,
+            "charged {}, expected {expected}",
+            funds_before - w.funds().0
+        );
+    }
+
+    /// Margin interest is what a levered *long* actually pays, and it is
+    /// account-level: the debt is the negative cash balance, not any position.
+    #[test]
+    fn margin_interest_is_charged_on_borrowed_cash_only() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_margin_rate(0.10)
+            .with_bar_frequency(crate::time::Frequency::Day(1));
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+        // 300 units at 100 against 10,000 of equity: 20,000 borrowed.
+        assert!((w.funds().0 + 20_000.0).abs() < 1e-9, "{}", w.funds().0);
+
+        let funds_before = w.funds().0;
+        w.advance(&[("X", bar(100.0))]);
+        let expected = 20_000.0 * 0.10 / 365.25;
+        assert!(
+            (funds_before - w.funds().0 - expected).abs() < 1e-6,
+            "charged {}, expected {expected}",
+            funds_before - w.funds().0
+        );
+
+        // An unlevered book never borrows, so it is never billed.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_margin_rate(0.10)
+            .with_bar_frequency(crate::time::Frequency::Day(1));
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        let funds_before = w.funds().0;
+        w.advance(&[("X", bar(100.0))]);
+        assert_eq!(w.funds().0, funds_before);
+    }
+
+    /// The gap that makes an unliquidated levered backtest describe a different
+    /// strategy: a 3x book does not survive a drawdown that a 1x book shrugs off.
+    #[test]
+    fn a_levered_book_is_closed_out_when_it_breaches_maintenance() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_maintenance_margin(0.10);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+        assert!((w.position(&"X").amount - 300.0).abs() < 1e-9);
+
+        // Down 25%: equity is 10,000 - 300*25 = 2,500 against 22,500 of gross,
+        // an 11% ratio — still above the 10% threshold.
+        let fills = w.advance(&[("X", bar(75.0))]);
+        assert!(fills.is_empty(), "not yet: {fills:?}");
+        assert!((w.position(&"X").amount - 300.0).abs() < 1e-9);
+
+        // Down 27%: equity 1,000 against 21,900 of gross is 4.6%. Gone.
+        let fills = w.advance(&[("X", bar(73.0))]);
+        assert_eq!(fills.len(), 1, "expected a forced close: {fills:?}");
+        assert_eq!(fills[0].kind, OrderKind::Liquidation);
+        assert_eq!(w.position(&"X").amount, 0.0);
+        assert!(w.equity().0 > 0.0, "solvent, but closed out");
+    }
+
+    /// The trigger reads the bar's adverse extreme, because a wick is what
+    /// actually liquidates a levered account — a close-only test would report a
+    /// strategy that survived an event it did not.
+    #[test]
+    fn a_wick_liquidates_even_when_the_close_recovers() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_maintenance_margin(0.10);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+
+        // Opens and closes at 99, but traded down to 73 inside the bar.
+        let wick = Candle::new(99.0, 99.0, 73.0, 99.0, 0.0);
+        let fills = w.advance(&[("X", wick)]);
+        assert_eq!(
+            fills.len(),
+            1,
+            "the wick should have closed the account out"
+        );
+        assert_eq!(fills[0].kind, OrderKind::Liquidation);
+        // Booked at the close, which is the documented simplification: the
+        // price the breach happened at is not recoverable from one bar.
+        assert!((fills[0].price - 99.0).abs() < 1e-9);
+    }
+
+    /// Off unless asked for. The ratio is a venue assumption, so the default has
+    /// to be "no margin call", not a guess at someone's tier.
+    #[test]
+    fn no_maintenance_margin_means_no_margin_call() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0).with_max_gross(3.0);
+        assert_eq!(w.maintenance_margin(), None);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+        let fills = w.advance(&[("X", bar(70.0))]);
+        assert!(fills.is_empty());
+        assert!((w.position(&"X").amount - 300.0).abs() < 1e-9);
     }
 
     #[test]

@@ -250,6 +250,12 @@ where
             // reason `candle` is optional: a synthesised zero would mark the
             // position to nothing, and a `NaN` would pass every `close <= 0.0`
             // guard and poison the equity curve without a single error.
+            // Hand the wallet the whole atom before anything is priced: a cost
+            // model whose rate is *data* (a perpetual's funding, which changes
+            // every settlement and flips sign) reads its column here. The
+            // default is to ignore it, so this is a no-op for every wallet that
+            // prices nothing off the side channels.
+            wallet.observe(sym, atom);
             let Some(candle) = atom.candle else { continue };
             bar_candles.push((sym.clone(), candle));
         }

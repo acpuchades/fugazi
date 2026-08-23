@@ -70,6 +70,9 @@ BY_PARAM = {
     "max": "float",
     "cash": "float",
     "max_gross": "float",
+    "margin_rate": "float",
+    "maintenance_margin": "float | None",
+    "bar_freq": "str | Frequency | None",
     "initial_equity": "float",
     "bars_per_year": "float",
     "risk_free_rate": "float",
@@ -314,6 +317,11 @@ MEMBER_RULES = {
     # and a live one may not have been able to ask yet.
     "leverage": "float | None",
     "refresh_leverage": "float",
+    "margin_rate": "float",
+    # `None` = no margin call is modelled, which is the default.
+    "maintenance_margin": "float | None",
+    # (bars that wanted a carry rate, bars that got one)
+    "carry_coverage": "tuple[int, int]",
     "equity": "float",
     "funds": "float",
     "position": "float",

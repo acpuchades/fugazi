@@ -193,3 +193,44 @@ pub fn collect_warnings(skipped: &[String], no_cost: bool, what: &str) -> Vec<St
     }
     w
 }
+
+/// Warn when a configured **carry** model cannot actually charge — because the
+/// column it reads is not in the input, or the run's cadence never resolved.
+///
+/// Both failures are silent by construction: the model evaluates to zero on
+/// every bar and the equity curve is indistinguishable from one where carry was
+/// genuinely free. Configuring a cost and being quietly given none is the exact
+/// shape of bug the leverage work went in to remove, so it is checked before the
+/// run rather than left to be noticed.
+pub fn carry_warnings(
+    requirements: &fugazi::spec::costs::CarryRequirements,
+    available_columns: &[String],
+    cadence_resolved: bool,
+) -> Vec<String> {
+    let mut w = Vec::new();
+    let missing: Vec<&str> = requirements
+        .columns
+        .iter()
+        .filter(|c| !available_columns.iter().any(|a| a == *c))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        w.push(format!(
+            "carry reads column{} `{}`, which the input does not carry — every bar \
+             will be charged nothing, which is indistinguishable from carry being \
+             free. Join a series that has it (e.g. `fugazi get \
+             binance-vision-futures:BTCUSDT[1d]` publishes `funding_rate`)",
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join("`, `"),
+        ));
+    }
+    if requirements.needs_cadence && !cadence_resolved {
+        w.push(
+            "carry is configured with an annualized rate but the bar cadence did not \
+             resolve — an annual rate cannot be pro-rated to a bar of unknown length, \
+             so nothing will be charged. Pass `-f/--frequency`"
+                .to_string(),
+        );
+    }
+    w
+}

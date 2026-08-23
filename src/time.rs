@@ -48,13 +48,22 @@ pub enum Frequency {
 }
 
 impl Frequency {
-    /// The approximate seconds a bar of this cadence spans, using calendar
+    /// The approximate seconds a bar of this cadence spans, using **calendar**
     /// conventions (30-day month, 7-day week). Used as the primary total-
     /// order key by [`Ord`] so cadences sort by duration regardless of
     /// variant, which keeps `Frequency::Minute(120) > Frequency::Hour(1)` (a
     /// derived `Ord` would order them lexicographically by variant tag and
     /// get it wrong).
-    fn seconds_per_bar(self) -> u64 {
+    ///
+    /// **Calendar, not trading.** Distinct from
+    /// [`AssetClass::trading_seconds_per_bar`](crate::spec::calendar::AssetClass::trading_seconds_per_bar),
+    /// which answers how much *trading* a bar contains — 6.5 hours for a US
+    /// equity `1d` bar, not 24. Which one a caller wants depends on what it is
+    /// measuring: annualizing a return uses trading time, because that is when
+    /// the return happened; accruing **interest** uses calendar time, because a
+    /// broker charges over the weekend. Reaching for the wrong one under-charges
+    /// equity margin interest by nearly 4x.
+    pub fn calendar_seconds_per_bar(self) -> u64 {
         match self {
             Frequency::Minute(n) => 60 * n as u64,
             Frequency::Hour(n) => 3_600 * n as u64,
@@ -93,8 +102,8 @@ impl Frequency {
 
 impl Ord for Frequency {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.seconds_per_bar()
-            .cmp(&other.seconds_per_bar())
+        self.calendar_seconds_per_bar()
+            .cmp(&other.calendar_seconds_per_bar())
             .then_with(|| self.variant_rank().cmp(&other.variant_rank()))
     }
 }

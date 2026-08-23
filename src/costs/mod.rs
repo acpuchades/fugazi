@@ -112,6 +112,100 @@ impl Clone for Box<dyn SlippageModel> {
     }
 }
 
+/// What one bar of *holding* costs — the cost of **carry**.
+///
+/// The other three legs price a fill; this one prices the gap between fills.
+/// Perpetual funding, margin interest, a short's borrow fee and overnight
+/// financing all accrue on a position that does nothing, so none of them can be
+/// expressed as a function of a trade: `commission(notional, units)` has nowhere
+/// to put an elapsed interval, and on a bar that books no fill it is not called
+/// at all.
+///
+/// Charged once per bar by [`PaperWallet::advance`](crate::Wallet::advance), on
+/// the position **carried into** the bar and marked at that bar's `open` — you
+/// pay for what you held through the interval, not for what you ended up with,
+/// so a position opened this bar first pays next bar. Positive means cash leaves
+/// the account; **negative is a credit**, which is not a rounding case: the
+/// short side of a positive funding rate is paid, and a model that could only
+/// charge would be wrong for half the book.
+///
+/// [`clone_box`](Self::clone_box) mirrors [`CommissionModel::clone_box`] — see
+/// that trait's doc.
+pub trait CarryModel: Send + Sync {
+    /// Cash to charge for carrying `ctx.position` across one bar.
+    fn carry(&self, ctx: &CarryContext) -> Real;
+
+    /// The overlay column this model reads a per-bar rate from, if it is
+    /// data-driven.
+    ///
+    /// The wallet asks once per bar and hands the value back as
+    /// [`CarryContext::rate`]; a model that needs no data (a constant rate)
+    /// leaves this `None` and never sees one. This is how a funding *series*
+    /// reaches a cost model at all — the rate is data, not configuration, and
+    /// it arrives on the same atom as the bar it is charged for.
+    fn column(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this model charges nothing under any input — the tag the CLI's
+    /// "no cost model set" banner reads.
+    fn is_no_op(&self) -> bool {
+        false
+    }
+
+    /// Whether this model is **time**-denominated and so needs
+    /// [`CarryContext::year_fraction`] to charge anything at all.
+    ///
+    /// A caller that cannot resolve the run's cadence should say so rather than
+    /// let an annualized rate quietly evaluate to zero on every bar — the
+    /// failure looks exactly like "carry was free".
+    fn needs_year_fraction(&self) -> bool {
+        false
+    }
+
+    /// Return a boxed deep clone of `self`. See the trait doc.
+    fn clone_box(&self) -> Box<dyn CarryModel>;
+}
+
+impl Clone for Box<dyn CarryModel> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+/// What a [`CarryModel`] is given for one symbol, for one bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarryContext {
+    /// The **signed** position carried into the bar, in instrument units —
+    /// positive long, negative short. Signed rather than absolute because
+    /// funding's direction depends on which side you are: at a positive rate
+    /// longs pay shorts.
+    pub position: Real,
+    /// The mark this bar's carry values the position at — the bar's `open`, the
+    /// same price its fills settle against, so nothing here reads information
+    /// from later in the bar than the charge.
+    pub price: Real,
+    /// What fraction of a year this bar spans, or `None` when the caller could
+    /// not resolve the run's cadence.
+    ///
+    /// Only a time-denominated model needs it (an annual interest rate has to
+    /// be pro-rated); a settlement-denominated one — funding, which is quoted
+    /// *per settlement* and already summed into the bar — must ignore it, or it
+    /// would scale a charge the venue states in full. `None` is not a licence to
+    /// guess: a rate model with no cadence charges nothing and the CLI warns,
+    /// rather than inventing a year length.
+    pub year_fraction: Option<Real>,
+    /// This bar's value of the model's [`column`](CarryModel::column), when it
+    /// named one and the bar carried a sample.
+    ///
+    /// **`None` is "no sample", not "zero"** — the distinction the
+    /// `binance-vision-futures` funding column is built around, and the
+    /// difference between "no carry was recorded for this bar" and "carry was
+    /// nil". A model that cannot tell them apart will silently under-charge
+    /// every bar whose data is missing.
+    pub rate: Option<Real>,
+}
+
 // ---------------------------------------------------------------------------
 // Bundle
 // ---------------------------------------------------------------------------
@@ -128,6 +222,9 @@ pub struct TradingCosts {
     pub commission: Box<dyn CommissionModel>,
     pub spread: Box<dyn SpreadModel>,
     pub slippage: Box<dyn SlippageModel>,
+    /// The cost of **holding**, charged per bar rather than per fill. Defaults
+    /// to [`NoCarry`]; set it with [`with_carry`](TradingCosts::with_carry).
+    pub carry: Box<dyn CarryModel>,
 }
 
 impl TradingCosts {
@@ -141,7 +238,19 @@ impl TradingCosts {
             commission,
             spread,
             slippage,
+            carry: Box::new(NoCarry),
         }
+    }
+
+    /// Install the [`CarryModel`] — the per-bar cost of holding.
+    ///
+    /// A builder rather than a fourth parameter on [`new`](Self::new): the three
+    /// fill legs are what almost every bundle configures, carry matters only
+    /// once an account holds something overnight or borrows to hold it, and
+    /// every existing three-argument call keeps working.
+    pub fn with_carry(mut self, carry: Box<dyn CarryModel>) -> Self {
+        self.carry = carry;
+        self
     }
 
     /// The zero-friction bundle: [`NoCommission`] + [`NoSpread`] + [`NoSlippage`].
@@ -151,6 +260,7 @@ impl TradingCosts {
             commission: Box::new(NoCommission),
             spread: Box::new(NoSpread),
             slippage: Box::new(NoSlippage),
+            carry: Box::new(NoCarry),
         }
     }
 
@@ -158,7 +268,10 @@ impl TradingCosts {
     /// any fill). Cheap struct-tag check — the CLI uses it to decide whether to
     /// print the "no cost model set" warning banner.
     pub fn is_none(&self) -> bool {
-        self.commission.is_no_op() && self.spread.is_no_op() && self.slippage.is_no_op()
+        self.commission.is_no_op()
+            && self.spread.is_no_op()
+            && self.slippage.is_no_op()
+            && self.carry.is_no_op()
     }
 }
 
@@ -221,6 +334,188 @@ impl SlippageModel for NoSlippage {
     }
     fn clone_box(&self) -> Box<dyn SlippageModel> {
         Box::new(*self)
+    }
+}
+
+/// The zero-carry model: holding is free. What every wallet starts with.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoCarry;
+
+impl CarryModel for NoCarry {
+    fn carry(&self, _ctx: &CarryContext) -> Real {
+        0.0
+    }
+    fn is_no_op(&self) -> bool {
+        true
+    }
+    fn clone_box(&self) -> Box<dyn CarryModel> {
+        Box::new(*self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Carry models
+// ---------------------------------------------------------------------------
+
+/// Perpetual **funding**, read per bar from an overlay column.
+///
+/// `carry = position × price × rate`, signed both ways: at a positive rate a
+/// long pays and a short is credited, and when the rate goes negative — which
+/// it regularly does — the two swap. That sign flip is the reason funding
+/// cannot be approximated by a constant: a fixed rate is not a conservative
+/// stand-in for it, it is simply wrong in a direction nobody chose.
+///
+/// The rate is **data**, so it arrives on the same atom as the bar it is charged
+/// for, through [`CarryModel::column`]. `binance-vision-futures` publishes it as
+/// `funding_rate` already shaped for this: a bar's value is the **sum** of the
+/// settlements inside it, so a `1d` bar carries all three of its 8-hourly
+/// charges and the model needs no notion of settlement cadence at all.
+///
+/// For the same reason [`CarryContext::year_fraction`] is deliberately ignored:
+/// funding is quoted per settlement and already totalled per bar, so pro-rating
+/// it by a year fraction would scale a charge the venue states in full.
+///
+/// A bar with **no sample** charges nothing — the honest reading of an absent
+/// column, and why the column and the rate are `Option` all the way down. A
+/// series that simply lacks funding data will therefore under-charge silently,
+/// which is what [`PaperWallet::carry_coverage`](crate::PaperWallet::carry_coverage)
+/// exists to let a caller check.
+#[derive(Debug, Clone)]
+pub struct FundingRate {
+    column: String,
+}
+
+impl FundingRate {
+    /// Read the per-bar rate from `column`.
+    pub fn new(column: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+        }
+    }
+
+    /// The conventional column name, as `binance-vision-futures` publishes it.
+    pub const DEFAULT_COLUMN: &'static str = "funding_rate";
+}
+
+impl Default for FundingRate {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_COLUMN)
+    }
+}
+
+impl CarryModel for FundingRate {
+    fn carry(&self, ctx: &CarryContext) -> Real {
+        match ctx.rate {
+            Some(rate) => ctx.position * ctx.price * rate,
+            None => 0.0,
+        }
+    }
+    fn column(&self) -> Option<&str> {
+        Some(&self.column)
+    }
+    fn clone_box(&self) -> Box<dyn CarryModel> {
+        Box::new(self.clone())
+    }
+}
+
+/// A constant **annualized** rate on the position's notional, pro-rated to the
+/// bar — margin interest on a levered long, a borrow fee on a short.
+///
+/// `carry = |position| × price × rate_for_side × year_fraction`, with separate
+/// long and short rates because they are separate arrangements: a long pays to
+/// borrow cash, a short pays to borrow stock, and the two are not the same
+/// number. Both are charges, so both are non-negative and neither side is ever
+/// credited — unlike [`FundingRate`], where the sign is the point.
+///
+/// This is the model for the things that genuinely *are* near-constant. Reaching
+/// for it to stand in for perpetual funding is the mistake `FundingRate`'s doc
+/// warns about.
+///
+/// **Charges nothing when [`year_fraction`](CarryContext::year_fraction) is
+/// `None`.** An annual rate is meaningless without knowing how much of a year a
+/// bar spans, and guessing 252 or 365 would be an invented venue assumption; the
+/// CLI warns rather than letting the omission pass as "carry was free".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnnualRate {
+    long: Real,
+    short: Real,
+}
+
+impl AnnualRate {
+    /// Separate annualized rates for a long and a short position, as decimal
+    /// fractions (`0.06` is 6% a year). Negatives are clamped to zero — this
+    /// model charges, it does not pay.
+    pub fn new(long: Real, short: Real) -> Self {
+        Self {
+            long: long.max(0.0),
+            short: short.max(0.0),
+        }
+    }
+
+    /// The same annualized rate whichever side the position is.
+    pub fn flat(rate: Real) -> Self {
+        Self::new(rate, rate)
+    }
+}
+
+impl CarryModel for AnnualRate {
+    fn carry(&self, ctx: &CarryContext) -> Real {
+        let Some(year_fraction) = ctx.year_fraction else {
+            return 0.0;
+        };
+        let rate = if ctx.position >= 0.0 {
+            self.long
+        } else {
+            self.short
+        };
+        ctx.position.abs() * ctx.price * rate * year_fraction
+    }
+    fn is_no_op(&self) -> bool {
+        self.long == 0.0 && self.short == 0.0
+    }
+    fn needs_year_fraction(&self) -> bool {
+        !self.is_no_op()
+    }
+    fn clone_box(&self) -> Box<dyn CarryModel> {
+        Box::new(*self)
+    }
+}
+
+/// Both at once: a [`FundingRate`] and an [`AnnualRate`], summed.
+///
+/// A margined perp account pays both — the exchange's funding on the position
+/// *and* interest on the cash it borrowed to hold it — and they are denominated
+/// differently, so neither model can absorb the other.
+#[derive(Debug, Clone)]
+pub struct CompositeCarry {
+    funding: FundingRate,
+    rate: AnnualRate,
+}
+
+impl CompositeCarry {
+    /// Charge `funding` and `rate` together.
+    pub fn new(funding: FundingRate, rate: AnnualRate) -> Self {
+        Self { funding, rate }
+    }
+}
+
+impl CarryModel for CompositeCarry {
+    fn carry(&self, ctx: &CarryContext) -> Real {
+        self.funding.carry(ctx) + self.rate.carry(ctx)
+    }
+    fn column(&self) -> Option<&str> {
+        self.funding.column()
+    }
+    fn is_no_op(&self) -> bool {
+        // Never claims to be free: the funding leg's charge depends on data
+        // this cannot see, and the banner it feeds is a warning about silence.
+        false
+    }
+    fn needs_year_fraction(&self) -> bool {
+        self.rate.needs_year_fraction()
+    }
+    fn clone_box(&self) -> Box<dyn CarryModel> {
+        Box::new(self.clone())
     }
 }
 
@@ -540,7 +835,11 @@ impl SlippageModel for VolumeParticipationSlippage {
 fn kind_multiplier(kind: OrderKind, stop_multiplier: Real) -> Real {
     match kind {
         OrderKind::Market => 1.0,
-        OrderKind::Stop | OrderKind::TakeProfit => stop_multiplier.max(0.0),
+        // A forced close takes liquidity on someone else's schedule, so it
+        // prices at least as badly as a stop — never better.
+        OrderKind::Stop | OrderKind::TakeProfit | OrderKind::Liquidation => {
+            stop_multiplier.max(0.0)
+        }
         OrderKind::Limit => 0.0,
     }
 }

@@ -49,6 +49,11 @@ pub struct OptimizeOptions<'a> {
     /// Most gross notional each grid point's account may hold, as a multiple of
     /// equity (`--max-gross`; `1.0` is unlevered).
     pub max_gross: Real,
+    /// Annualized interest on a negative cash balance (`--margin-rate`).
+    pub margin_rate: Real,
+    /// Maintenance-margin ratio, or `None` for no margin call
+    /// (`--maintenance-margin`).
+    pub maintenance_margin: Option<Real>,
     /// The shape of the strategy YAML being swept. Single-asset is the
     /// legacy path (one symbol probed from the spec + one atom slice from
     /// the frame). Pairs probes `[left, right]` from the first subgrid
@@ -456,6 +461,8 @@ fn run_single(
         let keep_unstable = opts.keep_unstable;
         let cash = opts.cash;
         let max_gross = opts.max_gross;
+        let margin_rate = opts.margin_rate;
+        let maintenance_margin = opts.maintenance_margin;
         let cost_config = opts.cost_config;
         let schema_ref = &schema;
         // Same lift as the sweep path: the unified measurement is
@@ -476,6 +483,8 @@ fn run_single(
         let ctx = backtest::EvalContext {
             cash,
             max_gross,
+            margin_rate,
+            maintenance_margin,
             bars_per_year,
             risk_free_rate: opts.risk_free_rate,
             cost_config,
@@ -541,6 +550,8 @@ fn run_single(
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        margin_rate: opts.margin_rate,
+        maintenance_margin: opts.maintenance_margin,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config,
@@ -600,6 +611,8 @@ fn run_single(
                 backtest::EvalContext {
                     cash: opts.cash,
                     max_gross: opts.max_gross,
+                    margin_rate: opts.margin_rate,
+                    maintenance_margin: opts.maintenance_margin,
                     bars_per_year: bpy,
                     risk_free_rate: opts.risk_free_rate,
                     cost_config,
@@ -885,6 +898,8 @@ fn run_multi_symbol(
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        margin_rate: opts.margin_rate,
+        maintenance_margin: opts.maintenance_margin,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config,
@@ -983,6 +998,8 @@ fn run_multi_symbol_walkforward(
     let keep_unstable = opts.keep_unstable;
     let cash = opts.cash;
     let max_gross = opts.max_gross;
+    let margin_rate = opts.margin_rate;
+    let maintenance_margin = opts.maintenance_margin;
     let cost_config = opts.cost_config;
     let kind = opts.strategy_kind;
 
@@ -1012,6 +1029,8 @@ fn run_multi_symbol_walkforward(
     let ctx = backtest::EvalContext {
         cash,
         max_gross,
+        margin_rate,
+        maintenance_margin,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config,

@@ -424,6 +424,27 @@ pub trait Wallet<Sym> {
         &[]
     }
 
+    /// Feed this bar's whole sample for `symbol` — the candle plus whatever
+    /// overlay columns the series carries — ahead of [`advance`](Self::advance).
+    ///
+    /// Default: ignore it. Only a wallet that prices something off *data* needs
+    /// this, and today that is one thing: a [`CarryModel`](crate::costs::CarryModel)
+    /// whose rate is a published series rather than a constant. A perpetual's
+    /// funding rate is not configuration — it changes every settlement and flips
+    /// sign — so it has to reach the cost model the same way a price does, on
+    /// the atom for the bar it is charged for.
+    ///
+    /// **This is the wallet reading its own inputs, not the driver knowing about
+    /// costs.** The driver hands over the whole atom and the wallet takes what
+    /// its own models asked for; nothing above has to learn which column a cost
+    /// bundle was configured with, or that carry exists at all.
+    ///
+    /// A live wallet ignores it: the venue charges its own funding and reports
+    /// the result in the balance, so simulating it on top would double-count.
+    fn observe(&mut self, symbol: &Sym, atom: &crate::types::Atom) {
+        let _ = (symbol, atom);
+    }
+
     /// Install a per-symbol [`TradingCosts`] override — every fill on
     /// `symbol` thereafter books through this bundle instead of the wallet's
     /// default. Latest-wins per symbol.

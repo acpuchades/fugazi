@@ -256,6 +256,16 @@ pub enum OrderKind {
     /// would let the cost pipeline fill it worse than the price the caller
     /// named, which is the one thing a limit order guarantees.
     Limit,
+    /// A **forced close**: the account breached its maintenance margin and the
+    /// wallet flattened the book on its own (see
+    /// [`PaperWallet::with_maintenance_margin`](crate::PaperWallet::with_maintenance_margin)).
+    ///
+    /// Its own kind rather than a `Market` fill, because a blotter that cannot
+    /// tell a liquidation from an exit cannot answer the only question that
+    /// matters about a levered run: did the strategy close this, or did the
+    /// account die? It prices like a `Stop` — a forced close takes liquidity on
+    /// someone else's schedule, so it never fills *better* than one.
+    Liquidation,
 }
 
 /// A single filled order: a `symbol`, a [`Side`], a strictly-positive number of

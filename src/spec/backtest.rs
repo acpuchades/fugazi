@@ -262,6 +262,13 @@ pub struct EvalContext<'a> {
     /// for. A `sizing:` above it is fitted to it and the gap recorded on
     /// [`Order::requested_units`](crate::Order::requested_units).
     pub max_gross: Real,
+    /// Annualized interest charged on a **negative** cash balance —
+    /// [`PaperWallet::with_margin_rate`]. `0.0` charges nothing, which is the
+    /// only honest default: a rate is a fact about a broker, not about a run.
+    pub margin_rate: Real,
+    /// Equity/gross ratio below which the run's account is force-closed, or
+    /// `None` for no margin call — [`PaperWallet::with_maintenance_margin`].
+    pub maintenance_margin: Option<Real>,
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
     pub cost_config: &'a CostConfig,
@@ -299,7 +306,18 @@ impl EvalContext<'_> {
     /// One place, so the priced run and its zero-cost twin cannot end up on
     /// differently-configured accounts.
     pub fn account(&self, per_symbol_costs: &[(String, TradingCosts)]) -> PaperWallet<Symbol> {
-        let mut wallet = PaperWallet::new(self.cash).with_max_gross(self.max_gross);
+        let mut wallet = PaperWallet::new(self.cash)
+            .with_max_gross(self.max_gross)
+            .with_margin_rate(self.margin_rate);
+        // Only when the cadence resolved. A time-denominated carry model charges
+        // nothing without it — see `with_bar_year_fraction` — which the CLI
+        // warns about rather than papering over with an assumed year length.
+        if let Some(freq) = self.effective_freq {
+            wallet = wallet.with_bar_frequency(freq);
+        }
+        if let Some(ratio) = self.maintenance_margin {
+            wallet = wallet.with_maintenance_margin(ratio);
+        }
         for (sym, costs) in per_symbol_costs {
             let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
         }

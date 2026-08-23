@@ -137,55 +137,73 @@ silence covered *that* too. Both are now bounded by gross notional
 inequality as `funds >= 0`, so an unlevered long backtest is unchanged), and a
 request above the cap is fitted and recorded rather than reinterpreted.
 
-### Cost of carry is not modelled
+### Cost of carry — *settled*
 
-Raising `max_gross` above `1.0` lets a book hold more than it funded, and fugazi
-charges nothing for the difference. Perpetual funding, margin interest on a
-negative cash balance, a short's borrow fee, overnight financing — none of it
-exists, so a levered backtest is **optimistic** by an amount that scales with the
-leverage and the holding period.
+**Settled: a fourth cost leg.** `CarryModel` is charged once per bar by
+`advance`, on the position carried *into* the bar and marked at its `open`, with
+three models — `!funding` (per-bar rate read from an overlay column, signed both
+ways), `!annual` (a constant annualized rate per side), `!both`. Cash interest on
+a negative balance is `PaperWallet::with_margin_rate` / `--margin-rate`, on the
+account rather than in the per-symbol bundle, because that is what the balance
+is.
 
-**A preset cannot cover this, and that is the whole point of the entry.** All
-three cost legs are per-*fill*: they are called from `fill_at` and nowhere else,
-so on a bar that does not trade they are not called at all, and
-`commission(notional, units)` has nowhere to put a bar, an elapsed interval or a
-held position. Carry is a function of *what is held* times *how long*, which is a
-different arity — not a model that is missing, a call site that is.
+The entry that stood here argued a fourth leg was too large because funding needs
+"a rate *schedule*, not a constant". That turned out to be the answer rather than
+the obstacle: the rate is **data**, so it arrives on the atom for the bar it is
+charged for, through `CarryModel::column` and `Wallet::observe`. No new
+configuration surface, no accrual cadence to invent —
+`binance-vision-futures` already publishes `funding_rate` *summed per bar* for
+exactly this reading, so a `1d` bar carries all three of its 8-hourly settlements
+and the model needs no notion of settlement timing at all.
 
-Not added alongside the cap, deliberately. A fourth leg is not one struct: it
-needs a per-bar hook in `advance`, a rate *schedule* (OKX funding is an 8-hourly
-series that a backtest would have to be fed like any other input, not a
-constant), a cadence to accrue on, per-symbol scoping through the whole
-`--costs` grammar, a place in `metrics.yml`'s cost accounting, and a decision
-about what a `PaperWallet` with no venue is supposed to charge. Shipping a
-constant-rate approximation of it would be worse than the documented hole:
-funding flips sign with the market, so a fixed rate is not conservative, it is
-just wrong in a direction nobody chose.
+Both silent-failure modes are checked rather than left to be noticed: a
+`!funding` whose column is absent, and an `!annual` with no resolvable cadence,
+each charge nothing on every bar and leave a curve indistinguishable from "carry
+was free". `run` warns before the sweep (`CostConfig::carry_requirements`), and
+`PaperWallet::carry_coverage()` reports `(wanted, got)` after it.
 
-**What would change this:** a rate series arriving as an ordinary overlay column
-(the `sources` layer already fetches per-symbol series, and OKX publishes
-funding history), at which point the accrual is a per-bar read of a column the
-run already carries rather than a new configuration surface. Until then
-`Wallet::adjust_funds(-carry)` between bars is the documented seam, and
-`docs/COSTS.md` states the omission where a reader configuring costs will hit it.
+### Liquidation is modelled; a full margin model still is not
 
-### Leverage is bounded at fill time, not tracked between fills
+`PaperWallet::with_maintenance_margin(ratio)` force-closes the book when equity
+falls below `ratio × gross`, as `OrderKind::Liquidation`. **Opt-in**, and the
+default stays off deliberately: the ratio is a venue assumption that varies by
+exchange, instrument and tier, so stating it is the caller's job. This narrows —
+but does not close — what `ARCHITECTURE.md` says about a margin model.
+
+What is here: a threshold test at the end of each bar, triggered on the bar's
+**adverse extreme** (a long at the `low`, a short at the `high`), because a wick
+is what liquidates a levered account.
+
+What is **not** here, and what a real venue does:
+
+- **A fill price.** The forced legs book at the bar's `close`. The price at which
+  equity actually crossed the threshold is a point on a surface once more than
+  one symbol is involved, and is not recoverable from one bar. For a
+  single-symbol book it *is* computable in closed form — that is the obvious
+  refinement, and the reason this is written down.
+- **Partial liquidation.** Real venues close enough to restore the ratio, tier by
+  tier; this closes everything.
+- **Tiered ratios.** One number for the whole book, where a venue scales the
+  requirement with position size.
+- **Continuous marking.** The check runs once per bar, so a breach that opens and
+  closes inside one bar is caught only if the bar's extreme reaches it.
+
+**What would change this:** a user reconciling a live liquidation against a
+backtest and finding the *size* of the loss wrong rather than its existence.
+Getting the event right is most of the value; getting the fill exact needs the
+path, which a bar does not carry.
+
+### `max_gross` limits what is asked for, not what is held
 
 `max_gross` is checked when a fill books and never re-checked afterwards, so a
-book at exactly the cap drifts over it the moment marks move against it. Nothing
-liquidates, nothing warns, and the account simply cannot *add* until it is back
-under — exits stay exempt precisely so it can trade its way out.
+book at exactly the cap drifts over it the moment marks move against it. It
+bounds what a strategy may *ask for*; what happens to a book that has already
+drifted is `with_maintenance_margin`'s job, and the two are deliberately separate
+numbers — a venue's position limit and its liquidation threshold are not one
+setting either.
 
-That is deliberate, and it is the line `ARCHITECTURE.md` already draws around
-ruin: a maintenance-margin model needs venue assumptions fugazi does not have
-(which marks, what haircut, liquidated at what price, in what order). What is
-here bounds what a *strategy may ask for* so a levered backtest and the live
-account it tracks agree on the size of the book. What is not here is what a venue
-would do to that book afterwards.
-
-**What would change this:** a user reporting that a backtest survived a drawdown
-their real account was liquidated inside. That is the gap, and no amount of
-fill-time bounding closes it.
+Exits stay exempt from the cap precisely so a drifted account can trade its way
+back under without needing the margin call to do it.
 
 ### Setting a venue's leverage is not exposed
 
