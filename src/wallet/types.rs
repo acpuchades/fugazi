@@ -194,6 +194,21 @@ impl Size {
         Size::PositionFraction(fraction)
     }
 
+    /// Whether the sizing carries a finite number. A `NaN` or an infinity —
+    /// which an expression can manufacture, `!mul` overflowing to infinity and
+    /// `!sub` of two infinities being the short path — resolves to a `NaN`
+    /// magnitude that passes every solvency comparison and books a `NaN`
+    /// position. The account refuses it as
+    /// [`WalletError::InvalidQuantity`](crate::wallet::WalletError::InvalidQuantity).
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Size::Units(x)
+            | Size::FundsFraction(x)
+            | Size::ValueFraction(x)
+            | Size::PositionFraction(x) => x.is_finite(),
+        }
+    }
+
     /// Resolve to a non-negative unit magnitude from the current `price`, the
     /// symbol's `position`, the wallet's available `funds`, and its total
     /// `equity`.
@@ -431,6 +446,19 @@ pub enum WalletError {
     /// The fed price is not strictly positive, so it can't value or book a
     /// movement.
     InvalidPrice,
+    /// A requested quantity — a target position, a resolved size, or a
+    /// protective leg's trigger — is not a finite number.
+    ///
+    /// Its own variant rather than [`InvalidPrice`](Self::InvalidPrice) because
+    /// the two say different things to the caller, and because this one is the
+    /// account's last guard against a `NaN` it cannot recover from: a `NaN`
+    /// target passes every `>` and `<` solvency test (all of which read false),
+    /// books a `NaN` position, and takes cash and equity with it for the rest
+    /// of the run. An expression *can* manufacture one — `!mul` of two values
+    /// near the top of the range overflows to infinity and `!sub` of two
+    /// infinities is a `NaN` — and so can a direct `set_position` from Rust or
+    /// Python.
+    InvalidQuantity,
     /// The requested fill price lies outside the symbol's current candle range
     /// `[low, high]`, so it could not have traded on this bar.
     PriceOutOfRange,
@@ -474,6 +502,9 @@ impl fmt::Display for WalletError {
         match self {
             WalletError::UnknownPrice => f.write_str("no price has been fed for this symbol"),
             WalletError::InvalidPrice => f.write_str("the fed price is not strictly positive"),
+            WalletError::InvalidQuantity => {
+                f.write_str("the requested quantity is not a finite number")
+            }
             WalletError::UnsupportedOperation => {
                 f.write_str("the operation is not supported by this wallet implementation")
             }

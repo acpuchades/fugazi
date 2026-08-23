@@ -538,8 +538,12 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   **then** limits — so a protective exit books before a limit entry on the same bar.
   A triggered-but-unaffordable limit is a rejection and is *consumed*. Resting fill
   price provably in `[low, high]`.
-- **Errors.** `WalletError` (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`,
-  `InsufficientFunds`, `UnsupportedOperation`).
+- **Errors.** `WalletError` (`UnknownPrice`, `InvalidPrice`, `InvalidQuantity`,
+  `PriceOutOfRange`, `InsufficientFunds`, `ExceedsMaxGross`,
+  `UnsupportedOperation`, `Venue`). `InvalidQuantity` is the account's guard
+  against a non-finite request: a `NaN` reads false against **every** `>` and
+  `<`, so it clears both solvency rules and the range check, books a `NaN`
+  position, and takes cash and equity with it for the rest of the run.
 - **Optional capability methods** (defaulted, opt-in per impl): `adjust_funds` /
   `set_limit` / `cancel_limit` / `cancel` / `poll_fills` / `take_rejections`, plus
   **`positions() -> Vec<Units<Sym>>`** (default empty — "can't enumerate", *not*

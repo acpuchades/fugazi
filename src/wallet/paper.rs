@@ -959,8 +959,17 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         if delta.abs() <= POSITION_EPSILON {
             return Ok(None);
         }
+        // Last guard, and the one that matters: a `NaN` reads false against
+        // every `>` and `<` below, so it passes both solvency rules and the
+        // range check, books a `NaN` position, and takes cash and equity with it
+        // for the rest of the run. `delta` covers `target`; the fraction-sized
+        // paths resolve here rather than at submission, so this is where they
+        // are caught.
+        if !delta.is_finite() {
+            return Err(WalletError::InvalidQuantity);
+        }
         let bar = *self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
-        if theoretical_price <= 0.0 {
+        if !theoretical_price.is_finite() || theoretical_price <= 0.0 {
             return Err(WalletError::InvalidPrice);
         }
         // The pre-cost price must be one the bar actually traded at; cost
@@ -1184,6 +1193,9 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         current: Real,
         target: Real,
     ) -> Result<(), WalletError> {
+        if !target.is_finite() {
+            return Err(WalletError::InvalidQuantity);
+        }
         let close = self.price(symbol).ok_or(WalletError::UnknownPrice)?.0;
         if close <= 0.0 {
             return Err(WalletError::InvalidPrice);
@@ -1779,6 +1791,9 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         if close <= 0.0 {
             return Err(self.reject_submission(&symbol, WalletError::InvalidPrice));
         }
+        if !size.is_finite() {
+            return Err(self.reject_submission(&symbol, WalletError::InvalidQuantity));
+        }
         if let Size::Units(units) = size {
             let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
             let target = side.sign() * units.abs();
@@ -1797,6 +1812,12 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         trigger: Reference,
         size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
+        // A non-finite trigger never compares true against a bar's range, so
+        // the leg would rest forever without ever firing — a stop the caller
+        // believes is protecting a position and is not.
+        if !trigger.0.is_finite() || !size.is_finite() {
+            return Err(self.reject_submission(&symbol, WalletError::InvalidQuantity));
+        }
         let id = self.mint();
         self.protective.entry(symbol).or_default().stop = Some(Leg {
             trigger: trigger.0,
@@ -1812,6 +1833,10 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         trigger: Reference,
         size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
+        // See `set_stop`: a leg that can never fire is worse than no leg.
+        if !trigger.0.is_finite() || !size.is_finite() {
+            return Err(self.reject_submission(&symbol, WalletError::InvalidQuantity));
+        }
         let id = self.mint();
         self.protective.entry(symbol).or_default().take_profit = Some(Leg {
             trigger: trigger.0,
@@ -1833,8 +1858,11 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         size: Size,
         limit: Reference,
     ) -> Result<Ack<Sym>, WalletError> {
-        if limit.0 <= 0.0 {
+        if !limit.0.is_finite() || limit.0 <= 0.0 {
             return Err(WalletError::InvalidPrice);
+        }
+        if !size.is_finite() {
+            return Err(self.reject_submission(&symbol, WalletError::InvalidQuantity));
         }
         let id = self.mint();
         self.limits.insert(
@@ -3959,6 +3987,92 @@ mod tests {
         assert!(
             w.take_rejections().is_empty(),
             "a second drain must yield nothing"
+        );
+    }
+
+    /// A `NaN` is the one quantity the account cannot recover from: it reads
+    /// false against **every** `>` and `<`, so it clears both solvency rules and
+    /// the bar-range check, books a `NaN` position, and takes cash and equity
+    /// with it for the rest of the run. An expression can manufacture one —
+    /// `!mul` near the top of the range overflows to infinity and `!sub` of two
+    /// infinities is a `NaN` — and so can a direct `set_position` from Rust or
+    /// Python. Every entry point refuses it.
+    #[test]
+    fn a_non_finite_quantity_is_refused_at_every_entry_point() {
+        let bad = [Real::NAN, Real::INFINITY, Real::NEG_INFINITY];
+
+        for x in bad {
+            let mut w = PaperWallet::new(10_000.0);
+            w.update("BTC", ohlc(100.0, 101.0, 99.0, 100.0));
+            assert_eq!(
+                w.set_position(Units {
+                    symbol: "BTC",
+                    amount: x,
+                }),
+                Err(WalletError::InvalidQuantity),
+                "set_position accepted {x}"
+            );
+            assert_eq!(
+                w.set("BTC", Side::Buy, Size::Units(x)),
+                Err(WalletError::InvalidQuantity),
+                "set(units) accepted {x}"
+            );
+            assert_eq!(
+                w.set("BTC", Side::Buy, Size::ValueFraction(x)),
+                Err(WalletError::InvalidQuantity),
+                "set(value_frac) accepted {x}"
+            );
+            assert_eq!(
+                w.set_stop("BTC", Reference(x), Size::PositionFraction(1.0)),
+                Err(WalletError::InvalidQuantity),
+                "set_stop accepted a {x} trigger"
+            );
+            assert_eq!(
+                w.set_take_profit("BTC", Reference(x), Size::PositionFraction(1.0)),
+                Err(WalletError::InvalidQuantity),
+                "set_take_profit accepted a {x} trigger"
+            );
+            // A limit's price guard is `InvalidPrice` (it already had one for
+            // non-positive); its *size* is the quantity.
+            assert!(
+                w.set_limit("BTC", Side::Buy, Size::Units(1.0), Reference(x))
+                    .is_err(),
+                "set_limit accepted a {x} price"
+            );
+            assert_eq!(
+                w.set_limit("BTC", Side::Buy, Size::Units(x), Reference(100.0)),
+                Err(WalletError::InvalidQuantity),
+                "set_limit accepted a {x} size"
+            );
+            // Nothing was booked, and nothing rests.
+            assert_eq!(w.position(&"BTC").amount, 0.0);
+            assert!(w.equity().0.is_finite());
+        }
+
+        // The refusals are on the same failure stream as a fill-time drop, so a
+        // strategy that ignores the `Err` still leaves a trace.
+        let mut w = PaperWallet::new(10_000.0);
+        w.update("BTC", ohlc(100.0, 101.0, 99.0, 100.0));
+        let _ = w.set_position(Units {
+            symbol: "BTC",
+            amount: Real::NAN,
+        });
+        assert!(
+            w.rejections()
+                .iter()
+                .any(|r| r.error == WalletError::InvalidQuantity),
+            "the refusal was not recorded"
+        );
+
+        // …and an ordinary request is untouched.
+        let mut w = PaperWallet::new(10_000.0);
+        w.update("BTC", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert!(
+            w.set_position(Units {
+                symbol: "BTC",
+                amount: 5.0,
+            })
+            .is_ok()
         );
     }
 }

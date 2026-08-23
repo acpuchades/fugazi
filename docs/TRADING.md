@@ -198,7 +198,10 @@ Every one of those paths goes through the same private engine, `fill_at`.
    liquidity rather than taking it, and anything else would let the pipeline fill
    it worse than the price a limit order exists to guarantee. Per-symbol cost
    overrides win over the wallet's default bundle.
-4. **Solvency, in two rules.** *Cash*: on an unlevered wallet a net buy plus its
+4. **Solvency, in two rules** — preceded by a finiteness guard, because a `NaN`
+   quantity passes both of them (and rule 2 above) by reading false against
+   every comparison, and would book a `NaN` position: `InvalidQuantity`.
+   *Cash*: on an unlevered wallet a net buy plus its
    commission cannot drive cash below zero, otherwise `InsufficientFunds`.
    *Leverage*: no fill may leave gross notional (`Σ |position| × price`) above
    `max_gross × equity`, otherwise `ExceedsMaxGross`.
