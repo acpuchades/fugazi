@@ -80,7 +80,7 @@ pub fn build_error(e: String) -> anyhow::Error {
 /// [`Schema::empty()`] when the stream is empty or none of the atoms are
 /// overlay-bearing (i.e. no side channel), so a `!get { key }` in the spec
 /// panics with a helpful "unknown key" against the empty registered-keys list.
-pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
+pub fn schema_from_atoms<K>(atoms: &[(K, Atom)]) -> std::sync::Arc<Schema> {
     atoms
         .iter()
         .find_map(|(_, a)| a.overlays.as_ref())

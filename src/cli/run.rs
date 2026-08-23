@@ -48,7 +48,7 @@ use fugazi::prelude::*;
 use crate::backtest::{self, EvalContext, IterationResult};
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
-use crate::data::DataFrame;
+use crate::data::{DataFrame, IndexKey};
 use crate::daterange::{self, Slice};
 use crate::metrics;
 use crate::overlap::{self, Overlap};
@@ -350,7 +350,8 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // representations at once — on a long run that is a second copy of the whole
     // series resident at peak for no reason, and `Atom` is 88 bytes a bar before
     // its overlays.
-    let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let bar_keys: Vec<IndexKey> = atoms.iter().map(|(k, _)| k.clone()).collect();
+    let bars: Vec<String> = bar_keys.iter().map(IndexKey::to_string).collect();
     // Series the document reads but does not trade — resolved (and refused, if
     // absent) before the stream is built, so a missing one is an error rather
     // than a run of `None`s. Nothing to do for a document that names none,
@@ -366,7 +367,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // entries to existing snapshots, never snapshots of its own. The traded
     // symbol is therefore present in every snapshot, which is what keeps the
     // strategy's `Position` and `Book` reading its own candle.
-    attach_read_series(&bars, &mut snapshots, &read_only);
+    attach_read_series(&bar_keys, &mut snapshots, &read_only);
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
     // Resolved before the inputs block prints, so the `period` line names the
     // range that will be *measured* rather than the range the file covers.
@@ -421,8 +422,9 @@ pub fn run_pairs(
         .map_err(backtest::build_error)?;
     let left_series = frame.atoms(&left)?;
     let right_series = frame.atoms(&right)?;
-    let (bars, left_atoms, right_atoms) =
+    let (bar_keys, left_atoms, right_atoms) =
         join_pair_by_time(&left_series.atoms, &right_series.atoms);
+    let bars: Vec<String> = bar_keys.iter().map(IndexKey::to_string).collect();
 
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
@@ -476,7 +478,7 @@ pub fn run_pairs(
     // privileged here, so `!pick` is already mandatory on every leaf; this only
     // widens which assets one can name.
     let read_only = read_only_series(frame, &[left.as_str(), right.as_str()], opts.reads)?;
-    attach_read_series(&bars, &mut snapshots, &read_only);
+    attach_read_series(&bar_keys, &mut snapshots, &read_only);
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
     // The slice lands on the *joined* timeline, so two partially-overlapping
     // legs behave the way the dates say rather than the way the files do.
@@ -542,11 +544,12 @@ fn run_universe(
     }
     // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
     // BTreeMap so ascending order is guaranteed by construction).
-    let per_symbol: Vec<(Symbol, Vec<(String, Atom)>)> = universe
+    let per_symbol: Vec<(Symbol, Vec<(IndexKey, Atom)>)> = universe
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
-    let (bars, mut snapshots) = join_universe_by_time(&per_symbol);
+    let (bar_keys, mut snapshots) = join_universe_by_time(&per_symbol);
+    let bars: Vec<String> = bar_keys.iter().map(IndexKey::to_string).collect();
     // Series read but not traded. Empty whenever the universe is the whole
     // frame — every `!pick` target is already in it — so for basket and
     // multi-asset this is purely the "named a symbol that isn't in the input"
@@ -554,7 +557,7 @@ fn run_universe(
     // `None` forever and scores nothing, silently.
     let traded_refs: Vec<&str> = traded.iter().map(String::as_str).collect();
     let read_only = read_only_series(frame, &traded_refs, opts.reads)?;
-    attach_read_series(&bars, &mut snapshots, &read_only);
+    attach_read_series(&bar_keys, &mut snapshots, &read_only);
     if bars.is_empty() {
         anyhow::bail!(
             "no bars found in the input series across the {} discovered symbol(s)",
@@ -596,7 +599,7 @@ fn run_universe(
     // dropped column), while this one says the run is about to measure
     // something other than the universe it names. `--quiet` suppresses the
     // summary, not a finding about the data.
-    overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
+    overlap::warn_if_fragmented(&overlap, overlap.at.as_deref(), overlap::RUN_CONSEQUENCE);
 
     let iter = iterate(&any, sliced.bars, &sliced.snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
@@ -736,7 +739,7 @@ fn universe_calendar(
     opts: &RunOptions<'_>,
     frame: &DataFrame,
     representative: &str,
-    per_symbol: &[(Symbol, Vec<(String, fugazi::types::Atom)>)],
+    per_symbol: &[(Symbol, Vec<(IndexKey, fugazi::types::Atom)>)],
 ) -> Result<(Option<Frequency>, Real)> {
     let effective_freq = calendar::pick_frequency(opts.frequency, representative)
         .or_else(|| frame.declared_frequency(representative))
@@ -916,33 +919,36 @@ fn costs_active<'a>(
 /// convention at the call sites rather than folded in here, so this stays a
 /// pure join.
 pub(crate) fn join_universe_by_time(
-    per_symbol: &[(Symbol, Vec<(String, Atom)>)],
-) -> (Vec<String>, Vec<fugazi::types::Snapshot<Symbol>>) {
+    per_symbol: &[(Symbol, Vec<(IndexKey, Atom)>)],
+) -> (Vec<IndexKey>, Vec<fugazi::types::Snapshot<Symbol>>) {
     // Cursor per symbol.
     let mut cursors = vec![0usize; per_symbol.len()];
-    let mut times: Vec<String> = Vec::new();
+    let mut times: Vec<IndexKey> = Vec::new();
     let mut snaps: Vec<fugazi::types::Snapshot<Symbol>> = Vec::new();
     loop {
-        // Find the smallest time head across all live cursors.
-        let next_time: Option<&str> = per_symbol
+        // Find the smallest index head across all live cursors. Compared as
+        // `IndexKey`, which is the same order `DataFrame`'s `BTreeMap` sorted
+        // the streams into — comparing the rendered labels instead would be a
+        // second, lexicographic order, and the two disagree on any numeric
+        // index (`"10" < "9"`).
+        let next_key: Option<&IndexKey> = per_symbol
             .iter()
             .zip(cursors.iter())
-            .filter_map(|((_sym, atoms), &i)| atoms.get(i).map(|(t, _)| t.as_str()))
+            .filter_map(|((_sym, atoms), &i)| atoms.get(i).map(|(k, _)| k))
             .min();
-        let Some(next) = next_time else {
+        let Some(next) = next_key.cloned() else {
             break;
         };
-        let next_owned = next.to_string();
         let mut snap = fugazi::types::Snapshot::<Symbol>::new();
         for ((sym, atoms), cursor) in per_symbol.iter().zip(cursors.iter_mut()) {
-            if let Some((t, atom)) = atoms.get(*cursor)
-                && t == &next_owned
+            if let Some((k, atom)) = atoms.get(*cursor)
+                && k == &next
             {
                 snap.push(Some(sym.clone()), None, atom.clone());
                 *cursor += 1;
             }
         }
-        times.push(next_owned);
+        times.push(next);
         snaps.push(snap);
     }
     (times, snaps)
@@ -951,7 +957,7 @@ pub(crate) fn join_universe_by_time(
 /// Per-symbol atom streams, each sorted by its time label — what
 /// [`DataFrame::atoms`] produces per symbol and [`join_universe_by_time`]
 /// consumes.
-pub(crate) type SymbolStreams = Vec<(Symbol, Vec<(String, Atom)>)>;
+pub(crate) type SymbolStreams = Vec<(Symbol, Vec<(IndexKey, Atom)>)>;
 
 /// Resolve the series a document **reads but does not trade** — every symbol
 /// `opts.reads` collected from an explicit `!pick { symbol: … }`, minus the ones
@@ -1010,13 +1016,15 @@ pub(crate) fn read_only_series(
 /// would describe a timeline the traded asset never had. So `bars` stays what
 /// it was, and a read series simply contributes an entry to the bars it shares.
 ///
-/// Both sides are sorted by the time label (`DataFrame::atoms` walks a
+/// Both sides are sorted by [`IndexKey`] (`DataFrame::atoms` walks a
 /// `BTreeMap`), which is the same ordering assumption
 /// [`join_universe_by_time`] makes, so one forward cursor per series suffices.
+/// Keys, not rendered labels: a lexicographic walk of a numeric index advances
+/// in a different order and would drop matching bars without erroring.
 pub(crate) fn attach_read_series(
-    bars: &[String],
+    bars: &[IndexKey],
     snapshots: &mut [fugazi::types::Snapshot<Symbol>],
-    read_only: &[(Symbol, Vec<(String, Atom)>)],
+    read_only: &[(Symbol, Vec<(IndexKey, Atom)>)],
 ) {
     for (sym, atoms) in read_only {
         let mut cursor = 0usize;
@@ -1041,7 +1049,7 @@ fn print_basket_inputs_block(
     universe: &[Symbol],
     sliced: &Sliced,
     costs_active: bool,
-    overlap: &Overlap<&str>,
+    overlap: &Overlap<String>,
 ) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
@@ -1246,12 +1254,16 @@ fn sliced_inputs(
 /// `time` (by construction — `DataFrame::atoms` walks a `BTreeMap`), so a
 /// simple two-cursor merge suffices.
 fn join_pair_by_time(
-    left: &[(String, Atom)],
-    right: &[(String, Atom)],
-) -> (Vec<String>, Vec<Atom>, Vec<Atom>) {
+    left: &[(IndexKey, Atom)],
+    right: &[(IndexKey, Atom)],
+) -> (Vec<IndexKey>, Vec<Atom>, Vec<Atom>) {
     let (mut times, mut ls, mut rs) = (Vec::new(), Vec::new(), Vec::new());
     let (mut i, mut j) = (0, 0);
     while i < left.len() && j < right.len() {
+        // On `IndexKey`, not on the rendered label: the two-cursor merge is only
+        // valid if it advances in the same order `DataFrame` sorted the streams
+        // into, and a lexicographic comparison of a numeric index is a different
+        // order (`"10" < "9"`) that would silently drop matching bars.
         match left[i].0.cmp(&right[j].0) {
             std::cmp::Ordering::Equal => {
                 times.push(left[i].0.clone());

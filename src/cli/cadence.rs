@@ -386,6 +386,15 @@ pub enum Finding {
         /// One offending stamp, verbatim, so the reader can see the scale.
         example: i64,
     },
+    /// The frame is keyed by a numeric `index`, so it has no cadence to
+    /// census. Informational, not a warning about the data.
+    IndexSampled {
+        /// How many bars the frame carries, across every symbol.
+        bars: usize,
+        /// Whether the rows still carry a parseable `time` column — which
+        /// decides how much of the calendar layer keeps working.
+        timed: bool,
+    },
     /// A series' label and its timestamp spacing disagree.
     Mislabelled {
         symbol: String,
@@ -409,6 +418,28 @@ impl Finding {
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Finding::IndexSampled { bars, timed } => {
+                write!(
+                    f,
+                    "the input is index-sampled ({bars} bars keyed by a numeric `index`), so it \
+                     has no bar cadence: annualization cannot be looked up from a calendar, \
+                     `-w`'s duration form is unavailable, and freq-scoped `--costs` entries \
+                     match nothing. "
+                )?;
+                if *timed {
+                    f.write_str(
+                        "The rows do carry a parseable `time` column, so carry is pro-rated over \
+                         the interval each bar actually spans, the calendar leaves read real \
+                         dates, and `bars_per_year` is measured from the span the input covers.",
+                    )
+                } else {
+                    f.write_str(
+                        "The rows carry no parseable `time`, so carry charges nothing, the \
+                         calendar leaves read `None` on every bar, and `--bars-per-year` has to \
+                         be passed explicitly.",
+                    )
+                }
+            }
             Finding::Ambiguous { symbol, cadences } => {
                 let list = cadences
                     .iter()
@@ -509,6 +540,17 @@ impl fmt::Display for Finding {
 /// Errors abort with every error finding in one message: a frame with three
 /// ambiguous symbols should not take three runs to fix.
 pub fn apply(frame: &mut DataFrame, specs: &[ScopedFrequency]) -> Result<Vec<Finding>> {
+    // An index-sampled frame has no cadence to census, and every finding below
+    // is *about* a cadence. Detection would still produce one — the median gap
+    // between dollar-bar closes snaps to some named `Frequency` like any other
+    // number — and it would be an artefact of how busy the tape was, reported
+    // with the same confidence as a real one. Say what the input is instead.
+    if frame.is_index_sampled() {
+        return Ok(vec![Finding::IndexSampled {
+            bars: frame.len(),
+            timed: frame.has_parseable_times(),
+        }]);
+    }
     let resolution = Census::of(frame).resolve(specs);
     if resolution.has_errors() {
         let errors: Vec<String> = resolution

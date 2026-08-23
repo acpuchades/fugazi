@@ -20,7 +20,7 @@ use crate::calendar::{
     self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency, WalkForwardSpec, WindowSpec,
 };
 use crate::costs::CostConfig;
-use crate::data::DataFrame;
+use crate::data::{DataFrame, IndexKey};
 use crate::daterange::{self, Slice};
 use crate::imports;
 use crate::input;
@@ -433,7 +433,7 @@ fn run_single(
     // would skip warm-up twice and lay the first fold out later than asked.
     // The sweep takes the prefix and warms across it.
     let sliced_schema = backtest::schema_from_atoms(&atoms);
-    let bar_labels: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let bar_labels: Vec<String> = atoms.iter().map(|(t, _)| t.to_string()).collect();
     let slice = optimize_slice(opts, &bar_labels, || {
         let keep_unstable = opts.keep_unstable;
         let cash = opts.cash;
@@ -478,7 +478,7 @@ fn run_single(
         // Interned once: every bar's `Snapshot::single` then clones a refcount
         // rather than allocating a fresh copy of the same symbol.
         let wf_symbol = fugazi::types::symbol(&probe_symbol);
-        let wf_bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+        let wf_keys: Vec<IndexKey> = atoms.iter().map(|(k, _)| k.clone()).collect();
         let mut wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
             .iter()
             .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
@@ -486,7 +486,7 @@ fn run_single(
         // Left-joined onto the traded symbol's bars — see `run::attach_read_series`.
         // The folds slice this stream by index, so a read series has to be on it
         // before the split, not per fold.
-        attach_read_series(&wf_bars, &mut wf_snapshots, &read_only);
+        attach_read_series(&wf_keys, &mut wf_snapshots, &read_only);
         let wf_snapshots_ref = &wf_snapshots;
         let ctx = backtest::EvalContext {
             cash,
@@ -549,12 +549,12 @@ fn run_single(
     // this inside every call).
     // Interned once — see the walk-forward branch above.
     let symbol = fugazi::types::symbol(&probe_symbol);
-    let sweep_bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let sweep_keys: Vec<IndexKey> = atoms.iter().map(|(k, _)| k.clone()).collect();
     let mut snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
         .iter()
         .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
         .collect();
-    attach_read_series(&sweep_bars, &mut snapshots, &read_only);
+    attach_read_series(&sweep_keys, &mut snapshots, &read_only);
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
@@ -604,7 +604,7 @@ fn run_single(
             )
             .map_err(anyhow::Error::msg)?,
         };
-        let labels: Vec<String> = other_atoms.iter().map(|(t, _)| t.clone()).collect();
+        let labels: Vec<String> = other_atoms.iter().map(|(t, _)| t.to_string()).collect();
         let other_slice = optimize_slice(opts, &labels, || Ok(slice.warmup_bars()))?;
         let warm = (other_slice.warmup_bars() > 0).then(|| other_slice.warmup_bars());
         let other_atoms = if other_slice.is_everything(other_atoms.len()) {
@@ -613,13 +613,13 @@ fn run_single(
             other_atoms[other_slice.fed()].to_vec()
         };
         let sym = fugazi::types::symbol(&key.symbol);
-        let bars: Vec<String> = other_atoms.iter().map(|(t, _)| t.clone()).collect();
+        let bar_keys: Vec<IndexKey> = other_atoms.iter().map(|(k, _)| k.clone()).collect();
         let mut snaps: Vec<fugazi::types::Snapshot<Symbol>> = other_atoms
             .iter()
             .map(|(_, a)| fugazi::types::Snapshot::single(sym.clone(), a.clone()))
             .collect();
         let reads_here = read_only_series(frame, &[key.symbol.as_str()], &reads)?;
-        attach_read_series(&bars, &mut snaps, &reads_here);
+        attach_read_series(&bar_keys, &mut snaps, &reads_here);
         streams.insert(
             key.clone(),
             (
@@ -678,7 +678,7 @@ fn run_single(
 
     if !opts.quiet {
         let finished = SystemTime::now();
-        let fed: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+        let fed: Vec<String> = atoms.iter().map(|(t, _)| t.to_string()).collect();
         let period = evaluated_period_line(&fed, sweep_warmup.unwrap_or(0));
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         style::print_warns(&style::collect_warnings(
@@ -788,11 +788,12 @@ fn run_multi_symbol(
     // Per-symbol atom streams, sorted by time. `DataFrame::atoms` walks a
     // BTreeMap so each per-symbol stream is already ascending; the joiner
     // then N-way merges them into shared bar-tagged snapshots.
-    let per_symbol: Vec<(Symbol, Vec<(String, Atom)>)> = universe
+    let per_symbol: Vec<(Symbol, Vec<(IndexKey, Atom)>)> = universe
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
-    let (bars, mut snapshots) = join_universe_by_time(&per_symbol);
+    let (bar_keys, mut snapshots) = join_universe_by_time(&per_symbol);
+    let bars: Vec<String> = bar_keys.iter().map(IndexKey::to_string).collect();
     // Empty unless the universe is narrower than the frame (pairs), since every
     // `!pick` target of a basket / multi / portfolio sweep is already traded —
     // so for those three this is the "named a symbol that isn't in the input"
@@ -800,7 +801,7 @@ fn run_multi_symbol(
     let traded_refs: Vec<&str> = universe.iter().map(|s| s.as_ref()).collect();
     let reads = probe_reads(base_value, &subgrids)?;
     let read_only = read_only_series(frame, &traded_refs, &reads)?;
-    attach_read_series(&bars, &mut snapshots, &read_only);
+    attach_read_series(&bar_keys, &mut snapshots, &read_only);
     if snapshots.is_empty() {
         bail!(
             "no bars found in the input series across the {} discovered symbol(s)",
@@ -812,7 +813,7 @@ fn run_multi_symbol(
     // that sweep measures something other than the universe it names, and that
     // is worth knowing before the grid runs, not after. See `crate::overlap`.
     let overlap = overlap::measure_universe(&per_symbol);
-    overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
+    overlap::warn_if_fragmented(&overlap, overlap.at.as_deref(), overlap::RUN_CONSEQUENCE);
 
     // Cadence: the representative (first) symbol's `--frequency` scope, then
     // its declared `freq` column, then detection from its timestamps. Matches

@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
@@ -52,8 +53,107 @@ type Row = HashMap<String, String>;
 /// Columns treated as OHLCV or metadata and therefore never lifted into an
 /// overlay schema. Everything else in a row is a candidate overlay column.
 const RESERVED_COLUMNS: &[&str] = &[
-    "symbol", "time", "freq", "open", "high", "low", "close", "volume",
+    "symbol", "time", "index", "freq", "open", "high", "low", "close", "volume",
 ];
+
+/// The ordered join key of one bar — what a `--series` frame is indexed by.
+///
+/// A bar stream needs a key that says *which* bar this is and how bars order
+/// against each other. Wall-clock time is the familiar one, but it is not the
+/// only sound one: an index-sampled stream (volume, dollar or tick bars) closes
+/// its bars on traded quantity, and the sequence number of the bucket is what
+/// identifies a bar there.
+///
+/// # Why this is a type and not a `String`
+///
+/// It used to be a `String`, ordered lexicographically by the frame's
+/// `BTreeMap` — which is correct for ISO-8601 and silently wrong for integers,
+/// where `"10" < "9"`. A numeric index would have produced a scrambled bar order
+/// with no error at all.
+///
+/// The tempting fix — one `String` with a comparator that "notices" integers —
+/// **is not a total order**, so it cannot back a `BTreeMap`. Take `"9"`, `"10"`
+/// and `"1a"`: the first two compare numerically (`9 < 10`), but `"10" < "1a"`
+/// and `"1a" < "9"` lexicographically, so `9 < 10 < 1a < 9`. Transitivity fails
+/// and the map corrupts. Making the two kinds distinct variants is what makes
+/// the order well-defined.
+///
+/// # Ordering across variants
+///
+/// Derived: every [`Ordinal`](Self::Ordinal) sorts before every
+/// [`Label`](Self::Label). That ordering is never *used* — a frame mixing the
+/// two is refused at load ([`DataFrame::from_series`]) — but it has to exist and
+/// be consistent for `Ord` to be lawful.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IndexKey {
+    /// A numeric sequence index, ordered numerically. Comes only from an
+    /// `index` column whose cell parses as an `i64`.
+    ///
+    /// Its text form normalises: `007` and `7` are the same bar, and both
+    /// render as `7`. That is the point — they *are* the same index — but it
+    /// means a zero-padded input does not round-trip its padding.
+    Ordinal(i64),
+    /// A label, ordered lexicographically — exactly as every frame was ordered
+    /// before this type existed. Timestamps land here, which is why ISO-8601's
+    /// sort-as-text property still carries the ordering for time bars.
+    Label(String),
+}
+
+impl IndexKey {
+    /// The key for a `time` column cell — **always** a [`Label`](Self::Label).
+    ///
+    /// A bare integer in a `time` column is an epoch stamp, not an ordinal
+    /// (`calendar::parse_time_to_millis` reads it that way), so this deliberately
+    /// does not try to parse one. Which column a cell came from is what
+    /// disambiguates the two readings; the cell text alone cannot.
+    pub fn from_time_cell(cell: &str) -> Self {
+        IndexKey::Label(cell.to_string())
+    }
+
+    /// The key for an `index` column cell: [`Ordinal`](Self::Ordinal) when it
+    /// parses as an `i64`, else a [`Label`](Self::Label).
+    ///
+    /// The `Label` fallback is what lets an `index` column carry a non-numeric
+    /// shared key — a session id, an auction sequence — rather than forcing
+    /// every index-sampled file to number its buckets.
+    pub fn from_index_cell(cell: &str) -> Self {
+        match cell.parse::<i64>() {
+            Ok(n) => IndexKey::Ordinal(n),
+            Err(_) => IndexKey::Label(cell.to_string()),
+        }
+    }
+
+    /// Whether this key is an [`Ordinal`](Self::Ordinal) — the discriminant the
+    /// mixed-frame check compares.
+    pub fn is_ordinal(&self) -> bool {
+        matches!(self, IndexKey::Ordinal(_))
+    }
+}
+
+/// A bare string is a [`Label`](IndexKey::Label) — the reading a `time` cell
+/// gets. An [`Ordinal`](IndexKey::Ordinal) is never inferred from loose text;
+/// it requires [`from_index_cell`](IndexKey::from_index_cell), because only the
+/// column a cell came from can tell an epoch from a sequence number.
+impl From<&str> for IndexKey {
+    fn from(s: &str) -> Self {
+        IndexKey::Label(s.to_string())
+    }
+}
+
+impl From<String> for IndexKey {
+    fn from(s: String) -> Self {
+        IndexKey::Label(s)
+    }
+}
+
+impl fmt::Display for IndexKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndexKey::Ordinal(n) => write!(f, "{n}"),
+            IndexKey::Label(s) => f.write_str(s),
+        }
+    }
+}
 
 /// Classification state for one candidate overlay column, accumulated across
 /// a symbol's rows. Two flags start `true` and monotonically flip to `false`
@@ -125,15 +225,15 @@ fn parse_bool_token(s: &str) -> bool {
     s.eq_ignore_ascii_case("true")
 }
 
-/// The atom series for one symbol: per-bar `(time, atom)` pairs plus a
+/// The atom series for one symbol: per-bar `(index, atom)` pairs plus a
 /// vestigial "skipped columns" list (always empty in the current
 /// implementation — retained so the existing warning banners in
 /// [`crate::run`] / [`crate::optimize`] compile unchanged; follow-up cleanup
 /// will remove both the field and the banners).
 #[derive(Debug)]
 pub struct AtomSeries {
-    /// One `(time, atom)` per bar, ascending by `time`.
-    pub atoms: Vec<(String, Atom)>,
+    /// One `(index, atom)` per bar, ascending by [`IndexKey`].
+    pub atoms: Vec<(IndexKey, Atom)>,
     /// **Deprecated.** Non-reserved columns that used to be dropped from the
     /// schema for carrying a non-numeric value; the loader now preserves
     /// those as `Str` overlays and returns an empty list here.
@@ -214,7 +314,7 @@ impl SeriesSpec {
     }
 }
 
-/// The merged long dataframe: rows keyed by `(symbol, freq, time)`.
+/// The merged long dataframe: rows keyed by `(symbol, freq, index)`.
 ///
 /// The middle component is the `freq` **cell as written**, trimmed but never
 /// case-folded — `1M` is a month and `1m` is a minute, so lowercasing the key
@@ -222,7 +322,7 @@ impl SeriesSpec {
 /// none could be inferred (see the module docs).
 #[derive(Debug, Default)]
 pub struct DataFrame {
-    rows: BTreeMap<(String, String, String), Row>,
+    rows: BTreeMap<(String, String, IndexKey), Row>,
     /// Memoized frame-wide overlay schema — see
     /// [`shared_schema`](Self::shared_schema). Every atom the frame produces
     /// binds to this one `Arc`, which is what makes a cross-symbol `!get`
@@ -252,7 +352,73 @@ impl DataFrame {
         for (raw, row) in loaded {
             frame.insert(raw, row, &fallback)?;
         }
+        frame.refuse_mixed_index_kinds()?;
         Ok(frame)
+    }
+
+    /// Refuse a frame whose rows are keyed by two different kinds of index.
+    ///
+    /// A numeric index and a label index order by different rules, and
+    /// [`IndexKey`]'s cross-variant ordering exists only to keep `Ord` lawful —
+    /// it is not a meaningful interleaving of the two. A frame carrying both is
+    /// two bar streams stacked into one, and there is no ordering of the union
+    /// that is right for both.
+    ///
+    /// Ambiguity is refused rather than resolved, the same bargain
+    /// [`crate::cadence`] strikes: picking one for the user would produce a
+    /// plausible-looking result off a bar order nobody asked for. The remedy is
+    /// a consistent input, which is a dataset choice the caller makes.
+    fn refuse_mixed_index_kinds(&self) -> Result<()> {
+        let mut ordinal: Option<&IndexKey> = None;
+        let mut label: Option<&IndexKey> = None;
+        for (_, _, index) in self.rows.keys() {
+            let slot = if index.is_ordinal() {
+                &mut ordinal
+            } else {
+                &mut label
+            };
+            slot.get_or_insert(index);
+            if let (Some(o), Some(l)) = (ordinal, label) {
+                bail!(
+                    "the input mixes a numeric `index` ({o}) with a label index ({l}); \
+                     the two order by different rules and cannot be interleaved into one \
+                     bar stream — give every row the same kind of index, or load them as \
+                     separate runs"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this frame is keyed by a numeric `index` rather than by a time
+    /// label — i.e. whether it is **index-sampled**.
+    ///
+    /// Checked on the first key only: [`refuse_mixed_index_kinds`] has already
+    /// established the frame is homogeneous by the time anything asks.
+    ///
+    /// [`refuse_mixed_index_kinds`]: Self::refuse_mixed_index_kinds
+    pub fn is_index_sampled(&self) -> bool {
+        self.rows
+            .keys()
+            .next()
+            .is_some_and(|(_, _, k)| k.is_ordinal())
+    }
+
+    /// How many rows the frame holds, across every symbol and cadence.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether any row carries a `time` cell that parses.
+    ///
+    /// The difference between an index-sampled series that kept its wall-clock
+    /// stamps — where carry, the calendar leaves and measured annualization all
+    /// keep working — and one that did not, where each of those degrades. The
+    /// census reports which, since the two look identical from the outside.
+    pub fn has_parseable_times(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|((_, _, index), row)| row_time_ms(index, row).is_some())
     }
 
     /// Every unique `symbol` present in the frame, in ascending order.
@@ -315,9 +481,9 @@ impl DataFrame {
     /// against anything.
     pub fn cadence_groups(&self) -> Vec<(String, String, Vec<i64>)> {
         let mut by_group: BTreeMap<(&str, &str), Vec<i64>> = BTreeMap::new();
-        for (sym, freq, time) in self.rows.keys() {
+        for ((sym, freq, index), row) in &self.rows {
             let bucket = by_group.entry((sym.as_str(), freq.as_str())).or_default();
-            if let Some(ms) = calendar::parse_time_to_millis(time) {
+            if let Some(ms) = row_time_ms(index, row) {
                 bucket.push(ms);
             }
         }
@@ -345,7 +511,14 @@ impl DataFrame {
             .retain(|(sym, f, _), _| sym != symbol || f == freq);
     }
 
-    /// Merge one row into the frame, joining on `(symbol, freq, time)`.
+    /// Merge one row into the frame, joining on `(symbol, freq, index)`.
+    ///
+    /// The index cell comes from an `index` column when the row has one, else
+    /// from `time`. A row carrying **both** keys on `index` and still parses
+    /// `time` into `Atom::time` — which is the shape an index-sampled series
+    /// wants: dollar bars have a perfectly good close time, and keeping it is
+    /// what lets the calendar leaves, carry pro-rating and measured
+    /// annualization keep working on a stream that joins on its bucket number.
     ///
     /// `untagged_fallback` maps a symbol to the sole cadence it declares
     /// elsewhere in this load; a row with no `freq` cell of its own joins that
@@ -365,16 +538,18 @@ impl DataFrame {
             .get("symbol")
             .cloned()
             .ok_or_else(|| anyhow!("series `{spec}`: a row is missing a `symbol` column"))?;
-        let time = row
-            .get("time")
-            .cloned()
-            .ok_or_else(|| anyhow!("series `{spec}`: a row is missing a `time` column"))?;
+        let index = match row.get("index").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(cell) => IndexKey::from_index_cell(cell),
+            None => IndexKey::from_time_cell(row.get("time").ok_or_else(|| {
+                anyhow!("series `{spec}`: a row is missing both an `index` and a `time` column")
+            })?),
+        };
         let freq = declared_cadence(&row)
             .map(str::to_string)
             .or_else(|| untagged_fallback.get(&symbol).cloned())
             .unwrap_or_default();
         self.rows
-            .entry((symbol, freq, time))
+            .entry((symbol, freq, index))
             .or_default()
             .extend(row);
         Ok(())
@@ -479,18 +654,22 @@ impl DataFrame {
         // Second pass: build one atom per row, attaching overlays when the
         // schema has any columns.
         let mut atoms = Vec::new();
-        for ((sym, _freq, time), row) in &self.rows {
+        for ((sym, _freq, index), row) in &self.rows {
             if sym != symbol {
                 continue;
             }
-            let candle = row_to_candle(sym, time, row)?;
+            let label = index.to_string();
+            let candle = row_to_candle(sym, &label, row)?;
             // Parse the row's `time` label into a UTC-ms `Timestamp` when it
             // matches a known shape (RFC3339, `YYYY-MM-DD [HH:MM:SS]`, epoch
             // s/ms) — so `Atom::time` carries the real bar-open time and the
             // calendar indicators / duration-form `-w` don't have to re-parse.
             // An unparseable label leaves `time` as `None`; the strings still
             // sort the frame the way the user typed them.
-            let ts = calendar::parse_time_to_millis(time).map(Timestamp);
+            // From the `time` **column**, not the join key: a row may join on
+            // an `index` and still carry a wall-clock stamp, which is exactly
+            // the shape an index-sampled series wants.
+            let ts = row_time_ms(index, row).map(Timestamp);
             // Built field-wise rather than through the constructors: with the
             // candle optional there are eight combinations, and naming them all
             // reads worse than the three fields do.
@@ -505,7 +684,7 @@ impl DataFrame {
                 OverlayInfo::new(schema.clone(), values)
             });
             atoms.push((
-                time.clone(),
+                index.clone(),
                 Atom {
                     candle,
                     time: ts,
@@ -526,6 +705,26 @@ impl DataFrame {
 ///
 /// Not case-folded — `Frequency` spells month `1M` and minute `1m`, so the
 /// case *is* the unit.
+/// The wall-clock time a row carries, in epoch milliseconds.
+///
+/// Read from the `time` **column** when there is one, falling back to the join
+/// key's own text. The fallback is what keeps a plain time-indexed frame — where
+/// the key *is* the time cell — behaving exactly as it did.
+///
+/// One rule, used by both [`DataFrame::atoms`] and
+/// [`DataFrame::cadence_groups`]: if they disagreed about which cell is the
+/// clock, the cadence the census reports would not be the cadence the run
+/// annualizes with.
+fn row_time_ms(index: &IndexKey, row: &Row) -> Option<i64> {
+    row.get("time")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || calendar::parse_time_to_millis(&index.to_string()),
+            calendar::parse_time_to_millis,
+        )
+}
+
 fn declared_cadence(row: &Row) -> Option<&str> {
     row.get("freq").map(|s| s.trim()).filter(|s| !s.is_empty())
 }
@@ -708,6 +907,136 @@ mod tests {
     /// `cargo test`, with another checkout, and with another user's leftovers —
     /// and the failure reads as a data bug rather than as the clash it is.
     /// Same reasoning as `tests/common/cli.rs::unique_path`.
+    /// **Regression.** A numeric `index` orders numerically. Keyed as a plain
+    /// string — which is what the frame did before [`IndexKey`] existed — bar 10
+    /// sorts before bar 9, and the run reports a scrambled bar order with no
+    /// error anywhere.
+    #[test]
+    fn a_numeric_index_orders_numerically_not_lexicographically() {
+        let mut rows = String::from("symbol,index,open,high,low,close,volume\n");
+        for i in 0..12 {
+            let c = 100 + i;
+            rows.push_str(&format!("BTC,{i},{c},{c},{c},{c},1\n"));
+        }
+        let f = tmp_csv("fugazi_index_order.csv", &rows);
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC").unwrap();
+
+        let order: Vec<i64> = series
+            .atoms
+            .iter()
+            .map(|(k, _)| match k {
+                IndexKey::Ordinal(n) => *n,
+                other => panic!("expected an ordinal, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(order, (0..12).collect::<Vec<_>>());
+
+        // And the closes ride along in the same order — the actual consequence.
+        let closes: Vec<Real> = series
+            .atoms
+            .iter()
+            .map(|(_, a)| a.candle.unwrap().close)
+            .collect();
+        assert_eq!(closes[9], 109.0);
+        assert_eq!(closes[10], 110.0);
+    }
+
+    /// An `index` column that is not numeric stays a label — the shape a shared
+    /// non-numeric key (a session id, an auction sequence) takes.
+    #[test]
+    fn a_non_numeric_index_stays_a_label() {
+        let f = tmp_csv(
+            "fugazi_index_label.csv",
+            "symbol,index,open,high,low,close,volume\n\
+              BTC,sess-a,1,1,1,1,1\n\
+              BTC,sess-b,2,2,2,2,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC").unwrap();
+        assert_eq!(series.atoms[0].0, IndexKey::Label("sess-a".into()));
+        assert!(!frame.is_index_sampled());
+    }
+
+    /// A bare integer in a `time` column is an epoch stamp, not an ordinal.
+    /// Only the column a cell came from can tell the two apart.
+    #[test]
+    fn a_bare_integer_in_a_time_column_stays_a_time() {
+        let f = tmp_csv(
+            "fugazi_epoch_time.csv",
+            "symbol,time,open,high,low,close,volume\n\
+              BTC,1704067200,1,1,1,1,1\n\
+              BTC,1704153600,2,2,2,2,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC").unwrap();
+        assert!(
+            !series.atoms[0].0.is_ordinal(),
+            "an epoch is not an ordinal"
+        );
+        assert_eq!(series.atoms[0].1.time, Some(Timestamp(1_704_067_200_000)));
+    }
+
+    /// The shape an index-sampled series actually has: joins on the bucket
+    /// number, *and* keeps the bucket's close time. Both have to survive, or
+    /// carry and the calendar leaves go dark on a file that has the data.
+    #[test]
+    fn an_index_keyed_row_keeps_its_time_column() {
+        let f = tmp_csv(
+            "fugazi_index_and_time.csv",
+            "symbol,index,time,open,high,low,close,volume\n\
+             BTC,0,2024-01-01T00:00:00Z,1,1,1,1,1\n\
+             BTC,1,2024-01-03T00:00:00Z,2,2,2,2,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        assert!(frame.is_index_sampled());
+        assert!(frame.has_parseable_times());
+
+        let series = frame.atoms("BTC").unwrap();
+        assert_eq!(series.atoms[0].0, IndexKey::Ordinal(0));
+        assert_eq!(series.atoms[0].1.time, Some(Timestamp(1_704_067_200_000)));
+        // Two days later — the gap carry is pro-rated over.
+        assert_eq!(
+            series.atoms[1].1.time,
+            Some(Timestamp(1_704_067_200_000 + 2 * 86_400_000))
+        );
+    }
+
+    /// Two kinds of index in one frame have no shared ordering, so the load is
+    /// refused rather than interleaved into a bar order nobody asked for.
+    #[test]
+    fn a_frame_mixing_index_kinds_is_refused() {
+        let a = tmp_csv(
+            "fugazi_mixed_a.csv",
+            "symbol,index,open,high,low,close,volume\nBTC,0,1,1,1,1,1\nBTC,1,2,2,2,2,1\n",
+        );
+        let b = tmp_csv(
+            "fugazi_mixed_b.csv",
+            "symbol,time,open,high,low,close,volume\nETH,2024-01-01T00:00:00Z,3,3,3,3,1\n",
+        );
+        let err = DataFrame::from_series(&[
+            format!("@{a}").parse().unwrap(),
+            format!("@{b}").parse().unwrap(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("mixes a numeric `index`"), "{err}");
+    }
+
+    /// A row with neither key names both columns, not just `time` — the error
+    /// has to point at the option the user actually has.
+    #[test]
+    fn a_row_with_no_index_and_no_time_is_refused() {
+        let f = tmp_csv(
+            "fugazi_no_key.csv",
+            "symbol,open,high,low,close,volume\nBTC,1,1,1,1,1\n",
+        );
+        let err = DataFrame::from_series(&[format!("@{f}").parse().unwrap()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`index`") && err.contains("`time`"), "{err}");
+    }
+
     fn tmp_csv(name: &str, contents: &str) -> String {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
@@ -732,7 +1061,7 @@ mod tests {
             DataFrame::from_series(&[format!("symbol='BTC',@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
-        assert_eq!(series.atoms[0].0, "1");
+        assert_eq!(series.atoms[0].0, IndexKey::Label("1".into()));
         assert_eq!(series.atoms[0].1.candle.unwrap().close, 10.5);
         assert_eq!(series.atoms[1].1.candle.unwrap().high, 12.0);
     }
@@ -1177,8 +1506,14 @@ mod tests {
         assert_eq!(frame.symbols(), ["BTC", "ETH"]);
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
-        assert_eq!(series.atoms[0].0, "2024-01-01T00:00:00Z");
-        assert_eq!(series.atoms[1].0, "2024-01-02T00:00:00Z");
+        assert_eq!(
+            series.atoms[0].0,
+            IndexKey::Label("2024-01-01T00:00:00Z".into())
+        );
+        assert_eq!(
+            series.atoms[1].0,
+            IndexKey::Label("2024-01-02T00:00:00Z".into())
+        );
     }
 
     /// The documented two-`get`-into-two-`--series` join, with a hand-written
@@ -1231,7 +1566,7 @@ mod tests {
         let key = (
             "BTC".to_string(),
             "1d".to_string(),
-            "2024-01-01T00:00:00Z".to_string(),
+            IndexKey::Label("2024-01-01T00:00:00Z".to_string()),
         );
 
         let untagged_last = DataFrame::from_series(&[
