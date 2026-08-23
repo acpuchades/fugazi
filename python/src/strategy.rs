@@ -3168,6 +3168,10 @@ impl PyRunReport {
                 // so a hand-built report is by definition a clean one.
                 rejections: Vec::new(),
                 initial_equity,
+                // Same reasoning: coverage is counted by the account as it
+                // charges, so a hand-built report has nothing to report and
+                // says so — `None` is "does not say", not "fully covered".
+                carry_coverage: None,
             },
         }
     }
@@ -3256,6 +3260,21 @@ impl PyRunReport {
     #[getter]
     pub(crate) fn ruin_bar(&self) -> Option<usize> {
         self.inner.ruin_bar
+    }
+
+    /// `(bars that wanted a carry rate, bars that got one)`, or `None` when the
+    /// account this ran against does not model carry.
+    ///
+    /// The data-quality companion to [`rejections`](Self::rejections): `seen`
+    /// below `wanted` means a data-driven carry model was configured and charged
+    /// **nothing** on the difference, which is indistinguishable from carry
+    /// being free. A funding column that starts late, or that a join gave one
+    /// symbol and not another, produces exactly that.
+    ///
+    /// `None` is "does not say", never "coverage was complete".
+    #[getter]
+    pub(crate) fn carry_coverage(&self) -> Option<(usize, usize)> {
+        self.inner.carry_coverage
     }
 
     /// Rebuild through [`_rebuild_run_report`].

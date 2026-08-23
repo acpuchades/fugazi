@@ -106,6 +106,17 @@ pub struct RunReport<Sym> {
     /// once `prev < 0` — a region of parameter space with a genuinely positive
     /// Sharpe that any argmax search finds.
     pub ruin_bar: Option<usize>,
+    /// `(bars that wanted a carry rate, bars that got one)`, or `None` when the
+    /// account does not model carry — see [`Wallet::carry_coverage`].
+    ///
+    /// [`Wallet::carry_coverage`]: crate::Wallet::carry_coverage
+    ///
+    /// Sits beside [`rejections`](Self::rejections) for the same reason: both
+    /// say the equity curve above them may not describe what it looks like it
+    /// describes. `seen < wanted` means a data-driven carry model was configured
+    /// and charged **nothing** on the difference, which is indistinguishable
+    /// from carry being free — the exact failure that leg exists to remove.
+    pub carry_coverage: Option<(usize, usize)>,
 }
 
 /// Drive `strategy` over `snapshots`, executing against `wallet`, and return
@@ -327,6 +338,7 @@ where
         rejections,
         initial_equity,
         ruin_bar,
+        carry_coverage: wallet.carry_coverage(),
     }
 }
 

@@ -36,9 +36,8 @@
 //! symbol declares two or more cadences the untagged rows stay in their own `""`
 //! group, where the cadence census reports them rather than guessing.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -343,6 +342,9 @@ pub struct DataFrame {
     /// binds to this one `Arc`, which is what makes a cross-symbol `!get`
     /// resolve.
     schema: OnceLock<Option<Arc<Schema>>>,
+    /// Per `--series` term, how many of its own rows collided with a row it had
+    /// already contributed — see [`self_collisions`](Self::self_collisions).
+    collisions: Vec<(String, usize)>,
 }
 
 impl DataFrame {
@@ -363,35 +365,43 @@ impl DataFrame {
         }
         let fallback = sole_declared_cadences(&loaded);
 
+        // Count each term's collisions **with itself** before inserting.
+        //
+        // Merging on `(symbol, freq, time)` is the whole point of the full join
+        // — it is how a separate overlay CSV attaches to a price file, and how
+        // a later `--series` overrides an earlier one. Within *one* term it is
+        // not a join, it is data loss: a file has no reason to state one bar
+        // twice, and the second row's OHLCV silently replaced the first's. A
+        // file with every stamp duplicated loaded as half its rows and said
+        // nothing.
         let mut frame = DataFrame::default();
-        // `(series, symbol, stream, index)` seen so far. A *later* `--series`
-        // overwriting an earlier one is the documented full-outer join; the same
-        // key twice **within one series** is not a join, it is a malformed file,
-        // and it silently merged the two rows.
+        // Count each term's collisions **with itself**, keyed on the row's
+        // resolved `(symbol, stream, index)`.
+        //
+        // Counted here rather than in a pre-pass over the raw cells, because
+        // the join key is not always the `time` cell: a row with an `index`
+        // column keys on that instead, and may carry no `time` at all. Reading
+        // the key back off `insert` is what keeps the two in step — a pre-pass
+        // would have to re-derive the same rule and could drift from it.
+        //
+        // Reported, not refused. Merging on the key is the whole point of the
+        // full join across terms; within *one* term it is data loss, and a
+        // repeating `index` column (a price level mistaken for a bar index) is
+        // the loud case — but the run is still well-defined, so this warns the
+        // way every other data finding does.
         let mut seen: HashSet<(&str, String, String, IndexKey)> = HashSet::new();
+        let mut collisions: BTreeMap<&str, usize> = BTreeMap::new();
         for (raw, row) in loaded {
             let key = frame.insert(raw, row, &fallback)?;
-            if !seen.insert((raw, key.0.clone(), key.1.clone(), key.2.clone())) {
-                bail!(
-                    "series `{raw}`: two rows share `{}`{} at index `{}`.\n\
-                     \n\
-                     Within one series that is a duplicate key, not a join, and the \
-                     rows would silently merge into one bar. The usual cause is an \
-                     `index` column that is not a bar index — `index` is a reserved \
-                     name and becomes the join key when present, so a column of \
-                     values that repeat (a price level, a category) collides here. \
-                     Rename it to keep it as an overlay.",
-                    key.0,
-                    if key.1.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", key.1)
-                    },
-                    key.2,
-                );
+            if !seen.insert((raw, key.0, key.1, key.2)) {
+                *collisions.entry(raw).or_default() += 1;
             }
         }
         frame.refuse_mixed_index_kinds()?;
+        frame.collisions = collisions
+            .into_iter()
+            .map(|(spec, n)| (spec.to_string(), n))
+            .collect();
         Ok(frame)
     }
 
@@ -525,6 +535,17 @@ impl DataFrame {
         self.rows
             .iter()
             .any(|((_, _, index), row)| row_time_ms(index, row).is_some())
+    }
+
+    /// Per `--series` term, how many of its own rows were overwritten by a
+    /// later row of the **same** term carrying the same `(symbol, freq, index)`.
+    ///
+    /// Empty on a clean load. A non-empty entry means the frame holds fewer
+    /// bars than the file does rows, which is data loss rather than a join —
+    /// see [`from_series`](Self::from_series). Reported by the caller, not here,
+    /// so a library embedder can decide what to do with it.
+    pub fn self_collisions(&self) -> &[(String, usize)] {
+        &self.collisions
     }
 
     /// Every unique `symbol` present in the frame, in ascending order.
@@ -1144,20 +1165,52 @@ mod tests {
     /// **Regression.** `index` is a reserved name now, so a pre-existing column
     /// called `index` that held *data* — a market index level, a category —
     /// silently became the join key and merged every row that repeated a value.
-    /// Duplicate keys within one series are refused so the hijack is loud.
+    ///
+    /// Counted as a self-collision, which is what makes it visible: the frame
+    /// then holds fewer bars than the file has rows, and `run` says so.
     #[test]
-    fn a_repeated_index_value_within_one_series_is_refused() {
+    fn a_repeated_index_value_within_one_series_is_counted() {
         let f = tmp_csv(
             "fugazi_index_hijack.csv",
             "symbol,time,index,open,high,low,close,volume\n\
              BTC,2024-01-01T00:00:00Z,4783.45,1,1,1,1,1\n\
              BTC,2024-01-02T00:00:00Z,4783.45,2,2,2,2,1\n",
         );
-        let err = DataFrame::from_series(&[format!("@{f}").parse().unwrap()])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("two rows share"), "{err}");
-        assert!(err.contains("reserved name"), "names the cause: {err}");
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.len(), 1, "the two rows collided into one bar");
+        assert_eq!(
+            frame
+                .self_collisions()
+                .iter()
+                .map(|(_, n)| *n)
+                .sum::<usize>(),
+            1,
+            "and the collision is counted rather than silent"
+        );
+    }
+
+    /// The collision count is keyed on the row's **resolved** index, not on its
+    /// `time` cell — an `index`-keyed row need carry no `time` at all, and
+    /// counting on the wrong cell would miss every collision in that frame.
+    #[test]
+    fn collisions_are_counted_on_the_resolved_key_not_the_time_cell() {
+        let f = tmp_csv(
+            "fugazi_index_only_dupe.csv",
+            "symbol,index,open,high,low,close,volume\n\
+             BTC,0,1,1,1,1,1\n\
+             BTC,0,2,2,2,2,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{f}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.len(), 1);
+        assert_eq!(
+            frame
+                .self_collisions()
+                .iter()
+                .map(|(_, n)| *n)
+                .sum::<usize>(),
+            1,
+            "a frame with no `time` column still counts its collisions"
+        );
     }
 
     /// The same key in two *different* series is the documented full-outer
@@ -1179,6 +1232,10 @@ mod tests {
         ])
         .expect("two series joining on one key is not a duplicate");
         assert_eq!(frame.len(), 1, "joined into one row");
+        assert!(
+            frame.self_collisions().is_empty(),
+            "a cross-series join is not a self-collision"
+        );
     }
 
     /// Two cadences of one symbol at the same stamp are two streams, not a
@@ -1961,5 +2018,66 @@ mod tests {
         );
         let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
         assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 1);
+    }
+
+    /// Merging on `(symbol, freq, time)` is the join — it is how a separate
+    /// overlay CSV attaches to a price file, and how a later `--series` term
+    /// overrides an earlier one. Within **one** term it is not a join: a file
+    /// has no reason to state one bar twice, and the second row's OHLCV
+    /// silently replaced the first's, so a file with every stamp duplicated
+    /// loaded as half its rows and said nothing.
+    #[test]
+    fn a_terms_collisions_with_itself_are_counted_but_a_join_is_not() {
+        // Every stamp twice: 4 rows in, 2 bars out, 2 collisions.
+        let path = tmp_csv(
+            "fugazi_dup_rows.csv",
+            "symbol;freq;time;open;high;low;close;volume\n\
+             BTC;1d;1;10;11;9;10.5;100\n\
+             BTC;1d;1;20;21;19;20.5;100\n\
+             BTC;1d;2;12;13;11;12.5;100\n\
+             BTC;1d;2;22;23;21;22.5;100\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 2);
+        assert_eq!(
+            frame.self_collisions(),
+            &[(format!("@{path}"), 2)],
+            "the term's collisions with itself were not counted"
+        );
+
+        // Two terms joining onto the same keys is the designed behaviour and
+        // must not be accused: an overlay file attaching to a price file.
+        let prices = tmp_csv(
+            "fugazi_join_prices.csv",
+            "symbol;freq;time;open;high;low;close;volume\n\
+             BTC;1d;1;10;11;9;10.5;100\n\
+             BTC;1d;2;12;13;11;12.5;100\n",
+        );
+        let overlay = tmp_csv(
+            "fugazi_join_overlay.csv",
+            "symbol;freq;time;funding\nBTC;1d;1;0.01\nBTC;1d;2;0.02\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("@{prices}").parse().unwrap(),
+            format!("@{overlay}").parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 2);
+        assert!(
+            frame.self_collisions().is_empty(),
+            "a cross-term join is not a duplicate: {:?}",
+            frame.self_collisions()
+        );
+
+        // Same stamp under two different cadences is two series, not a
+        // collision — the key carries `freq`.
+        let both = tmp_csv(
+            "fugazi_two_cadences.csv",
+            "symbol;freq;time;open;high;low;close;volume\n\
+             BTC;1d;1;10;11;9;10.5;100\n\
+             BTC;1h;1;20;21;19;20.5;100\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{both}").parse().unwrap()]).unwrap();
+        assert!(frame.self_collisions().is_empty());
     }
 }

@@ -182,6 +182,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
             .account_can_short
     }
 
+    /// Carry is charged once, on the one real account the ledgers net onto, so
+    /// every child would otherwise report the whole portfolio's coverage as its
+    /// own. `None` — "this view does not say" — is the honest answer; ask the
+    /// account.
+    fn carry_coverage(&self) -> Option<(usize, usize)> {
+        None
+    }
+
     /// Takes the trait default (`None`) deliberately, unlike
     /// [`can_short`](Wallet::can_short) right above.
     ///

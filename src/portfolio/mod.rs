@@ -768,7 +768,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             weights.len()
         );
         let sum_w: Real = weights.iter().sum();
-        if sum_w <= 0.0 {
+        // `NaN <= 0.0` is false, so a non-finite sum would pass this and every
+        // target equity below it would be a `NaN`. The share-indicator path
+        // cleans its own (`.max(0.0)` suppresses a `NaN`); a `WeightPolicy`
+        // supplied from Rust is not obliged to.
+        if !sum_w.is_finite() || sum_w <= 0.0 {
             // Degenerate weight vector — no rebalance direction defined.
             return;
         }

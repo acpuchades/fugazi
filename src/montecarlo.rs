@@ -143,6 +143,13 @@ pub fn percentile(values: &[Real], p: Real) -> Option<Real> {
         return None;
     }
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // `clamp` leaves a `NaN` alone, and a `NaN` `p` reaches here from a
+    // `--mc-ci` the shell was handed verbatim: `alpha = (1 - ci) / 2` carries it
+    // straight through, and the interval printed as `NaN … NaN`. There is no
+    // quantile of an undefined probability, so say so.
+    if !p.is_finite() {
+        return None;
+    }
     let p = p.clamp(0.0, 1.0);
     let n = sorted.len();
     if n == 1 {
@@ -258,5 +265,73 @@ mod tests {
         assert_eq!(percentile(&v, 0.0), Some(1.0));
         assert_eq!(percentile(&v, 1.0), Some(4.0));
         assert_eq!(percentile(&v, 0.5), Some(2.5));
+    }
+
+    /// Every scheme over every degenerate length and block size. The block
+    /// parameters are caller-supplied (`--mc-block`), so a block longer than the
+    /// series, a block of zero, and a `mean_block` below one all arrive here —
+    /// and each is a loop bound or a probability.
+    #[test]
+    fn every_scheme_returns_n_in_range_indices_at_any_block_size() {
+        let schemes = |block: usize, mean: f64| {
+            [
+                ResampleScheme::Iid,
+                ResampleScheme::MovingBlock { block },
+                ResampleScheme::Stationary { mean_block: mean },
+            ]
+        };
+        for n in [0usize, 1, 2, 7, 50] {
+            for (block, mean) in [
+                (0usize, 0.0f64),
+                (1, 1.0),
+                (3, 3.0),
+                (n, n as f64),
+                (n + 1, n as f64 + 1.0),
+                (usize::MAX, f64::INFINITY),
+                (2, f64::NAN),
+                (2, -5.0),
+            ] {
+                for scheme in schemes(block, mean) {
+                    let mut rng = rng_from_seed(7);
+                    let idx = resample_indices(n, scheme, &mut rng);
+                    assert_eq!(
+                        idx.len(),
+                        n,
+                        "{scheme:?} at n={n} block={block} mean={mean} returned {} indices",
+                        idx.len()
+                    );
+                    assert!(
+                        idx.iter().all(|&i| i < n.max(1)),
+                        "{scheme:?} at n={n} produced an out-of-range index"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `percentile` and `std_dev` reduce the per-permutation metric samples,
+    /// and a metric that is absent on some permutations leaves `NaN`s and short
+    /// runs behind.
+    #[test]
+    fn the_reducers_answer_none_rather_than_a_non_finite_number() {
+        assert_eq!(percentile(&[], 0.5), None);
+        assert_eq!(percentile(&[f64::NAN, f64::NAN], 0.5), None);
+        assert_eq!(percentile(&[1.0], 0.5), Some(1.0));
+        // `p` outside [0, 1] saturates rather than indexing past the end.
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], -1.0), Some(1.0));
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], 2.0), Some(3.0));
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], f64::NAN), None);
+        // A `NaN` among finite samples is dropped, not sorted.
+        assert_eq!(percentile(&[1.0, f64::NAN, 3.0], 0.5), Some(2.0));
+
+        assert_eq!(std_dev(&[]), None);
+        assert_eq!(std_dev(&[1.0]), None);
+        assert_eq!(
+            std_dev(&[1.0, f64::NAN]),
+            None,
+            "one finite sample is not two"
+        );
+        assert_eq!(std_dev(&[2.0, 2.0]), Some(0.0));
+        assert!(std_dev(&[1.0, f64::INFINITY, 3.0]).is_some_and(|v| v.is_finite()));
     }
 }

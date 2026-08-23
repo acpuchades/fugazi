@@ -885,7 +885,12 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
 /// `1.0`). Used at build to seed each child's ledger.
 pub(super) fn allocate_funds(total_funds: Real, weights: &[Real]) -> Vec<Real> {
     let sum: Real = weights.iter().sum();
-    if sum <= 0.0 {
+    // `NaN <= 0.0` is false, so a non-finite sum sails past the degenerate
+    // check below and divides every allocation into a `NaN` — a portfolio whose
+    // children each start with an undefined stake. Answer it the same way as a
+    // zero sum: no split is defined, so the whole stake sits with the first
+    // child rather than being destroyed.
+    if !sum.is_finite() || sum <= 0.0 {
         let mut out = vec![0.0; weights.len()];
         if let Some(first) = out.first_mut() {
             *first = total_funds;
@@ -893,4 +898,48 @@ pub(super) fn allocate_funds(total_funds: Real, weights: &[Real]) -> Vec<Real> {
         return out;
     }
     weights.iter().map(|w| total_funds * w / sum).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seeding split, over the weight vectors a `WeightPolicy` supplied
+    /// from Rust may hand it. A zero or negative sum has no direction, which is
+    /// answered by giving the whole stake to the first child; a **non-finite**
+    /// sum reads false against `<= 0.0` and used to divide every allocation
+    /// into a `NaN` — a portfolio whose children each start with an undefined
+    /// stake, and whose ledger invariant then fails on the first bar.
+    #[test]
+    fn allocate_funds_answers_a_degenerate_weight_vector_without_destroying_the_stake() {
+        let total = 10_000.0;
+        let sums = |w: &[Real]| -> Vec<Real> { allocate_funds(total, w) };
+
+        // The ordinary case.
+        assert_eq!(sums(&[3.0, 1.0]), vec![7_500.0, 2_500.0]);
+        // Weights that do not sum to one are normalized, not taken literally.
+        assert_eq!(sums(&[0.3, 0.1]), vec![7_500.0, 2_500.0]);
+
+        for degenerate in [
+            vec![0.0, 0.0],
+            vec![-1.0, -1.0],
+            vec![Real::NAN, 1.0],
+            vec![Real::INFINITY, 1.0],
+            vec![Real::INFINITY, Real::NEG_INFINITY],
+        ] {
+            let out = sums(&degenerate);
+            assert!(
+                out.iter().all(|x| x.is_finite()),
+                "{degenerate:?} produced {out:?}"
+            );
+            let sum: Real = out.iter().sum();
+            assert!(
+                (sum - total).abs() < 1e-9,
+                "{degenerate:?} allocated {sum}, not the whole {total}"
+            );
+        }
+
+        // No children is not a crash, and allocates nothing.
+        assert!(allocate_funds(total, &[]).is_empty());
+    }
 }

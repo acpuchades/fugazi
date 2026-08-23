@@ -1371,9 +1371,10 @@ must be passed explicitly.
 **If you already have a column named `index`,** it is now a reserved name and
 becomes the join key. Rename it (`index_level`, say) to keep it as an overlay.
 You will usually be told: two rows sharing one key **within a single
-`--series`** is refused, and a column of values that repeat — a price level, a
-category — collides immediately. (The same key across *two* `--series` is the
-documented full-outer join and still works.)
+`--series`** are counted as a self-collision and reported, so a column of values
+that repeat — a price level, a category — shows up as a frame holding fewer bars
+than the file has rows. (The same key across *two* `--series` is the documented
+full-outer join and is not a collision.)
 
 **A numeric index orders numerically.** `9` sorts before `10`, which a plain
 string key would not do. An `index` cell that is not an integer stays a label
@@ -1443,7 +1444,9 @@ It's a `,`-separated list of terms, itself repeatable:
 - `NAME=value` — set one placeholder. The value parses as a JSON scalar
   (`FAST=3` → number, `TRUE=true` → bool, `SYM=BTC` → string). On
   `optimize`, `NAME=[v1,v2,…]` or `NAME=start..end[:step]` declares a
-  [sweep axis](#sweep-axes).
+  [sweep axis](#sweep-axes). A range is inclusive at both ends, needs a
+  positive step, and may expand to at most **1 000 000 points** — past that it
+  is an error naming the count rather than an allocation the OOM killer ends.
 - `@file.yml` — load a whole `NAME: value` mapping. See
   [`examples/params.yml`](../examples/params.yml).
 
@@ -1661,6 +1664,7 @@ data):
 |---|---|
 | The universe runs at more than one cadence | Annualization takes one factor for the whole run, read off the first symbol, so every risk-adjusted metric is scaled for that series and mis-scaled for the rest. |
 | A series' `freq` label disagrees with its timestamp spacing | The label is what freq-scoped `--costs` match on; the spacing is what the run is made of. Reported only from 10 bars up, since a median over a handful of gaps is noise. |
+| A `--series` term carries the same `(symbol, freq, time)` twice | Merging on that key is the join — it is how a separate overlay CSV attaches to a price file, and how a later term overrides an earlier one. Within *one* term it is data loss: the second row replaced the first rather than adding a bar, so the run is shorter than the file. |
 | A series' timestamps fall outside the calendar | `time` is read as **milliseconds** since the epoch, and tops out at year 9999. A column in *nanoseconds* — `datetime64[ns]` cast to an integer, which is what a `pandas`/`polars` export produces — lands ~52 million years out, so every calendar reading (`!is_weekday`, `!month`, `!day_of_week`) is absent and any gate built on one never fires. Divide by 1e6. |
 
 **Examples**

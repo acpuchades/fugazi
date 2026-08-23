@@ -589,6 +589,12 @@ pub fn report_slice<Sym: Clone>(
             .ruin_bar
             .filter(|&r| r < bars.end)
             .map(|r| r.saturating_sub(bars.start)),
+        // Deliberately **not** sliced. The counters are cumulative over the
+        // whole run and carry no bar index, so there is nothing to attribute to
+        // this window; carrying them through unchanged says "the run this slice
+        // came from had this coverage", which is true and is what a reader of a
+        // windowed row needs to know before trusting it.
+        carry_coverage: report.carry_coverage,
     }
 }
 
@@ -1105,6 +1111,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         from_report(&report, 252.0, 0.0, None)
     }
@@ -1201,6 +1208,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
 
         for start in 0..=BARS {
@@ -1234,6 +1242,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         let windows = windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 3);
@@ -1275,6 +1284,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         let windows = rolling_from_report(&report, 3, 252.0, 0.0, None);
         assert_eq!(
@@ -1306,6 +1316,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         assert!(rolling_from_report(&report, 3, 252.0, 0.0, None).is_empty());
     }
@@ -1337,6 +1348,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
 
         let threads = rayon::current_num_threads();

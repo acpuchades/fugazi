@@ -418,7 +418,13 @@ struct RunArgs {
     mc_null: McNullArg,
 
     /// Two-sided confidence level for the bootstrap intervals. Default 0.95.
-    #[arg(long = "mc-ci", value_name = "LEVEL", default_value_t = 0.95)]
+    /// Must lie strictly inside `(0, 1)`.
+    #[arg(
+        long = "mc-ci",
+        value_name = "LEVEL",
+        default_value_t = 0.95,
+        value_parser = parse_confidence
+    )]
     mc_ci: f64,
 
     /// Metrics to analyze (comma-separated short or dotted names, e.g.
@@ -1152,11 +1158,45 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
 /// every surface downstream — the bar count, the date range, the detected
 /// annualization factor — looks correct over the interleaved wreckage. See
 /// [`cadence`] for what is refused and what is merely reported.
+/// A two-sided confidence level: strictly inside `(0, 1)`.
+///
+/// Validated at the flag rather than clamped downstream because the two ends
+/// fail differently and neither is loud. `0` and `1` collapse the interval onto
+/// one order statistic; a `NaN` — which `"nan"` parses to, and which
+/// `clamp(0.0, 1.0)` leaves untouched — carried straight through
+/// `alpha = (1 - ci) / 2` and printed the interval as `NaN … NaN`.
+fn parse_confidence(raw: &str) -> Result<f64, String> {
+    let v: f64 = raw
+        .parse()
+        .map_err(|_| format!("`{raw}` is not a number"))?;
+    if !v.is_finite() || v <= 0.0 || v >= 1.0 {
+        return Err(format!(
+            "`{raw}` is not a confidence level — it must lie strictly inside (0, 1), \
+             e.g. 0.95"
+        ));
+    }
+    Ok(v)
+}
+
 fn load_frame(
     series: &[data::SeriesSpec],
     frequency: &[calendar::ScopedFrequency],
 ) -> Result<data::DataFrame> {
     let mut frame = data::DataFrame::from_series(series)?;
+    // Before the cadence census, because it is about rows the census will never
+    // see: a term whose own rows collided on `(symbol, freq, time)` contributed
+    // fewer bars than it holds, and the frame it hands the census is already the
+    // survivors.
+    for (spec, n) in frame.self_collisions() {
+        eprintln!(
+            "  {} `--series {spec}` has {n} row(s) that repeat a (symbol, freq, \
+             time) it already carries — each one replaced the earlier row \
+             rather than adding a bar, so the run is {n} bar(s) shorter than \
+             the file. Merging on that key is how a *second* `--series` term \
+             joins onto the first; within one term it is a duplicate.",
+            style::yellow("warn"),
+        );
+    }
     let findings = cadence::apply(&mut frame, frequency)?;
     cadence::warn(&findings);
     Ok(frame)

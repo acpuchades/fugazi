@@ -53,6 +53,50 @@ load path says so explicitly (`src/cli/data.rs:493`):
 mostly names it, fixes its ordering, and makes the derived-time degradation
 explicit rather than incidental.
 
+## The stance: index-agnostic, time-first
+
+These are two commitments, and they are not in tension — but the second one is
+a *preference*, deliberately held, and it should not be mistaken for an
+accident of the implementation.
+
+**Index-agnostic**, because the mechanics have no business caring. Nothing in
+the indicator layer, the wallet, the books or the run loop reads a clock; the
+data layer needs an *ordered key* and nothing more. So every one of them takes
+alternatively-sampled bars — volume, dollar, tick — for free, and the design
+keeps it that way: `IndexKey` is the join key, `StreamId` is opaque, and
+`Frequency` is one parseable form of a stream id rather than its definition.
+
+**Time-first**, because a timestamp does something no other index can: it is
+**shared across series**. Two symbols stamped `2024-01-01T00:00:00Z` are
+observations of the same instant, so they can be joined, ranked against each
+other, and traded as a basket. Two symbols' dollar bars both numbered `5` are
+not — each is that symbol's own fifth bucket, at whatever instant its own flow
+happened to reach the threshold, and joining on the number would manufacture a
+cross-series comparison that never existed.
+
+That is why cross-sectional work — `basket:`, `multi:`, `portfolio:`, and every
+`!pick` of an asset the document does not trade — is a **time-bar capability**
+in practice. Not because the code demands a clock, but because a wall clock is
+the only index the market hands to every series at once. An exogenous shared
+index (a basket-level dollar clock, an auction counter) reaches the same place,
+and the design admits it; but the user has to supply that agreement, whereas
+time comes with it.
+
+So the ordering of the two commitments is: **the machinery stays agnostic, the
+defaults and the ergonomics assume time.** A `time` column is checked against
+its name, populates `Atom::time`, and lights up carry pro-rating, the calendar
+leaves, `-w`'s duration form and calendar-looked-up annualization. An
+index-sampled series keeps everything that does not need a clock, measures what
+it can (annualization from the observed span; carry from the real elapsed gap
+when stamps are present), and is told plainly what it gives up. Neither mode is
+emulated in terms of the other.
+
+**A practical consequence worth stating.** The best shape for an
+alternatively-sampled series is *both* columns — join on `index`, keep `time`
+— which is why they are independent rather than alternatives. Dollar bars have
+a perfectly good close time; discarding it would give up carry accuracy and the
+calendar for nothing.
+
 ## Design decisions
 
 ### D1 — The index is the primitive; time is a *kind* of index

@@ -121,6 +121,14 @@ protective resters — all return an `Ack`, never a fill. On a `PaperWallet`:
   flatters itself.
 - **`set_stop` / `set_take_profit` rest.** One bracket per symbol, latest wins.
   The wallet triggers and prices them itself against each bar's range (§3).
+  When **both legs sit inside one bar** the range says only that the price
+  visited each level, not in which order — so the **stop wins**, on both a long
+  and a short. That is the pessimistic reading of an ambiguity the data cannot
+  settle, and the same choice on either side of the book. A bracket set while
+  flat guards the entry from the bar the entry fills on, since market fills
+  resolve before protective legs; a fill that **reverses through zero** drops
+  the bracket with the position it left, rather than reinterpreting a long's
+  stop as a short's.
 - **`set_limit` rests** as an *entry* instrument: it drives the position toward a
   target once the market trades through the limit price, at that price or better.
 
@@ -220,6 +228,16 @@ Every one of those paths goes through the same private engine, `fill_at`.
 5. Move cash and the position, push to the blotter, return the `Order` — carrying
    `requested_units` beside `units`, so a magnitude that was fitted to either
    rule is visible rather than reported as if it were what was asked for.
+
+   **A fit that collapses to *no trade* is booked as a rejection instead.** There
+   is no order to hang `requested_units` on, so without that the leg simply
+   vanished — no fill, no refusal, nothing in the blotter — and a strategy the
+   account could not afford looked like one that chose not to trade. The same
+   situation reached through an explicit `Size::Units` is a loud
+   `InsufficientFunds` at submission, and a fractional sizing is what the spec
+   layer builds for *every* `sizing:`, so the silent spelling was the default
+   one. An unlevered basket whose earlier legs have used the whole gross budget
+   reaches it on the last leg routinely.
 6. **A fill that flattens or flips the sign voids the resting bracket**, so a
    bare market exit or reversal drops a now-stale stop without an explicit
    cancel.

@@ -850,6 +850,7 @@ fn emit_run(
     if !opts.quiet {
         print_ruin_warning(&iter.report);
         print_rejection_warning(&iter.report);
+        print_carry_coverage_warning(&iter.report);
         print_fitted_warning(&iter.report);
         print_liquidation_warning(&iter.report);
     }
@@ -1731,6 +1732,36 @@ fn print_rejection_warning<Sym>(report: &fugazi::RunReport<Sym>) {
         "{n} order{} refused by the wallet — the equity curve and metrics below \
          reflect trades that did not happen as specified: {detail}",
         if n == 1 { " was" } else { "s were" },
+    )]);
+}
+
+/// The post-run **partial carry coverage** banner.
+///
+/// The top-of-run `carry_warnings` catch the two total failures: a column the
+/// input does not carry at all, and an annualized rate with no resolvable
+/// cadence. Neither sees a column that *is* present and has **holes** in it — a
+/// funding series that starts late, a symbol the join gave a column another one
+/// carries, a venue that skipped a settlement. Those bars are charged nothing,
+/// which is the honest reading of an absent sample and also exactly what a run
+/// with no carry model at all looks like.
+///
+/// Only knowable after the fact, so it prints beside the rejection banner
+/// rather than with the input warnings. Silent when every bar that wanted a rate
+/// got one, and silent when no carry model asked for data.
+fn print_carry_coverage_warning<Sym>(report: &fugazi::RunReport<Sym>) {
+    let Some((wanted, seen)) = report.carry_coverage else {
+        return;
+    };
+    if wanted == 0 || seen >= wanted {
+        return;
+    }
+    let missing = wanted - seen;
+    let pct = 100.0 * missing as f64 / wanted as f64;
+    style::print_warns(&[format!(
+        "carry was configured but {missing} of {wanted} position-bars ({pct:.1}%) had no \
+         rate to charge — those bars were free, which is indistinguishable from carry \
+         being free. Check the rate column covers the whole run for every symbol it is \
+         configured on",
     )]);
 }
 

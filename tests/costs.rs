@@ -486,3 +486,85 @@ fn pairs_run_mixes_global_default_with_symbol_override() {
     assert_all_rates(&a, 0.05, "A leg (symbol scope should win)");
     assert_all_rates(&b, 0.001, "B leg (unscoped default should apply)");
 }
+
+/// A funding column that is **present with holes** — a series that starts late,
+/// a symbol the join gave a column another one carries, a venue that skipped a
+/// settlement.
+///
+/// `--costs carry=!funding` reads a rate per bar and charges nothing on a bar
+/// that has none, which is the honest reading of an absent sample and also
+/// exactly what a run with no carry model at all looks like. The top-of-run
+/// warnings catch the two *total* failures (a column the input lacks entirely,
+/// an annualized rate with no cadence) and cannot see this one: the column is
+/// there, and only some of its cells are.
+fn funding_series(rows: usize, last_rate_bar: usize) -> String {
+    let mut out = String::from("symbol,freq,time,open,high,low,close,volume,funding_rate\n");
+    for i in 0..rows {
+        let t = 1_704_067_200_000i64 + i as i64 * 86_400_000;
+        let p = 100.0 + (i % 7) as f64 * 2.0;
+        let rate = if i <= last_rate_bar { "0.0003" } else { "" };
+        out += &format!(
+            "X,1d,{t},{p},{},{},{},1000,{rate}\n",
+            p + 1.0,
+            p - 1.0,
+            p + 0.5
+        );
+    }
+    out
+}
+
+const BUY_AND_HOLD: &str = "\
+root: X
+long:
+  enter: !every 1
+  exit: !never
+";
+
+fn carry_run(series_csv: &str, out_name: &str) -> common::cli::Outcome {
+    let (_csv, series) = scratch_file(&format!("{out_name}_series.csv"), series_csv);
+    let (_yml, strategy) = scratch_file(&format!("{out_name}_strategy.yml"), BUY_AND_HOLD);
+    Cmd::new("run")
+        .arg(&strategy)
+        .series(&series)
+        .costs("carry=!funding {}")
+        .args(&["-f", "1d", "--crypto"])
+        .output_dir(out_name)
+        .ok()
+}
+
+#[test]
+fn a_funding_column_with_holes_is_reported_after_the_run() {
+    // Rates for the first 26 of 40 bars, then nothing.
+    let out = carry_run(&funding_series(40, 25), "carry_holes");
+    // The run-body banners print with the report, on stdout — unlike the
+    // cadence and overlap findings, which precede it on stderr.
+    assert!(
+        out.stdout.contains("no rate to charge"),
+        "no partial-coverage warning:\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("position-bars"),
+        "the warning should count position-bars, not say it vaguely:\n{}",
+        out.stdout
+    );
+
+    // A column that covers the whole run says nothing.
+    let out = carry_run(&funding_series(40, 39), "carry_full");
+    assert!(
+        !out.stdout.contains("no rate to charge"),
+        "a fully-covered run must not be accused:\n{}",
+        out.stdout
+    );
+
+    // Neither does a run with no carry model at all.
+    let (_csv, series) = scratch_file("carry_none_series.csv", &funding_series(40, 39));
+    let (_yml, strategy) = scratch_file("carry_none_strategy.yml", BUY_AND_HOLD);
+    let out = Cmd::new("run")
+        .arg(&strategy)
+        .series(&series)
+        .costs("commission=!percentage { rate: 0.001 }")
+        .output_dir("carry_none")
+        .ok();
+    assert!(!out.stdout.contains("no rate to charge"), "{}", out.stdout);
+}

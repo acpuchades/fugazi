@@ -70,7 +70,8 @@
 //! that wants no filesystem access at all.
 //!
 //! Import cycles are a hard error naming the chain, rather than a stack
-//! overflow.
+//! overflow. So is a composed document that nests too deeply — see
+//! [`MAX_DEPTH`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -105,8 +106,27 @@ struct ImportDirective {
 /// and also the confinement root: no import, however deeply nested, may resolve
 /// to a path outside it (see the module docs).
 pub fn resolve(value: Value, base: &Path) -> Result<Value> {
-    walk(value, base, base, &mut Vec::new())
+    walk(value, base, base, &mut Vec::new(), 0)
 }
+
+/// How deep the **composed** document may nest before resolution refuses it.
+///
+/// The YAML parser bounds a *single file* (serde's own recursion limit, 128
+/// levels), and that bound is what keeps every later pass safe — `!param`
+/// substitution, the typed `NodeSpec` parse and `try_build` are each a separate
+/// recursion over the same tree. Splicing defeats it: sixty files of a hundred
+/// levels each compose into six thousand, and the first of those four passes
+/// overflowed the stack and aborted the process. A cycle was already an error
+/// naming the chain; this is the same failure reached by a different route.
+///
+/// `256` is twice the parser's own per-file bound and an order of magnitude past
+/// anything an author writes — a strategy document is ten or twenty levels deep,
+/// and an import chain of five files is a large one. It is deliberately sized
+/// against the *smallest* stack this code runs on rather than the main thread's:
+/// a debug-build `walk` frame is around two kilobytes, and a spawned thread
+/// (a `cargo test` worker, a Python thread) gets 2 MiB, so a limit chosen for
+/// the main thread's 8 MiB would still abort there.
+pub const MAX_DEPTH: usize = 256;
 
 /// Structural check for a caller that disables `!import` entirely: walks
 /// `value` exactly like [`resolve`] would, but bails on the first `!import`
@@ -137,21 +157,36 @@ pub fn refuse(value: &Value) -> Result<()> {
 /// the original top-level `base` [`resolve`] was called with, unchanged
 /// across nested imports. `stack` carries the canonical paths of the
 /// documents currently being resolved — the cycle tripwire.
-fn walk(value: Value, base: &Path, root: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+fn walk(
+    value: Value,
+    base: &Path,
+    root: &Path,
+    stack: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<Value> {
+    if depth > MAX_DEPTH {
+        bail!(
+            "!import: the composed document nests more than {MAX_DEPTH} levels \
+             deep. Each file is bounded on its own by the YAML parser, but splicing \
+             them together is not — and the passes that follow (`!param` \
+             substitution, the typed parse, the build) each recurse over the whole \
+             tree. Flatten the import chain."
+        );
+    }
     match value {
         Value::Object(map) => {
             if let Some(directive) = import_directive(&map)? {
-                return load(&directive, base, root, stack);
+                return load(&directive, base, root, stack, depth);
             }
             let mut out = Map::with_capacity(map.len());
             for (key, v) in map {
-                out.insert(key, walk(v, base, root, stack)?);
+                out.insert(key, walk(v, base, root, stack, depth + 1)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(items) => items
             .into_iter()
-            .map(|v| walk(v, base, root, stack))
+            .map(|v| walk(v, base, root, stack, depth + 1))
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         scalar => Ok(scalar),
@@ -232,6 +267,7 @@ fn load(
     base: &Path,
     root: &Path,
     stack: &mut Vec<PathBuf>,
+    depth: usize,
 ) -> Result<Value> {
     let joined = base.join(&directive.path);
     let canonical = std::fs::canonicalize(&joined)
@@ -288,7 +324,9 @@ fn load(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     stack.push(canonical);
-    let resolved = walk(value, &dir, root, stack);
+    // The imported document continues the *composed* depth, not a fresh one —
+    // that is exactly the accounting splicing was defeating.
+    let resolved = walk(value, &dir, root, stack, depth);
     stack.pop();
     let resolved = resolved?;
 
@@ -303,7 +341,7 @@ fn load(
     // document) or `!param` placeholders (left as-is for the outer pass).
     let mut inline_resolved: HashMap<String, Value> = HashMap::with_capacity(inline.len());
     for (key, value) in inline {
-        inline_resolved.insert(key.clone(), walk(value.clone(), base, root, stack)?);
+        inline_resolved.insert(key.clone(), walk(value.clone(), base, root, stack, depth)?);
     }
     crate::spec::params::substitute_partial(resolved, &inline_resolved)
 }
@@ -688,5 +726,52 @@ mod tests {
         )
         .unwrap();
         assert!(refuse(&value).is_ok());
+    }
+
+    /// Splicing defeats the parser's own recursion bound.
+    ///
+    /// serde limits a *single file* to 128 levels, and that is what keeps the
+    /// three passes after this one safe — `!param` substitution, the typed
+    /// `NodeSpec` parse and `try_build` each recurse over the whole tree.
+    /// Composition is not bounded by it: sixty files of a hundred levels
+    /// compose into six thousand, and `walk` — the first of those passes —
+    /// overflowed the stack and aborted the process rather than reporting
+    /// anything. A cycle was already an error naming the chain; this is the
+    /// same failure by a different route, so it is an error too.
+    #[test]
+    fn a_composed_document_deeper_than_the_limit_is_an_error_not_a_stack_overflow() {
+        let dir = tmp_dir("deep_chain");
+        // Each file wraps the previous one in `WRAP` `!abs` levels — two object
+        // levels apiece, since `!abs { source: … }` normalizes to
+        // `{abs: {source: …}}` — so the chain composes to `files * WRAP * 2`,
+        // comfortably past `MAX_DEPTH` while every individual file stays well
+        // inside the parser's own 128-level bound.
+        const WRAP: usize = 50;
+        let files = MAX_DEPTH / WRAP + 2;
+        fs::write(dir.join("f0.yml"), "!close\n").unwrap();
+        for i in 1..=files {
+            let mut body = format!("!import f{}.yml", i - 1);
+            for _ in 0..WRAP {
+                body = format!("!abs {{ source: {body} }}");
+            }
+            fs::write(dir.join(format!("f{i}.yml")), body + "\n").unwrap();
+        }
+
+        let root = serde_json::json!({ "import": format!("f{files}.yml") });
+        let err = resolve(root, &dir).expect_err("a chain this deep must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("nests more than"),
+            "the error should name the depth bound, got: {msg}"
+        );
+
+        // A chain that stays inside the bound still composes — the guard is a
+        // ceiling, not a ban on nested imports.
+        let shallow = serde_json::json!({ "import": "f2.yml" });
+        assert!(
+            resolve(shallow, &dir).is_ok(),
+            "two files of {WRAP} wraps is {} levels, inside the bound",
+            2 * WRAP * 2
+        );
     }
 }
