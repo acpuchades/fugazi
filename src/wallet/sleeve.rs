@@ -119,6 +119,11 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn can_short(&self) -> bool {
         self.inner.can_short()
     }
+    /// Delegates: carry is charged on the account underneath, and a sleeve is a
+    /// view onto it rather than a second book with its own coverage.
+    fn carry_coverage(&self) -> Option<(usize, usize)> {
+        self.inner.carry_coverage()
+    }
     /// Delegates, for the same reason: a sleeve carves a share out of one
     /// account's cash, it does not redenominate it.
     fn quote_ccy(&self) -> Option<&str> {

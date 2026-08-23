@@ -48,6 +48,7 @@ fn report(bars: usize) -> RunReport<Symbol> {
         rejections: Vec::new(),
         initial_equity: candles[0].close * 100.0,
         ruin_bar: None,
+        carry_coverage: None,
     }
 }
 
@@ -131,6 +132,7 @@ fn linear_filter<Sym: Clone>(
             report.equity_curve[bars.start - 1]
         },
         ruin_bar: None,
+        carry_coverage: None,
     }
 }
 

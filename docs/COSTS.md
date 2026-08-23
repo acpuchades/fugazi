@@ -121,9 +121,11 @@ one)` after it. An absent sample is **"no carry recorded"**, never "carry was
 nil" — and that holds cell by cell, not just column by column. A `Real` overlay
 slot has no `None`, so a *blank cell* in a column that is otherwise present
 arrives as a `NaN`; it is read as no sample, counted as a bar that wanted a rate
-and did not get one, and charged nothing. The `run` warning covers a column that
-is wholly absent; a column with **holes** shows up as `carry_coverage()`
-reporting fewer seen than wanted.
+and did not get one, and charged nothing. `run` warns about a column that is
+wholly absent *before* the run, and about one with **holes** after it — it
+cannot know which bars had no cell until it has walked them — reporting how many
+position-bars went uncharged. `carry_coverage()` is the same figure for a
+library caller.
 
 ### Cash interest and the margin call
 

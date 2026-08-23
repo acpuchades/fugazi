@@ -2662,6 +2662,7 @@ where
         fills: composite_fills.clone(),
         rejections: composite_rejections.clone(),
         initial_equity: cash,
+        carry_coverage: None,
     };
     let composite_metrics = metrics::from_report(
         &composite_report,
@@ -2704,6 +2705,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 2);
@@ -3957,6 +3959,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);
 
@@ -4052,6 +4055,7 @@ mod tests {
             rejections: Vec::new(),
             initial_equity: 100.0,
             ruin_bar: None,
+            carry_coverage: None,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);
 

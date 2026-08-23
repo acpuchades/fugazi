@@ -324,6 +324,24 @@ pub trait Wallet<Sym> {
         true
     }
 
+    /// How many bars wanted a **carry rate** and how many got one, or `None`
+    /// when this wallet does not model carry at all.
+    ///
+    /// The data-quality companion to [`take_rejections`](Self::take_rejections),
+    /// and it exists because a funding series with holes in it fails the same
+    /// way a missing one does — an equity curve indistinguishable from a run
+    /// where carry was genuinely free, which is the exact failure the carry leg
+    /// exists to remove. A wholly absent column is caught up front by the CLI;
+    /// a column that is *present with gaps* can only be counted as the run goes.
+    ///
+    /// `None` means "this wallet does not say", never "coverage was complete" —
+    /// the same convention as [`quote_ccy`](Self::quote_ccy) and
+    /// [`data_sources`](Self::data_sources). A live venue charges funding itself
+    /// and takes the default.
+    fn carry_coverage(&self) -> Option<(usize, usize)> {
+        None
+    }
+
     /// The leverage this account trades `symbol` at — the multiple of equity it
     /// may hold as gross notional — or `None` when the venue has no such
     /// concept.

@@ -1548,6 +1548,12 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Reference(self.funds)
     }
 
+    /// The inherent [`carry_coverage`](Self::carry_coverage), lifted onto the
+    /// trait so a generic driver can carry it into the report.
+    fn carry_coverage(&self) -> Option<(usize, usize)> {
+        Some(PaperWallet::carry_coverage(self))
+    }
+
     fn position(&self, symbol: &Sym) -> Units<Sym> {
         Units {
             symbol: symbol.clone(),

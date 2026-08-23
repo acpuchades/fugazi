@@ -80,6 +80,7 @@ fn load_report() -> RunReport<&'static str> {
         rejections: Vec::new(),
         initial_equity: INITIAL_CASH,
         ruin_bar: None,
+        carry_coverage: None,
     }
 }
 

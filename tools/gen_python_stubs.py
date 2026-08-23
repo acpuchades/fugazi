@@ -190,6 +190,9 @@ MEMBER_RETURNS = {
     ("StrSource", "update"): "str | None",
     ("StrSource", "value"): "str | None",
     ("StrSource", "feed"): FED,
+    # A wallet counts as it charges, so it always has a figure; a `RunReport`
+    # may have been built by hand, and `None` there is "does not say".
+    ("RunReport", "carry_coverage"): "tuple[int, int] | None",
     ("MultiIndicator", "update"): "dict[str, float] | None",
     ("MultiIndicator", "value"): "dict[str, float] | None",
     ("MultiIndicator", "feed"): FED,

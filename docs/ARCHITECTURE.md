@@ -544,6 +544,13 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   against a non-finite request: a `NaN` reads false against **every** `>` and
   `<`, so it clears both solvency rules and the range check, books a `NaN`
   position, and takes cash and equity with it for the rest of the run.
+- **`carry_coverage() -> Option<(usize, usize)>`** (default `None` = "does not
+  say") — `(bars that wanted a carry rate, bars that got one)`. `PaperWallet`
+  answers; `SleeveWallet` delegates; `LedgerWallet` does not (carry is charged
+  once on the netted account, so every child would report the portfolio's
+  figure as its own). `backtest::run` carries it onto `RunReport` beside
+  `rejections`, for the same reason: both say the curve above them may not
+  describe what it looks like it describes.
 - **Optional capability methods** (defaulted, opt-in per impl): `adjust_funds` /
   `set_limit` / `cancel_limit` / `cancel` / `poll_fills` / `take_rejections`, plus
   **`positions() -> Vec<Units<Sym>>`** (default empty — "can't enumerate", *not*

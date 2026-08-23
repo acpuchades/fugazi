@@ -616,6 +616,7 @@ use fugazi::metrics::{per_bar_returns, drawdown_segments, sharpe, max_drawdown};
 #     rejections: vec![],
 #     initial_equity: 10_000.0,
 #     ruin_bar: None,
+#     carry_coverage: None,
 # };
 let returns  = per_bar_returns(&report.equity_curve, report.initial_equity);
 let segments = drawdown_segments(&report.equity_curve);
