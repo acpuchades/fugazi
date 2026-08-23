@@ -112,7 +112,7 @@ case.
 
 ### A fitted fill is scaled down without saying so — *settled*
 
-**Settled, in the shape this entry called for.** `requested_units` is a
+**Settled in 0.75.0, in the shape this entry called for.** `requested_units` is a
 field on `Order`, beside `units`; `fill_ratio()` is `units / requested_units`;
 `fills.csv` carries the column on every row and the CLI warns past
 `MATERIALLY_FITTED` (1%). The reasoning that picked that shape is kept below,
@@ -136,6 +136,38 @@ silence covered *that* too. Both are now bounded by gross notional
 (`PaperWallet::with_max_gross`, `1.0` by default — for a long-only book the same
 inequality as `funds >= 0`, so an unlevered long backtest is unchanged), and a
 request above the cap is fitted and recorded rather than reinterpreted.
+
+### Cost of carry is not modelled
+
+Raising `max_gross` above `1.0` lets a book hold more than it funded, and fugazi
+charges nothing for the difference. Perpetual funding, margin interest on a
+negative cash balance, a short's borrow fee, overnight financing — none of it
+exists, so a levered backtest is **optimistic** by an amount that scales with the
+leverage and the holding period.
+
+**A preset cannot cover this, and that is the whole point of the entry.** All
+three cost legs are per-*fill*: they are called from `fill_at` and nowhere else,
+so on a bar that does not trade they are not called at all, and
+`commission(notional, units)` has nowhere to put a bar, an elapsed interval or a
+held position. Carry is a function of *what is held* times *how long*, which is a
+different arity — not a model that is missing, a call site that is.
+
+Not added alongside the cap, deliberately. A fourth leg is not one struct: it
+needs a per-bar hook in `advance`, a rate *schedule* (OKX funding is an 8-hourly
+series that a backtest would have to be fed like any other input, not a
+constant), a cadence to accrue on, per-symbol scoping through the whole
+`--costs` grammar, a place in `metrics.yml`'s cost accounting, and a decision
+about what a `PaperWallet` with no venue is supposed to charge. Shipping a
+constant-rate approximation of it would be worse than the documented hole:
+funding flips sign with the market, so a fixed rate is not conservative, it is
+just wrong in a direction nobody chose.
+
+**What would change this:** a rate series arriving as an ordinary overlay column
+(the `sources` layer already fetches per-symbol series, and OKX publishes
+funding history), at which point the accrual is a per-bar read of a column the
+run already carries rather than a new configuration surface. Until then
+`Wallet::adjust_funds(-carry)` between bars is the documented seam, and
+`docs/COSTS.md` states the omission where a reader configuring costs will hit it.
 
 ### Leverage is bounded at fill time, not tracked between fills
 

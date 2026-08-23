@@ -335,6 +335,16 @@ impl<Sym> PaperWallet<Sym> {
     /// limit by a mark can always trade its way back — and
     /// [`flatten`](Wallet::flatten) always works.
     ///
+    /// **Nothing charges for the borrowing.** fugazi models no cost of carry —
+    /// no perpetual funding, no margin interest on a negative cash balance, no
+    /// borrow fee — and the [`TradingCosts`] pipeline structurally cannot,
+    /// because all three of its legs are per-*fill* and carry accrues on bars
+    /// that do not trade. At `1.0` nothing is borrowed and nothing is missing;
+    /// above it, a levered run is **optimistic** by an amount that scales with
+    /// the leverage and the holding period. Charge it yourself through
+    /// [`Wallet::adjust_funds`] if it matters at your horizon. See
+    /// `docs/COSTS.md`, *What the pipeline cannot express*.
+    ///
     /// Like the cost models and [`retention`](Self::with_retention), this is
     /// *configuration*: it is not carried in
     /// [`snapshot_state`](Self::snapshot_state), so a resumed run takes the cap

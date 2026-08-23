@@ -55,6 +55,37 @@ Everything is under [`src/costs/`](../src/costs/) as three tiny traits, one
 model per struct, plus a `TradingCosts` bundle that
 [`PaperWallet::with_costs`](../src/strategy.rs) takes.
 
+### What the pipeline cannot express: cost of carry
+
+**All three legs are per-fill.** They are called from `PaperWallet::fill_at` and
+nowhere else, so on a bar where nothing trades they are not called at all — and
+their signatures have nowhere to put the missing information:
+`commission(notional, units)` sees no bar, no elapsed time and no held position.
+
+That rules out the whole **carry** family, and no preset can work around it,
+because the gap is arity rather than parameters:
+
+| Not modelled | What it would need |
+|---|---|
+| Perpetual **funding** (OKX charges it every 8h on an open swap) | the held position, per funding interval |
+| **Margin interest** on a negative cash balance | the cash balance, per elapsed day |
+| **Borrow fee** on a short | the short's notional, per elapsed day |
+| Overnight / weekend financing on CFDs and futures roll | the position, per calendar gap |
+
+**When this matters.** At the default `max_gross = 1.0` nothing is borrowed, so
+for a long-only unlevered backtest there is nothing missing. The gap opens
+exactly when you raise the cap: a 3x book pays for the 2x it did not fund
+itself, every bar it holds, and omitting that makes a levered backtest
+**optimistic** by an amount that scales with both the leverage and the holding
+period. A high-turnover 3x strategy will barely notice; a 3x position held for
+months is materially mis-stated.
+
+Charge it outside the pipeline if you need it: `Wallet::adjust_funds(-carry)`
+between bars is the seam, and it is what the flow-adjustment note in
+[METRICS.md](METRICS.md) already assumes for external cash movements. See the
+`Cost of carry is not modelled` entry in [TODO.md](../TODO.md) for why a fourth
+leg was not added along with the leverage cap.
+
 ## Wiring costs into a run
 
 Two surfaces: the CLI's `--costs` flag and the Rust API's

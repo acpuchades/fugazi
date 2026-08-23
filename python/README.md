@@ -791,6 +791,20 @@ set out of band, in its own UI, and can change under a running strategy. Set the
 strategy. Without that, a live equity curve is uninterpretable against the
 backtest it is supposed to be tracking.
 
+**One thing `max_gross` does not do is charge for the borrowing.** fugazi models
+no cost of carry — no perpetual funding, no margin interest, no borrow fee — and
+the cost pipeline structurally cannot, because commission, spread and slippage
+are all per-*fill* while carry accrues on bars that do not trade. At the default
+`1.0` nothing is borrowed and nothing is missing. Above it, a levered backtest is
+**optimistic**, by an amount that grows with both the leverage and how long
+positions are held: barely visible on a high-turnover strategy, material on one
+that holds for months. Deduct it yourself between bars if it matters at your
+horizon:
+
+```py
+wallet.adjust_funds(-position_notional * funding_rate)
+```
+
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,
 > `trade.bars_held`, `order.signed_units` — including derived readings like the
