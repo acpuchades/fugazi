@@ -124,6 +124,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 |---|---|
 | An indicator's math | a case in `tests/indicator_reference.rs` (hand-derived expected values) **and** in `tests/warm_up.rs` |
 | An indicator's warm-up / settling | `tests/warm_up.rs` — and nothing else; that file is the sole authority |
+| A **new indicator**, on top of the two above | a line in each sweep in `tests/degenerate_inputs.rs` — no non-finite reading on a flat / zero-volume / zero-range / all-zero / gapped series, no `NaN` at `period: 1`, `reset` back to the constructed state, and a bit-identical mid-stream resume. Adding one is a line per sweep, and the file is where a missing `#[state(...)]` annotation actually surfaces |
 | A `pub(crate)` core | a differential unit test beside it |
 | A `NodeSpec` tag | the compiler and the catalogue/parity guards will tell you; add grammar coverage in `tests/spec_grammar.rs` |
 | Strategy decision logic | `tests/strategies.rs` (catalogue-wide) or the shape's own file (`pairs.rs`, `portfolio.rs`) |

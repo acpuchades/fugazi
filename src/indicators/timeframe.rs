@@ -221,6 +221,18 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
         self.inner.reset();
         self.count = 0;
         self.open = None;
+        // The bucket accumulators too. They are dead while `open` is `None` —
+        // the next `update` overwrites all four before reading any — so leaving
+        // them behind changed no reading, and that is exactly why it survived:
+        // `reset` is documented to return the indicator to its *constructed*
+        // condition, and `save_state` is the only complete view of whether it
+        // did. A reset instance that still serializes a previous run's high
+        // makes the two disagree, and couples correctness to an invariant
+        // ("`open` is checked first") three fields away.
+        self.high = 0.0;
+        self.low = 0.0;
+        self.close = 0.0;
+        self.volume = 0.0;
         self.value = None;
     }
 
