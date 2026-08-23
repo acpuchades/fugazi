@@ -1296,7 +1296,11 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
 - **`glob.rs`** — shell glob (`b*`/`*b*`/`?`/`[a-z]`/`[!abc]`/`\*`), case-insensitive,
   whole-string. Hand-rolled to avoid regex deps.
 - **`imports.rs`** — `!import` pass, runs **before `!param`**. Paths relative to the
-  importing doc. Cycles = hard error. Object form `!import { path, params: {...} }`
+  importing doc. Cycles = hard error, and so is a **composed depth over
+  `imports::MAX_DEPTH` (256)**: the YAML parser bounds each *file* at 128 levels
+  and that bound is what keeps the three later passes (`!param`, the typed parse,
+  `try_build`) inside the stack — splicing defeats it, and a chain deep enough
+  aborted the process instead of reporting anything. Object form `!import { path, params: {...} }`
   resolves the imported subtree's `!param` against the inline table first (via
   `params::substitute_partial`).
 - **`typecheck.rs`** — static input/output type checking of `NodeSpec` trees, run from
