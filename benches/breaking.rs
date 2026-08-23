@@ -382,5 +382,120 @@ fn bench_value_write_back(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_input_by_reference, bench_value_write_back);
+// ---------------------------------------------------------------------------
+// Candidate — parallelising the non-overlapping windowed reduction
+// ---------------------------------------------------------------------------
+//
+// `spec::metrics::windowed_from_report` is serial by an explicit decision
+// documented at its definition: its sibling `rolling_from_report` *is* parallel,
+// and the comment says the non-overlapping one stays serial because under
+// `optimize` it runs inside the grid's `par_iter`, where an inner one "would
+// just fight for the same threads without wall-clock benefit".
+//
+// That reasoning holds when the grid is at least as wide as the machine. It
+// does not when the grid is *narrower* — a 2-point grid on a 16-core box leaves
+// 14 workers idle no matter how many windows each row has — and `run -w`, which
+// has no outer par_iter at all, is fully serial today.
+//
+// So the question is not "is nesting free" but "what does it cost when the grid
+// is already wide, and what does it win when it isn't". This measures both, at
+// the same total work, by varying only the outer width.
+
+/// A synthetic equity curve long enough for the window count to matter.
+fn windowed_report(bars: usize) -> fugazi::RunReport<fugazi::types::Symbol> {
+    let mut equity = Vec::with_capacity(bars);
+    let mut v = 10_000.0f64;
+    for i in 0..bars {
+        v *= 1.0 + ((i % 17) as f64 - 8.0) / 1_000.0;
+        equity.push(v);
+    }
+    fugazi::RunReport {
+        equity_curve: equity,
+        fills: Vec::new(),
+        rejections: Vec::new(),
+        initial_equity: 10_000.0,
+        ruin_bar: None,
+        carry_coverage: None,
+    }
+}
+
+/// The parallel candidate: what `windowed_from_report` would be if it farmed
+/// its windows out the way `rolling_from_report` already does.
+fn windowed_parallel(
+    report: &fugazi::RunReport<fugazi::types::Symbol>,
+    window: usize,
+) -> Vec<fugazi::spec::metrics::WindowMetrics> {
+    use rayon::prelude::*;
+    let bars = report.equity_curve.len();
+    let n = bars / window;
+    (0..n)
+        .into_par_iter()
+        .map(|w| {
+            let start = w * window;
+            let end = (start + window).min(bars);
+            fugazi::spec::metrics::WindowMetrics {
+                start_bar: start,
+                end_bar: end - 1,
+                metrics: fugazi::spec::metrics::from_report(
+                    &fugazi::spec::metrics::report_slice(report, start..end),
+                    252.0,
+                    0.0,
+                    None,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn bench_windowed_nesting(c: &mut Criterion) {
+    use rayon::prelude::*;
+    const BARS: usize = 20_000;
+    const WINDOW: usize = 250; // 80 windows per row
+
+    let report = windowed_report(BARS);
+    let mut group = c.benchmark_group("windowed_nesting");
+
+    // `rows` is the outer grid width. 1 stands in for `run -w` (no outer
+    // par_iter); 2 and 4 for a narrow sweep; 32 for one at least twice as wide
+    // as the 16-core box this was measured on.
+    for rows in [1usize, 2, 4, 32] {
+        group.throughput(Throughput::Elements((rows * (BARS / WINDOW)) as u64));
+
+        group.bench_function(format!("serial_inner/rows={rows}"), |b| {
+            b.iter(|| {
+                let out: Vec<_> = (0..rows)
+                    .into_par_iter()
+                    .map(|_| {
+                        fugazi::spec::metrics::windowed_from_report(
+                            black_box(&report),
+                            WINDOW,
+                            252.0,
+                            0.0,
+                            None,
+                        )
+                    })
+                    .collect();
+                black_box(out.len())
+            })
+        });
+
+        group.bench_function(format!("parallel_inner/rows={rows}"), |b| {
+            b.iter(|| {
+                let out: Vec<_> = (0..rows)
+                    .into_par_iter()
+                    .map(|_| windowed_parallel(black_box(&report), WINDOW))
+                    .collect();
+                black_box(out.len())
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_input_by_reference,
+    bench_value_write_back,
+    bench_windowed_nesting
+);
 criterion_main!(benches);

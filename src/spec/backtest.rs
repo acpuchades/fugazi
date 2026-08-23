@@ -440,6 +440,94 @@ pub fn evaluate_windowed_any(
     Ok(ctx.reduce_windowed(&measured_report_any(spec, snapshots, ctx)?, window))
 }
 
+/// The pooled twin of [`evaluate_any`]: one document per **panel member**, the
+/// same spec run against each member's own snapshot stream.
+///
+/// The members are measured in parallel over a flat work list, which is the
+/// only parallelism available to a caller with no grid to fan out over
+/// (`run --pooled`); under `optimize` this nests inside the grid's own
+/// `par_iter` on the same pool, so it queues rather than oversubscribing and
+/// still fills a box the grid alone is too narrow to saturate.
+///
+/// A member that fails to build fails the whole call — a panel silently short
+/// one instrument is a pooled mean over a different population than the one the
+/// caller asked for, and [`crate::spec::panel::Pooled::defined`] would report
+/// the wrong denominator for it.
+pub fn evaluate_panel_any(
+    spec: &StrategySpec,
+    members: &[(String, &[crate::types::Snapshot<Symbol>])],
+    ctx: &EvalContext,
+) -> Result<Vec<crate::spec::panel::PanelMetrics>, String> {
+    use rayon::prelude::*;
+    members
+        .par_iter()
+        .map(|(name, snapshots)| {
+            check_member_universe_pub(spec, name, snapshots)?;
+            Ok(crate::spec::panel::PanelMetrics {
+                member: name.clone(),
+                metrics: ctx.reduce(&measured_report_any(spec, snapshots, ctx)?),
+            })
+        })
+        .collect()
+}
+
+/// Refuse a panel member whose stream is missing a symbol the document names.
+///
+/// This is the panel's copy of the rule the CLI runners apply to a single run:
+/// `Pick::matching` reads `None` on every bar for a symbol that is not in the
+/// input, so the member would run to completion, trade nothing, and report a
+/// perfectly plausible flat backtest. Pooled, that is worse than it is alone —
+/// the member still *counts* toward `Pooled::members`, so the panel silently
+/// reports a mean over a population that includes runs which never happened.
+///
+/// The common way to hit this is handing `panel=` a document whose `root:`
+/// names one instrument (`!pick { symbol: !param SYM }` with `SYM` pinned):
+/// every member but that one matches nothing. Naming the offending member and
+/// what its stream *does* carry is what makes that diagnosable rather than a
+/// support count the caller has to notice and then explain.
+pub fn check_member_universe_pub(
+    spec: &StrategySpec,
+    member: &str,
+    snapshots: &[crate::types::Snapshot<Symbol>],
+) -> Result<(), String> {
+    let wanted = spec.universe(snapshots);
+    if wanted.is_empty() {
+        // A sole-atom (unrooted) document names nothing and reads whatever the
+        // bar carries — the shape `panel=` is most naturally used with.
+        return Ok(());
+    }
+    let present: std::collections::BTreeSet<&str> = snapshots
+        .iter()
+        .flat_map(|s| s.iter().filter_map(|(sym, _, _)| sym.map(|s| s.as_str())))
+        .collect();
+    let missing: Vec<&str> = wanted
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !present.contains(s))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut have: Vec<&str> = present.into_iter().collect();
+    have.sort_unstable();
+    Err(format!(
+        "panel member `{member}` has no bars for {} — that member's stream carries {}.          A named symbol absent from a stream reads `None` on every bar, so this member          would report a flat zero-trade backtest and still count toward the pooled mean.          Either give each member a document rooted on its own series (the CLI's          `--pooled AXIS` substitutes the member per row) or use a sole-atom `root:` that          reads whatever the bar carries",
+        missing
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if have.is_empty() {
+            "nothing".to_string()
+        } else {
+            have.iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    ))
+}
+
 /// The pure-work half of a run, for any shape: drive the strategy over
 /// `snapshots`, reduce the report to `Metrics`, and hand back an
 /// [`IterationResult`]. Does no IO and no console printing — that's the

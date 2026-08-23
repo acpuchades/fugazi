@@ -149,6 +149,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySweepRow>()?;
     m.add_class::<PyWalkForwardResult>()?;
     m.add_class::<PyWalkForwardFold>()?;
+    m.add_class::<PyPanelWalkForwardResult>()?;
+    m.add_class::<PyPanelFold>()?;
+    m.add_class::<PyMemberComposite>()?;
 
     // `fugazi.Wallet` — an ABC with the three concrete wallets registered as
     // virtual subclasses, so `isinstance(w, ta.Wallet)` works. See there.

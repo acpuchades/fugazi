@@ -80,6 +80,10 @@ pub mod montecarlo;
 // stack.
 pub mod optimize;
 
+// Panel pooling — the cross-instrument reduction `optimize` ranks on when the
+// instrument axis is reduced over rather than selected on.
+pub mod panel;
+
 // Shared rayon thread-pool constructor — the optimize kernel uses it.
 pub mod pool;
 

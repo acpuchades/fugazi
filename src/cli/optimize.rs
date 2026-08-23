@@ -99,6 +99,14 @@ pub struct OptimizeOptions<'a> {
     /// the trading calendar inside [`run`] (duration form requires
     /// `asset_class` and a resolvable bar cadence).
     pub windowed: Option<WindowSpec>,
+    /// `--pooled AXIS`: reduce over the named grid axis instead of ranking on
+    /// it. The axis leaves [`Sweep::union_columns`] and each remaining grid
+    /// point is scored across every value of it — one row per parameter set,
+    /// not one per `(parameter set, instrument)`.
+    ///
+    /// Mutually exclusive with `windowed` (both reduce a row to `mean ∓ k·std`,
+    /// over different partitions); composes with `walkforward`.
+    pub pooled: Option<String>,
     /// `--walkforward IS,OS[,Embargo]`: rolling walk-forward optimization. When
     /// set, [`run`] takes the walk-forward branch (dispatched into
     /// [`walkforward`]) instead of the plain grid sweep — mutually exclusive
@@ -313,6 +321,75 @@ fn probe_streams(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<St
     Ok(out)
 }
 
+/// Carve the `--pooled` axis out of every subgrid, returning the reduced
+/// subgrids and the values that axis will be pooled over.
+///
+/// The reduced subgrids are what the sweep actually enumerates: one row per
+/// combination of the *remaining* axes. The pooled axis is re-substituted per
+/// member inside the evaluator, so it never reaches
+/// [`compute_union_columns`] and never becomes a CSV column — which is the
+/// literal meaning of "reduced over, not ranked on".
+///
+/// Every subgrid must offer the **same** values for the axis. Letting them
+/// differ would silently mean two rows pooled over different populations, and
+/// a `_mean` that is not comparable between them — the one property the whole
+/// sweep is built around.
+fn split_pooled_axis(subgrids: Vec<Subgrid>, axis: &str) -> Result<(Vec<Subgrid>, Vec<Value>)> {
+    let mut members: Option<Vec<Value>> = None;
+    let mut reduced = Vec::with_capacity(subgrids.len());
+    for (i, subgrid) in subgrids.into_iter().enumerate() {
+        let Some(pos) = subgrid.axes.iter().position(|(name, _)| name == axis) else {
+            let available: Vec<&str> = subgrid.axes.iter().map(|(n, _)| n.as_str()).collect();
+            bail!(
+                "--pooled `{axis}` names no axis in --grid #{} — that grid varies {}. \
+                 The pooled axis has to be a swept axis: it is the thing being reduced \
+                 over, so a scalar would leave a panel of one",
+                i + 1,
+                if available.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    available.join(", ")
+                },
+            );
+        };
+        let values = subgrid.axes[pos].1.clone();
+        match &members {
+            None => members = Some(values.clone()),
+            Some(first) if *first != values => bail!(
+                "--pooled `{axis}` takes {} value(s) in --grid #{} but {} in the first — \
+                 every subgrid has to pool over the same members, or two rows' pooled \
+                 means would be averages over different populations",
+                values.len(),
+                i + 1,
+                first.len(),
+            ),
+            Some(_) => {}
+        }
+        // Drop the axis and re-enumerate the cartesian product without it. The
+        // combos must stay a mixed-radix enumeration of `axes` with the last
+        // axis fastest — `smooth_keys` and `plateau_size` read lattices out of
+        // that layout — so this rebuilds them rather than filtering the old
+        // ones.
+        let mut axes = subgrid.axes;
+        axes.remove(pos);
+        let combos = cartesian(&axes);
+        reduced.push(Subgrid {
+            fixed: subgrid.fixed,
+            axes,
+            combos,
+        });
+    }
+    let members = members.expect("at least one subgrid");
+    if members.len() < 2 {
+        bail!(
+            "--pooled `{axis}` has only {} value — pooling reduces across a panel, and a \
+             panel of one is just a plain sweep with an extra layer of indirection",
+            members.len(),
+        );
+    }
+    Ok((reduced, members))
+}
+
 /// A traded series a grid row can resolve to: the instrument, and the cadence
 /// its `root:` declared (if it declared one).
 ///
@@ -367,15 +444,53 @@ fn run_single(
     base_value: &Value,
 ) -> Result<()> {
     let started = SystemTime::now();
+    // `--pooled AXIS` carves that axis out of the grid *before* anything else
+    // looks at it. `distinct_roots` then still walks every combination the
+    // sweep will evaluate — the pooled values are re-substituted below — so the
+    // stream map covers every member, exactly as it covers every row.
+    let (subgrids, pooled_members) = match opts.pooled.as_deref() {
+        Some(axis) => {
+            let (reduced, members) = split_pooled_axis(subgrids, axis)?;
+            (reduced, Some((axis.to_string(), members)))
+        }
+        None => (subgrids, None),
+    };
+    // Every (row, member) parameter table the sweep will build. Without
+    // pooling this is just the grid; with it, the pooled axis is spliced back
+    // in so root resolution and stream preparation see the real population.
+    let expanded: Vec<Subgrid> = match &pooled_members {
+        None => subgrids.clone(),
+        Some((axis, values)) => subgrids
+            .iter()
+            .map(|sg| {
+                let mut axes = sg.axes.clone();
+                axes.push((axis.clone(), values.clone()));
+                axes.sort_by(|a, b| a.0.cmp(&b.0));
+                let combos = cartesian(&axes);
+                Subgrid {
+                    fixed: sg.fixed.clone(),
+                    axes,
+                    combos,
+                }
+            })
+            .collect(),
+    };
     // Which traded series this grid touches. More than one is a *root axis* —
     // a sweep over instruments or cadences rather than over parameters.
-    let roots = distinct_roots(base_value, &subgrids)?;
+    let roots = distinct_roots(base_value, &expanded)?;
     if roots.len() > 1 {
-        if opts.walkforward.is_some() {
+        // Pooling is exactly the answer to the objection below: the axis is
+        // reduced over rather than ranked on, so rows stay comparable and folds
+        // are laid out on the panel's shared clock rather than on one member's
+        // bar indices. So neither the refusal nor the warning applies.
+        if opts.pooled.is_none() && opts.walkforward.is_some() {
             bail!(
                 "--walkforward lays folds out over one bar timeline, but this grid sweeps {} \
                  traded series ({}) — each has its own bar count, so a fold index means a \
-                 different span per row. Sweep the root or walk forward, not both",
+                 different span per row. Either sweep the root or walk forward, not both — or \
+                 pass `--pooled <AXIS>` to reduce over that axis instead of ranking on it, \
+                 which lays folds out on the panel's shared clock and fits one parameter set \
+                 across every series",
                 roots.len(),
                 roots
                     .iter()
@@ -388,12 +503,19 @@ fn run_single(
         // around no longer holds: rows are warmed to the grid-wide maximum and
         // otherwise evaluate *their own* series' bars, so a difference between
         // two rows is no longer "the parameters and not the window".
-        eprintln!(
-            "  {} this grid sweeps {} traded series — rows evaluate different bars, so their \
-             metrics are a batch of separate backtests rather than a like-for-like comparison",
-            style::yellow("warn"),
-            roots.len(),
-        );
+        //
+        // `--pooled` is exempt because it is the fix for exactly that: the axis
+        // is reduced over rather than ranked on, so there is one row per
+        // parameter set and nothing is being compared across series.
+        if opts.pooled.is_none() {
+            eprintln!(
+                "  {} this grid sweeps {} traded series — rows evaluate different bars, so their \
+                 metrics are a batch of separate backtests rather than a like-for-like \
+                 comparison. `--pooled <AXIS>` reduces over that axis instead",
+                style::yellow("warn"),
+                roots.len(),
+            );
+        }
     }
     let probe_symbol = roots[0].symbol.clone();
     let series = frame.atoms(&probe_symbol)?;
@@ -404,11 +526,11 @@ fn run_single(
     // them is not in the input. `run` makes the same check; a sweep that
     // silently read `None` for a regime gate would produce a whole grid of
     // plausible zero-trade rows.
-    let reads = probe_reads(base_value, &subgrids)?;
+    let reads = probe_reads(base_value, &expanded)?;
     crate::run::check_streams(
         frame,
         opts.frequency,
-        &probe_streams(base_value, &subgrids)?,
+        &probe_streams(base_value, &expanded)?,
         crate::run::StreamUse::Pick,
     )?;
     let read_only = read_only_series(frame, &[probe_symbol.as_str()], &reads)?;
@@ -484,90 +606,6 @@ fn run_single(
     };
     let sweep_warmup =
         (opts.walkforward.is_none() && slice.warmup_bars() > 0).then(|| slice.warmup_bars());
-
-    // Walk-forward branch: an independent driver — different outputs and a
-    // fold-scoped per-row measurement rather than one whole-run reduction. The
-    // grid loop shape is similar, but the emitted artifacts have their own
-    // schema (per-fold winners + composite OOS), so we don't try to squeeze it
-    // through the [`Sweep`] shape.
-    if let Some(walkforward_spec) = opts.walkforward {
-        let schema = backtest::schema_from_atoms(&atoms);
-        let keep_unstable = opts.keep_unstable;
-        let cash = opts.cash;
-        let max_gross = opts.max_gross;
-        let margin_rate = opts.margin_rate;
-        let maintenance_margin = opts.maintenance_margin;
-        let cost_config = opts.cost_config;
-        let schema_ref = &schema;
-        // Same lift as the sweep path: the unified measurement is
-        // snapshot-shaped, so tag each bar with the strategy's symbol once.
-        // Interned once: every bar's `Snapshot::single` then clones a refcount
-        // rather than allocating a fresh copy of the same symbol.
-        let wf_symbol = fugazi::types::symbol(&probe_symbol);
-        let wf_keys: Vec<IndexKey> = atoms.iter().map(|(k, _)| k.clone()).collect();
-        let mut wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
-            .iter()
-            .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
-            .collect();
-        // Left-joined onto the traded symbol's bars — see `run::attach_read_series`.
-        // The folds slice this stream by index, so a read series has to be on it
-        // before the split, not per fold.
-        attach_read_series(&wf_keys, &mut wf_snapshots, &read_only);
-        let wf_snapshots_ref = &wf_snapshots;
-        let ctx = backtest::EvalContext {
-            cash,
-            max_gross,
-            margin_rate,
-            maintenance_margin,
-            bars_per_year,
-            risk_free_rate: opts.risk_free_rate,
-            cost_config,
-            effective_freq,
-            stream: effective_freq.map(|f| f.as_token()),
-            windowed: None,
-            seconds_per_bar,
-            mc: None,
-            warmup_bars: None,
-        };
-        let ctx_ref = &ctx;
-        let probe = |params: &HashMap<String, Value>| -> Result<usize> {
-            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
-            let built = spec
-                .try_build(cash, schema_ref, None)
-                .map_err(backtest::build_error)?;
-            Ok(if keep_unstable {
-                built.warm_up_bars()
-            } else {
-                built.stable_bars()
-            })
-        };
-        let run_backtest = |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
-            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
-            backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
-                .map_err(backtest::build_error)
-        };
-        return walkforward_run(
-            subgrids,
-            atoms.len(),
-            probe,
-            run_backtest,
-            bars_per_year,
-            opts.risk_free_rate,
-            effective_freq,
-            walkforward_spec,
-            opts.keep_unstable,
-            opts.asset_class,
-            seconds_per_bar,
-            &opts.metrics,
-            opts.best_by.as_deref(),
-            opts.smoothing.as_ref(),
-            opts.output,
-            opts.jobs,
-            opts.quiet,
-            &skipped_overlay_columns,
-            opts.cash,
-        );
-    }
 
     let cost_config = opts.cost_config;
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
@@ -676,7 +714,142 @@ fn run_single(
     }
     let streams_ref = &streams;
 
+    // Walk-forward branch: an independent driver — different outputs and a
+    // fold-scoped per-row measurement rather than one whole-run reduction. The
+    // grid loop shape is similar, but the emitted artifacts have their own
+    // schema (per-fold winners + composite OOS), so we don't try to squeeze it
+    // through the [`Sweep`] shape.
+    if let Some(walkforward_spec) = opts.walkforward {
+        // Pooled walk-forward: folds on the panel's shared clock, one winner
+        // per fold chosen on the pooled in-sample score, applied out-of-sample
+        // to every member. Routed before the single-stream path because it is a
+        // different geometry, not a variation on one — fold ranges index the
+        // union of every member's bar times, not any single member's bars.
+        if let Some((axis, values)) = pooled_members.as_ref() {
+            return pooled_walkforward_run(
+                opts,
+                base_value,
+                subgrids,
+                axis,
+                values,
+                streams_ref,
+                walkforward_spec,
+                bars_per_year,
+                effective_freq,
+                seconds_per_bar,
+                &skipped_overlay_columns,
+                started,
+            );
+        }
+        let schema = backtest::schema_from_atoms(&atoms);
+        let keep_unstable = opts.keep_unstable;
+        let cash = opts.cash;
+        let max_gross = opts.max_gross;
+        let margin_rate = opts.margin_rate;
+        let maintenance_margin = opts.maintenance_margin;
+        let cost_config = opts.cost_config;
+        let schema_ref = &schema;
+        // Same lift as the sweep path: the unified measurement is
+        // snapshot-shaped, so tag each bar with the strategy's symbol once.
+        // Interned once: every bar's `Snapshot::single` then clones a refcount
+        // rather than allocating a fresh copy of the same symbol.
+        let wf_symbol = fugazi::types::symbol(&probe_symbol);
+        let wf_keys: Vec<IndexKey> = atoms.iter().map(|(k, _)| k.clone()).collect();
+        let mut wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
+            .iter()
+            .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
+            .collect();
+        // Left-joined onto the traded symbol's bars — see `run::attach_read_series`.
+        // The folds slice this stream by index, so a read series has to be on it
+        // before the split, not per fold.
+        attach_read_series(&wf_keys, &mut wf_snapshots, &read_only);
+        let wf_snapshots_ref = &wf_snapshots;
+        let ctx = backtest::EvalContext {
+            cash,
+            max_gross,
+            margin_rate,
+            maintenance_margin,
+            bars_per_year,
+            risk_free_rate: opts.risk_free_rate,
+            cost_config,
+            effective_freq,
+            stream: effective_freq.map(|f| f.as_token()),
+            windowed: None,
+            seconds_per_bar,
+            mc: None,
+            warmup_bars: None,
+        };
+        let ctx_ref = &ctx;
+        let probe = |params: &HashMap<String, Value>| -> Result<usize> {
+            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+            let built = spec
+                .try_build(cash, schema_ref, None)
+                .map_err(backtest::build_error)?;
+            Ok(if keep_unstable {
+                built.warm_up_bars()
+            } else {
+                built.stable_bars()
+            })
+        };
+        let run_backtest = |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
+            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+            backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
+                .map_err(backtest::build_error)
+        };
+        return walkforward_run(
+            subgrids,
+            atoms.len(),
+            probe,
+            run_backtest,
+            bars_per_year,
+            opts.risk_free_rate,
+            effective_freq,
+            walkforward_spec,
+            opts.keep_unstable,
+            opts.asset_class,
+            seconds_per_bar,
+            &opts.metrics,
+            opts.best_by.as_deref(),
+            opts.smoothing.as_ref(),
+            opts.output,
+            opts.jobs,
+            opts.quiet,
+            &skipped_overlay_columns,
+            opts.cash,
+        );
+    }
+
+    let pooled_ref = pooled_members.as_ref();
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
+        // Pooled: re-splice each member's value for the carved-out axis, run
+        // that member against its own prepared stream, and hand the kernel one
+        // document per member. The reduction to `mean ∓ k·std` happens in
+        // `ranking_value`, exactly as it does for `-w`.
+        //
+        // Each member is measured against **its own** `EvalContext` — its own
+        // annualization and cadence — because those are properties of the
+        // series, not of the grid. Pooling a daily member with an hourly one is
+        // then still meaningful: both Sharpes are annualized before they meet.
+        if let Some((axis, values)) = pooled_ref {
+            let members = values
+                .iter()
+                .map(|v| {
+                    let mut member_params = params.clone();
+                    member_params.insert(axis.clone(), v.clone());
+                    let spec = build_any_spec(StrategyKind::Single, base_value, &member_params)?;
+                    let key = root_key_of(base_value, &member_params)?;
+                    let (snapshots_ref, ctx_ref) = streams_ref
+                        .get(&key)
+                        .expect("every member's root was prepared by `distinct_roots`");
+                    Ok(fugazi::spec::panel::PanelMetrics {
+                        member: format_value(v),
+                        metrics: backtest::evaluate_any(&spec, snapshots_ref, ctx_ref)
+                            .map_err(backtest::build_error)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Evaluation::Panel(members));
+        }
         let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
         // Which series *this row* trades. Every key was prepared above, so the
         // lookup cannot miss — `distinct_roots` walked the same combos.
@@ -1198,11 +1371,12 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         union_columns,
         metric_columns,
         windowed,
+        panel,
         deflated_sharpe_context,
         rows,
         ..
     } = sweep;
-    let (windowed, deflated_sharpe_context) = (*windowed, *deflated_sharpe_context);
+    let (windowed, panel, deflated_sharpe_context) = (*windowed, *panel, *deflated_sharpe_context);
     // The smoothed columns are named after the metric they average, so the CSV
     // reads `risk_adjusted.sharpe` next to `risk_adjusted.sharpe_smoothed`.
     let smoothed_path = sweep
@@ -1226,6 +1400,13 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         if windowed {
             header.push(format!("{name}_mean"));
             header.push(format!("{name}_std"));
+        } else if panel.is_some() {
+            header.push(format!("{name}_mean"));
+            header.push(format!("{name}_std"));
+            // The support, which the windowed reduction has no column for. A
+            // mean over 2 of 30 members and a mean over 30 of 30 are otherwise
+            // indistinguishable in the CSV, and they are not the same evidence.
+            header.push(format!("{name}_n"));
         } else {
             header.push(name.clone());
         }
@@ -1250,6 +1431,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
     let sample_metrics = rows.iter().find_map(|r| match &r.eval {
         Evaluation::Whole(m) => Some(m.as_ref()),
         Evaluation::Windowed(ws) => ws.first().map(|w| &w.metrics),
+        Evaluation::Panel(ms) => ms.first().map(|m| &m.metrics),
     });
     let positions: Vec<Option<ColumnPos>> = if let Some(sample) = sample_metrics {
         let flat = metrics::flatten(sample);
@@ -1294,6 +1476,34 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
                         pos.and_then(|p| mean_std_of(per_window.iter().map(|window| window[p])));
                     record.push(cell(spread.map(|(mean, _)| mean)));
                     record.push(cell(spread.map(|(_, std)| std)));
+                }
+            }
+            // Same indexed-flatten shape as the windowed arm, plus the support
+            // count. The mean is over the members that *reported* the metric —
+            // never over zeros substituted for the ones that could not compute
+            // it — which is what makes `_n` worth a column of its own.
+            Evaluation::Panel(ms) => {
+                let per_member: Vec<Vec<Option<Real>>> = ms
+                    .iter()
+                    .map(|m| {
+                        metrics::flatten(&m.metrics)
+                            .into_iter()
+                            .map(|(_, v)| v)
+                            .collect()
+                    })
+                    .collect();
+                for pos in &positions {
+                    let defined = pos.map(|p| {
+                        per_member
+                            .iter()
+                            .filter(|member| member[p].is_some())
+                            .count()
+                    });
+                    let spread =
+                        pos.and_then(|p| mean_std_of(per_member.iter().map(|member| member[p])));
+                    record.push(cell(spread.map(|(mean, _)| mean)));
+                    record.push(cell(spread.map(|(_, std)| std)));
+                    record.push(defined.map(|d| d.to_string()).unwrap_or_default());
                 }
             }
         }
@@ -1439,6 +1649,7 @@ fn warn_if_nothing_traded(rows: &[Row]) {
     let any_traded = rows.iter().any(|row| match &row.eval {
         Evaluation::Whole(m) => trades(m) > 0,
         Evaluation::Windowed(ws) => ws.iter().any(|w| trades(&w.metrics) > 0),
+        Evaluation::Panel(ms) => ms.iter().any(|m| trades(&m.metrics) > 0),
     });
     if any_traded {
         return;
@@ -1677,6 +1888,33 @@ fn print_best_block(sweep: &Sweep, k: Real) {
                 ),
             )
         }
+        // The panel twin of the windowed arm — same `mean ± std`, over members
+        // rather than windows, with the support appended so a headline resting
+        // on three of thirty members says so.
+        Evaluation::Panel(ms) => {
+            let pooled = |path: &str| crate::spec::panel::pool_metric(ms, path);
+            let ann = pooled("returns.annualized_mean_pct");
+            let vol = pooled("returns.annualized_volatility_pct");
+            let fmt = |p: Option<crate::spec::panel::Pooled>, signed: bool| {
+                p.map_or_else(
+                    || "—".to_string(),
+                    |p| {
+                        if signed {
+                            format!("{:+.2}% ± {:.2}%", p.mean, p.std)
+                        } else {
+                            format!("{:.2}% ± {:.2}%", p.mean, p.std)
+                        }
+                    },
+                )
+            };
+            let support = ann.map_or(0, |p| p.defined);
+            format!(
+                "{} ann · vol {} (pooled over {support} of {} members)",
+                fmt(ann, true),
+                fmt(vol, false),
+                ms.len(),
+            )
+        }
     };
     style::field("return", &headline);
 
@@ -1687,6 +1925,12 @@ fn print_best_block(sweep: &Sweep, k: Real) {
         let bars = match &best.eval {
             Evaluation::Whole(m) => m.run.bars,
             Evaluation::Windowed(ws) => ws.last().map_or(0, |w| w.end_bar + 1),
+            // The ruined member's own bar count — the bar index above is on
+            // that member's clock, not the pooled one, so this is the total it
+            // is an index into.
+            Evaluation::Panel(ms) => {
+                crate::spec::panel::ruined_member(ms).map_or(0, |m| m.metrics.run.bars)
+            }
         };
         style::field(
             "ruin",
@@ -1703,7 +1947,8 @@ fn print_best_block(sweep: &Sweep, k: Real) {
 }
 
 /// One metric value for the best block: `1.2345` for a whole-run evaluation,
-/// `1.2345 ± 0.6789` for a windowed one, `—` when degenerate (everywhere).
+/// `1.2345 ± 0.6789` for a windowed one, `1.2345 ± 0.6789 (28/30)` for a pooled
+/// one, `—` when degenerate (everywhere).
 fn format_metric(eval: &Evaluation, path: &str) -> String {
     match eval {
         Evaluation::Whole(m) => {
@@ -1712,6 +1957,12 @@ fn format_metric(eval: &Evaluation, path: &str) -> String {
         Evaluation::Windowed(ws) => lookup_windowed(ws, path).map_or_else(
             || "—".to_string(),
             |(mean, std)| format!("{mean:.4} ± {std:.4}"),
+        ),
+        // `± std (n/m)` — the support is inline rather than in a separate
+        // field because the number is only interpretable next to it.
+        Evaluation::Panel(ms) => crate::spec::panel::pool_metric(ms, path).map_or_else(
+            || "—".to_string(),
+            |p| format!("{:.4} ± {:.4} ({}/{})", p.mean, p.std, p.defined, p.members),
         ),
     }
 }
@@ -1836,6 +2087,7 @@ where
             result.folds.len(),
             n_bars,
             output,
+            None,
         );
         print_walkforward_summary(
             &result.fold_rows,
@@ -1980,6 +2232,7 @@ fn write_composite_metrics_yaml(path: &Path, m: &metrics::Metrics) -> Result<()>
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_walkforward_inputs(
     spec: &WalkForwardSpec,
     resolved: (usize, usize, usize),
@@ -1988,6 +2241,10 @@ fn print_walkforward_inputs(
     n_folds: usize,
     n_bars: usize,
     output: &Path,
+    // Pooled runs write one composite curve per member, so the file list is
+    // per member too — naming a `composite_oos_equity.csv` that was never
+    // written would send a reader looking for a file that does not exist.
+    composite_members: Option<&[String]>,
 ) {
     let (is_b, oos_b, emb_b) = resolved;
     style::print_section("inputs");
@@ -2008,10 +2265,25 @@ fn print_walkforward_inputs(
     );
     style::field("folds", &format!("{n_folds}  (over {n_bars} bars)"));
     style::field("output", &format!("{}", output.display()));
-    style::field_continuation(&format!(
-        "+ {}",
-        derive_sibling(output, "composite_oos_equity", "csv").display()
-    ));
+    match composite_members {
+        None => style::field_continuation(&format!(
+            "+ {}",
+            derive_sibling(output, "composite_oos_equity", "csv").display()
+        )),
+        Some(members) => {
+            for member in members {
+                style::field_continuation(&format!(
+                    "+ {}",
+                    derive_sibling(
+                        output,
+                        &format!("composite_oos_equity.{}", sanitize_member(member)),
+                        "csv"
+                    )
+                    .display()
+                ));
+            }
+        }
+    }
     style::field_continuation(&format!(
         "+ {}",
         derive_sibling(output, "composite_oos_metrics", "yml").display()
@@ -2109,5 +2381,402 @@ fn print_walkforward_summary(
                 ),
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pooled walk-forward (`--pooled` + `--walkforward`)
+// ---------------------------------------------------------------------------
+
+/// The `--pooled --walkforward` driver: one winner per fold on the **pooled**
+/// in-sample score, applied out-of-sample to every member.
+///
+/// The single-stream driver's geometry does not generalize here and is not
+/// reused: its folds are ranges of one series' bar indices, and two instruments
+/// that listed years apart do not share those. This lays folds out on the
+/// panel's shared clock — the sorted union of every member's bar times — and
+/// maps each fold down to a member's own bars only at the point of measurement,
+/// so fold *k* is one span for the whole panel and a member that had not listed
+/// yet contributes nothing to it rather than shifting it.
+///
+/// Emits the per-fold table, one composite OOS equity CSV **per member**, and a
+/// pooled composite metrics YAML. There is deliberately no single netted
+/// composite curve — see [`fugazi::spec::panel::MemberComposite`].
+#[allow(clippy::too_many_arguments)]
+fn pooled_walkforward_run(
+    opts: &OptimizeOptions,
+    base_value: &Value,
+    subgrids: Vec<Subgrid>,
+    axis: &str,
+    values: &[Value],
+    streams: &HashMap<RootKey, (Vec<fugazi::types::Snapshot<Symbol>>, backtest::EvalContext)>,
+    spec: WalkForwardSpec,
+    bars_per_year: Real,
+    effective_freq: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+    skipped_overlay_columns: &[String],
+    started: SystemTime,
+) -> Result<()> {
+    use fugazi::spec::panel;
+
+    let (is_bars, oos_bars, embargo_bars) = spec
+        .resolve(effective_freq, opts.asset_class)
+        .map_err(anyhow::Error::msg)
+        .context("resolving `--walkforward`")?;
+
+    // Resolve each member to its prepared stream, once. A member's stream must
+    // not depend on the rest of the grid: its bar clock is fixed for the whole
+    // panel, so a root that varied with another axis would make fold ranges
+    // mean different things per row. Checked against **every** combo rather
+    // than a probe point, for the same reason `distinct_roots` does.
+    let mut member_keys: Vec<RootKey> = Vec::with_capacity(values.len());
+    for v in values {
+        let mut resolved: Option<RootKey> = None;
+        for subgrid in &subgrids {
+            for combo in &subgrid.combos {
+                let mut params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                params.insert(axis.to_string(), v.clone());
+                let key = root_key_of(base_value, &params)?;
+                match &resolved {
+                    None => resolved = Some(key),
+                    Some(first) if *first != key => bail!(
+                        "--pooled `{axis}` = {} resolves to `{}` for one grid point and `{}` \
+                         for another — under `--walkforward` a member's traded series has to \
+                         be fixed by the pooled axis alone, since its bar clock is what the \
+                         folds are laid out on",
+                        format_value(v),
+                        first.symbol,
+                        key.symbol,
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+        member_keys.push(resolved.expect("every subgrid has at least one combo"));
+    }
+
+    // Each member's bar clock, off its own prepared stream.
+    let axes: Vec<panel::MemberAxis> = values
+        .iter()
+        .zip(&member_keys)
+        .map(|(v, key)| {
+            let (snaps, _) = streams
+                .get(key)
+                .expect("every member's root was prepared by `distinct_roots`");
+            panel::MemberAxis::from_snapshots(format_value(v), snaps)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let keep_unstable = opts.keep_unstable;
+    let cash = opts.cash;
+    let member_stream = |m: usize| {
+        streams
+            .get(&member_keys[m])
+            .expect("every member's root was prepared by `distinct_roots`")
+    };
+    let params_for = |params: &HashMap<String, Value>, m: usize| {
+        let mut out = params.clone();
+        out.insert(axis.to_string(), values[m].clone());
+        out
+    };
+
+    let probe = |params: &HashMap<String, Value>, m: usize| -> Result<usize> {
+        let member_params = params_for(params, m);
+        let spec = build_any_spec(StrategyKind::Single, base_value, &member_params)?;
+        let (snaps, _) = member_stream(m);
+        let schema = backtest::schema_from_snapshots(snaps);
+        let built = spec
+            .try_build(cash, &schema, None)
+            .map_err(backtest::build_error)?;
+        Ok(if keep_unstable {
+            built.warm_up_bars()
+        } else {
+            built.stable_bars()
+        })
+    };
+    let run_backtest =
+        |params: &HashMap<String, Value>, m: usize| -> Result<fugazi::RunReport<Symbol>> {
+            let member_params = params_for(params, m);
+            let spec = build_any_spec(StrategyKind::Single, base_value, &member_params)?;
+            let (snaps, ctx) = member_stream(m);
+            backtest::measured_report_any(&spec, snaps, ctx).map_err(backtest::build_error)
+        };
+
+    let result = panel::panel_walkforward(
+        subgrids,
+        axes,
+        probe,
+        run_backtest,
+        bars_per_year,
+        opts.risk_free_rate,
+        seconds_per_bar,
+        is_bars,
+        oos_bars,
+        embargo_bars,
+        &opts.metrics,
+        opts.best_by.as_deref(),
+        opts.risk_aversion,
+        opts.smoothing.as_ref(),
+        opts.jobs,
+        cash,
+    )?;
+
+    write_pooled_walkforward_csv(
+        opts.output,
+        &result.union_columns,
+        &result.metric_columns,
+        opts.smoothing
+            .as_ref()
+            .and(result.best_by.as_ref())
+            .map(|(_, path, _)| path.as_str()),
+        &result.fold_rows,
+    )?;
+    // One composite curve per member — the panel does not net into one account.
+    for composite in &result.composites {
+        write_composite_equity_csv(
+            &derive_sibling(
+                opts.output,
+                &format!(
+                    "composite_oos_equity.{}",
+                    sanitize_member(&composite.member)
+                ),
+                "csv",
+            ),
+            &composite.equity,
+        )?;
+    }
+    write_pooled_composite_yaml(
+        &derive_sibling(opts.output, "composite_oos_metrics", "yml"),
+        &result,
+    )?;
+
+    if !opts.quiet {
+        style::print_header("optimize", "pooled walk-forward optimization");
+        style::print_warns(&style::collect_warnings(
+            skipped_overlay_columns,
+            !opts.costs_supplied,
+            "grid results",
+        ));
+        print_walkforward_inputs(
+            &spec,
+            (result.is_bars, result.oos_bars, result.embargo_bars),
+            result.axis.prefix_skip,
+            keep_unstable,
+            result.folds.len(),
+            result.axis.len(),
+            opts.output,
+            Some(
+                &result
+                    .axis
+                    .members
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        style::field(
+            "pooled",
+            &format!(
+                "axis `{axis}` reduced over {} members ({}) — one parameter set per fold, \
+                 scored on the pooled in-sample metric",
+                result.axis.members.len(),
+                result
+                    .axis
+                    .members
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        );
+        style::field_continuation(
+            "folds are laid out on the panel's shared clock (the union of every member's \
+             bar times), so fold k is one span for every member",
+        );
+        print_pooled_walkforward_summary(&result);
+        print_result_block(result.fold_rows.len(), started, SystemTime::now());
+    }
+    Ok(())
+}
+
+/// A member name as a filename component — the member is a symbol, and `BTC/USDT`
+/// would otherwise write into a directory that doesn't exist.
+fn sanitize_member(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn write_pooled_walkforward_csv(
+    path: &Path,
+    union_columns: &[String],
+    metric_columns: &[(String, String)],
+    smoothed_path: Option<&str>,
+    rows: &[fugazi::spec::panel::PanelFoldRow],
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(path)
+        .with_context(|| format!("creating `{}`", path.display()))?;
+
+    // `is_n` / `oos_n` are the member counts, not window counts — a fold early
+    // in a ragged panel rests on fewer members, and that has to be visible
+    // beside the mean rather than inferred from the dates.
+    let mut header: Vec<String> = vec![
+        "fold".into(),
+        "is_start".into(),
+        "is_end".into(),
+        "oos_start".into(),
+        "oos_end".into(),
+        "is_members".into(),
+        "oos_members".into(),
+    ];
+    header.extend(union_columns.iter().cloned());
+    for (name, _) in metric_columns {
+        header.push(format!("{name}_is"));
+        header.push(format!("{name}_is_std"));
+        header.push(format!("{name}_is_n"));
+        header.push(format!("{name}_oos"));
+        header.push(format!("{name}_oos_std"));
+        header.push(format!("{name}_oos_n"));
+        header.push(format!("{name}_wfe"));
+    }
+    if let Some(path) = smoothed_path {
+        header.push(format!("{path}_is_smoothed"));
+        header.push(format!("{path}_is_support"));
+    }
+    writer.write_record(&header)?;
+
+    let cell = |v: Option<Real>| v.map(format_number).unwrap_or_default();
+    for row in rows {
+        let mut record: Vec<String> = vec![
+            row.fold.to_string(),
+            row.is.start.to_string(),
+            row.is.end.to_string(),
+            row.oos.start.to_string(),
+            row.oos.end.to_string(),
+            row.is_support().to_string(),
+            row.oos_support().to_string(),
+        ];
+        record.extend(
+            row.values
+                .iter()
+                .map(|v| v.as_ref().map(format_value).unwrap_or_default()),
+        );
+        for (_, path) in metric_columns {
+            let is_p = fugazi::spec::panel::pool_metric(&row.is_members, path);
+            let oos_p = fugazi::spec::panel::pool_metric(&row.oos_members, path);
+            // Walk-forward efficiency on the pooled means. Defined only when
+            // both sides pooled to something, so a fold no member reported in
+            // leaves an empty cell rather than a ratio of two absences.
+            let wfe = match (is_p, oos_p) {
+                (Some(i), Some(o)) if i.mean.abs() > f64::EPSILON => Some(o.mean / i.mean),
+                _ => None,
+            };
+            record.push(cell(is_p.map(|p| p.mean)));
+            record.push(cell(is_p.map(|p| p.std)));
+            record.push(is_p.map(|p| p.defined.to_string()).unwrap_or_default());
+            record.push(cell(oos_p.map(|p| p.mean)));
+            record.push(cell(oos_p.map(|p| p.std)));
+            record.push(oos_p.map(|p| p.defined.to_string()).unwrap_or_default());
+            record.push(cell(wfe));
+        }
+        if smoothed_path.is_some() {
+            record.push(cell(row.is_smoothed.and_then(|s| s.value)));
+            record.push(cell(row.is_smoothed.map(|s| s.support)));
+        }
+        writer.write_record(&record)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// The pooled composite document: every member's composite metrics, plus the
+/// cross-member pooled reading of each.
+fn write_pooled_composite_yaml(
+    path: &Path,
+    result: &fugazi::spec::panel::PanelWalkForward,
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let members = result.composite_members();
+    let mut pooled = serde_json::Map::new();
+    if let Some(sample) = members.first() {
+        for (metric_path, _) in metrics::flatten(&sample.metrics) {
+            if let Some(p) = fugazi::spec::panel::pool_metric(&members, metric_path) {
+                pooled.insert(
+                    metric_path.to_string(),
+                    serde_json::json!({
+                        "mean": p.mean,
+                        "std": p.std,
+                        "defined": p.defined,
+                        "members": p.members,
+                    }),
+                );
+            }
+        }
+    }
+    let doc = serde_json::json!({
+        "pooled": pooled,
+        "members": members
+            .iter()
+            .map(|m| (m.member.clone(), serde_json::to_value(&m.metrics).unwrap_or_default()))
+            .collect::<serde_json::Map<_, _>>(),
+    });
+    let text = serde_norway::to_string(&doc).context("serializing pooled composite metrics")?;
+    std::fs::write(path, text).with_context(|| format!("writing `{}`", path.display()))?;
+    Ok(())
+}
+
+fn print_pooled_walkforward_summary(result: &fugazi::spec::panel::PanelWalkForward) {
+    println!();
+    style::print_section("folds");
+    if let Some((label, path, _dir)) = result.best_by.as_ref() {
+        for row in &result.fold_rows {
+            let is_p = fugazi::spec::panel::pool_metric(&row.is_members, path);
+            let oos_p = fugazi::spec::panel::pool_metric(&row.oos_members, path);
+            let fmt = |p: Option<fugazi::spec::panel::Pooled>| {
+                p.map_or_else(
+                    || "—".to_string(),
+                    |p| format!("{:.4} ± {:.4} ({}/{})", p.mean, p.std, p.defined, p.members),
+                )
+            };
+            style::field(
+                &format!("fold {}", row.fold),
+                &format!("{label} IS {} · OOS {}", fmt(is_p), fmt(oos_p),),
+            );
+        }
+    }
+    println!();
+    style::print_section("composite (out-of-sample)");
+    for composite in &result.composites {
+        let total = crate::spec::optimize::lookup(&composite.metrics, "returns.total_pct");
+        style::field(
+            &composite.member,
+            &format!(
+                "{} bars · total {}",
+                composite.equity.len(),
+                total.map_or_else(|| "—".to_string(), |v| format!("{v:+.2}%")),
+            ),
+        );
+    }
+    if let Some(p) = result.composite_metric("risk_adjusted.sharpe") {
+        style::field(
+            "pooled sharpe",
+            &format!(
+                "{:.4} ± {:.4} over {} of {} members",
+                p.mean, p.std, p.defined, p.members
+            ),
+        );
     }
 }

@@ -659,9 +659,34 @@ struct OptimizeArgs {
         short = 'w',
         long = "windowed",
         value_name = "LEN",
-        group = "sweep_shape"
+        group = "sweep_shape",
+        group = "reduction"
     )]
     windowed: Option<calendar::WindowSpec>,
+
+    /// Reduce over a grid axis instead of ranking on it — fit **one** parameter
+    /// set across a panel of instruments rather than picking the best
+    /// `(params, instrument)` cell.
+    ///
+    /// `AXIS` names an existing `--grid` axis (typically the one driving
+    /// `root:`, e.g. `--grid 'SYM=["BTC/USDT","ETH/USDT"]' --pooled SYM`).
+    /// That axis leaves the CSV's axis columns entirely; each remaining grid
+    /// point becomes one row scored across every value of it. Every `-m` metric
+    /// becomes three columns — `<name>_mean`, `<name>_std` and `<name>_n`, the
+    /// last being how many members actually reported it.
+    ///
+    /// This is the same reduction as `-w/--windowed` over a different partition
+    /// (members rather than time windows), so `-k/--risk-aversion` composes and
+    /// penalizes a parameter set that only works on one member. It also makes
+    /// the grid `N` hypotheses wide rather than `N×M`, which is the count a
+    /// deflated Sharpe should be parameterized by.
+    ///
+    /// Composes with `--walkforward`, which is the point: each fold picks one
+    /// winner on the **pooled** in-sample score and applies it out-of-sample to
+    /// every member, with folds laid out on the panel's shared clock so a
+    /// ragged panel's fold *k* is the same span for everyone.
+    #[arg(long = "pooled", value_name = "AXIS", group = "reduction")]
+    pooled: Option<String>,
 
     /// Rolling walk-forward optimization. `IS,OS[,Embargo]` — each component is
     /// a `-w`-style bar count or duration. For each fold the grid is scored on
@@ -699,7 +724,7 @@ struct OptimizeArgs {
         short = 'k',
         long = "risk-aversion",
         value_name = "K",
-        requires = "windowed",
+        requires = "reduction",
         requires = "best_by"
     )]
     risk_aversion: Option<f64>,
@@ -1429,6 +1454,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
+        pooled: args.pooled.clone(),
         walkforward: args.walkforward,
         keep_unstable: args.keep_unstable,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),

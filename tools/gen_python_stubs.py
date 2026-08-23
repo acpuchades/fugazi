@@ -164,7 +164,7 @@ RETURNS = {
     },
     # --- spec / data --------------------------------------------------------
     "load_spec": "StrategySpec",
-    "optimize": "Sweep | WalkForwardResult",
+    "optimize": "Sweep | WalkForwardResult | PanelWalkForwardResult",
     "evaluate_report": "dict[str, Any]",
     "fetch": "Any",
     "tickers": "list[str]",
@@ -280,6 +280,10 @@ MEMBER_RETURNS = {
     ("CoinbaseWallet", "mainnet"): "CoinbaseWallet",
     # --- sweep / walk-forward rows ------------------------------------------
     ("SweepRow", "metrics_windowed"): "list[dict[str, Any]] | None",
+    # Pooled (`panel=`) rows: per-member documents keyed by member name, and the
+    # `(defined, members)` support behind each pooled mean.
+    ("SweepRow", "metrics_panel"): "dict[str, dict[str, Any]] | None",
+    ("SweepRow", "metrics_support"): "dict[str, tuple[int, int] | None] | None",
     ("SweepRow", "ruin_bar"): "int | None",
     ("SweepRow", "ruined"): "bool",
     ("SweepRow", "smoothed"): "float | None",
@@ -296,6 +300,28 @@ MEMBER_RETURNS = {
     ("WalkForwardResult", "is_bars"): "int",
     ("WalkForwardResult", "oos_bars"): "int",
     ("WalkForwardResult", "prefix_skip"): "int",
+    ("PanelFold", "fold"): "int",
+    ("PanelFold", "is_range"): "tuple[int, int]",
+    ("PanelFold", "oos_range"): "tuple[int, int]",
+    ("PanelFold", "is_smoothed"): "float | None",
+    ("PanelFold", "is_support"): "float | None",
+    ("PanelFold", "is_support_members"): "int",
+    ("PanelFold", "oos_support_members"): "int",
+    ("PanelFold", "metrics_is"): "dict[str, dict[str, Any]]",
+    ("PanelFold", "metrics_oos"): "dict[str, dict[str, Any]]",
+    ("PanelWalkForwardResult", "axis_len"): "int",
+    ("PanelWalkForwardResult", "cash"): "float",
+    ("PanelWalkForwardResult", "composites"): "list[MemberComposite]",
+    ("PanelWalkForwardResult", "embargo_bars"): "int",
+    ("PanelWalkForwardResult", "folds"): "list[PanelFold]",
+    ("PanelWalkForwardResult", "is_bars"): "int",
+    ("PanelWalkForwardResult", "members"): "list[str]",
+    ("PanelWalkForwardResult", "oos_bars"): "int",
+    ("PanelWalkForwardResult", "prefix_skip"): "int",
+    ("PanelWalkForwardResult", "pooled"): "tuple[float, float, int, int] | None",
+    ("MemberComposite", "member"): "str",
+    ("MemberComposite", "equity"): "list[float]",
+    ("MemberComposite", "fills"): "list[Fill]",
     # --- fugazi.metrics result types ----------------------------------------
     **{("Trade", m): "int" for m in "entry_bar exit_bar bars_held".split()},
     **{
@@ -610,6 +636,8 @@ def member_return(cls_name: str, name: str) -> tuple[str, bool]:
         "SweepRow",
         "WalkForwardResult",
         "WalkForwardFold",
+        "PanelFold",
+        "MemberComposite",
     ) and name in (
         "values",
         "metrics",
@@ -728,6 +756,8 @@ def dunders_for(cls_name: str, cls: type) -> list[tuple[str, str]]:
     if cls_name == "Sweep":
         out.append(("__getitem__", "(self, index: int | slice) -> Any"))
     if cls_name == "WalkForwardResult":
+        out.append(("__getitem__", "(self, index: int | slice) -> Any"))
+    if cls_name == "PanelWalkForwardResult":
         out.append(("__getitem__", "(self, index: int | slice) -> Any"))
     if cls_name == "SharedMultiIndicator":
         out.append(("__getitem__", "(self, name: str) -> Indicator"))

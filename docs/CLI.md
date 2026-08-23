@@ -438,7 +438,8 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <LEN> [-k <K>] | --walkforward <IS,OS[,E]> [--keep-unstable]]
+               [-w <LEN> | --pooled <AXIS>] [-k <K>]
+               [--walkforward <IS,OS[,E]> [--keep-unstable]]
                [--smooth[=<KERNEL>] [--smooth-min-support <FRAC>]]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
@@ -452,12 +453,13 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
-| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). |
+| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). Mutually exclusive with `--walkforward`. |
+| `--pooled <AXIS>` | **Reduce over** a grid axis instead of ranking on it — fit *one* parameter set across a panel of instruments rather than picking the best `(params, instrument)` cell. `AXIS` names an existing `--grid` axis (typically the one driving `root:`). That axis leaves the CSV's axis columns entirely and each remaining grid point becomes one row scored across every value of it; every `-m` metric becomes three columns (`<name>_mean` / `<name>_std` / `<name>_n`, the last being how many members reported it). Composes with `--walkforward` and `-k`. Mutually exclusive with `-w`. See [Pooling across a panel](#pooling-across-a-panel). |
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
-| `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
+| `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's mean *against* it by `K` standard deviations before sorting. Requires `--best-by` plus one of `-w` (dispersion across time windows) or `--pooled` (dispersion across panel members); `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. A `NAME` that no subgrid sweeps is an error — an unmatched pin is never looked up, so it would silently leave the axis on the automatic choice. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
@@ -847,6 +849,87 @@ generalises; if they collapse (or flip sign), the tuning was fitting
 noise. Keep the split boundary fixed once you've chosen it — re-sweeping
 against different splits until one confirms the result is the same
 overfitting under a different name.
+
+#### Pooling across a panel
+
+A sweep over `SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]` and two parameter axes
+ranks all `N × M` cells against one another and reports the best. That answers
+"which instrument cooperated best with which parameters" — and on a low-data
+market it mostly finds whichever pair happened to fit.
+
+`--pooled AXIS` answers the other question. The named axis is **reduced over**
+rather than ranked on:
+
+```bash
+fugazi optimize @ma.yml -s @panel.csv \
+  --grid 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"],FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled SYM --best-by sharpe -k 0.5 -m sharpe -o out/pooled.csv --crypto
+```
+
+That grid has 18 points; pooled, it emits **6 rows** — one per `(FAST, SLOW)`
+pair — each scored across all three instruments. `SYM` is not a CSV column,
+because it is no longer something the sweep chose. Two consequences:
+
+- The grid is `N` hypotheses wide rather than `N × M`, which is the count a
+  [deflated Sharpe](#deflated-sharpe) should be parameterized by.
+- It is the same reduction as [`-w/--windowed`](#windowed-metrics) over a
+  different partition — members rather than time windows — so
+  [`-k/--risk-aversion`](#best-by-directions) composes and means the same
+  thing: a parameter set that only works on one member is penalized for the
+  spread. (For that reason the two are mutually exclusive; a `mean ∓ k·std` of
+  a set of `mean ∓ k·std`s is not a statistic worth emitting silently.)
+
+Each `-m` metric becomes three columns rather than two:
+
+| Column | Meaning |
+| --- | --- |
+| `<name>_mean` | Cross-member mean, over the members that **reported** the metric |
+| `<name>_std` | Population standard deviation across those same members |
+| `<name>_n` | How many members that was |
+
+`_n` exists because an undefined metric stays undefined. A member that never
+traded has no win rate, and it is dropped from the mean rather than counted as
+zero — so a mean over 2 of 30 members and a mean over 30 of 30 would otherwise
+render identically. A ruined member is different again: it disqualifies the
+whole row from ranking, because dropping it from the mean would *raise* the
+pooled score and reward a search for parameters that destroy an account (the
+same rule as [ruin exclusion](#ruined-cells), applied to a panel).
+
+##### Pooled walk-forward
+
+`--pooled` composes with `--walkforward`, which is the point of it: each fold
+picks **one** winner on the pooled in-sample score and applies it
+out-of-sample to every member, so all the composites switch parameters on the
+same dates.
+
+```bash
+fugazi optimize @ma.yml -s @panel.csv \
+  --grid 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"],FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled SYM --walkforward 2000,500 --best-by sharpe -m sharpe \
+  -o out/pwf.csv --crypto
+```
+
+**Folds are laid out on the panel's shared clock** — the sorted union of every
+member's bar times — not on any one member's bar indices. This is what makes a
+*ragged* panel work: instruments list at different dates, so "bars 5000–6000"
+is a different fortnight for each of them. A member with no bars inside a
+fold's window contributes nothing to that fold and does not shift it; the
+fold table's `is_members` / `oos_members` columns report how many members each
+fold actually rested on.
+
+The head skip works the same way. Folds begin once the **first** member is
+ready, not the last — waiting for every member would truncate the panel's
+history to its most recent listing, which on a few years of hourly crypto
+discards most of the sample. Early folds therefore legitimately rest on fewer
+members, which the support columns make visible rather than silent.
+
+Output is one composite equity CSV **per member**
+(`<stem>.composite_oos_equity.<MEMBER>.csv`) plus a pooled
+`<stem>.composite_oos_metrics.yml` carrying every member's composite document
+and the cross-member pooled reading of each. There is deliberately no single
+netted composite curve: netting `M` members into one account requires a
+weighting and a rebalance cadence, which is an allocation policy — and fugazi
+already has a shape that states one explicitly ([`portfolio:`](#portfolio)).
 
 #### Walk-forward optimization
 

@@ -633,32 +633,61 @@ fn booked_within<'a, T>(
 /// is the equity marked on the bar before it, and only the fills booked inside
 /// it count — a position carried across a boundary shows up in the entering
 /// window as an unmatched closing fill, the usual windowed-analysis convention.
-pub fn windowed_from_report<Sym: Clone + PartialEq>(
+/// The per-window reductions are pure and independent, so this farms them out
+/// to whatever pool the caller has installed — the same treatment
+/// [`rolling_from_report`] gets.
+///
+/// **This used to be serial**, on the reasoning that under `optimize` it runs
+/// inside the grid's own `par_iter`, where an inner one "would just fight for
+/// the same threads without wall-clock benefit". Measured, that is not what
+/// happens (`cargo bench -p fugazi --bench breaking -- windowed_nesting`,
+/// 20 000 bars / 250-bar windows, 16 cores):
+///
+/// | outer grid rows | serial inner | parallel inner |
+/// |---|---|---|
+/// | 1 (`run -w`, no outer pool) | 422 µs | **132 µs** |
+/// | 2 | 421 µs | **195 µs** |
+/// | 4 | 606 µs | **298 µs** |
+/// | 32 (2× the core count) | 3.26 ms | **1.80 ms** |
+///
+/// Nesting is not oversubscription — rayon queues the inner tasks on the same
+/// pool and work-steals them — so the cost of the extra tasks is small, and it
+/// buys two things the serial form gave up. On a grid *narrower* than the
+/// machine (or `run -w`, which has no outer `par_iter` at all) it is the only
+/// parallelism available. On a grid wider than the machine it still helps,
+/// because the outer rows do not cost the same: a worker that has finished its
+/// rows can drain the windows of a straggler instead of idling.
+pub fn windowed_from_report<Sym: Clone + PartialEq + Send + Sync>(
     report: &RunReport<Sym>,
     window: usize,
     bars_per_year: Real,
     risk_free_rate: Real,
     seconds_per_bar: Option<Real>,
 ) -> Vec<WindowMetrics> {
+    use rayon::prelude::*;
     assert!(window > 0, "window length must be positive");
     let bars = report.equity_curve.len();
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < bars {
-        let end = (start + window).min(bars);
-        out.push(WindowMetrics {
-            start_bar: start,
-            end_bar: end - 1,
-            metrics: from_report(
-                &report_slice(report, start..end),
-                bars_per_year,
-                risk_free_rate,
-                seconds_per_bar,
-            ),
-        });
-        start = end;
-    }
-    out
+    // Window *count* first, so the spans can be indexed rather than walked —
+    // a sequential `while` loop has no parallel form. The last window keeps
+    // whatever bars remain, so it is `div_ceil`, not `/`.
+    let n = bars.div_ceil(window);
+    (0..n)
+        .into_par_iter()
+        .map(|w| {
+            let start = w * window;
+            let end = (start + window).min(bars);
+            WindowMetrics {
+                start_bar: start,
+                end_bar: end - 1,
+                metrics: from_report(
+                    &report_slice(report, start..end),
+                    bars_per_year,
+                    risk_free_rate,
+                    seconds_per_bar,
+                ),
+            }
+        })
+        .collect()
 }
 
 /// The rolling twin of [`windowed_from_report`]: one [`Metrics`] per
@@ -676,9 +705,9 @@ pub fn windowed_from_report<Sym: Clone + PartialEq>(
 /// The per-window reductions are pure and independent, so this uses
 /// [`rayon::prelude::IntoParallelIterator`] to farm them out to whatever pool
 /// the caller has installed (`run -w` on the default pool, `optimize` on its
-/// grid pool). The non-overlapping [`windowed_from_report`] stays serial: on
-/// `optimize` it runs *inside* the grid's `par_iter`, so an inner par_iter
-/// would just fight for the same threads without wall-clock benefit.
+/// grid pool). The non-overlapping [`windowed_from_report`] does the same —
+/// it used to stay serial, and the measurement that changed that is recorded
+/// on it.
 pub fn rolling_from_report<Sym: Clone + Send + Sync + PartialEq>(
     report: &RunReport<Sym>,
     window: usize,

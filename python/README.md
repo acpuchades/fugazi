@@ -1364,6 +1364,168 @@ result.composite_equity                 # stitched OOS curve
 result.composite_metrics                # composite metrics doc
 ```
 
+### Pooling across a panel
+
+`panel=` fits **one** parameter set across several instruments instead of
+picking the best `(params, instrument)` cell. The instrument axis is *reduced
+over* rather than ranked on, so the grid stays `N` hypotheses wide rather than
+`N × M` — which is the count a deflated Sharpe should be parameterized by.
+
+Members are passed as separate snapshot streams, keyed by name. Separate
+streams matter: one merged multi-instrument stream would make every member run
+over the *union* timeline and see bars on which it has no quote.
+
+```python
+panel_doc = """
+root: !pick { symbol: !param SYM }
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+  exit: !crosses_below
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+sizing: !value 1.0
+"""
+
+DAY = 86_400_000
+
+
+def member_stream(sym, start_ms, closes):
+    return [
+        ta.Snapshot({sym: ta.Atom(ta.Candle(c, c, c, c, 1.0), time=start_ms + i * DAY)})
+        for i, c in enumerate(closes)
+    ]
+
+
+wave = [100.0 + (i % 8 if i % 8 < 4 else 8 - i % 8) * 3.0 for i in range(120)]
+panel = {
+    # Each member is its own stream. One merged multi-instrument stream would
+    # make every member run over the union timeline and see bars it has no
+    # quote on.
+    "AAA": member_stream("AAA", 0, wave),
+    "BBB": member_stream("BBB", 0, [v * 1.1 for v in wave]),
+    # Lists 40 days later than the others — a ragged panel is the normal case.
+    "CCC": member_stream("CCC", 40 * DAY, wave[:80]),
+}
+
+sweep = ta.optimize(
+    panel_doc,
+    panel=panel,
+    panel_axis="SYM",          # substitutes each member's name for !param SYM
+    grid=[{"FAST": [3, 5], "SLOW": [10, 20]}],
+    best_by="sharpe",
+    risk_aversion=0.5,         # penalizes a set that works on only one member
+    metric_names=["sharpe"],
+    bars_per_year=365,
+)
+
+row = sweep.best
+row.values           # the winning parameter set — no "SYM" key, it was pooled
+row.metrics          # pooled means:  {"risk_adjusted.sharpe": 1.42, ...}
+row.metrics_support  # support:       {"risk_adjusted.sharpe": (3, 3)}
+row.metrics_panel    # per member:    {"AAA": {...}, "BBB": {...}, "CCC": {...}}
+```
+
+`panel_axis=` is optional; without it the same document runs against every
+member, which is right for a sole-atom `root:` that reads whatever the bar
+carries. With it, the member's name is substituted for that `!param` first, so
+each member is rooted on its own series — the same thing the CLI's
+`--pooled AXIS` does. A document that names a symbol *no* member's stream
+carries is an error rather than a flat zero-trade backtest that still counts
+toward the pooled mean.
+
+`panel=` is the same reduction as `windowed=` over a different partition, so
+`risk_aversion=` composes and means the same thing. The two are mutually
+exclusive for that reason. Two properties are worth stating outright:
+
+- **An undefined metric stays undefined.** The pooled mean is over the members
+  that *reported* — a member that never traded has no win rate and is dropped,
+  not counted as zero. `metrics_support` gives `(defined, members)` so a mean
+  over 2 of 30 and a mean over 30 of 30 don't read identically.
+- **A ruined member disqualifies the row.** Not "drops out of the mean" —
+  dropping it would *raise* the pooled score and reward a search for parameters
+  that destroy an account.
+
+#### Pooled walk-forward
+
+`panel=` composes with `walkforward=`, which is the point of it: each fold
+picks one winner on the **pooled** in-sample score and applies it
+out-of-sample to every member, so all the composites switch parameters on the
+same dates. Running the single-stream walk-forward once per instrument would
+fit a *different* parameter set to each, which is the opposite of pooling.
+
+```python
+pwf_doc = """
+root: !pick { symbol: !param SYM }
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+  exit: !crosses_below
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+sizing: !value 1.0
+"""
+
+DAY = 86_400_000
+wave = [100.0 + (i % 8 if i % 8 < 4 else 8 - i % 8) * 3.0 for i in range(120)]
+
+
+def member_stream(sym, start_ms, closes):
+    return [
+        ta.Snapshot({sym: ta.Atom(ta.Candle(c, c, c, c, 1.0), time=start_ms + i * DAY)})
+        for i, c in enumerate(closes)
+    ]
+
+
+panel = {
+    "AAA": member_stream("AAA", 0, wave),
+    "BBB": member_stream("BBB", 0, [v * 1.1 for v in wave]),
+    "CCC": member_stream("CCC", 40 * DAY, wave[:80]),
+}
+
+result = ta.optimize(
+    pwf_doc,
+    panel=panel,
+    panel_axis="SYM",
+    grid=[{"FAST": [3, 5], "SLOW": [10, 20]}],
+    walkforward=(40, 20),         # or (is, oos, embargo)
+    best_by="sharpe",
+    bars_per_year=365,
+)
+# -> PanelWalkForwardResult
+
+result.axis_len       # length of the panel's shared clock
+result.prefix_skip    # readiness bars trimmed off its head
+result.members        # ["AAA", "BBB", "CCC"]
+
+for fold in result:
+    fold.is_range, fold.oos_range      # ranges on the *shared clock*
+    fold.values                        # the one winner for this fold
+    fold.is_support_members            # members with bars in the IS window
+    fold.oos_support_members
+    fold.metrics_is, fold.metrics_oos  # per-member docs, keyed by member
+
+result.pooled("sharpe")   # (mean, std, defined, members) over the composites
+for c in result.composites:
+    c.member, c.equity, c.metrics      # one stitched OOS curve per member
+```
+
+**The panel may be ragged.** Instruments list at different dates, so folds are
+laid out on the shared clock — the sorted union of every member's bar times —
+not on any member's bar indices, and `is_range` / `oos_range` index into
+*that*. A member with no bars in a fold's window contributes nothing to it and
+does not shift it; `is_support_members` reports how many members each fold
+actually rested on. Folds begin once the **first** member is ready rather than
+the last, since waiting for every member would truncate the panel's history to
+its most recent listing.
+
+There is deliberately no single netted composite curve: netting `M` members
+into one account needs a weighting and a rebalance cadence, which is an
+allocation policy fugazi expresses explicitly with `portfolio:` rather than
+inventing inside `optimize`.
+
 `smooth=` mirrors the CLI's `--smooth`: rank `best_by` by a kernel-weighted
 average over each grid point's *parameter neighbourhood* rather than by the
 point estimate, so a broad plateau outranks a lone spike. `"box:R"`,

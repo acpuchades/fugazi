@@ -647,7 +647,7 @@ That case has none of the ambiguity above: two symbols on one cadence share a
 bar grid, so "absent" means absent and there is nothing to forward-fill. The
 `freq` half is still open for exactly the reason stated.
 
-### `optimize` sweeps the traded series; pairs and walk-forward still refuse
+### `optimize` sweeps the traded series; pooling reduces over it, pairs still refuse
 
 Before `root:`, `optimize` bound one atom slice and one snapshot stream to a
 probe symbol for the whole grid. Cross-subgrid disagreement was refused with a
@@ -663,11 +663,50 @@ document produces standalone through `run`; `tests/cross_asset_reads.rs` pins
 exactly that, because a test asserting only "the rows differ" would have passed
 the old behaviour too.
 
-Two refusals kept, deliberately:
+One refusal kept, one lifted for a case it never covered:
 
-- **`--walkforward` + a root axis.** Folds are laid out over one bar timeline;
-  two instruments have different bar counts, so fold *k* would span a different
-  period per row. There is no reading of that number worth emitting.
+- **`--walkforward` + a root axis that is *ranked on*.** Still refused, and the
+  reason is unchanged: folds are laid out over one bar timeline; two instruments
+  have different bar counts, so fold *k* would span a different period per row.
+  There is no reading of that number worth emitting.
+- **`--walkforward` + a root axis that is *reduced over* — now allowed
+  (`--pooled`).** A different question, not a relaxation of the above. Pooling
+  does not rank the instrument axis at all: each fold picks **one** winner on
+  the pooled in-sample score and applies it out-of-sample to every member. The
+  objection was that fold *k* would mean a different span per row, and the
+  answer is that a pooled fold is not laid out on bar indices — it is laid out
+  on the panel's **shared clock**, the sorted union of every member's bar times,
+  and mapped down to a member's own bars only at the point of measurement. So
+  fold *k* is one span for the whole panel by construction, and a member with no
+  bars in it contributes nothing rather than shifting it. See `src/spec/panel.rs`
+  and `tests/pooled.rs`.
+
+  What that costs: pooled fold ranges index the shared clock, not any member's
+  bars, so they are not comparable to the single-stream driver's. That is
+  inherent — a ragged panel has no single bar axis — and the fold table carries
+  `is_members` / `oos_members` so the support behind each fold is read off
+  rather than assumed.
+
+  Two sub-decisions, both with a defensible opposite:
+
+  - **The head skip follows the first ready member, not the last.** Waiting for
+    every member makes each fold fully supported, but truncates the panel to its
+    most recent listing — on a few years of hourly crypto that discards most of
+    the sample to buy a comparability the support counts already report. Early
+    folds resting on few members is the accepted cost.
+  - **A ruined member disqualifies the whole row**, rather than dropping out of
+    the pooled mean. Dropping it would *raise* the row's score, so a search over
+    that objective would be rewarded for finding parameters that destroy an
+    account — the same perversity `ranking_lookup` exists to prevent, one layer
+    up.
+
+  Still open: `fugazi run --pooled`. `optimize --pooled` over a one-point grid
+  already *is* a pooled run and emits the same `_mean`/`_std`/`_n` columns, so
+  the gap is ergonomic rather than functional. Giving `run` its own spelling
+  needs a value-list grammar it does not have (its `--params` are scalars) plus
+  a decision about what a pooled run's equity-curve output, `--resume` and
+  `--montecarlo` mean per member — none of which pooling answers on its own.
+
 - **A `pairs:` grid varying its legs.** A pairs run evaluates the **inner join**
   of its two legs. Widening the stream to the union of every swept pair would
   change which bars each row sees, so a row would stop matching the same
@@ -680,7 +719,10 @@ so the grid is a batch of separate backtests rather than the like-for-like
 parameter comparison the rest of `optimize` is built around (`--smooth`, the
 grid-wide `max(stable_bars)`). Refusing it would be wrong — comparing an
 instrument's best parameters *is* the use case — but leaving it unsaid would
-let a reader trust a ranking the numbers don't support.
+let a reader trust a ranking the numbers don't support. `--pooled` suppresses
+that warning, because it is the fix for exactly what the warning describes: the
+rows are one per parameter set again, and the axis is reduced over rather than
+compared across.
 
 ## Repo hygiene
 

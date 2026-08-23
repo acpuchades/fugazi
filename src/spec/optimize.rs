@@ -286,6 +286,8 @@ where
     // sweeps; see the field's rustdoc for the windowed-mode aggregation.
     let deflated_sharpe_context = compute_dsr_context(&rows);
 
+    let panel = rows.first().and_then(|r| r.eval.panel()).map(<[_]>::len);
+
     Ok(Sweep {
         union_columns,
         subgrid_summaries,
@@ -293,6 +295,7 @@ where
         best_by,
         rows,
         windowed: windowed.is_some(),
+        panel,
         deflated_sharpe_context,
         smoothing,
         smooth_scales,
@@ -309,6 +312,7 @@ pub fn sample_metrics(eval: &Evaluation) -> Option<&metrics::Metrics> {
     match eval {
         Evaluation::Whole(m) => Some(m.as_ref()),
         Evaluation::Windowed(ws) => ws.first().map(|w| &w.metrics),
+        Evaluation::Panel(ms) => ms.first().map(|m| &m.metrics),
     }
 }
 
@@ -485,6 +489,7 @@ pub fn row_summary_sharpe(row: &Row) -> Option<Real> {
     match &row.eval {
         Evaluation::Whole(m) => m.risk_adjusted.sharpe,
         Evaluation::Windowed(ws) => mean_of(ws.iter().map(|w| w.metrics.risk_adjusted.sharpe)),
+        Evaluation::Panel(ms) => mean_of(ms.iter().map(|m| m.metrics.risk_adjusted.sharpe)),
     }
 }
 
@@ -524,6 +529,27 @@ pub fn row_dsr_inputs(row: &Row) -> (Option<Real>, Option<Real>, Option<Real>, u
                 .unwrap_or(0.0);
             (sharpe, skew, kurt, n_returns, bpy)
         }
+        // Same aggregation as the windowed arm, for the same reason: these are
+        // the numbers the pooled `_mean` columns already show, so the DSR cell
+        // stays comparable to the rest of the row.
+        //
+        // The *trial count* is where pooling actually changes DSR, and it does
+        // so upstream of here: a pooled grid contributes one row per parameter
+        // set rather than one per (parameter set, instrument), so
+        // `compute_dsr_context` sees `N` trials, not `N×M`. That is the whole
+        // statistical argument for pooling and it needs no code here — it falls
+        // out of the grid being narrower.
+        Evaluation::Panel(ms) => {
+            let sharpe = mean_of(ms.iter().map(|m| m.metrics.risk_adjusted.sharpe));
+            let skew = mean_of(ms.iter().map(|m| m.metrics.returns.skewness));
+            let kurt = mean_of(ms.iter().map(|m| m.metrics.returns.kurtosis));
+            let n_returns: usize = ms.iter().map(|m| m.metrics.run.bars).sum();
+            let bpy = ms
+                .first()
+                .map(|m| m.metrics.run.bars_per_year)
+                .unwrap_or(0.0);
+            (sharpe, skew, kurt, n_returns, bpy)
+        }
     }
 }
 
@@ -538,6 +564,20 @@ pub enum Evaluation {
     /// Boxed: the document is ~50 fields, dwarfing the windowed variant's Vec.
     Whole(Box<metrics::Metrics>),
     Windowed(Vec<metrics::WindowMetrics>),
+    /// (`--pooled`) One document per **panel member** — the same parameter set
+    /// run against several instruments — aggregated per metric as cross-member
+    /// mean ± stddev.
+    ///
+    /// Deliberately the same reduction as [`Windowed`](Self::Windowed), because
+    /// it is the same statistic over a different partition: windows cut one run
+    /// by time, members cut one parameter set by instrument. So `--risk-aversion`
+    /// composes identically and means the same thing — a parameter set that only
+    /// works on one member is penalized for the spread.
+    ///
+    /// It differs in exactly one place, and only upward: the pooled cells carry
+    /// their support (`crate::spec::panel::Pooled::defined`), because a member
+    /// that never listed is far more common than a window that reports nothing.
+    Panel(Vec<crate::spec::panel::PanelMetrics>),
 }
 
 impl Evaluation {
@@ -558,6 +598,27 @@ impl Evaluation {
             Evaluation::Windowed(ws) => ws
                 .iter()
                 .find_map(|w| w.metrics.run.ruin_bar.map(|b| w.start_bar + b)),
+            // Any member ruining disqualifies the row. Members are separate
+            // accounts, so unlike the windowed case this is not "the account
+            // only dies once" — it is that a member which blew up would
+            // otherwise *drop out* of the pooled mean and thereby raise the
+            // row's score. See `panel::ruined_member`.
+            //
+            // The bar index is that member's own, which is not on the pooled
+            // clock; nothing reads it beyond `is_some()`, and the panel result
+            // names the ruined *member*, which is the useful half.
+            Evaluation::Panel(ms) => {
+                crate::spec::panel::ruined_member(ms).and_then(|m| m.metrics.run.ruin_bar)
+            }
+        }
+    }
+
+    /// The panel members behind a pooled evaluation, or `None` for the other
+    /// two shapes.
+    pub fn panel(&self) -> Option<&[crate::spec::panel::PanelMetrics]> {
+        match self {
+            Evaluation::Panel(ms) => Some(ms),
+            _ => None,
         }
     }
 }
@@ -574,6 +635,7 @@ impl Evaluation {
 /// `(ci / strides()[j]) % axis_lens()[j]`, and stepping one place along axis `j`
 /// is `ci ± strides()[j]`. [`smooth_keys`] and [`plateau_size`] rely on this;
 /// `subgrid_index_space_is_mixed_radix` pins it.
+#[derive(Clone)]
 pub struct Subgrid {
     pub fixed: HashMap<String, Value>,
     pub axes: Vec<Axis>,
@@ -649,6 +711,15 @@ pub struct Sweep {
     /// True iff `windowed` was set — the CSV writer uses this to emit
     /// `<name>_mean` / `<name>_std` columns per metric.
     pub windowed: bool,
+    /// `Some(member_count)` iff the rows were pooled across a panel
+    /// (`--pooled`) — the CSV writer emits `<name>_mean` / `<name>_std` /
+    /// `<name>_n` per metric, the third being the support the mean rests on.
+    ///
+    /// **Derived from the rows, not passed in.** A flag that could disagree
+    /// with the evaluations it describes is a flag that eventually does; the
+    /// closure that built the rows already decided this, so this reads it back
+    /// off `rows[0]` rather than taking the caller's word for it.
+    pub panel: Option<usize>,
     /// `(n_trials, Var[SR])` collected across the sweep, or `None` when the
     /// grid has fewer than two **candidate** rows with a defined Sharpe or when
     /// the trial variance is zero — DSR is meaningless in either case. Consumed
@@ -1229,6 +1300,13 @@ pub fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Rea
             Direction::Descending => mean - k * std,
             Direction::Ascending => mean + k * std,
         }),
+        // Identical shift, different partition — see `Evaluation::Panel`.
+        Evaluation::Panel(ms) => {
+            crate::spec::panel::pool_metric(ms, path).map(|p| match direction {
+                Direction::Descending => p.mean - k * p.std,
+                Direction::Ascending => p.mean + k * p.std,
+            })
+        }
     }
 }
 

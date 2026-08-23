@@ -1294,6 +1294,11 @@ pub(crate) struct PySweepRow {
     pub(crate) metric_values: Vec<Option<Real>>,
     // If windowed, one Metrics dict per window.
     pub(crate) windowed_metrics: Option<Vec<SpecMetrics>>,
+    // If pooled, one Metrics dict per panel member, in panel order.
+    pub(crate) panel_metrics: Option<Vec<(String, SpecMetrics)>>,
+    // If pooled, `(defined, members)` per metric column — the support behind
+    // each pooled mean.
+    pub(crate) panel_support: Option<Vec<Option<(usize, usize)>>>,
     // Under `smooth=`, the neighbourhood average this row was ranked by and the
     // support behind it. `None` when smoothing didn't run.
     pub(crate) smoothed: Option<Real>,
@@ -1366,6 +1371,49 @@ impl PySweepRow {
             }
         }
         Ok(d.into())
+    }
+
+    /// One metrics document per **panel member**, keyed by member name — the
+    /// pooled twin of `metrics_windowed`. `None` when the sweep wasn't pooled.
+    ///
+    /// `row.metrics` holds the pooled *means* over these; this is what they
+    /// were pooled from, so a member that dragged the mean down is findable
+    /// rather than merely implied.
+    #[getter]
+    pub(crate) fn metrics_panel(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.panel_metrics {
+            None => Ok(py.None()),
+            Some(members) => {
+                let d = pyo3::types::PyDict::new(py);
+                for (name, m) in members {
+                    d.set_item(name, metrics_to_py(py, m)?)?;
+                }
+                Ok(d.into_any().unbind())
+            }
+        }
+    }
+
+    /// How many panel members each pooled metric actually rests on:
+    /// `{name: (defined, members)}`. `None` when the sweep wasn't pooled.
+    ///
+    /// An undefined metric stays undefined rather than becoming zero, so a
+    /// pooled mean is taken over the members that *reported* it. Without this,
+    /// a mean over 2 of 30 survivors and a mean over 30 read identically.
+    #[getter]
+    pub(crate) fn metrics_support(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.panel_support {
+            None => Ok(py.None()),
+            Some(support) => {
+                let d = pyo3::types::PyDict::new(py);
+                for ((user, _resolved), v) in self.metric_columns.iter().zip(support) {
+                    match v {
+                        Some((defined, members)) => d.set_item(user, (*defined, *members))?,
+                        None => d.set_item(user, py.None())?,
+                    }
+                }
+                Ok(d.into_any().unbind())
+            }
+        }
     }
 
     #[getter]
@@ -1512,7 +1560,7 @@ pub(crate) fn build_subgrids(
 #[pyfunction]
 #[pyo3(signature = (
     text,
-    snapshots,
+    snapshots = None,
     // Everything below is configuration, not data: the order is an
     // implementation detail and no caller means `optimize(doc, snaps, 1.0, None,
     // None, "auto", ...)`. Keyword-only pins that down before the order becomes
@@ -1529,6 +1577,8 @@ pub(crate) fn build_subgrids(
     best_by = None,
     windowed = None,
     walkforward = None,
+    panel = None,
+    panel_axis = None,
     risk_aversion = 0.0,
     smooth = None,
     smooth_min_support = 0.0,
@@ -1545,7 +1595,7 @@ pub(crate) fn build_subgrids(
 pub(crate) fn optimize(
     py: Python<'_>,
     text: &str,
-    snapshots: &Bound<'_, PyAny>,
+    snapshots: Option<&Bound<'_, PyAny>>,
     cash: Real,
     max_gross: Real,
     margin_rate: Real,
@@ -1557,6 +1607,8 @@ pub(crate) fn optimize(
     best_by: Option<String>,
     windowed: Option<usize>,
     walkforward: Option<&Bound<'_, PyAny>>,
+    panel: Option<&Bound<'_, PyAny>>,
+    panel_axis: Option<String>,
     risk_aversion: Real,
     smooth: Option<&str>,
     smooth_min_support: Real,
@@ -1575,6 +1627,39 @@ pub(crate) fn optimize(
         return Err(PyValueError::new_err(
             "`walkforward=` and `windowed=` are mutually exclusive",
         ));
+    }
+    // `panel=` and `windowed=` are the same reduction over different partitions
+    // — members vs. windows — so composing them would need a nested one, and
+    // `mean ∓ k·std` of a set of `mean ∓ k·std`s is not a statistic worth
+    // emitting silently. `panel=` and `walkforward=` *do* compose: pooling the
+    // fold's in-sample score is the whole point.
+    if panel.is_some() && windowed.is_some() {
+        return Err(PyValueError::new_err(
+            "`panel=` and `windowed=` are mutually exclusive — both reduce a row to \
+             `mean ∓ k·std`, one across panel members and one across time windows",
+        ));
+    }
+    // Exactly one source of data. `snapshots` stays positional for the single
+    // stream case; a panel names its members, so it comes in by keyword.
+    let panel_members = panel.map(extract_panel).transpose()?;
+    if panel_axis.is_some() && panel_members.is_none() {
+        return Err(PyValueError::new_err(
+            "`panel_axis=` needs `panel=` — there is no member name to substitute without one",
+        ));
+    }
+    match (snapshots.is_some(), panel_members.is_some()) {
+        (false, false) => {
+            return Err(PyValueError::new_err(
+                "pass either `snapshots` (one stream) or `panel=` (several, pooled)",
+            ));
+        }
+        (true, true) => {
+            return Err(PyValueError::new_err(
+                "pass either `snapshots` or `panel=`, not both — a pooled sweep reduces \
+                 across the panel's members and has no separate single stream to rank against",
+            ));
+        }
+        _ => {}
     }
     // `smooth=` mirrors the CLI's `--smooth` grammar: "box:1", "triangle:2",
     // "gaussian:1.5". Presence is what turns smoothing on; `smooth_min_support`
@@ -1605,7 +1690,10 @@ pub(crate) fn optimize(
             })
         })
         .transpose()?;
-    let snaps = snapshots_from_sequence(snapshots)?;
+    let snaps = match snapshots {
+        Some(obj) => snapshots_from_sequence(obj)?,
+        None => Vec::new(),
+    };
     let params_table = extract_params(params)?;
     spec_optimize::reject_axes_in_params(&params_table)
         .map_err(|e| PyValueError::new_err(format!("`params`: {e}")))?;
@@ -1642,6 +1730,36 @@ pub(crate) fn optimize(
 
     let metric_names_vec: Vec<String> = metric_names.unwrap_or_default();
     let best_by_str = best_by.clone();
+
+    // ----- Pooled walkforward: one winner per fold, on the pooled IS score -----
+    if let (Some((is_bars, oos_bars, embargo_bars)), Some(members)) =
+        (walkforward_tuple, panel_members.as_ref())
+    {
+        return run_panel_walkforward(
+            py,
+            detected,
+            &base_value,
+            members,
+            panel_axis.as_deref(),
+            &cost_config,
+            subgrids,
+            is_bars,
+            oos_bars,
+            embargo_bars,
+            &metric_names_vec,
+            best_by_str.as_deref(),
+            risk_aversion,
+            smoothing.as_ref(),
+            jobs,
+            cash,
+            max_gross,
+            margin_rate,
+            maintenance_margin,
+            bars_per_year,
+            risk_free_rate,
+            seconds_per_bar,
+        );
+    }
 
     // ----- Walkforward path (mutually exclusive with `windowed=`) -----
     if let Some((is_bars, oos_bars, embargo_bars)) = walkforward_tuple {
@@ -1694,21 +1812,60 @@ pub(crate) fn optimize(
                 warmup_bars: None,
             };
             let ctx_ref = &ctx;
+            // Borrowed as slices once, so the per-row closure re-borrows rather
+            // than cloning every member's stream on every grid point.
+            let panel_axis_ref = panel_axis.as_deref();
+            let panel_ref: Option<PanelSlices<'_>> = panel_members
+                .as_ref()
+                .map(|ms| ms.iter().map(|(n, s)| (n.clone(), s.as_slice())).collect());
+            let panel_ref = panel_ref.as_deref();
             let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
             if interrupt.should_stop() {
                 anyhow::bail!("interrupted");
             }
-            let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
-            let spec = spec_from_value(value, detected)?;
-            Ok(match windowed {
-                None => spec_optimize::Evaluation::Whole(Box::new(
-                    spec_backtest::evaluate_any(&spec, &snaps, ctx_ref)
+            // Under `panel_axis=`, the document is only complete *per member* —
+            // the axis is exactly the parameter the members differ in, so
+            // substituting the row's params alone would leave it unset and fail
+            // the load. So that arm never builds a shared spec; every other
+            // path does, once.
+            let build_shared = || -> anyhow::Result<_> {
+                let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                spec_from_value(value, detected)
+            };
+            Ok(match (panel_ref, windowed) {
+                // Pooled: one document per member, reduced across them.
+                //
+                // Under `panel_axis=`, the member's *name* is substituted for
+                // that parameter first, so each member is rooted on its own
+                // series — the same thing the CLI's `--pooled AXIS` does. Built
+                // per member rather than once, because the spec differs.
+                (Some(members), _) => spec_optimize::Evaluation::Panel(match panel_axis_ref {
+                    None => spec_backtest::evaluate_panel_any(&build_shared()?, members, ctx_ref)
+                        .map_err(spec_backtest::build_error)?,
+                    Some(axis) => members
+                        .iter()
+                        .map(|(name, snaps)| {
+                            let mut p = params.clone();
+                            p.insert(axis.to_string(), JsonValue::String(name.clone()));
+                            let value =
+                                fugazi_core::spec::params::substitute(base_value.clone(), &p)?;
+                            let member_spec = spec_from_value(value, detected)?;
+                            let one = [(name.clone(), *snaps)];
+                            let mut out =
+                                spec_backtest::evaluate_panel_any(&member_spec, &one, ctx_ref)
+                                    .map_err(spec_backtest::build_error)?;
+                            Ok::<_, anyhow::Error>(out.remove(0))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                }),
+                (None, None) => spec_optimize::Evaluation::Whole(Box::new(
+                    spec_backtest::evaluate_any(&build_shared()?, &snaps, ctx_ref)
                         .map_err(spec_backtest::build_error)?,
                 )),
-                Some(w) => spec_optimize::Evaluation::Windowed(
-                    spec_backtest::evaluate_windowed_any(&spec, &snaps, ctx_ref, w)
+                (None, Some(w)) => spec_optimize::Evaluation::Windowed(
+                    spec_backtest::evaluate_windowed_any(&build_shared()?, &snaps, ctx_ref, w)
                         .map_err(spec_backtest::build_error)?,
                 ),
             })
@@ -1747,13 +1904,35 @@ pub(crate) fn optimize(
                 spec_optimize::Evaluation::Windowed(ws) => {
                     spec_optimize::lookup_windowed(ws.as_slice(), resolved).map(|(mean, _)| mean)
                 }
+                spec_optimize::Evaluation::Panel(ms) => {
+                    fugazi_core::spec::panel::pool_metric(ms, resolved).map(|p| p.mean)
+                }
             })
             .collect();
         let windowed_metrics = match &row.eval {
-            spec_optimize::Evaluation::Whole(_) => None,
             spec_optimize::Evaluation::Windowed(ws) => {
                 Some(ws.iter().map(|w| w.metrics.clone()).collect())
             }
+            _ => None,
+        };
+        // Per-member documents, keyed by member — the pooled twin of
+        // `metrics_windowed`, plus the support each pooled cell rests on.
+        let (panel_metrics, panel_support) = match &row.eval {
+            spec_optimize::Evaluation::Panel(ms) => {
+                let members: Vec<(String, SpecMetrics)> = ms
+                    .iter()
+                    .map(|m| (m.member.clone(), m.metrics.clone()))
+                    .collect();
+                let support: Vec<Option<(usize, usize)>> = metric_columns
+                    .iter()
+                    .map(|(_user, resolved)| {
+                        fugazi_core::spec::panel::pool_metric(ms, resolved)
+                            .map(|p| (p.defined, p.members))
+                    })
+                    .collect();
+                (Some(members), Some(support))
+            }
+            _ => (None, None),
         };
         let py_row = Py::new(
             py,
@@ -1763,6 +1942,8 @@ pub(crate) fn optimize(
                 metric_columns: metric_columns.clone(),
                 metric_values,
                 windowed_metrics,
+                panel_metrics,
+                panel_support,
                 smoothed: row.smoothed.and_then(|s| s.value),
                 support: row.smoothed.map(|s| s.support),
                 ruin_bar: row.eval.ruin_bar(),
@@ -1880,6 +2061,61 @@ impl PyWalkForwardFold {
             self.fold, self.is_range, self.oos_range
         )
     }
+}
+
+/// A panel's members as the pooled evaluators take them: name plus a borrowed
+/// snapshot stream.
+pub(crate) type PanelSlices<'a> = Vec<(String, &'a [Snapshot<Symbol>])>;
+
+/// Coerce the `panel=` argument into named snapshot streams.
+///
+/// Accepts a mapping (`{"BTC": snaps, "ETH": snaps}`) or a plain sequence of
+/// streams (auto-named `member[0]`, `member[1]`, …). The mapping form is worth
+/// preferring: pooled cells report *which* members reported a metric, and
+/// `member[7]` is a poor answer to that.
+///
+/// Each stream is a separate feed on purpose. Handing one merged
+/// multi-instrument stream instead would make every member run over the
+/// **union** timeline and see bars on which it has no quote — which is exactly
+/// what the CLI's per-root stream preparation exists to avoid, and Python has
+/// no equivalent to inherit.
+pub(crate) fn extract_panel(
+    panel: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(String, Vec<Snapshot<Symbol>>)>> {
+    let mut out: Vec<(String, Vec<Snapshot<Symbol>>)> = Vec::new();
+    if let Ok(map) = panel.cast::<pyo3::types::PyDict>() {
+        for (k, v) in map.iter() {
+            let name: String = k.extract().map_err(|_| {
+                PyTypeError::new_err("`panel=` mapping keys must be strings (member names)")
+            })?;
+            out.push((name, snapshots_from_sequence(&v)?));
+        }
+    } else {
+        let iter = panel.try_iter().map_err(|_| {
+            PyTypeError::new_err(
+                "`panel=` expected a mapping of name -> snapshots, or a sequence of \
+                 snapshot streams",
+            )
+        })?;
+        for (i, item) in iter.enumerate() {
+            out.push((format!("member[{i}]"), snapshots_from_sequence(&item?)?));
+        }
+    }
+    if out.is_empty() {
+        return Err(PyValueError::new_err(
+            "`panel=` is empty — pooling needs at least one member",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (name, _) in &out {
+        if !seen.insert(name.clone()) {
+            return Err(PyValueError::new_err(format!(
+                "`panel=` has two members named `{name}` — member names label the \
+                 pooled support counts, so they have to be distinct"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 /// The result of a walk-forward run (`ta.optimize(..., walkforward=(is,
@@ -2125,6 +2361,474 @@ pub(crate) fn run_walkforward(
             composite_equity: result.composite_equity,
             composite_fills: result.composite_fills,
             composite_metrics: result.composite_metrics,
+            columns,
+            metric_columns,
+            cash: result.cash,
+        },
+    )?;
+    Ok(py_result.into_any())
+}
+
+// ---------------------------------------------------------------------------
+// Pooled walk-forward
+// ---------------------------------------------------------------------------
+
+/// One fold of a pooled walk-forward: the parameter set that won this fold on
+/// the **pooled** in-sample score, and the per-member documents behind it.
+///
+/// `is_range` / `oos_range` are indices into the panel's shared clock — the
+/// sorted union of every member's bar times — not into any one member's bars.
+/// That is what makes fold *k* the same span for every member of a ragged
+/// panel; see `PanelWalkForwardResult.axis_len`.
+#[pyclass(name = "PanelFold", module = "fugazi")]
+pub(crate) struct PyPanelFold {
+    pub(crate) fold: usize,
+    pub(crate) is_range: (usize, usize),
+    pub(crate) oos_range: (usize, usize),
+    pub(crate) axis_columns: Vec<String>,
+    pub(crate) axis_values: Vec<Option<JsonValue>>,
+    pub(crate) is_members: Vec<(String, SpecMetrics)>,
+    pub(crate) oos_members: Vec<(String, SpecMetrics)>,
+    pub(crate) is_smoothed: Option<Real>,
+    pub(crate) is_support: Option<Real>,
+}
+
+#[pymethods]
+impl PyPanelFold {
+    #[getter]
+    pub(crate) fn fold(&self) -> usize {
+        self.fold
+    }
+    /// In-sample range on the panel's shared clock, `(start, end)`.
+    #[getter]
+    pub(crate) fn is_range(&self) -> (usize, usize) {
+        self.is_range
+    }
+    /// Post-embargo out-of-sample range on the panel's shared clock.
+    #[getter]
+    pub(crate) fn oos_range(&self) -> (usize, usize) {
+        self.oos_range
+    }
+    /// The winning parameter set, as `{axis: value}`.
+    #[getter]
+    pub(crate) fn values(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in self.axis_columns.iter().zip(&self.axis_values) {
+            match v {
+                Some(val) => d.set_item(name, json_to_py(py, val)?)?,
+                None => d.set_item(name, py.None())?,
+            }
+        }
+        Ok(d.into())
+    }
+    /// Per-member in-sample documents for the winning row, keyed by member.
+    ///
+    /// Only members with bars in this fold's window appear. A member that had
+    /// not listed yet is **absent**, never present-and-zero — which is what
+    /// makes `len(fold.metrics_is)` a usable support count.
+    #[getter]
+    pub(crate) fn metrics_is(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        members_to_py(py, &self.is_members)
+    }
+    /// Per-member out-of-sample documents for the winning row.
+    #[getter]
+    pub(crate) fn metrics_oos(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        members_to_py(py, &self.oos_members)
+    }
+    /// Members with bars in this fold's in-sample window.
+    #[getter]
+    pub(crate) fn is_support_members(&self) -> usize {
+        self.is_members.len()
+    }
+    /// Members with bars in this fold's out-of-sample window.
+    #[getter]
+    pub(crate) fn oos_support_members(&self) -> usize {
+        self.oos_members.len()
+    }
+    /// Under `smooth=`, the neighbourhood average of the winning row's pooled
+    /// IS ranking key — the value this fold was actually selected on.
+    #[getter]
+    pub(crate) fn is_smoothed(&self) -> Option<Real> {
+        self.is_smoothed
+    }
+    /// The neighbourhood support behind `is_smoothed`.
+    #[getter]
+    pub(crate) fn is_support(&self) -> Option<Real> {
+        self.is_support
+    }
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "PanelFold(fold={}, is={:?}, oos={:?}, members={}/{})",
+            self.fold,
+            self.is_range,
+            self.oos_range,
+            self.oos_members.len(),
+            self.is_members.len(),
+        )
+    }
+}
+
+fn members_to_py(py: Python<'_>, members: &[(String, SpecMetrics)]) -> PyResult<Py<PyAny>> {
+    let d = pyo3::types::PyDict::new(py);
+    for (name, m) in members {
+        d.set_item(name, metrics_to_py(py, m)?)?;
+    }
+    Ok(d.into_any().unbind())
+}
+
+/// One panel member's stitched out-of-sample composite.
+#[pyclass(name = "MemberComposite", module = "fugazi")]
+pub(crate) struct PyMemberComposite {
+    pub(crate) member: String,
+    pub(crate) equity: Vec<Real>,
+    pub(crate) fills: Vec<fugazi_core::Fill<Symbol>>,
+    pub(crate) metrics: SpecMetrics,
+}
+
+#[pymethods]
+impl PyMemberComposite {
+    #[getter]
+    pub(crate) fn member(&self) -> String {
+        self.member.clone()
+    }
+    #[getter]
+    pub(crate) fn equity(&self) -> Vec<Real> {
+        self.equity.clone()
+    }
+    #[getter]
+    pub(crate) fn fills(&self) -> Vec<PyFill> {
+        self.fills
+            .iter()
+            .map(|f| PyFill { inner: f.clone() })
+            .collect()
+    }
+    #[getter]
+    pub(crate) fn metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        metrics_to_py(py, &self.metrics)
+    }
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "MemberComposite(member={:?}, bars={})",
+            self.member,
+            self.equity.len()
+        )
+    }
+}
+
+/// The result of a pooled walk-forward (`ta.optimize(..., panel=...,
+/// walkforward=(is, oos))`).
+///
+/// One parameter set is chosen per fold on the **pooled** in-sample score and
+/// applied out-of-sample to every member, so all the composites switch
+/// parameters on the same dates.
+///
+/// There is deliberately no single netted composite curve: netting `M` members
+/// into one account needs a weighting and a rebalance cadence, which is an
+/// allocation policy fugazi expresses explicitly with `portfolio:` rather than
+/// inventing inside `optimize`. Use `pooled(metric)` for the cross-member
+/// headline, and `composites` for the per-instrument curves.
+#[pyclass(name = "PanelWalkForwardResult", module = "fugazi")]
+pub(crate) struct PyPanelWalkForwardResult {
+    pub(crate) is_bars: usize,
+    pub(crate) oos_bars: usize,
+    pub(crate) embargo_bars: usize,
+    pub(crate) prefix_skip: usize,
+    pub(crate) axis_len: usize,
+    pub(crate) members: Vec<String>,
+    pub(crate) folds: Vec<Py<PyPanelFold>>,
+    pub(crate) composites: Vec<Py<PyMemberComposite>>,
+    pub(crate) composite_members: Vec<fugazi_core::spec::panel::PanelMetrics>,
+    pub(crate) columns: Vec<String>,
+    pub(crate) metric_columns: Vec<(String, String)>,
+    pub(crate) cash: Real,
+}
+
+#[pymethods]
+impl PyPanelWalkForwardResult {
+    #[getter]
+    pub(crate) fn is_bars(&self) -> usize {
+        self.is_bars
+    }
+    #[getter]
+    pub(crate) fn oos_bars(&self) -> usize {
+        self.oos_bars
+    }
+    #[getter]
+    pub(crate) fn embargo_bars(&self) -> usize {
+        self.embargo_bars
+    }
+    /// Bars trimmed off the head of the shared clock for grid-wide readiness —
+    /// the pooled analogue of `WalkForwardResult.prefix_skip`.
+    ///
+    /// Measured from the point the **first** member becomes ready, not the
+    /// last: waiting for every member would truncate the panel's history to its
+    /// most recent listing. Early folds therefore rest on fewer members, which
+    /// `PanelFold.is_support_members` reports rather than hides.
+    #[getter]
+    pub(crate) fn prefix_skip(&self) -> usize {
+        self.prefix_skip
+    }
+    /// Length of the panel's shared clock — the union of every member's bar
+    /// times. Fold ranges index into this, not into any one member's bars.
+    #[getter]
+    pub(crate) fn axis_len(&self) -> usize {
+        self.axis_len
+    }
+    /// The panel's member names, in order.
+    #[getter]
+    pub(crate) fn members(&self) -> Vec<String> {
+        self.members.clone()
+    }
+    #[getter]
+    pub(crate) fn columns(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+    #[getter]
+    pub(crate) fn metric_columns(&self) -> Vec<(String, String)> {
+        self.metric_columns.clone()
+    }
+    #[getter]
+    pub(crate) fn cash(&self) -> Real {
+        self.cash
+    }
+    #[getter]
+    pub(crate) fn folds(&self, py: Python<'_>) -> Vec<Py<PyPanelFold>> {
+        self.folds.iter().map(|f| f.clone_ref(py)).collect()
+    }
+    /// One stitched out-of-sample composite per member, in panel order.
+    #[getter]
+    pub(crate) fn composites(&self, py: Python<'_>) -> Vec<Py<PyMemberComposite>> {
+        self.composites.iter().map(|c| c.clone_ref(py)).collect()
+    }
+
+    /// Pool one metric across the per-member composites:
+    /// `(mean, std, defined, members)`, or `None` when no member reported it.
+    ///
+    /// The mean is over the members that reported — a member with no trades has
+    /// no win rate and is dropped rather than counted as zero — so `defined` is
+    /// what separates a well-supported number from a mean over two survivors.
+    pub(crate) fn pooled(&self, metric: &str) -> PyResult<Option<(Real, Real, usize, usize)>> {
+        let sample = self
+            .composite_members
+            .first()
+            .ok_or_else(|| PyValueError::new_err("pooled(): the panel has no members"))?;
+        let (path, _) = fugazi_core::spec::metrics::resolve_metric(metric, &sample.metrics)
+            .map_err(|e| PyValueError::new_err(format!("pooled(): {e:#}")))?;
+        Ok(
+            fugazi_core::spec::panel::pool_metric(&self.composite_members, &path)
+                .map(|p| (p.mean, p.std, p.defined, p.members)),
+        )
+    }
+
+    /// The number of folds — `len(result)` == `len(result.folds)`.
+    pub(crate) fn __len__(&self) -> usize {
+        self.folds.len()
+    }
+    /// Iterate the folds, so `for fold in result` needs no `.folds` detour.
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::classes::iter_over(py, self.folds(py))
+    }
+    /// Index or slice the folds — `result[0]`, `result[-1]`, `result[:2]`.
+    pub(crate) fn __getitem__(
+        &self,
+        py: Python<'_>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let list = pyo3::types::PyList::new(py, self.folds(py))?;
+        Ok(list.as_any().get_item(index)?.unbind())
+    }
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "PanelWalkForwardResult(folds={}, members={}, is={}, oos={}, embargo={})",
+            self.folds.len(),
+            self.members.len(),
+            self.is_bars,
+            self.oos_bars,
+            self.embargo_bars,
+        )
+    }
+}
+
+/// The pooled walk-forward driver — the `panel=` peer of [`run_walkforward`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_panel_walkforward(
+    py: Python<'_>,
+    detected: &str,
+    base_value: &JsonValue,
+    members: &[(String, Vec<Snapshot<Symbol>>)],
+    // When set, each member's name is substituted for this `!param` before its
+    // spec is built, so every member is rooted on its own series — the Python
+    // twin of the CLI's `--pooled AXIS`.
+    panel_axis: Option<&str>,
+    cost_config: &fugazi_core::spec::costs::CostConfig,
+    subgrids: Vec<spec_optimize::Subgrid>,
+    is_bars: usize,
+    oos_bars: usize,
+    embargo_bars: usize,
+    metric_names: &[String],
+    best_by: Option<&str>,
+    risk_aversion: Real,
+    smoothing: Option<&spec_optimize::Smoothing>,
+    jobs: Option<usize>,
+    cash: Real,
+    max_gross: Real,
+    margin_rate: Real,
+    maintenance_margin: Option<Real>,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
+) -> PyResult<Py<PyAny>> {
+    use fugazi_core::spec::panel;
+
+    // Each member's own bar clock, read off its snapshots. Refused here rather
+    // than deep in the kernel so a stream with no `time` names the member.
+    let axes: Vec<panel::MemberAxis> = members
+        .iter()
+        .map(|(name, snaps)| panel::MemberAxis::from_snapshots(name, snaps))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(|e| SpecError::new_err(format!("pooled walkforward: {e:#}")))?;
+
+    let interrupt = crate::classes::SweepInterrupt::new();
+    let result = crate::classes::run_watched(
+        py,
+        &interrupt,
+        || -> anyhow::Result<panel::PanelWalkForward> {
+            let needs_probe_feed = matches!(detected, "basket" | "multi");
+            let ctx = spec_backtest::EvalContext {
+                cash,
+                max_gross,
+                margin_rate,
+                maintenance_margin,
+                bars_per_year,
+                risk_free_rate,
+                cost_config,
+                effective_freq: None,
+                stream: None,
+                windowed: None,
+                seconds_per_bar,
+                mc: None,
+                warmup_bars: None,
+            };
+            let ctx_ref = &ctx;
+            // One schema per member: members are different instruments, so
+            // their overlay columns need not agree.
+            let schemas: Vec<_> = members
+                .iter()
+                .map(|(_, snaps)| spec_backtest::schema_from_snapshots(snaps))
+                .collect();
+
+            let member_params = |params: &std::collections::HashMap<String, JsonValue>,
+                                 m: usize|
+             -> std::collections::HashMap<String, JsonValue> {
+                let mut p = params.clone();
+                if let Some(axis) = panel_axis {
+                    p.insert(axis.to_string(), JsonValue::String(members[m].0.clone()));
+                }
+                p
+            };
+            let probe_readiness = |params: &std::collections::HashMap<String, JsonValue>,
+                                   m: usize|
+             -> anyhow::Result<usize> {
+                let params = member_params(params, m);
+                let value = fugazi_core::spec::params::substitute(base_value.clone(), &params)?;
+                let spec = spec_from_value(value, detected)?;
+                let mut built = spec
+                    .try_build(cash, &schemas[m], None)
+                    .map_err(spec_backtest::build_error)?;
+                if needs_probe_feed && let Some(first) = members[m].1.first() {
+                    built.update(first.clone());
+                }
+                Ok(built.stable_bars())
+            };
+
+            let run_backtest = |params: &std::collections::HashMap<String, JsonValue>,
+                                m: usize|
+             -> anyhow::Result<fugazi_core::RunReport<Symbol>> {
+                if interrupt.should_stop() {
+                    anyhow::bail!("interrupted");
+                }
+                let params = member_params(params, m);
+                let value = fugazi_core::spec::params::substitute(base_value.clone(), &params)?;
+                let spec = spec_from_value(value, detected)?;
+                spec_backtest::check_member_universe_pub(&spec, &members[m].0, &members[m].1)
+                    .map_err(spec_backtest::build_error)?;
+                spec_backtest::measured_report_any(&spec, &members[m].1, ctx_ref)
+                    .map_err(spec_backtest::build_error)
+            };
+
+            panel::panel_walkforward(
+                subgrids,
+                axes,
+                probe_readiness,
+                run_backtest,
+                bars_per_year,
+                risk_free_rate,
+                seconds_per_bar,
+                is_bars,
+                oos_bars,
+                embargo_bars,
+                metric_names,
+                best_by,
+                risk_aversion,
+                smoothing,
+                jobs,
+                cash,
+            )
+        },
+    )
+    .map_err(|e| SpecError::new_err(format!("pooled walkforward: {e:#}")));
+    let result = interrupt.raise_over(result)?;
+
+    let columns = result.union_columns.clone();
+    let metric_columns = result.metric_columns.clone();
+    let mut fold_objs: Vec<Py<PyPanelFold>> = Vec::with_capacity(result.fold_rows.len());
+    for row in &result.fold_rows {
+        let to_pairs = |ms: &[panel::PanelMetrics]| -> Vec<(String, SpecMetrics)> {
+            ms.iter()
+                .map(|m| (m.member.clone(), m.metrics.clone()))
+                .collect()
+        };
+        fold_objs.push(Py::new(
+            py,
+            PyPanelFold {
+                fold: row.fold,
+                is_range: (row.is.start, row.is.end),
+                oos_range: (row.oos.start, row.oos.end),
+                axis_columns: columns.clone(),
+                axis_values: row.values.clone(),
+                is_members: to_pairs(&row.is_members),
+                oos_members: to_pairs(&row.oos_members),
+                is_smoothed: row.is_smoothed.and_then(|s| s.value),
+                is_support: row.is_smoothed.map(|s| s.support),
+            },
+        )?);
+    }
+    let composite_members = result.composite_members();
+    let mut composite_objs: Vec<Py<PyMemberComposite>> =
+        Vec::with_capacity(result.composites.len());
+    for c in &result.composites {
+        composite_objs.push(Py::new(
+            py,
+            PyMemberComposite {
+                member: c.member.clone(),
+                equity: c.equity.clone(),
+                fills: c.fills.clone(),
+                metrics: c.metrics.clone(),
+            },
+        )?);
+    }
+    let py_result = Py::new(
+        py,
+        PyPanelWalkForwardResult {
+            is_bars: result.is_bars,
+            oos_bars: result.oos_bars,
+            embargo_bars: result.embargo_bars,
+            prefix_skip: result.axis.prefix_skip,
+            axis_len: result.axis.len(),
+            members: result.axis.members.iter().map(|m| m.name.clone()).collect(),
+            folds: fold_objs,
+            composites: composite_objs,
+            composite_members,
             columns,
             metric_columns,
             cash: result.cash,
