@@ -486,3 +486,64 @@ fn a_plain_single_cadence_input_says_nothing() {
         out.stderr
     );
 }
+
+/// A `time` column in **nanoseconds** — what `datetime64[ns]` cast to an
+/// integer produces, and the shape a `pandas`/`polars` export lands in.
+///
+/// Every stamp is then ~52 million years past the epoch. `time` tops out at
+/// year 9999, so the first `!is_weekday` in the document used to kill the run
+/// with a raw `expect` message from `Timestamp::to_datetime`; making that
+/// total turned the abort into a strategy that silently never fires — which is
+/// worse, because it looks like a result. The census says so instead.
+#[test]
+fn nanosecond_timestamps_are_named_rather_than_silently_ungated() {
+    // 2024-01-01 onward, one day apart, in nanoseconds.
+    const NS_PER_DAY: i64 = 86_400_000_000_000;
+    let base = 1_704_067_200_000_000_000i64;
+    let mut body = String::new();
+    for i in 0..40i64 {
+        let close = 100 + (i % 7) * 2;
+        body.push_str(&format!(
+            "BTC,1d,{},{close},{close},{close},{close},100\n",
+            base + i * NS_PER_DAY
+        ));
+    }
+    let out = Cmd::new("run")
+        .arg(&single_strategy("BTC"))
+        .series(&series_of("cadence_nanos.csv", &body))
+        .output_dir("cadence_nanos")
+        .ok();
+
+    assert!(
+        out.stderr.contains("fall outside the calendar"),
+        "no undatable-timestamp warning:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("nanoseconds"),
+        "the warning should name the usual cause:\n{}",
+        out.stderr
+    );
+    // And the run completes rather than aborting.
+    assert!(out.wrote("metrics.yml"), "the run should still complete");
+
+    // The same series in milliseconds is ordinary, and says nothing.
+    let mut ms_body = String::new();
+    for i in 0..40i64 {
+        let close = 100 + (i % 7) * 2;
+        ms_body.push_str(&format!(
+            "BTC,1d,{},{close},{close},{close},{close},100\n",
+            base / 1_000_000 + i * (NS_PER_DAY / 1_000_000)
+        ));
+    }
+    let out = Cmd::new("run")
+        .arg(&single_strategy("BTC"))
+        .series(&series_of("cadence_millis.csv", &ms_body))
+        .output_dir("cadence_millis")
+        .ok();
+    assert!(
+        !out.stderr.contains("fall outside the calendar"),
+        "an ordinary millisecond series must not be accused:\n{}",
+        out.stderr
+    );
+}

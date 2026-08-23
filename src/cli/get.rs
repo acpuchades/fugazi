@@ -1199,8 +1199,8 @@ fn warn_short_history(
         // not the full `stable` bars the trim assumes.
         let warm_incomplete =
             !keep_unstable && s.stable > 0 && earliest > s.fetch_since(since, since_specified);
-        let earliest_date = earliest.to_datetime().date();
-        let since_date = since.to_datetime().date();
+        let earliest_date = format_date(earliest);
+        let since_date = format_date(since);
 
         if earliest > since {
             let mut msg = format!(
@@ -1299,8 +1299,12 @@ fn warn_fragmented_dataset(o: &Overlap<i64>) {
 /// time-of-day is the whole point here: it is the session boundary the symbols
 /// split along.
 fn format_stamp(t: Timestamp) -> String {
-    let dt = t.to_datetime();
-    format!("{} {:02}:{:02}Z", dt.date(), dt.hour(), dt.minute())
+    match t.to_datetime() {
+        Some(dt) => format!("{} {:02}:{:02}Z", dt.date(), dt.hour(), dt.minute()),
+        // Outside the calendar `time` can express — show the raw stamp rather
+        // than aborting a diagnostic.
+        None => t.0.to_string(),
+    }
 }
 
 /// Build one **global** fetch-progress bar, denominated in series completed —
@@ -1473,7 +1477,10 @@ fn print_result_block(rows: usize, n_symbols: usize, n_series: usize, overlap: &
 /// since the fetch grammar is date-precision and printing HH:MM:SS would add
 /// noise the user never gave us.
 fn format_date(t: Timestamp) -> String {
-    t.to_datetime().date().to_string()
+    match t.to_datetime() {
+        Some(dt) => dt.date().to_string(),
+        None => t.0.to_string(),
+    }
 }
 
 /// Write the row list to `path` as a `,`-delimited CSV. Base header:
@@ -1521,8 +1528,8 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
             .expect("get.rs atoms always carry a bar-open time");
         let time = time_ts
             .to_datetime()
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| time_ts.0.to_string());
+            .and_then(|dt| dt.format(&Rfc3339).ok())
+            .unwrap_or_else(|| time_ts.0.to_string());
         let mut record: Vec<String> = vec![row.symbol.clone(), row.freq.clone(), time];
         if any_candle {
             let ohlcv = |f: fn(&Candle) -> Real| {

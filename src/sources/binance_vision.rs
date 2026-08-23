@@ -884,7 +884,12 @@ fn days_between(since: i64, until: i64) -> Vec<String> {
     let mut out = Vec::new();
     let mut day = first;
     while day < until {
-        let date = Timestamp(day).to_datetime().date();
+        // A range endpoint outside the calendar `time` can express has no date
+        // to name an archive with — there is nothing to fetch past it.
+        let Some(dt) = Timestamp(day).to_datetime() else {
+            break;
+        };
+        let date = dt.date();
         out.push(format!(
             "{:04}-{:02}-{:02}",
             date.year(),
@@ -903,8 +908,13 @@ fn months_between(since: i64, until: i64) -> Vec<(i32, u8)> {
     if until <= since {
         return Vec::new();
     }
-    let start = Timestamp(since).to_datetime();
-    let end = Timestamp(until.saturating_sub(1)).to_datetime();
+    // Same as `days_between`: an unrepresentable endpoint names no archive.
+    let (Some(start), Some(end)) = (
+        Timestamp(since).to_datetime(),
+        Timestamp(until.saturating_sub(1)).to_datetime(),
+    ) else {
+        return Vec::new();
+    };
     let (mut year, mut month) = (start.year(), start.month() as u8);
     let last = (end.year(), end.month() as u8);
 

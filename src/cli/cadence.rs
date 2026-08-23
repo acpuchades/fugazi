@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::{Result, bail};
-use fugazi::types::Frequency;
+use fugazi::types::{Frequency, Timestamp};
 
 use crate::calendar::{self, ScopedFrequency};
 use crate::data::DataFrame;
@@ -103,6 +103,11 @@ pub struct Series {
     pub detected: Option<Frequency>,
     /// Rows in the group that carry a parseable timestamp.
     pub bars: usize,
+    /// Of those, how many land outside the calendar `time` can express (past
+    /// year 9999, or before year -9999). See [`Finding::Undatable`].
+    pub undatable: usize,
+    /// One such stamp, verbatim, so a diagnostic can show its scale.
+    pub undatable_example: Option<i64>,
 }
 
 impl Series {
@@ -117,6 +122,14 @@ impl Series {
             freq,
             detected: calendar::detect_frequency_from_millis(stamps.iter().copied()),
             bars: stamps.len(),
+            undatable: stamps
+                .iter()
+                .filter(|&&ms| Timestamp(ms).to_datetime().is_none())
+                .count(),
+            undatable_example: stamps
+                .iter()
+                .copied()
+                .find(|&ms| Timestamp(ms).to_datetime().is_none()),
         }
     }
 
@@ -283,6 +296,18 @@ impl Census {
                 });
             }
 
+            if group.undatable > 0
+                && let Some(example) = group.undatable_example
+            {
+                findings.push(Finding::Undatable {
+                    symbol: symbol.to_string(),
+                    freq: group.freq.clone(),
+                    bars: group.undatable,
+                    total: group.bars,
+                    example,
+                });
+            }
+
             if let Some(f) = pick.or_else(|| group.effective()) {
                 effective.push((symbol, f));
             }
@@ -351,6 +376,16 @@ pub enum Finding {
         /// `(cadence, symbols)`, ascending by cadence duration.
         groups: Vec<(Frequency, Vec<String>)>,
     },
+    /// A series' timestamps land outside the calendar, so nothing that reads a
+    /// date can answer for them.
+    Undatable {
+        symbol: String,
+        freq: String,
+        bars: usize,
+        total: usize,
+        /// One offending stamp, verbatim, so the reader can see the scale.
+        example: i64,
+    },
     /// A series' label and its timestamp spacing disagree.
     Mislabelled {
         symbol: String,
@@ -414,6 +449,25 @@ impl fmt::Display for Finding {
                  a series literal — `--series \"freq=<CODE>,@file.csv\"`.",
                 declared.len(),
                 declared.join(", "),
+            ),
+            Finding::Undatable {
+                symbol,
+                freq,
+                bars,
+                total,
+                example,
+            } => write!(
+                f,
+                "`{symbol}`{}: {bars} of {total} timestamp(s) fall outside the calendar \
+                 (`{example}`), so every calendar reading — `!is_weekday`, `!month`, \
+                 `!day_of_week` — is absent for them and any gate built on one never fires. \
+                 A `time` column in **nanoseconds** is the usual cause: `datetime64[ns]` cast \
+                 to an integer. fugazi reads milliseconds; divide by 1e6.",
+                if freq.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{freq}]")
+                },
             ),
             Finding::Mixed { groups } => {
                 let list = groups

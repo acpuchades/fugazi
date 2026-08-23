@@ -103,7 +103,10 @@ impl<F: CalendarField, S: Indicator<Output = Atom>> Indicator for Calendar<F, S>
         self.value = self
             .source
             .update(input)
-            .and_then(|a| a.time.map(|t| F::get(t.to_datetime())));
+            // `to_datetime` is `None` for a stamp outside the calendar `time`
+            // can express — a nanosecond epoch column, most often. That reads
+            // the same as an undated bar: no calendar answer.
+            .and_then(|a| a.time.and_then(|t| t.to_datetime()).map(F::get));
         self.value
     }
 
@@ -404,8 +407,8 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekday<S> {
 
     fn update(&mut self, input: S::Input) -> Option<bool> {
         self.value = self.source.update(input).and_then(|a| {
-            a.time.map(|t| {
-                let d = t.to_datetime().weekday().number_from_monday();
+            a.time.and_then(|t| t.to_datetime()).map(|dt| {
+                let d = dt.weekday().number_from_monday();
                 d <= 5
             })
         });
@@ -478,8 +481,8 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekend<S> {
 
     fn update(&mut self, input: S::Input) -> Option<bool> {
         self.value = self.source.update(input).and_then(|a| {
-            a.time.map(|t| {
-                let d = t.to_datetime().weekday().number_from_monday();
+            a.time.and_then(|t| t.to_datetime()).map(|dt| {
+                let d = dt.weekday().number_from_monday();
                 d >= 6
             })
         });

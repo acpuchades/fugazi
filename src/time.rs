@@ -24,11 +24,25 @@ impl Timestamp {
         Self((nanos / 1_000_000) as i64)
     }
 
-    /// Reconstruct a `time::OffsetDateTime` at UTC from this millisecond stamp.
-    pub fn to_datetime(self) -> ::time::OffsetDateTime {
+    /// Reconstruct a `time::OffsetDateTime` at UTC from this millisecond stamp,
+    /// or `None` when the stamp lands outside the calendar `time` can express.
+    ///
+    /// **An `i64` of milliseconds does not fit in an `OffsetDateTime`**, which
+    /// is where this used to `expect`. `time` tops out at year 9999 —
+    /// `253_402_300_800_000` ms — and an `i64` reaches 292 million years, so
+    /// three quarters of the type's range aborts. That is not a theoretical
+    /// gap: a `time` column in **nanoseconds** is what `pandas`' and `polars`'
+    /// `datetime64[ns]` produce when cast to an integer, `parse_time_to_millis`
+    /// passes any stamp past `1e11` through as milliseconds by design (it cannot
+    /// tell nanoseconds from a far-future date), and the first `!is_weekday` in
+    /// the document then killed the run with a raw panic message.
+    ///
+    /// So this is `Option`, and every caller degrades: a calendar accessor reads
+    /// `None` — the same answer it already gives an undated bar — and a
+    /// formatter falls back to the raw number.
+    pub fn to_datetime(self) -> Option<::time::OffsetDateTime> {
         let nanos = (self.0 as i128) * 1_000_000;
-        ::time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-            .expect("i64 millis fits in OffsetDateTime range")
+        ::time::OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()
     }
 }
 
@@ -148,5 +162,70 @@ impl FromStr for Frequency {
                 "`{s}`: unknown unit `{other}`, expected one of m/h/d/w/M"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole `i64` millisecond range is a valid `Timestamp`; only part of
+    /// it is a valid `OffsetDateTime`. The out-of-range half used to abort.
+    #[test]
+    fn an_unrepresentable_stamp_reads_none_rather_than_aborting() {
+        // Year 9999-12-31 23:59:59.999 is the last representable millisecond.
+        let last = 253_402_300_799_999i64;
+        assert!(Timestamp(last).to_datetime().is_some());
+        assert!(Timestamp(last + 1).to_datetime().is_none());
+        // The shape that actually reaches here: a nanosecond epoch column read
+        // as milliseconds.
+        assert!(Timestamp(1_704_067_200_000_000_000).to_datetime().is_none());
+        assert!(Timestamp(i64::MAX).to_datetime().is_none());
+        assert!(Timestamp(i64::MIN).to_datetime().is_none());
+        // Ordinary stamps, and the pre-epoch ones a long equity history
+        // carries, are unaffected.
+        assert!(Timestamp(0).to_datetime().is_some());
+        assert!(Timestamp(1_704_067_200_000).to_datetime().is_some());
+        assert!(Timestamp(-2_208_988_800_000).to_datetime().is_some());
+    }
+
+    #[test]
+    fn a_representable_stamp_round_trips_through_the_datetime() {
+        for ms in [0i64, 1_704_067_200_000, -2_208_988_800_000, 1_234_567_891] {
+            let dt = Timestamp(ms).to_datetime().expect("representable");
+            assert_eq!(Timestamp::from_datetime(dt).0, ms);
+        }
+    }
+
+    /// The cadence grammar is `N<unit>` with a positive multiplier and one of
+    /// five units — everything else is bad input, reported rather than guessed
+    /// at.
+    #[test]
+    fn frequency_parsing_refuses_everything_that_is_not_a_cadence() {
+        for good in ["1m", "5m", "4h", "1d", "2w", "1M", " 15m "] {
+            let f: Frequency = good.parse().expect(good);
+            assert_eq!(f.as_token(), good.trim());
+        }
+        for bad in ["", "m", "0m", "-5m", "5", "5min", "5M5", "1s", "1y", "1.5h"] {
+            assert!(bad.parse::<Frequency>().is_err(), "accepted `{bad}`");
+        }
+    }
+
+    /// Ordered by duration, not by variant tag — the reason `Ord` is
+    /// hand-written. The tie-break keeps `Hour(24)` and `Day(1)` distinct
+    /// without breaking the `Ord`/`Eq` contract.
+    #[test]
+    fn cadences_order_by_duration_across_units() {
+        assert!(Frequency::Minute(120) > Frequency::Hour(1));
+        assert!(Frequency::Hour(25) > Frequency::Day(1));
+        assert!(Frequency::Day(8) > Frequency::Week(1));
+        assert!(Frequency::Week(5) > Frequency::Month(1));
+        // Equal duration, different unit: ordered but not equal.
+        assert_ne!(Frequency::Hour(24), Frequency::Day(1));
+        assert!(Frequency::Hour(24) < Frequency::Day(1));
+        assert_eq!(
+            Frequency::Hour(24).cmp(&Frequency::Hour(24)),
+            std::cmp::Ordering::Equal
+        );
     }
 }

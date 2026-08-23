@@ -83,15 +83,19 @@ pub use yahoo::Yahoo;
 /// joined onto the same price series.
 pub(crate) fn floor_to_bucket(ms: i64, interval: Interval) -> i64 {
     use time::{Date, Duration as TimeDuration, Time};
+    // A stamp outside the calendar `time` can express has no Monday and no
+    // 1st-of-month; it falls through to the modulo arm, which is defined for
+    // every `i64`. Bucketing something unrepresentable is already meaningless —
+    // the point is that it is not an abort.
     match interval {
-        Interval::Week(1) => {
-            let dt = Timestamp(ms).to_datetime();
+        Interval::Week(1) if Timestamp(ms).to_datetime().is_some() => {
+            let dt = Timestamp(ms).to_datetime().expect("checked by the guard");
             let back = dt.weekday().number_days_from_monday() as i64;
             let monday = dt.date() - TimeDuration::days(back);
             Timestamp::from_datetime(monday.with_time(Time::MIDNIGHT).assume_utc()).0
         }
-        Interval::Month(1) => {
-            let dt = Timestamp(ms).to_datetime();
+        Interval::Month(1) if Timestamp(ms).to_datetime().is_some() => {
+            let dt = Timestamp(ms).to_datetime().expect("checked by the guard");
             let first = Date::from_calendar_date(dt.year(), dt.month(), 1)
                 .expect("day 1 is valid in every month");
             Timestamp::from_datetime(first.with_time(Time::MIDNIGHT).assume_utc()).0
