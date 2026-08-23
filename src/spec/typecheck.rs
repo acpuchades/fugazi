@@ -116,7 +116,9 @@ pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
 
         // --- passthroughs: exactly as known as what they wrap ---
         Unstable { source } => output_type(source),
-        Resample { inner, .. } => output_type(inner),
+        Resample { inner, .. } | VolumeBars { inner, .. } | DollarBars { inner, .. } => {
+            output_type(inner)
+        }
 
         // --- absorbed boolean signals: all produce Bool ---
         Gt { .. }
@@ -434,7 +436,9 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         // `inner` is *chained* onto the resampled candle stream, so what `build`
         // constrains is its **input** (must accept a Candle), not its output —
         // which is why `output_type` reads through to it. No output demand.
-        Resample { inner, source, .. } => vec![
+        Resample { inner, source, .. }
+        | VolumeBars { inner, source, .. }
+        | DollarBars { inner, source, .. } => vec![
             ("source", CANDLE, source),
             ("inner", Expect::OneOf(&[]), inner),
         ],

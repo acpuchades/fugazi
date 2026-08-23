@@ -49,7 +49,7 @@ use serde_json::Value as Json;
 use crate::indicators::{Book, Position};
 use crate::market::{Atom, OverlayInfo, OverlayType, OverlayValue, Schema};
 use crate::runtime::{AnyChain, PayloadIndicator, PayloadType, PayloadValue};
-use crate::time::Frequency;
+use crate::snapshot::StreamId;
 use crate::types::Snapshot;
 
 use super::expr::{NodeSpec, Root};
@@ -313,21 +313,21 @@ pub fn compute_snapshots(
     let (out_schema, _) = prepare_for(existing, columns, Root::sole())?;
     let existing_len = existing.len();
 
-    type Key = (Option<Symbol>, Option<Frequency>);
+    type Key = (Option<Symbol>, Option<StreamId>);
     let mut sets: HashMap<Key, Vec<PreparedColumn>> = HashMap::new();
     let mut out = Vec::with_capacity(snaps.len());
 
     for snap in snaps {
         let mut rebuilt = Snapshot::<Symbol>::new();
         for (sym, freq, atom) in snap.iter() {
-            let key: Key = (sym.cloned(), freq);
+            let key: Key = (sym.cloned(), freq.cloned());
             if !sets.contains_key(&key) {
                 // An untagged entry has nothing to be rooted on; it falls back
                 // to the sole-atom unpack, same as the single-series path.
                 let root = key.0.as_ref().map(|sym| {
                     crate::spec::RootSpec::for_series(
                         sym.as_str(),
-                        key.1.map(|f| f.as_token()).as_deref(),
+                        key.1.as_ref().map(StreamId::as_str),
                     )
                 });
                 let (_, prepared) = prepare_for(existing, columns, Root::or_sole(root.as_ref()))?;

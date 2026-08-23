@@ -123,7 +123,7 @@ fn workload(name: &str) {
                 _ => {
                     let (syms, snap) = universe(N);
                     let sels = (0..N)
-                        .map(|i| Selector::by_freq(Frequency::Minute(i as u32 + 1)))
+                        .map(|i| Selector::by_stream(Frequency::Minute(i as u32 + 1)))
                         .collect();
                     (syms, snap, sels)
                 }

@@ -32,6 +32,7 @@ fn ctx<'a>(cost_config: &'a CostConfig) -> EvalContext<'a> {
         risk_free_rate: 0.0,
         cost_config,
         effective_freq: None,
+        stream: None,
         windowed: None,
         seconds_per_bar: None,
         mc: None,

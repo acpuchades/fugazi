@@ -80,7 +80,7 @@ pub fn build_error(e: String) -> anyhow::Error {
 /// [`Schema::empty()`] when the stream is empty or none of the atoms are
 /// overlay-bearing (i.e. no side channel), so a `!get { key }` in the spec
 /// panics with a helpful "unknown key" against the empty registered-keys list.
-pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
+pub fn schema_from_atoms<K>(atoms: &[(K, Atom)]) -> std::sync::Arc<Schema> {
     atoms
         .iter()
         .find_map(|(_, a)| a.overlays.as_ref())
@@ -273,6 +273,20 @@ pub struct EvalContext<'a> {
     pub risk_free_rate: Real,
     pub cost_config: &'a CostConfig,
     pub effective_freq: Option<Frequency>,
+    /// The **stream** the run trades, as `--costs`' `SYMBOL[STREAM]:` scope
+    /// spells it.
+    ///
+    /// Separate from [`effective_freq`](Self::effective_freq) because the two
+    /// answer different questions, and only one of them has an answer on an
+    /// index-sampled run. `effective_freq` is a *duration*, used for calendar
+    /// arithmetic — pro-rating carry, sizing a `-w` window, counting trading
+    /// seconds — and a volume-bar stream has none. This is an *identifier*,
+    /// matched verbatim against a cost scope, and every stream has one.
+    ///
+    /// Defaults to `effective_freq`'s token, so a time-bar run scopes exactly
+    /// as it always did; a runner that knows the frame's real stream tag sets
+    /// it to that instead.
+    pub stream: Option<String>,
     pub windowed: Option<NonZeroUsize>,
     /// Trading seconds a bar of `effective_freq` spans on the run's calendar
     /// — populates the `trades.*_seconds` fields on the metrics document.
@@ -326,7 +340,7 @@ impl EvalContext<'_> {
 
     /// Resolve one symbol's [`TradingCosts`] at this run's cadence.
     pub fn costs_for_one(&self, symbol: &str) -> TradingCosts {
-        self.cost_config.resolve(symbol, self.effective_freq)
+        self.cost_config.resolve(symbol, self.stream.as_deref())
     }
 
     /// Resolve a per-symbol cost bundle for each of `symbols` — the shape
@@ -495,7 +509,7 @@ pub fn run_iteration_resumable(
     // per-symbol scoped bundle is. The default matters on its own for a
     // portfolio, where it is the sub-wallet fallback rather than something
     // primed per symbol.
-    let costs_active = !ctx.cost_config.resolve("", ctx.effective_freq).is_none()
+    let costs_active = !ctx.cost_config.resolve("", ctx.stream.as_deref()).is_none()
         || per_symbol_costs.iter().any(|(_, c)| !c.is_none());
 
     let mut priced = spec.try_build_priced(

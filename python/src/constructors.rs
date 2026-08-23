@@ -136,7 +136,7 @@ fn extract_snapshot_with(
                 continue;
             }
             let key = coerce_selector(&k)?;
-            out.push(key.symbol, key.freq, atom);
+            out.push(key.symbol, key.stream, atom);
         }
         return Ok(out);
     }
@@ -1328,34 +1328,51 @@ atom_leaf_signal!(
 /// import fugazi as ta
 /// btc_close = ta.close(source=ta.pick("BTC"))
 /// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
-/// # Cross-frequency:
+/// # Cross-frequency (`freq` is validated as a cadence):
 /// hourly   = ta.close(ta.pick(freq="1h"))
+/// # Any other series id (`stream` is opaque):
+/// dollars  = ta.close(ta.pick("BTC", stream="dollar-1e6"))
 /// # Single-series:
 /// close    = ta.close(source=ta.pick())
 /// ```
 #[pyfunction]
-#[pyo3(signature = (symbol = None, freq = None))]
+#[pyo3(signature = (symbol = None, freq = None, *, stream = None))]
 pub(crate) fn pick(
     symbol: Option<&Bound<'_, PyAny>>,
     freq: Option<&Bound<'_, PyAny>>,
+    stream: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyAtomSource> {
+    // `freq` promises a bar cadence and is validated as one; `stream` promises
+    // nothing and is taken verbatim. Mirrors `!pick`'s two spellings — see
+    // `spec::expr::resolve_stream` for why the split rather than one open field.
+    let stream = match (freq, stream) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "pick() takes `freq` or `stream`, not both; they select the same thing                  (`freq` for a bar cadence, `stream` for any other series id)",
+            ));
+        }
+        // Validated, then round-tripped to its token.
+        (Some(f), None) => Some(StreamId::from(coerce_frequency(f)?)),
+        (None, Some(s)) => Some(coerce_stream(s)?),
+        (None, None) => None,
+    };
     // Allow `pick("BTC")` alongside `pick(symbol="BTC")`: the first positional
     // arg accepts either a plain str (→ symbol) or a Selector.
-    let selector = match (symbol, freq) {
+    let selector = match (symbol, stream) {
         (None, None) => Selector::default(),
         (Some(s), None) => {
             // If the first arg is already a full Selector / Frequency /
             // tuple, honor it verbatim. Otherwise treat it as a symbol str.
             coerce_selector(s)?
         }
-        (None, Some(f)) => Selector::by_freq(coerce_frequency(f)?),
+        (None, Some(f)) => Selector::by_stream(f),
         (Some(s), Some(f)) => {
             let sym = s.extract::<String>().map_err(|_| {
                 PyTypeError::new_err(
-                    "when both `symbol` and `freq` are given, `symbol` must be a str",
+                    "when both `symbol` and `freq`/`stream` are given, `symbol` must be a str",
                 )
             })?;
-            Selector::exact(sym, coerce_frequency(f)?)
+            Selector::exact(sym, f)
         }
     };
     let pick = if selector.is_empty() {
@@ -2003,6 +2020,57 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
     ))))
 }
 
+/// Aggregate base candles into one bar per `threshold` units of traded
+/// **volume**, and run `inner` (any candle-rooted Real source) over that
+/// stream. `resample()`'s information-driven sibling: identical in every
+/// respect except what closes a bar.
+///
+/// ```python
+/// import fugazi as ta
+/// # EMA-20 over bars of 5,000 units of traded quantity.
+/// bars = ta.latch(ta.volume_bars(5000.0, ta.ema(ta.close(), 20)))
+/// ```
+#[pyfunction]
+pub(crate) fn volume_bars(threshold: f64, inner: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    let inner_candle = accumulate_inner(threshold, "volume_bars", inner)?;
+    Ok(PyIndicator::wrap(AnySource::Atom(runtime::erase(
+        AccumulateThen::<VolumeMeasure>::new(threshold, inner_candle),
+    ))))
+}
+
+/// Aggregate base candles into one bar per `threshold` units of traded
+/// **notional** (`typical x volume`), and run `inner` over that stream. See
+/// [`volume_bars`].
+///
+/// ```python
+/// import fugazi as ta
+/// # EMA-20 over $1M dollar bars.
+/// bars = ta.latch(ta.dollar_bars(1_000_000.0, ta.ema(ta.close(), 20)))
+/// ```
+#[pyfunction]
+pub(crate) fn dollar_bars(threshold: f64, inner: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    let inner_candle = accumulate_inner(threshold, "dollar_bars", inner)?;
+    Ok(PyIndicator::wrap(AnySource::Atom(runtime::erase(
+        AccumulateThen::<DollarMeasure>::new(threshold, inner_candle),
+    ))))
+}
+
+/// Shared validation for the two accumulate constructors: the library
+/// constructor asserts on a bad threshold, and a Python caller gets a
+/// `ValueError` instead of a panic crossing the FFI boundary.
+fn accumulate_inner(
+    threshold: f64,
+    name: &str,
+    inner: PyRef<'_, PyIndicator>,
+) -> PyResult<Source<Atom>> {
+    if !threshold.is_finite() || threshold <= 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "{name} threshold must be finite and greater than zero"
+        )));
+    }
+    require_candle_source(inner.src.clone())
+}
+
 /// Hold the last `Some` output of an indicator or signal, re-emitting it on
 /// ticks where the source returns `None`. Domain-preserving: `latch()` of a
 /// candle-rooted source is candle-rooted, of an identity-rooted signal is
@@ -2542,13 +2610,13 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     let existing_len = existing.len();
 
     // Pass 1: collect each (symbol, freq) series in first-appearance order.
-    type Key = (Option<Symbol>, Option<Frequency>);
+    type Key = (Option<Symbol>, Option<StreamId>);
     let mut order: Vec<Key> = Vec::new();
     let mut index: HashMap<Key, usize> = HashMap::new();
     let mut series_atoms: Vec<Vec<Atom>> = Vec::new();
     for snap in &snaps {
         for (sym, freq, atom) in snap.iter() {
-            let key = (sym.cloned(), freq);
+            let key = (sym.cloned(), freq.cloned());
             let i = *index.entry(key.clone()).or_insert_with(|| {
                 order.push(key.clone());
                 series_atoms.push(Vec::new());
@@ -2578,7 +2646,7 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     for snap in &snaps {
         let mut rebuilt = Snapshot::<Symbol>::new();
         for (sym, freq, _) in snap.iter() {
-            let key = (sym.cloned(), freq);
+            let key = (sym.cloned(), freq.cloned());
             let i = index[&key];
             let c = cursor.entry(key.clone()).or_insert(0);
             let aug = augmented[i][*c].clone();

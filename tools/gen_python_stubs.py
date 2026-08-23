@@ -58,6 +58,8 @@ BY_PARAM = {
     "symbol": "str",
     "symbols": "Sequence[str]",
     "freq": "str | Frequency | None",
+    # An opaque stream id: any str, or a Frequency whose token is used.
+    "stream": "str | Frequency | None",
     "key": "str",
     "name": "str",
     "schema": "Schema",
@@ -132,6 +134,7 @@ RETURNS = {
             "stddev skewness kurtosis zscore correlation percentile percentile_rank bars_since "
             "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
             "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
+            "volume_bars dollar_bars "
             "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
             "week_of_year quarter unix_seconds unix_millis covariance beta"
         ).split()
@@ -239,7 +242,7 @@ MEMBER_RETURNS = {
     ("Atom", "time"): "int | None",
     ("Atom", "is_priceable"): "bool",
     ("OverlayInfo", "schema"): "Schema",
-    ("Selector", "freq"): "Frequency | None",
+    ("Selector", "stream"): "str | None",
     ("Fill", "order"): "Order",
     ("Size", "value"): "float",
     ("Size", "units"): "Size",

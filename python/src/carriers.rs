@@ -462,6 +462,65 @@ impl Indicator for ResampleThen {
     }
 }
 
+/// [`ResampleThen`]'s information-driven twin: a bar closes once `threshold`
+/// units of a [`BarMeasure`] have traded rather than after `every` base bars.
+///
+/// Generic over the measure so `volume_bars` and `dollar_bars` are one carrier,
+/// matching the library's `Accumulate<S, M>`.
+#[derive(Clone)]
+pub(crate) struct AccumulateThen<M> {
+    pub(crate) sampler: Accumulate<CurrentBar, M>,
+    pub(crate) inner: Source<Atom>,
+    pub(crate) value: Option<Real>,
+}
+
+impl<M> AccumulateThen<M> {
+    pub(crate) fn new(threshold: Real, inner: Source<Atom>) -> Self {
+        Self {
+            sampler: Accumulate::new(CurrentBar::new(), threshold),
+            inner,
+            value: None,
+        }
+    }
+}
+
+impl<M: BarMeasure + Clone> Indicator for AccumulateThen<M> {
+    type Input = Atom;
+    type Output = Real;
+
+    fn update(&mut self, atom: Atom) -> Option<Real> {
+        self.value = match self.sampler.update(atom) {
+            Some(bar) => Indicator::update(&mut self.inner, bar.into()),
+            None => None,
+        };
+        self.value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    fn warm_up_bars(&self) -> usize {
+        // The sampler's own warm-up is a lower bound, not a count — how many
+        // base candles fill a bucket is data. So this is the earliest the chain
+        // *could* be ready, which is the same claim the library's
+        // `Accumulate::warm_up_bars` makes.
+        Indicator::warm_up_bars(&self.sampler)
+            .saturating_add(Indicator::warm_up_bars(&self.inner).saturating_sub(1))
+    }
+
+    fn unstable_bars(&self) -> usize {
+        Indicator::unstable_bars(&self.sampler)
+            .saturating_add(Indicator::unstable_bars(&self.inner))
+    }
+
+    fn reset(&mut self) {
+        Indicator::reset(&mut self.sampler);
+        Indicator::reset(&mut self.inner);
+        self.value = None;
+    }
+}
+
 /// A boxed multi-output indicator (terminal: not usable as a source).
 pub(crate) struct MultiBox<I>(pub(crate) Box<dyn DynMulti<I>>);
 

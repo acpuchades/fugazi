@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::spec::calendar::{Frequency, Scope};
+use crate::spec::calendar::Scope;
 use crate::spec::input;
 use crate::spec::meta::Meta;
 
@@ -241,7 +241,7 @@ fn set_scoped(
         return Ok(());
     }
 
-    match (scope.symbol.as_deref(), scope.freq) {
+    match (scope.symbol.as_deref(), scope.freq.as_deref()) {
         (Some(symbol), None) => {
             let map = ensure_object(target_leg, "by_symbol");
             let existing = map.entry(symbol.to_string()).or_insert(Value::Null);
@@ -258,7 +258,7 @@ fn set_scoped(
         }
         (None, Some(freq)) => {
             let map = ensure_object(target_leg, "by_interval");
-            let key = format_freq(freq);
+            let key = freq.to_string();
             let existing = map.entry(key).or_insert(Value::Null);
             if rest.is_empty() {
                 *existing = value;
@@ -277,7 +277,7 @@ fn set_scoped(
                     "scoped cost setter `{}[{}]:{}` cannot use a dotted subkey; \
                      assign the whole model with a single expression",
                     symbol,
-                    format_freq(freq),
+                    freq,
                     key.join("."),
                 );
             }
@@ -288,7 +288,7 @@ fn set_scoped(
                 .ok_or_else(|| anyhow!("`{leg}.scoped` must be an array"))?;
             let mut entry = Map::new();
             entry.insert("symbol".to_string(), Value::String(symbol.to_string()));
-            entry.insert("freq".to_string(), Value::String(format_freq(freq)));
+            entry.insert("freq".to_string(), Value::String(freq.to_string()));
             entry.insert("model".to_string(), value);
             list.push(Value::Object(entry));
         }
@@ -356,16 +356,6 @@ fn ensure_object<'a>(leg: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<
         *slot = Value::Object(Map::new());
     }
     slot.as_object_mut().expect("just made it an object")
-}
-
-fn format_freq(freq: Frequency) -> String {
-    match freq {
-        Frequency::Minute(n) => format!("{n}m"),
-        Frequency::Hour(n) => format!("{n}h"),
-        Frequency::Day(n) => format!("{n}d"),
-        Frequency::Week(n) => format!("{n}w"),
-        Frequency::Month(n) => format!("{n}M"),
-    }
 }
 
 fn value_kind(v: &Value) -> &'static str {
@@ -446,20 +436,21 @@ impl<T> LegConfig<T> {
     /// insertion order as a same-specificity tie-breaker (later wins in the
     /// scoped list; the `by_symbol` / `by_interval` maps naturally overwrite on
     /// later insertions).
-    fn resolve(&self, symbol: &str, freq: Option<Frequency>) -> Option<&T> {
-        if let Some(freq) = freq {
-            let freq_str = format_freq(freq);
-            // Full symbol+freq — scan scoped list in reverse so the *last*
-            // matching entry wins on same specificity.
+    fn resolve(&self, symbol: &str, stream: Option<&str>) -> Option<&T> {
+        if let Some(stream) = stream {
+            // Compared verbatim. The scoped list and `by_interval` were always
+            // keyed by the cadence's *token*, so the storage never needed a
+            // `Frequency` — only the parameter did, and that is what kept a
+            // non-duration stream from being scopable at all.
             for entry in self.scoped.iter().rev() {
-                if entry.symbol == symbol && entry.freq == freq_str {
+                if entry.symbol == symbol && entry.freq == stream {
                     return Some(&entry.model);
                 }
             }
             if let Some(m) = self.by_symbol.get(symbol) {
                 return Some(m);
             }
-            if let Some(m) = self.by_interval.get(&freq_str) {
+            if let Some(m) = self.by_interval.get(stream) {
                 return Some(m);
             }
         } else {
@@ -737,25 +728,25 @@ impl CostConfig {
     /// Build the live [`TradingCosts`] for `(symbol, freq)`. A leg whose
     /// resolution is `None` becomes the [`No*`](crate::costs::NoCommission)
     /// zero-cost default.
-    pub fn resolve(&self, symbol: &str, freq: Option<Frequency>) -> TradingCosts {
+    pub fn resolve(&self, symbol: &str, stream: Option<&str>) -> TradingCosts {
         let commission = self
             .commission
-            .resolve(symbol, freq)
+            .resolve(symbol, stream)
             .map(|s| s.build())
             .unwrap_or_else(|| Box::new(NoCommission));
         let spread = self
             .spread
-            .resolve(symbol, freq)
+            .resolve(symbol, stream)
             .map(|s| s.build())
             .unwrap_or_else(|| Box::new(NoSpread));
         let slippage = self
             .slippage
-            .resolve(symbol, freq)
+            .resolve(symbol, stream)
             .map(|s| s.build())
             .unwrap_or_else(|| Box::new(NoSlippage));
         let carry = self
             .carry
-            .resolve(symbol, freq)
+            .resolve(symbol, stream)
             .map(|s| s.build())
             .unwrap_or_else(|| Box::new(NoCarry));
         TradingCosts::new(commission, spread, slippage).with_carry(carry)

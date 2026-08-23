@@ -892,6 +892,7 @@ impl PyStrategySpec {
                 risk_free_rate,
                 cost_config: &empty_costs,
                 effective_freq: None,
+                stream: None,
                 windowed: None,
                 seconds_per_bar,
                 mc: None,
@@ -1686,6 +1687,7 @@ pub(crate) fn optimize(
                 // The Python surface takes snapshots, not a dated series, so
                 // there's no bar cadence to resolve cost scopes against.
                 effective_freq: None,
+                stream: None,
                 windowed: windowed.and_then(std::num::NonZeroUsize::new),
                 seconds_per_bar,
                 mc: None,
@@ -2035,6 +2037,7 @@ pub(crate) fn run_walkforward(
                 risk_free_rate,
                 cost_config,
                 effective_freq: None,
+                stream: None,
                 windowed: None,
                 seconds_per_bar,
                 mc: None,

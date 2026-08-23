@@ -288,10 +288,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::StreamId;
     use crate::types::{Candle, Frequency, Real};
 
     fn snap(
-        pairs: impl IntoIterator<Item = (Option<String>, Option<Frequency>, Real)>,
+        pairs: impl IntoIterator<Item = (Option<String>, Option<StreamId>, Real)>,
     ) -> Snapshot<String> {
         let mut s = Snapshot::new();
         for (sym, freq, close) in pairs {
@@ -315,8 +316,16 @@ mod tests {
         // Query on symbol only; entries carry an extra freq field.
         let mut p = Pick::<String>::matching(Selector::by_symbol("BTC"));
         let out = p.update(snap([
-            (Some("BTC".into()), Some(Frequency::Hour(1)), 42.0),
-            (Some("ETH".into()), Some(Frequency::Hour(1)), 100.0),
+            (
+                Some("BTC".into()),
+                Some(StreamId::from(Frequency::Hour(1))),
+                42.0,
+            ),
+            (
+                Some("ETH".into()),
+                Some(StreamId::from(Frequency::Hour(1))),
+                100.0,
+            ),
         ]));
         assert_eq!(out.map(|a| a.candle.unwrap().close), Some(42.0));
     }

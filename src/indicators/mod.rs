@@ -150,7 +150,9 @@ pub use skewness::Skewness;
 pub use sma::Sma;
 pub use stddev::StdDev;
 pub use stochastic::{StochRsi, Stochastic};
-pub use timeframe::{Latch, Resample};
+pub use timeframe::{
+    Accumulate, BarMeasure, DollarBars, DollarMeasure, Latch, Resample, VolumeBars, VolumeMeasure,
+};
 pub use trailing::{Calmar, MaxDrawdown, Sharpe, Sortino, Volatility};
 pub use true_range::TrueRange;
 pub use unstable::Unstable;

@@ -254,7 +254,10 @@ impl WindowSpec {
                 })?;
                 let bar_freq = bar_freq.ok_or_else(|| {
                     format!(
-                        "`-w {}`: no bar cadence known — pass `-f/--frequency` or provide input with a parseable `time` column",
+                        "`-w {}`: no bar cadence known — pass `-f/--frequency`, or give the input a \
+                         parseable `time` column. An index-sampled series (volume, dollar or tick \
+                         bars) has no cadence to resolve by construction, so express the window \
+                         as a bar count (`-w N`) instead of a duration",
                         format_freq(win),
                     )
                 })?;
@@ -348,20 +351,90 @@ impl WalkForwardSpec {
     }
 }
 
-/// Resolve `bars_per_year` from the CLI's three inputs in priority order:
+/// Bars per year **measured** from the span the input actually covers:
+/// `timed bars ÷ elapsed years`, from the first parseable stamp to the last.
+///
+/// This is the annualization factor for a series that has no cadence to look
+/// up — an index-sampled stream (volume, dollar, tick bars), whose bars span no
+/// fixed interval by construction. It answers the question the calendar table
+/// answers for time bars, from the data rather than from a convention.
+///
+/// **Why this is legitimate.** Annualizing a dispersion scales it by the square
+/// root of the number of samples in a year, and that rule is per-*sample*, not
+/// per-unit-time: it holds whenever the per-bar returns are IID. Event sampling
+/// makes that assumption *more* defensible, not less, which is the entire point
+/// of sampling that way. So the concept survives intact and only its derivation
+/// changes.
+///
+/// **What it costs.** The result is a sample estimate over the span, not a
+/// property of the stream, and it is not stationary — bar arrival rate tracks
+/// activity, so a quiet year and a busy one annualize by different factors. The
+/// number means "the rate observed over this span, projected to a year". That
+/// caveat is real but it is one of degree: a daily equity series with holidays
+/// and halts does not deliver exactly 252 bars either.
+///
+/// `None` when fewer than two atoms carry a time, or the span is degenerate.
+/// Deliberately **not** preferred over the calendar for a series that does have
+/// a cadence: 252 is the convention every reference library annualizes with,
+/// and quietly substituting a measured 251.7 would make fugazi's numbers
+/// incomparable to them for no gain.
+pub fn measure_bars_per_year<'a>(atoms: impl IntoIterator<Item = &'a Atom>) -> Option<Real> {
+    let stamps: Vec<i64> = atoms
+        .into_iter()
+        .filter_map(|a| a.time.map(|t| t.0))
+        .collect();
+    if stamps.len() < 2 {
+        return None;
+    }
+    let first = *stamps.iter().min()?;
+    let last = *stamps.iter().max()?;
+    let span_ms = last - first;
+    if span_ms <= 0 {
+        return None;
+    }
+    // `len - 1` intervals span `len` stamps: N bars cover N-1 gaps, and using N
+    // would inflate the rate on a short series.
+    let years = span_ms as Real / 1_000.0 / (365.25 * 86_400.0);
+    let rate = (stamps.len() - 1) as Real / years;
+    rate.is_finite().then_some(rate).filter(|r| *r > 0.0)
+}
+
+/// Resolve `bars_per_year` in priority order:
 ///
 /// 1. an explicit `--bars-per-year <N>` — always wins;
-/// 2. `--<class> -f <freq>` — the derived value from the calendar × cadence;
-/// 3. one side of the pair alone — the missing side falls back to a sensible
-///    default (class = [`AssetClass::Stocks`], freq = daily);
-/// 4. nothing set — returns 252, matching the legacy default.
-pub fn resolve(explicit: Option<Real>, class: Option<AssetClass>, freq: Option<Frequency>) -> Real {
+/// 2. the class × cadence calendar, with the class defaulting to
+///    [`AssetClass::Stocks`] when only a cadence is known — the **convention**,
+///    and what every reference library uses;
+/// 3. `measured`, from [`measure_bars_per_year`] — the honest answer for a
+///    stream with no cadence to look up;
+/// 4. nothing left to derive it from: an error naming `--bars-per-year`.
+///
+/// **Step 4 used to return 252.** That default was defensible while every input
+/// was a time bar with a parseable stamp, where a missing cadence meant a
+/// malformed file. It is not defensible for an index-sampled series, because
+/// there it fires on *correct* input and silently annualizes an event clock as
+/// though it were a trading calendar — scaling Sharpe, Sortino, Calmar, CAGR,
+/// PSR and DSR by a factor nobody chose, with nothing on the surface saying so.
+/// See `docs/design/index-columns.md`, B4 and D5.
+pub fn resolve(
+    explicit: Option<Real>,
+    class: Option<AssetClass>,
+    freq: Option<Frequency>,
+    measured: Option<Real>,
+) -> Result<Real, String> {
     if let Some(v) = explicit {
-        return v;
+        return Ok(v);
     }
-    let class = class.unwrap_or(AssetClass::Stocks);
-    let freq = freq.unwrap_or(Frequency::Day(1));
-    class.bars_per_year(freq)
+    if let Some(freq) = freq {
+        return Ok(class.unwrap_or(AssetClass::Stocks).bars_per_year(freq));
+    }
+    measured.ok_or_else(|| {
+        "no bar cadence could be resolved and the input carries no times to measure one \
+         from, so `bars_per_year` cannot be derived — pass `--bars-per-year <N>` to state \
+         it, or `-f/--frequency <CODE>` if the input is time-sampled and its `time` \
+         column simply did not parse"
+            .to_string()
+    })
 }
 
 /// Best-effort auto-detection of a bar cadence from a series' `time` column.
@@ -450,16 +523,22 @@ pub fn parse_time_to_millis(raw: &str) -> Option<i64> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scope {
     pub symbol: Option<String>,
-    pub freq: Option<Frequency>,
+    /// The **stream** half of a `SYMBOL[STREAM]:` scope, verbatim.
+    ///
+    /// A `String` rather than a `Frequency`: the bracket names which series of
+    /// a symbol the entry applies to, and a cadence is only its most common
+    /// spelling. Parsing it here rejected `BTC[dollar-1e6]:` — a scope naming a
+    /// stream that genuinely exists — as a malformed cadence.
+    pub freq: Option<String>,
 }
 
 impl Scope {
     /// True when both halves match the run's (symbol, effective freq). An
     /// absent half matches anything; a present symbol matches by equality; a
     /// present freq matches only when the run's freq is `Some(_)` and equal.
-    pub fn matches(&self, symbol: &str, freq: Option<Frequency>) -> bool {
+    pub fn matches(&self, symbol: &str, stream: Option<&str>) -> bool {
         let sym_ok = self.symbol.as_deref().is_none_or(|s| s == symbol);
-        let freq_ok = self.freq.is_none_or(|f| Some(f) == freq);
+        let freq_ok = self.freq.as_deref().is_none_or(|f| Some(f) == stream);
         sym_ok && freq_ok
     }
 
@@ -626,11 +705,12 @@ pub fn looks_like_body(text: &str) -> bool {
 /// `--bars-per-year` / `-f/--frequency` prefixes.
 pub fn parse_scope(text: &str) -> Result<Scope, String> {
     let (symbol, freq_str) = parse_scope_parts(text)?;
-    let freq = match freq_str {
-        Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),
-        None => None,
-    };
-    Ok(Scope { symbol, freq })
+    // The bracket is taken verbatim: it names a stream, and a stream id is
+    // matched, never parsed. See `Scope::freq`.
+    Ok(Scope {
+        symbol,
+        freq: freq_str.map(str::to_string),
+    })
 }
 
 /// One `--bars-per-year` argument, parsed as either a plain `N` (the
@@ -673,11 +753,11 @@ impl FromStr for BarsPerYearSpec {
 pub fn pick_bars_per_year(
     specs: &[BarsPerYearSpec],
     symbol: &str,
-    freq: Option<Frequency>,
+    stream: Option<&str>,
 ) -> Option<Real> {
     specs
         .iter()
-        .filter(|s| s.scope.matches(symbol, freq))
+        .filter(|s| s.scope.matches(symbol, stream))
         .max_by_key(|s| s.scope.specificity())
         .map(|s| s.value)
 }
@@ -814,28 +894,104 @@ mod tests {
             resolve(
                 Some(999.0),
                 Some(AssetClass::Crypto),
-                Some(Frequency::Day(1))
+                Some(Frequency::Day(1)),
+                None
             ),
-            999.0
+            Ok(999.0)
         );
     }
 
     #[test]
     fn resolve_class_plus_frequency_derives() {
         assert_eq!(
-            resolve(None, Some(AssetClass::Crypto), Some(Frequency::Day(1))),
-            365.0
+            resolve(
+                None,
+                Some(AssetClass::Crypto),
+                Some(Frequency::Day(1)),
+                None
+            ),
+            Ok(365.0)
         );
         assert_eq!(
-            resolve(None, Some(AssetClass::Stocks), Some(Frequency::Hour(1))),
-            252.0 * 6.5
+            resolve(
+                None,
+                Some(AssetClass::Stocks),
+                Some(Frequency::Hour(1)),
+                None
+            ),
+            Ok(252.0 * 6.5)
         );
     }
 
+    /// **Regression.** With no cadence and nothing to measure, annualization
+    /// refuses. This used to return 252 — a number that is right for daily
+    /// equities and wrong for everything else, applied silently.
     #[test]
-    fn resolve_falls_back_to_legacy_default() {
-        // Nothing set → equities daily = 252 (backward-compatible default).
-        assert_eq!(resolve(None, None, None), 252.0);
+    fn resolve_refuses_when_nothing_can_derive_it() {
+        let err = resolve(None, None, None, None).unwrap_err();
+        assert!(err.contains("--bars-per-year"), "{err}");
+    }
+
+    /// A cadence beats a measurement: 252 is the convention every reference
+    /// library annualizes with, and quietly substituting a measured 251.7 would
+    /// make fugazi's numbers incomparable to them for no gain.
+    #[test]
+    fn resolve_prefers_a_known_cadence_over_a_measurement() {
+        assert_eq!(
+            resolve(
+                None,
+                Some(AssetClass::Stocks),
+                Some(Frequency::Day(1)),
+                Some(9_999.0)
+            ),
+            Ok(252.0)
+        );
+    }
+
+    /// With no cadence to look up — the index-sampled case — the measured rate
+    /// is what annualization uses.
+    #[test]
+    fn resolve_falls_back_to_the_measured_rate() {
+        assert_eq!(resolve(None, None, None, Some(1_234.0)), Ok(1_234.0));
+    }
+
+    fn timed_atom(ms: i64) -> Atom {
+        Atom::with_time(Candle::new(1.0, 1.0, 1.0, 1.0, 0.0), Timestamp(ms))
+    }
+
+    /// Bars per year measured off the span: 366 stamps one day apart span 365
+    /// intervals over 365 days, which is one bar a day.
+    #[test]
+    fn measure_bars_per_year_reads_the_observed_rate() {
+        let atoms: Vec<Atom> = (0..366).map(|i| timed_atom(i * 86_400_000)).collect();
+        let rate = measure_bars_per_year(atoms.iter()).unwrap();
+        assert!((rate - 365.25).abs() < 1.0, "measured {rate}");
+    }
+
+    /// An irregular stream — the whole point — measures the same way: 100 bars
+    /// scattered over a year annualize at ~100, whatever their spacing.
+    #[test]
+    fn measure_bars_per_year_handles_irregular_spacing() {
+        let year = 365.25 * 86_400_000.0;
+        let atoms: Vec<Atom> = (0..101)
+            .map(|i| timed_atom(((i as f64 / 100.0).powi(2) * year) as i64))
+            .collect();
+        let rate = measure_bars_per_year(atoms.iter()).unwrap();
+        assert!((rate - 100.0).abs() < 1.0, "measured {rate}");
+    }
+
+    /// Too little to measure, or no span at all, is `None` — never a guess.
+    #[test]
+    fn measure_bars_per_year_refuses_a_degenerate_span() {
+        assert_eq!(measure_bars_per_year([].iter()), None);
+        assert_eq!(measure_bars_per_year([timed_atom(0)].iter()), None);
+        assert_eq!(
+            measure_bars_per_year([timed_atom(5), timed_atom(5)].iter()),
+            None
+        );
+        // Times absent entirely — an index-sampled file with no `time` column.
+        let untimed = [Atom::new(Candle::new(1.0, 1.0, 1.0, 1.0, 0.0))];
+        assert_eq!(measure_bars_per_year(untimed.iter()), None);
     }
 
     /// Snap millisecond stamps from parsed time strings — mirrors what
@@ -963,10 +1119,10 @@ mod tests {
         assert_eq!(spec("BTC:8760").scope.symbol.as_deref(), Some("BTC"));
         assert_eq!(spec("BTC:8760").scope.freq, None);
         assert_eq!(spec("[1h]:8760").scope.symbol, None);
-        assert_eq!(spec("[1h]:8760").scope.freq, Some(Frequency::Hour(1)));
+        assert_eq!(spec("[1h]:8760").scope.freq.as_deref(), Some("1h"));
         let s = spec("BTC[1h]:8760");
         assert_eq!(s.scope.symbol.as_deref(), Some("BTC"));
-        assert_eq!(s.scope.freq, Some(Frequency::Hour(1)));
+        assert_eq!(s.scope.freq.as_deref(), Some("1h"));
         assert_eq!(s.value, 8760.0);
     }
 
@@ -999,15 +1155,15 @@ mod tests {
         .map(|s| spec(s))
         .collect();
         assert_eq!(
-            pick_bars_per_year(&specs, "BTC", Some(Frequency::Hour(1))),
+            pick_bars_per_year(&specs, "BTC", Some(&Frequency::Hour(1).as_token())),
             Some(4000.0)
         );
         assert_eq!(
-            pick_bars_per_year(&specs, "BTC", Some(Frequency::Day(1))),
+            pick_bars_per_year(&specs, "BTC", Some(&Frequency::Day(1).as_token())),
             Some(1000.0)
         );
         assert_eq!(
-            pick_bars_per_year(&specs, "SOL", Some(Frequency::Hour(1))),
+            pick_bars_per_year(&specs, "SOL", Some(&Frequency::Hour(1).as_token())),
             Some(2000.0)
         );
         assert_eq!(pick_bars_per_year(&specs, "SOL", None), Some(500.0));
@@ -1018,7 +1174,7 @@ mod tests {
         // Only a specific scope declared; the run's (symbol, freq) doesn't match.
         let specs = vec![spec("BTC[1h]:8760")];
         assert_eq!(
-            pick_bars_per_year(&specs, "AAPL", Some(Frequency::Day(1))),
+            pick_bars_per_year(&specs, "AAPL", Some(&Frequency::Day(1).as_token())),
             None
         );
     }

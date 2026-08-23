@@ -1930,25 +1930,42 @@ def test_funding_is_charged_from_the_series_and_counted():
     assert blind.equity == pytest.approx(free.equity)
 
 
-def test_margin_interest_needs_a_bar_length_and_refuses_to_guess():
-    """An annualized rate cannot be split across a bar of unknown length, so a
-    wallet that was not told charges nothing rather than inventing a year."""
+def test_margin_interest_is_measured_from_the_bars_when_it_can_be():
+    """A wallet not told a cadence still charges correctly when the *bars* carry
+    times: the interval is measured from consecutive stamps, so declaring `1d`
+    over daily bars is the same answer arrived at twice."""
     bars = _levered_bars([100.0] * 60)
 
-    untimed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
-    ta.load_spec(_LEVERED).run(untimed, bars)
+    measured = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
+    ta.load_spec(_LEVERED).run(measured, bars)
 
-    timed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08, bar_freq="1d")
-    ta.load_spec(_LEVERED).run(timed, bars)
+    declared = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08, bar_freq="1d")
+    ta.load_spec(_LEVERED).run(declared, bars)
 
-    assert timed.equity < untimed.equity, "borrowing 20k at 8% should cost something"
-    assert timed.margin_rate == pytest.approx(0.08)
+    assert measured.equity < 10_000.0, "borrowing 20k at 8% should cost something"
+    assert measured.equity == pytest.approx(declared.equity), (
+        "daily bars measure to the cadence they were declared with"
+    )
+    assert declared.margin_rate == pytest.approx(0.08)
     # An unlevered book never borrows, so it is never billed.
     flat = ta.PaperWallet(10_000.0, margin_rate=0.08, bar_freq="1d")
     ta.load_spec("root: S\nlong:\n  enter: !gt { lhs: !close, rhs: 0 }\n").run(
         flat, bars
     )
     assert flat.equity == pytest.approx(10_000.0)
+
+
+def test_margin_interest_refuses_to_guess_when_nothing_can_measure_it():
+    """With no times on the bars *and* no declared cadence there is nothing to
+    pro-rate an annual rate over, so the wallet charges nothing rather than
+    inventing a year length."""
+    untimed = [
+        ta.Snapshot({"S": ta.Atom(ta.Candle(100.0, 100.1, 99.9, 100.0, 1.0))})
+        for _ in range(60)
+    ]
+    wallet = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
+    ta.load_spec(_LEVERED).run(wallet, untimed)
+    assert wallet.equity == pytest.approx(10_000.0)
 
 
 def test_margin_settings_reject_nonsense():
@@ -3240,42 +3257,50 @@ def test_selector_construction_forms():
     # no-query single-entry unpack.
     assert ta.Selector().is_empty()
     assert ta.Selector(symbol="BTC").symbol == "BTC"
-    assert ta.Selector(symbol="BTC").freq is None
-    assert ta.Selector(freq="1h").symbol is None
-    assert str(ta.Selector(freq="1h").freq) == "1h"
-    assert ta.Selector(symbol="BTC", freq="1h").symbol == "BTC"
-    # `freq` accepts a Frequency instance too, not just a str.
-    assert ta.Selector(freq=ta.Frequency("1h")).freq == ta.Frequency("1h")
+    assert ta.Selector(symbol="BTC").stream is None
+    assert ta.Selector(stream="1h").symbol is None
+    assert ta.Selector(stream="1h").stream == "1h"
+    assert ta.Selector(symbol="BTC", stream="1h").symbol == "BTC"
+    # `stream` accepts a Frequency instance too — a cadence is one spelling of a
+    # stream id, and it is stored as its token.
+    assert ta.Selector(stream=ta.Frequency("1h")).stream == "1h"
+    # And an id that is not a duration at all, which is the point of the type.
+    assert ta.Selector(symbol="BTC", stream="dollar-1e6").stream == "dollar-1e6"
 
 
 def test_selector_matches_wildcard_semantics():
-    query = ta.Selector(symbol="BTC")  # freq is a wildcard
-    assert query.matches(ta.Selector(symbol="BTC", freq="1h"))
+    query = ta.Selector(symbol="BTC")  # stream is a wildcard
+    assert query.matches(ta.Selector(symbol="BTC", stream="1h"))
     assert query.matches(ta.Selector(symbol="BTC"))
-    assert not query.matches(ta.Selector(symbol="ETH", freq="1h"))
+    assert not query.matches(ta.Selector(symbol="ETH", stream="1h"))
     # An empty query matches every storage entry.
     empty = ta.Selector()
     assert empty.matches(ta.Selector(symbol="BTC"))
-    assert empty.matches(ta.Selector(symbol="ETH", freq="1d"))
+    assert empty.matches(ta.Selector(symbol="ETH", stream="1d"))
+    # A stream query discriminates two streams of one symbol — the case a
+    # closed enum of durations could not express.
+    dollars = ta.Selector(symbol="BTC", stream="dollar-1e6")
+    assert dollars.matches(ta.Selector(symbol="BTC", stream="dollar-1e6"))
+    assert not dollars.matches(ta.Selector(symbol="BTC", stream="1d"))
 
 
 def test_snapshot_accepts_selector_keys():
     snap = ta.Snapshot(
         {
-            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
-            ta.Selector(symbol="BTC", freq="1d"): _atom(ms=1, close=300.0),
+            ta.Selector(symbol="BTC", stream="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="BTC", stream="1d"): _atom(ms=1, close=300.0),
         }
     )
     # Exact lookup disambiguates.
-    exact = snap[ta.Selector(symbol="BTC", freq="1h")]
+    exact = snap[ta.Selector(symbol="BTC", stream="1h")]
     assert exact.candle.close == 100.0
 
 
 def test_snapshot_find_wildcards_over_freq():
     snap = ta.Snapshot(
         {
-            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
-            ta.Selector(symbol="ETH", freq="1h"): _atom(ms=1, close=50.0),
+            ta.Selector(symbol="BTC", stream="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="ETH", stream="1h"): _atom(ms=1, close=50.0),
         }
     )
     # A symbol-only query wildcards freq — finds the BTC entry.
@@ -3288,7 +3313,7 @@ def test_snapshot_tuple_key_coerces_to_selector():
     snap = ta.Snapshot()
     snap[("BTC", "1h")] = _atom(ms=1, close=100.0)
     # Round-tripped through Selector::exact.
-    assert snap[ta.Selector(symbol="BTC", freq="1h")].candle.close == 100.0
+    assert snap[ta.Selector(symbol="BTC", stream="1h")].candle.close == 100.0
 
 
 def test_pick_no_query_unpacks_single_entry_snapshot():
@@ -3806,7 +3831,7 @@ def _pickle_cases():
         "Atom": atom,
         "Snapshot": snapshot,
         "Frequency": ta.Frequency("1h"),
-        "Selector": ta.Selector(symbol="BTC", freq=ta.Frequency("1d")),
+        "Selector": ta.Selector(symbol="BTC", stream=ta.Frequency("1d")),
         "Size": ta.Size.value_frac(0.5),
         "Order": order,
         "Fill": fill,

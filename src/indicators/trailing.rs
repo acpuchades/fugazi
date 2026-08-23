@@ -163,7 +163,7 @@ where
         snap.iter()
             .map(|(sym, freq, atom)| {
                 let sym = sym.cloned().or_else(|| Some(self.fallback_symbol.clone()));
-                (sym, freq, atom.clone())
+                (sym, freq.cloned(), atom.clone())
             })
             .collect()
     }

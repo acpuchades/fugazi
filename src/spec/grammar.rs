@@ -598,7 +598,10 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
     ),
     ("conditional", &["if_else", "match"]),
     ("constants", &["value", "never", "every"]),
-    ("cross-timeframe composition", &["resample", "latch"]),
+    (
+        "cross-timeframe composition",
+        &["resample", "volume_bars", "dollar_bars", "latch"],
+    ),
     ("crossovers", &["crosses_above", "crosses_below"]),
     (
         "edge detectors",

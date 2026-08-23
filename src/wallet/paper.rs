@@ -11,13 +11,19 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::costs::TradingCosts;
-use crate::types::{Candle, Real};
+use crate::types::{Candle, Real, Timestamp};
 
 use super::types::{
     Ack, Order, OrderId, OrderKind, POSITION_EPSILON, PRICE_EPSILON, Reference, Rejection, Side,
     Size, Units, WalletError, cash_tolerance,
 };
 use super::{Wallet, marked_sum, trim_front};
+
+/// Calendar seconds in a year, matching the 30-day-month / 7-day-week
+/// convention [`Frequency::calendar_seconds_per_bar`](crate::time::Frequency::calendar_seconds_per_bar)
+/// uses. **Calendar, not trading time** — a broker charges interest over the
+/// weekend; the market does not pay returns over it.
+const SECONDS_PER_YEAR: Real = 365.25 * 86_400.0;
 use crate::hash::SymMap;
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -289,6 +295,15 @@ pub struct PaperWallet<Sym> {
     /// without it rather than inventing a year length. See
     /// [`with_bar_year_fraction`](Self::with_bar_year_fraction).
     bar_year_fraction: Option<Real>,
+    /// Bar-open time of the most recently advanced bar — the left endpoint of
+    /// the interval the *next* bar's carry is charged over. `None` until a bar
+    /// carrying a time has been observed. See
+    /// [`bar_year_fraction`](Self::with_bar_year_fraction).
+    last_bar_time: Option<Timestamp>,
+    /// This bar's open time, recorded by [`observe`](Wallet::observe) before
+    /// [`advance`](Wallet::advance) prices anything, and consumed by
+    /// [`accrue_carry`](Self::accrue_carry).
+    pending_bar_time: Option<Timestamp>,
     /// Annualized interest charged on a **negative** cash balance. See
     /// [`with_margin_rate`](Self::with_margin_rate).
     margin_rate: Real,
@@ -337,6 +352,8 @@ impl<Sym> PaperWallet<Sym> {
             quote_ccy: None,
             max_gross: 1.0,
             bar_year_fraction: None,
+            last_bar_time: None,
+            pending_bar_time: None,
             margin_rate: 0.0,
             maintenance_margin: None,
             carry_rates: SymMap::default(),
@@ -456,9 +473,6 @@ impl<Sym> PaperWallet<Sym> {
     /// [`with_bar_year_fraction`](Self::with_bar_year_fraction) resolved from a
     /// bar cadence — the spelling a caller who knows the run's `Frequency` wants.
     pub fn with_bar_frequency(self, freq: crate::time::Frequency) -> Self {
-        /// Calendar seconds in a year, matching the 30-day-month / 7-day-week
-        /// convention `Frequency::calendar_seconds_per_bar` uses.
-        const SECONDS_PER_YEAR: Real = 365.25 * 86_400.0;
         self.with_bar_year_fraction(freq.calendar_seconds_per_bar() as Real / SECONDS_PER_YEAR)
     }
 
@@ -466,6 +480,38 @@ impl<Sym> PaperWallet<Sym> {
     /// [`with_bar_year_fraction`](Self::with_bar_year_fraction).
     pub fn bar_year_fraction(&self) -> Option<Real> {
         self.bar_year_fraction
+    }
+
+    /// The year fraction **this** bar's carry is charged over.
+    ///
+    /// Measured from the gap between this bar's open time and the previous
+    /// bar's whenever both are known, and only otherwise falling back to the
+    /// configured [`bar_year_fraction`](Self::with_bar_year_fraction).
+    ///
+    /// **Measured beats declared, and that is a fix, not a preference.** A
+    /// declared cadence says every bar spans the same interval; the calendar
+    /// disagrees on any series with a gap in it. A daily equity bar stamped
+    /// Monday follows one stamped Friday, so the position was held for three
+    /// days of interest and `Frequency::Day(1)` bills for one — an under-charge
+    /// of 3x across every weekend, and worse across a holiday. The same
+    /// arithmetic is what lets an **index-sampled** stream (volume, dollar or
+    /// tick bars, whose bars span no fixed interval by construction) charge
+    /// carry correctly at all.
+    ///
+    /// `None` — charge nothing — when the stream carries no times *and* no
+    /// cadence was declared. Not a licence to guess: see
+    /// [`CarryContext::year_fraction`](crate::costs::CarryContext::year_fraction).
+    ///
+    /// A non-positive gap (a duplicate or out-of-order stamp) is not a
+    /// negative charge; it falls back to the declared value like any other
+    /// unusable measurement.
+    fn effective_year_fraction(&self) -> Option<Real> {
+        match (self.last_bar_time, self.pending_bar_time) {
+            (Some(prev), Some(now)) if now.0 > prev.0 => {
+                Some((now.0 - prev.0) as Real / 1_000.0 / SECONDS_PER_YEAR)
+            }
+            _ => self.bar_year_fraction,
+        }
     }
 
     /// Annualized interest charged on a **negative** cash balance — what a
@@ -702,6 +748,15 @@ struct WalletSnapshot<Sym> {
     funds: Real,
     initial_funds: Real,
     next_id: u64,
+    /// Bar-open time of the last advanced bar, as raw epoch milliseconds —
+    /// `Timestamp` is deliberately not `Serialize` (it keeps `time` out of the
+    /// core ABI), and the flat `i64` is its whole content.
+    ///
+    /// `#[serde(default)]` so a state file written before carry was measured
+    /// per bar still loads; it resumes with no left endpoint and falls back to
+    /// the declared cadence for one bar, exactly as it did when it was saved.
+    #[serde(default)]
+    last_bar_time: Option<i64>,
 }
 
 impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
@@ -720,6 +775,7 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
             funds: self.funds,
             initial_funds: self.initial_funds,
             next_id: self.next_id,
+            last_bar_time: self.last_bar_time.map(|t| t.0),
         };
         serde_json::to_value(&snapshot).expect("WalletSnapshot is serializable")
     }
@@ -742,6 +798,10 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
         self.funds = snapshot.funds;
         self.initial_funds = snapshot.initial_funds;
         self.next_id = snapshot.next_id;
+        // Carried across the chunk boundary so the first bar of a resumed run
+        // charges the interval since the last bar of the previous one, rather
+        // than starting from no left endpoint and silently skipping it.
+        self.last_bar_time = snapshot.last_bar_time.map(Timestamp);
         Ok(())
     }
 }
@@ -822,6 +882,9 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // The balance the bar opened with, before any of this bar's carry.
         let opening_funds = self.funds;
         let mut charge = 0.0;
+        // Resolved once for the bar: every symbol in a snapshot shares its
+        // open time, so a per-symbol answer could only differ by being wrong.
+        let year_fraction = self.effective_year_fraction();
 
         for (symbol, candle) in bars {
             let position = self.positions.get(symbol).copied().unwrap_or(0.0);
@@ -842,7 +905,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             charge += costs.carry.carry(&crate::costs::CarryContext {
                 position,
                 price: candle.open,
-                year_fraction: self.bar_year_fraction,
+                year_fraction,
                 rate,
             });
         }
@@ -852,7 +915,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // is billed for having borrowed.
         if self.margin_rate > 0.0
             && opening_funds < 0.0
-            && let Some(year_fraction) = self.bar_year_fraction
+            && let Some(year_fraction) = year_fraction
         {
             charge += -opening_funds * self.margin_rate * year_fraction;
         }
@@ -1617,6 +1680,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// [`CarryContext::rate`](crate::costs::CarryContext::rate), because an
     /// accrual is one of the few places where they are not the same statement.
     fn observe(&mut self, symbol: &Sym, atom: &crate::types::Atom) {
+        // Recorded before any early return below: the bar's time is what carry
+        // is pro-rated over, and it is wanted whether or not this symbol's
+        // model reads a rate column. First `Some` wins — every entry in a
+        // snapshot shares an open time, since snapshots group by exact key.
+        if self.pending_bar_time.is_none() {
+            self.pending_bar_time = atom.time;
+        }
         let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
         let Some(column) = costs.carry.column() else {
             return;
@@ -1712,6 +1782,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // it has already spent on funding.
         self.accrue_carry(bars);
         self.carry_rates.clear();
+        // Roll the interval forward. `take` rather than a plain copy so a bar
+        // whose atoms carried no time leaves `last_bar_time` where it was
+        // instead of silently re-charging the previous interval: the next
+        // stamped bar then measures across the gap, which is the interval that
+        // actually elapsed.
+        if let Some(now) = self.pending_bar_time.take() {
+            self.last_bar_time = Some(now);
+        }
 
         // Phase 2 — resolve every queued market order against ONE equity, built
         // from this bar's opens.
@@ -3251,6 +3329,146 @@ mod tests {
             (1, 0),
             "one bar wanted a rate and none arrived"
         );
+    }
+
+    /// One calendar day in years, the unit the assertions below are written in.
+    const DAY: Real = 86_400.0 / SECONDS_PER_YEAR;
+
+    /// One day of carry on the position [`carrying_wallet`] establishes:
+    /// `value_frac(1.0)` of 10,000 at a price of 100 is 100 units, so the
+    /// notional the annualized rate is charged on is the full 10,000.
+    const ONE_DAY_CARRY: Real = 10_000.0 * 0.10 * DAY;
+
+    /// Epoch millis for `2024-01-<day>T00:00:00Z`. 2024-01-05 is a Friday, so
+    /// 05 → 08 is the weekend gap the daily-bar case turns on.
+    fn jan(day: i64) -> crate::types::Timestamp {
+        crate::types::Timestamp(1_704_067_200_000 + (day - 1) * 86_400_000)
+    }
+
+    fn timed(candle: Candle, day: i64) -> crate::types::Atom {
+        crate::types::Atom::with_time(candle, jan(day))
+    }
+
+    /// A wallet holding one unit of `X` at 100, primed with an annualized carry
+    /// rate and whatever cadence the caller declares, positioned to charge on
+    /// the next `advance`.
+    fn carrying_wallet(declared: Option<crate::time::Frequency>) -> PaperWallet<&'static str> {
+        let costs = TradingCosts::none().with_carry(Box::new(crate::costs::AnnualRate::flat(0.10)));
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs);
+        if let Some(freq) = declared {
+            w = w.with_bar_frequency(freq);
+        }
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w
+    }
+
+    /// **Regression.** Carry is charged over the interval that actually
+    /// elapsed, not over the declared cadence. A daily series stamped Friday →
+    /// Monday spans three days of a broker's interest; billing `Frequency::Day(1)`
+    /// for it under-charges every weekend by 3x.
+    #[test]
+    fn carry_measures_the_weekend_gap_rather_than_the_declared_cadence() {
+        let mut w = carrying_wallet(Some(crate::time::Frequency::Day(1)));
+
+        // Friday: the position is established and the clock takes its first
+        // reading. Nothing is held through this bar, so nothing is charged.
+        w.observe(&"X", &timed(bar(100.0), 5));
+        w.advance(&[("X", bar(100.0))]);
+
+        // Monday: three calendar days later.
+        let before = w.funds().0;
+        w.observe(&"X", &timed(bar(100.0), 8));
+        w.advance(&[("X", bar(100.0))]);
+
+        let charged = before - w.funds().0;
+        assert!(
+            (charged - 3.0 * ONE_DAY_CARRY).abs() < 1e-9,
+            "charged {charged}, expected three days ({})",
+            3.0 * ONE_DAY_CARRY
+        );
+    }
+
+    /// The same arithmetic is what makes an **index-sampled** stream chargeable
+    /// at all: volume/dollar/tick bars span no fixed interval by construction,
+    /// so there is no cadence to declare and the elapsed gap is the only
+    /// honest answer.
+    #[test]
+    fn carry_prices_irregular_bars_with_no_declared_cadence() {
+        let mut w = carrying_wallet(None);
+
+        w.observe(&"X", &timed(bar(100.0), 1));
+        w.advance(&[("X", bar(100.0))]);
+
+        // A bar that took five days to fill its bucket.
+        let before = w.funds().0;
+        w.observe(&"X", &timed(bar(100.0), 6));
+        w.advance(&[("X", bar(100.0))]);
+
+        let charged = before - w.funds().0;
+        assert!(
+            (charged - 5.0 * ONE_DAY_CARRY).abs() < 1e-9,
+            "charged {charged} over a five-day bucket"
+        );
+    }
+
+    /// A stream with no times at all still charges the declared cadence — the
+    /// measurement is an upgrade where it exists, never a precondition.
+    #[test]
+    fn carry_falls_back_to_the_declared_cadence_without_times() {
+        let mut w = carrying_wallet(Some(crate::time::Frequency::Day(1)));
+        w.advance(&[("X", bar(100.0))]);
+        let before = w.funds().0;
+        w.advance(&[("X", bar(100.0))]);
+        let charged = before - w.funds().0;
+        assert!(
+            (charged - ONE_DAY_CARRY).abs() < 1e-9,
+            "charged {charged}, expected one declared day"
+        );
+    }
+
+    /// [`carrying_wallet`] with an owned symbol — save/restore needs
+    /// `DeserializeOwned`, which `&str` cannot satisfy.
+    fn carrying_wallet_owned() -> PaperWallet<String> {
+        let costs = TradingCosts::none().with_carry(Box::new(crate::costs::AnnualRate::flat(0.10)));
+        let mut w: PaperWallet<String> = PaperWallet::with_costs(10_000.0, costs);
+        w.update("X".to_string(), bar(100.0));
+        w.set("X".to_string(), Side::Buy, Size::value_frac(1.0))
+            .unwrap();
+        w
+    }
+
+    /// **Regression.** The interval's left endpoint has to survive a chunk
+    /// boundary, or a resumed run silently skips the carry between the last bar
+    /// of one chunk and the first of the next.
+    #[test]
+    fn the_carry_clock_survives_save_and_restore() {
+        let mut w = carrying_wallet_owned();
+        w.observe(&"X".to_string(), &timed(bar(100.0), 5));
+        w.advance(&[("X".to_string(), bar(100.0))]);
+        let state = w.snapshot_state();
+
+        let mut resumed = carrying_wallet_owned();
+        resumed.restore_state(&state).unwrap();
+        let before = resumed.funds().0;
+        resumed.observe(&"X".to_string(), &timed(bar(100.0), 8));
+        resumed.advance(&[("X".to_string(), bar(100.0))]);
+
+        let charged = before - resumed.funds().0;
+        assert!(
+            (charged - 3.0 * ONE_DAY_CARRY).abs() < 1e-9,
+            "charged {charged} across the chunk boundary, expected three days"
+        );
+    }
+
+    /// A state file written before the clock existed carries no left endpoint,
+    /// and must load rather than fail the resume.
+    #[test]
+    fn a_state_without_a_carry_clock_still_loads() {
+        let mut w = carrying_wallet_owned();
+        let mut state = w.snapshot_state();
+        state.as_object_mut().unwrap().remove("last_bar_time");
+        assert!(w.restore_state(&state).is_ok());
     }
 
     /// An annualized rate needs to know how long a bar is, and refuses to guess.

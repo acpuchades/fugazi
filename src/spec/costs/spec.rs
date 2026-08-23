@@ -19,6 +19,25 @@ use crate::spec::input::{self, Source};
 #[derive(Debug, Clone)]
 pub struct CostSpec(pub(super) Vec<CostTerm>);
 
+impl CostSpec {
+    /// Every stream this spec scopes an entry to — the `[STREAM]` half of each
+    /// `SYMBOL[STREAM]:` prefix.
+    ///
+    /// A stream id is matched verbatim now rather than parsed as a cadence, so
+    /// a typo no longer fails to parse; it just scopes the entry to a stream
+    /// that does not exist and the cost silently never applies. The CLI checks
+    /// these against the loaded frame for exactly that reason.
+    pub fn scoped_streams(&self) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter_map(|t| match t {
+                CostTerm::Set { scope, .. } => scope.freq.as_deref(),
+                CostTerm::Load(_) | CostTerm::None => None,
+            })
+            .collect()
+    }
+}
+
 /// One term of a `--costs` spec.
 #[derive(Debug, Clone)]
 pub(super) enum CostTerm {

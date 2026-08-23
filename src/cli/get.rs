@@ -33,7 +33,6 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -1016,9 +1015,12 @@ fn snapshots_by_time(raw: &[RawBar]) -> HashMap<i64, Snapshot<Symbol>> {
             .entry(bar.symbol.as_str())
             .or_insert_with(|| fugazi::types::symbol(&bar.symbol))
             .clone();
+        // The interval token verbatim. It used to round-trip through
+        // `Frequency::from_str`, which silently dropped the tag for any
+        // interval the enum could not name; a stream id has nothing to drop.
         by_time.entry(t).or_default().push(
             Some(sym),
-            Frequency::from_str(&bar.interval.as_token()).ok(),
+            Some(fugazi::types::stream(bar.interval.as_token())),
             bar.atom.clone(),
         );
     }

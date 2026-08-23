@@ -111,6 +111,22 @@ fugazi run @strategy.yml -s @btc.csv -s @funding.csv \
   --max-gross 3 --costs 'carry=!funding {}' --costs commission=!percentage:0.0005
 ```
 
+**`year_fraction` is measured, not declared.** A bar's carry is pro-rated by the
+gap between its own open time and the previous bar's whenever the series carries
+times, and only falls back to the run's declared cadence when it does not. That
+is a correction, not a preference: a daily equity bar stamped Monday follows one
+stamped Friday, so the position was held over three days of a broker's interest
+and a flat `1d` cadence bills for one — an under-charge of 3x across every
+weekend, worse across a holiday. It is also what lets an **index-sampled** series
+(volume, dollar or tick bars, whose bars span no fixed interval by construction)
+charge carry correctly at all: there is no cadence to declare, and the elapsed
+gap is the only honest answer. Calendar seconds, not trading seconds — a broker
+charges over the weekend; the market does not pay returns over it.
+
+Funding is unaffected either way. It is *settlement*-denominated — the venue
+states the charge in full and the column already sums it per bar — so it ignores
+`year_fraction` entirely, and scaling it by one would be the mistake.
+
 **Two ways it silently charges nothing, and both are checked.** A `!funding`
 whose column is absent from the input reads no sample on every bar; an `!annual`
 with no resolvable bar cadence cannot pro-rate its rate. Either leaves an equity
@@ -309,7 +325,7 @@ stop in a fast market typically slips more than a planned entry. Default
 |---|---|---|---|
 | `none` | `0` | — | Explicit zero. |
 | `bps` | `bps · 1e-4 · stop_mult` | `bps`, `stop_multiplier` (opt.) | Constant bps impact regardless of order size. |
-| `volume_participation` | `coef · (units / candle.volume)^exp · stop_mult` | `coefficient`, `exponent` (opt., default `0.5`), `stop_multiplier` (opt.) | Almgren-Chriss-style square-root impact; the standard "impact grows with participation" model. Zero-volume bars yield zero impact. |
+| `volume_participation` | `coef · (units / candle.volume)^exp · stop_mult` | `coefficient`, `exponent` (opt., default `0.5`), `stop_multiplier` (opt.) | Almgren-Chriss-style square-root impact; the standard "impact grows with participation" model. Zero-volume bars yield zero impact. **Degenerates on volume bars** — see below. |
 
 Examples:
 
@@ -332,11 +348,29 @@ slippage: !volume_participation { coefficient: 0.05, exponent: 1.0 }
 its own bar's volume, no participation cap carries across bars. For a
 strategy sending genuinely-large orders, split them in strategy code.
 
+**It degenerates on volume bars, and the degeneration is silent.** A volume bar
+closes when a fixed quantity has traded, so `candle.volume` is the *same
+constant* on every bar by construction, and `coef · (units / V)^exp` collapses to
+a fixed power of order size — a size penalty wearing a participation model's
+name. The number it returns is not obviously wrong, which is what makes it worth
+stating: participation is a ratio against how much the market traded *while you
+were trading*, and a volume bar has defined that away. On dollar bars it is
+worse than constant, since the quantity is held fixed in currency and the volume
+term drifts with price. Prefer `!bps` on an index-sampled series, or size the
+coefficient against the bucket threshold knowing it is a size penalty.
+
 ## Scope precedence
 
 Every leg supports per-symbol and per-frequency overrides. Resolution
 picks the winning model in this order (most-specific to least-specific;
 same-specificity ties are broken by insertion order — later wins):
+
+**The bracket names a stream, not a cadence.** `BTC[1d]:` is the common
+spelling, but the id is matched verbatim and never parsed, so
+`BTC[dollar-1e6]:` scopes an entry to an index-sampled series just as well. The
+cost of that: a typo no longer fails to parse, it just scopes the entry to a
+stream that does not exist and the cost silently never applies — so `run` warns
+when a scope names a stream the run does not carry.
 
 1. `scoped[i]` — an entry matching *both* `symbol` and `freq`.
 2. `by_symbol[symbol]` — set via `SYMBOL:key=…` or a preset `by_symbol` map.

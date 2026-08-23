@@ -752,9 +752,9 @@ impl PyFrequency {
 /// single-entry-unpack path.
 ///
 /// Coerced automatically from a Python `str` (symbol only), from a
-/// `Frequency` (freq only), from a `(str, Frequency | str | None)` tuple, and
+/// `Frequency` (stream only), from a `(str, Frequency | str | None)` tuple, and
 /// from a `dict` — so `ta.Snapshot({"BTC": ...})` and
-/// `ta.Snapshot({ta.Selector(symbol="BTC", freq="1h"): ...})` both work.
+/// `ta.Snapshot({ta.Selector(symbol="BTC", stream="1h"): ...})` both work.
 #[pyclass(name = "Selector", module = "fugazi", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySelector {
@@ -765,13 +765,13 @@ pub(crate) struct PySelector {
 impl PySelector {
     /// Build a selector. Both fields are optional and default to `None`; an
     /// empty selector is legal and drives the [`Pick`] single-entry-unpack path.
-    /// `freq` accepts a `Frequency` instance or a token string (`"1h"`, `"1d"`).
+    /// `stream` accepts any string, or a `Frequency` (whose token is used).
     #[new]
-    #[pyo3(signature = (symbol = None, freq = None))]
-    pub(crate) fn new(symbol: Option<String>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let freq = freq.map(coerce_frequency).transpose()?;
+    #[pyo3(signature = (symbol = None, stream = None))]
+    pub(crate) fn new(symbol: Option<String>, stream: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let stream = stream.map(coerce_stream).transpose()?;
         Ok(Self {
-            inner: Selector::<Symbol>::new(symbol.map(intern), freq),
+            inner: Selector::<Symbol>::new(symbol.map(intern), stream),
         })
     }
 
@@ -781,15 +781,15 @@ impl PySelector {
     }
 
     #[getter]
-    pub(crate) fn freq(&self) -> Option<PyFrequency> {
-        self.inner.freq.map(|inner| PyFrequency { inner })
+    pub(crate) fn stream(&self) -> Option<String> {
+        self.inner.stream.as_ref().map(StreamId::to_string)
     }
 
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         reduce_with(
             py,
             py.get_type::<PySelector>(),
-            (self.symbol(), self.freq()),
+            (self.symbol(), self.stream()),
         )
     }
 
@@ -798,7 +798,7 @@ impl PySelector {
         self.inner.is_empty()
     }
 
-    /// Match this selector as a **query** against a `(symbol, freq)` entry
+    /// Match this selector as a **query** against a `(symbol, stream)` entry
     /// tag: each `None` field on the query is a wildcard; a `Some` field
     /// must equal the entry's value. `entry` accepts a `Selector` (its
     /// fields are used as the tag) or a `(str | None, Frequency | str |
@@ -807,7 +807,7 @@ impl PySelector {
         let entry_sel = coerce_selector(entry)?;
         Ok(self
             .inner
-            .matches(entry_sel.symbol.as_ref(), entry_sel.freq))
+            .matches(entry_sel.symbol.as_ref(), entry_sel.stream.as_ref()))
     }
 
     pub(crate) fn __hash__(&self) -> u64 {
@@ -819,7 +819,7 @@ impl PySelector {
         // side stable hash based on its fields is still useful for `in`
         // checks / set membership.
         self.inner.symbol.hash(&mut h);
-        self.inner.freq.hash(&mut h);
+        self.inner.stream.hash(&mut h);
         h.finish()
     }
 
@@ -835,16 +835,35 @@ impl PySelector {
     }
 
     pub(crate) fn __repr__(&self) -> String {
-        match (&self.inner.symbol, &self.inner.freq) {
-            (Some(s), Some(f)) => format!("Selector(symbol={:?}, freq={:?})", s, f.as_token()),
+        match (&self.inner.symbol, &self.inner.stream) {
+            (Some(s), Some(f)) => format!("Selector(symbol={:?}, stream={:?})", s, f.as_str()),
             (Some(s), None) => format!("Selector(symbol={s:?})"),
-            (None, Some(f)) => format!("Selector(freq={:?})", f.as_token()),
+            (None, Some(f)) => format!("Selector(stream={:?})", f.as_str()),
             (None, None) => "Selector()".to_string(),
         }
     }
 }
 
 /// Extract a [`Frequency`] from a Python `PyFrequency` or a token `str`.
+/// Coerce a Python object into a [`StreamId`]: any `str` verbatim, or a
+/// `Frequency` via its token.
+///
+/// Deliberately *not* `coerce_frequency` — a stream id is opaque, and parsing
+/// it as a cadence here would reject every identifier that is not a duration,
+/// which is the restriction this type exists to lift. A `Frequency` is still
+/// accepted because a cadence is the common spelling.
+pub(crate) fn coerce_stream(obj: &Bound<'_, PyAny>) -> PyResult<StreamId> {
+    if let Ok(f) = obj.cast::<PyFrequency>() {
+        return Ok(StreamId::from(f.borrow().inner));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(StreamId::from(s));
+    }
+    Err(PyTypeError::new_err(
+        "expected a str stream id (e.g. \"1h\", \"dollar-1e6\") or a Frequency",
+    ))
+}
+
 pub(crate) fn coerce_frequency(obj: &Bound<'_, PyAny>) -> PyResult<Frequency> {
     if let Ok(f) = obj.cast::<PyFrequency>() {
         return Ok(f.borrow().inner);
@@ -869,7 +888,7 @@ pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbo
         return Ok(sel.borrow().inner.clone());
     }
     if let Ok(f) = obj.cast::<PyFrequency>() {
-        return Ok(Selector::by_freq(f.borrow().inner));
+        return Ok(Selector::by_stream(StreamId::from(f.borrow().inner)));
     }
     if let Ok(s) = obj.cast::<pyo3::types::PyString>()
         && let Ok(s) = s.to_cow()
@@ -880,15 +899,15 @@ pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbo
         // `SymbolInterner` instead, which allocates once per *distinct* symbol.
         return Ok(Selector::by_symbol(intern(s.as_ref())));
     }
-    if let Ok((sym, freq)) = obj.extract::<(String, Option<Py<PyAny>>)>() {
-        let freq = match freq {
+    if let Ok((sym, stream)) = obj.extract::<(String, Option<Py<PyAny>>)>() {
+        let stream = match stream {
             None => None,
-            Some(f) => Some(coerce_frequency(f.bind(obj.py()))?),
+            Some(f) => Some(coerce_stream(f.bind(obj.py()))?),
         };
-        return Ok(Selector::new(Some(intern(sym)), freq));
+        return Ok(Selector::new(Some(intern(sym)), stream));
     }
     Err(PyTypeError::new_err(
-        "Snapshot keys must be a Selector, a str (symbol), a Frequency, or a (symbol, freq) tuple",
+        "Snapshot keys must be a Selector, a str (symbol), a Frequency, or a (symbol, stream) tuple",
     ))
 }
 
@@ -943,7 +962,7 @@ impl PySnapshot {
         let sel = coerce_selector(key)?;
         // Remove exact matches on the key's tag pattern, then push.
         self.inner.remove_matching(&sel);
-        self.inner.push(sel.symbol, sel.freq, atom.inner.clone());
+        self.inner.push(sel.symbol, sel.stream, atom.inner.clone());
         Ok(())
     }
 
@@ -969,7 +988,7 @@ impl PySnapshot {
     /// use `__setitem__` (i.e. `snap[key] = atom`).
     pub(crate) fn push(&mut self, key: &Bound<'_, PyAny>, atom: PyRef<'_, PyAtom>) -> PyResult<()> {
         let sel = coerce_selector(key)?;
-        self.inner.push(sel.symbol, sel.freq, atom.inner.clone());
+        self.inner.push(sel.symbol, sel.stream, atom.inner.clone());
         Ok(())
     }
 
@@ -987,7 +1006,7 @@ impl PySnapshot {
         self.inner
             .iter()
             .map(|(sym, freq, _)| PySelector {
-                inner: Selector::new(sym.cloned(), freq),
+                inner: Selector::new(sym.cloned(), freq.cloned()),
             })
             .collect()
     }
@@ -1011,7 +1030,7 @@ impl PySnapshot {
             .map(|(sym, freq, atom)| {
                 (
                     PySelector {
-                        inner: Selector::new(sym.cloned(), freq),
+                        inner: Selector::new(sym.cloned(), freq.cloned()),
                     },
                     PyAtom {
                         inner: atom.clone(),
@@ -1085,7 +1104,7 @@ impl PySnapshot {
             .iter()
             .map(|(sym, freq, _)| {
                 PySelector {
-                    inner: Selector::new(sym.cloned(), freq),
+                    inner: Selector::new(sym.cloned(), freq.cloned()),
                 }
                 .__repr__()
             })

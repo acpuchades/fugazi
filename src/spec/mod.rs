@@ -1845,14 +1845,97 @@ mod tests {
         assert!(built.into_bool().is_err());
     }
 
+    /// `stream:` is the open spelling: any id builds, and what it selects is
+    /// decided by matching rather than by parsing.
     #[test]
-    fn pick_rejects_a_malformed_frequency() {
+    fn pick_accepts_an_arbitrary_stream_id_and_matches_on_it() {
+        use crate::types::{Atom, Candle, Snapshot, stream, symbol};
+
+        // Projected through `!close` so the chain is a Real source; the `!pick`
+        // is what is under test.
+        let spec: NodeSpec =
+            serde_norway::from_str("!close { source: !pick { symbol: BTC, stream: dollar-1e6 } }")
+                .unwrap();
+        let mut built = spec
+            .try_build(
+                &Position::new(),
+                &Book::new(1.0),
+                None,
+                &Schema::empty(),
+                Root::sole(),
+            )
+            .expect("an opaque stream id is not a malformed cadence")
+            .into_real()
+            .expect("a pick of a candle series is a Real source");
+
+        let bar = |c: Real| Atom::new(Candle::new(c, c, c, c, 1.0));
+        let mut snap = Snapshot::<crate::types::Symbol>::new();
+        // Same symbol, two streams: only the named one may be read.
+        snap.push(Some(symbol("BTC")), Some(stream("1d")), bar(10.0));
+        snap.push(Some(symbol("BTC")), Some(stream("dollar-1e6")), bar(99.0));
+
+        assert_eq!(
+            built.update(snap),
+            Some(99.0),
+            "the stream id selected the series, not the cadence parser"
+        );
+    }
+
+    /// `freq:` promises a bar cadence, so it is still **validated** — the field
+    /// name is the contract, and this is the guardrail that one opaque field
+    /// doing both jobs would have lost.
+    #[test]
+    fn pick_still_rejects_a_malformed_frequency() {
         let spec: NodeSpec = serde_norway::from_str("!pick { symbol: BTC, freq: banana }").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         let (trail, message) = crate::spec::diagnostics::split_trail(&err);
         assert_eq!(trail, vec!["!pick"], "{err}");
         assert!(message.contains("invalid frequency"), "{err}");
         assert!(message.contains("banana"), "names the offender: {err}");
+    }
+
+    /// A validated `freq:` contributes the **round-trip of its parse**, so the
+    /// stream it selects is the one the loader tagged with the same token.
+    ///
+    /// Round-trip, not cross-unit canonicalization: `Minute(60)` and `Hour(1)`
+    /// are deliberately distinct `Frequency` variants — that is what
+    /// `variant_rank` exists to keep apart — so `60m` names the `60m` stream
+    /// and not the `1h` one.
+    #[test]
+    fn pick_round_trips_a_validated_frequency() {
+        use crate::types::{Atom, Candle, Snapshot, stream, symbol};
+
+        let spec: NodeSpec =
+            serde_norway::from_str("!close { source: !pick { symbol: BTC, freq: 60m } }").unwrap();
+        let mut built = spec
+            .try_build(
+                &Position::new(),
+                &Book::new(1.0),
+                None,
+                &Schema::empty(),
+                Root::sole(),
+            )
+            .expect("60m is a valid cadence")
+            .into_real()
+            .expect("a pick of a candle series is a Real source");
+
+        let c = Candle::new(7.0, 7.0, 7.0, 7.0, 1.0);
+        let mut snap = Snapshot::<crate::types::Symbol>::new();
+        // `1h` is the same duration but a different variant, so it must *not*
+        // match; `60m` is the token the parse round-trips to, and does.
+        snap.push(Some(symbol("BTC")), Some(stream("1h")), Atom::new(c));
+        snap.push(Some(symbol("BTC")), Some(stream("60m")), Atom::new(c));
+        assert_eq!(built.update(snap), Some(7.0));
+    }
+
+    /// The two spellings select the same thing, so naming both is refused
+    /// rather than resolved by a precedence rule nobody would remember.
+    #[test]
+    fn pick_refuses_both_freq_and_stream() {
+        let spec: NodeSpec =
+            serde_norway::from_str("!pick { symbol: BTC, freq: 1h, stream: dollar-1e6 }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("both `freq` and `stream`"), "{err}");
     }
 
     #[test]

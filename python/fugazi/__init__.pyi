@@ -540,11 +540,11 @@ class Selector:
     empty selector is legal and stands for the [`Pick`] no-query, single-entry-
     unpack path.
     """
-    def __init__(self, symbol: str = ..., freq: str | Frequency | None = ...) -> None: ...
-    @property
-    def freq(self) -> Frequency | None: ...
+    def __init__(self, symbol: str = ..., stream: str | Frequency | None = ...) -> None: ...
     def is_empty(self) -> bool: ...
     def matches(self, entry: Any) -> bool: ...
+    @property
+    def stream(self) -> str | None: ...
     @property
     def symbol(self) -> str: ...
     def __hash__(self) -> int: ...
@@ -877,6 +877,11 @@ def day_of_year(source: AtomSource | None = ...) -> Indicator:
 def dmi(period: int = ...) -> MultiIndicator:
     """Directional movement index: {plus_di, minus_di} (Wilder's 14 by default)."""
     ...
+def dollar_bars(threshold: Any, inner: Any) -> Indicator:
+    """Aggregate base candles into one bar per `threshold` units of traded **notional**
+    (`typical x volume`), and run `inner` over that stream. See [`volume_bars`].
+    """
+    ...
 def donchian(high: Any, low: Any, period: int = ...) -> MultiIndicator:
     """Donchian channel from a `high` source and a `low` source: {upper, middle,
     lower}. Both sources must be rooted in the same domain. `period` defaults to the
@@ -1062,7 +1067,7 @@ def percentile_rank(source: Indicator, period: int) -> Indicator:
     `1/period`.
     """
     ...
-def pick(symbol: str = ..., freq: str | Frequency | None = ...) -> AtomSource:
+def pick(symbol: str = ..., freq: str | Frequency | None = ..., *, stream: str | Frequency | None = ...) -> AtomSource:
     """[`Selector`]. Compose with any atom-input leaf by passing the returned
     `AtomSource` as its `source=` argument.
     """
@@ -1240,6 +1245,12 @@ def volatility_of(strategy: Any, period: int, bars_per_year: float) -> Indicator
     ...
 def volume(source: AtomSource | None = ...) -> Indicator:
     """Source: the bar's volume."""
+    ...
+def volume_bars(threshold: Any, inner: Any) -> Indicator:
+    """Aggregate base candles into one bar per `threshold` units of traded **volume**,
+    and run `inner` (any candle-rooted Real source) over that stream. `resample()`'s
+    information-driven sibling: identical in every respect except what closes a bar.
+    """
     ...
 def vwap(period: int) -> Indicator:
     """Volume-weighted average price over `period` (rolling)."""

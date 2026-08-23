@@ -21,15 +21,15 @@ pub(crate) use fugazi_core::indicators::compare::{
     EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp,
 };
 pub(crate) use fugazi_core::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Beta,
-    Bollinger, BollingerValue, Cci, Close, Correlation, Covariance, CurrentBar, Day, DayOfWeek,
-    DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, Every, Exp, GarmanKlass, GetBool,
-    GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner,
-    KeltnerValue, Kurtosis, Latch, LinReg, LinRegValue, Log, Low, Macd, MacdValue, Median, Mfi,
-    Minute, Month, Obv, Open, Parkinson, Percentile, PercentileRank, Pick, Quarter, Resample, Rma,
-    RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, Typical,
-    UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume, Vwap, WeekOfYear, WilliamsR,
-    Wma, Year, ZScore,
+    Accumulate, Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarMeasure, BarsSince, BarsSinceHigh,
+    BarsSinceLow, Beta, Bollinger, BollingerValue, Cci, Close, Correlation, Covariance, CurrentBar,
+    Day, DayOfWeek, DayOfYear, Dmi, DmiValue, DollarMeasure, Donchian, DonchianValue, Ema, Every,
+    Exp, GarmanKlass, GetBool, GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday,
+    IsWeekend, Keltner, KeltnerValue, Kurtosis, Latch, LinReg, LinRegValue, Log, Low, Macd,
+    MacdValue, Median, Mfi, Minute, Month, Obv, Open, Parkinson, Percentile, PercentileRank, Pick,
+    Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic,
+    TrueRange, Typical, UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume,
+    VolumeMeasure, Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 pub(crate) use fugazi_core::indicators::{
     BoolIndicatorExt, Combine, DEFAULT_TOLERANCE, IndicatorExt, Tolerance,
@@ -48,7 +48,7 @@ pub(crate) use fugazi_core::strategies::{
 };
 pub(crate) use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
-    Selector, Snapshot,
+    Selector, Snapshot, StreamId,
 };
 pub(crate) use fugazi_core::types::{Symbol, symbol as intern};
 pub(crate) use fugazi_core::wallet::{
