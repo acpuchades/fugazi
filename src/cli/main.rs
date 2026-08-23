@@ -1183,6 +1183,20 @@ fn load_frame(
     frequency: &[calendar::ScopedFrequency],
 ) -> Result<data::DataFrame> {
     let mut frame = data::DataFrame::from_series(series)?;
+    // Before the cadence census, because it is about rows the census will never
+    // see: a term whose own rows collided on `(symbol, freq, time)` contributed
+    // fewer bars than it holds, and the frame it hands the census is already the
+    // survivors.
+    for (spec, n) in frame.self_collisions() {
+        eprintln!(
+            "  {} `--series {spec}` has {n} row(s) that repeat a (symbol, freq, \
+             time) it already carries — each one replaced the earlier row \
+             rather than adding a bar, so the run is {n} bar(s) shorter than \
+             the file. Merging on that key is how a *second* `--series` term \
+             joins onto the first; within one term it is a duplicate.",
+            style::yellow("warn"),
+        );
+    }
     let findings = cadence::apply(&mut frame, frequency)?;
     cadence::warn(&findings);
     Ok(frame)

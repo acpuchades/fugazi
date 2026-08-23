@@ -1593,6 +1593,7 @@ data):
 |---|---|
 | The universe runs at more than one cadence | Annualization takes one factor for the whole run, read off the first symbol, so every risk-adjusted metric is scaled for that series and mis-scaled for the rest. |
 | A series' `freq` label disagrees with its timestamp spacing | The label is what freq-scoped `--costs` match on; the spacing is what the run is made of. Reported only from 10 bars up, since a median over a handful of gaps is noise. |
+| A `--series` term carries the same `(symbol, freq, time)` twice | Merging on that key is the join — it is how a separate overlay CSV attaches to a price file, and how a later term overrides an earlier one. Within *one* term it is data loss: the second row replaced the first rather than adding a bar, so the run is shorter than the file. |
 | A series' timestamps fall outside the calendar | `time` is read as **milliseconds** since the epoch, and tops out at year 9999. A column in *nanoseconds* — `datetime64[ns]` cast to an integer, which is what a `pandas`/`polars` export produces — lands ~52 million years out, so every calendar reading (`!is_weekday`, `!month`, `!day_of_week`) is absent and any gate built on one never fires. Divide by 1e6. |
 
 **Examples**
