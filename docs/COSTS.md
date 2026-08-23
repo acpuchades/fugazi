@@ -318,7 +318,7 @@ stop in a fast market typically slips more than a planned entry. Default
 |---|---|---|---|
 | `none` | `0` | — | Explicit zero. |
 | `bps` | `bps · 1e-4 · stop_mult` | `bps`, `stop_multiplier` (opt.) | Constant bps impact regardless of order size. |
-| `volume_participation` | `coef · (units / candle.volume)^exp · stop_mult` | `coefficient`, `exponent` (opt., default `0.5`), `stop_multiplier` (opt.) | Almgren-Chriss-style square-root impact; the standard "impact grows with participation" model. Zero-volume bars yield zero impact. |
+| `volume_participation` | `coef · (units / candle.volume)^exp · stop_mult` | `coefficient`, `exponent` (opt., default `0.5`), `stop_multiplier` (opt.) | Almgren-Chriss-style square-root impact; the standard "impact grows with participation" model. Zero-volume bars yield zero impact. **Degenerates on volume bars** — see below. |
 
 Examples:
 
@@ -340,6 +340,17 @@ slippage: !volume_participation { coefficient: 0.05, exponent: 1.0 }
 `volume_participation` is a *single-bar* approximation: a fill uses only
 its own bar's volume, no participation cap carries across bars. For a
 strategy sending genuinely-large orders, split them in strategy code.
+
+**It degenerates on volume bars, and the degeneration is silent.** A volume bar
+closes when a fixed quantity has traded, so `candle.volume` is the *same
+constant* on every bar by construction, and `coef · (units / V)^exp` collapses to
+a fixed power of order size — a size penalty wearing a participation model's
+name. The number it returns is not obviously wrong, which is what makes it worth
+stating: participation is a ratio against how much the market traded *while you
+were trading*, and a volume bar has defined that away. On dollar bars it is
+worse than constant, since the quantity is held fixed in currency and the volume
+term drifts with price. Prefer `!bps` on an index-sampled series, or size the
+coefficient against the bucket threshold knowing it is a size penalty.
 
 ## Scope precedence
 

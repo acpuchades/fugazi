@@ -328,8 +328,17 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
     // else fall through to the class × cadence calendar.
-    let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
-        .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let bars_per_year =
+        match calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq) {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                effective_freq,
+                calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
@@ -433,9 +442,19 @@ pub fn run_pairs(
         .or_else(|| {
             calendar::detect_frequency_from_atoms(left_series.atoms.iter().map(|(_, a)| a))
         });
-    let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &left, effective_freq)
-        .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &right, effective_freq))
-        .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let bars_per_year =
+        match calendar::pick_bars_per_year(opts.bars_per_year, &left, effective_freq)
+            .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &right, effective_freq))
+        {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                effective_freq,
+                calendar::measure_bars_per_year(left_series.atoms.iter().map(|(_, a)| a)),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
@@ -553,7 +572,7 @@ fn run_universe(
 
     let representative = &universe[0];
     let (effective_freq, bars_per_year) =
-        universe_calendar(opts, frame, representative, &per_symbol);
+        universe_calendar(opts, frame, representative, &per_symbol)?;
     let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
     // Sliced on the joined timeline, after the outer join — so a symbol that
@@ -718,7 +737,7 @@ fn universe_calendar(
     frame: &DataFrame,
     representative: &str,
     per_symbol: &[(Symbol, Vec<(String, fugazi::types::Atom)>)],
-) -> (Option<Frequency>, Real) {
+) -> Result<(Option<Frequency>, Real)> {
     let effective_freq = calendar::pick_frequency(opts.frequency, representative)
         .or_else(|| frame.declared_frequency(representative))
         .or_else(|| {
@@ -730,9 +749,20 @@ fn universe_calendar(
                 })
         });
     let bars_per_year =
-        calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
-            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
-    (effective_freq, bars_per_year)
+        match calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq) {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                effective_freq,
+                per_symbol
+                    .iter()
+                    .find(|(s, _)| s.as_ref() == representative)
+                    .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
+    Ok((effective_freq, bars_per_year))
 }
 
 /// Assemble the resolved-once run inputs the driver takes.

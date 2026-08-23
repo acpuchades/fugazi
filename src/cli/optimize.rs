@@ -400,8 +400,16 @@ fn run_single(
         .or_else(|| frame.declared_frequency(&probe_symbol))
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     let bars_per_year =
-        calendar::pick_bars_per_year(opts.bars_per_year, &probe_symbol, effective_freq)
-            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+        match calendar::pick_bars_per_year(opts.bars_per_year, &probe_symbol, effective_freq) {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                effective_freq,
+                calendar::measure_bars_per_year(atoms.iter().map(|(_, a)| a)),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
 
     let windowed_bars = opts
         .windowed
@@ -586,8 +594,16 @@ fn run_single(
             })
             .or_else(|| frame.declared_frequency(&key.symbol))
             .or_else(|| calendar::detect_frequency_from_atoms(other_atoms.iter().map(|(_, a)| a)));
-        let bpy = calendar::pick_bars_per_year(opts.bars_per_year, &key.symbol, freq)
-            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, freq));
+        let bpy = match calendar::pick_bars_per_year(opts.bars_per_year, &key.symbol, freq) {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                freq,
+                calendar::measure_bars_per_year(other_atoms.iter().map(|(_, a)| a)),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
         let labels: Vec<String> = other_atoms.iter().map(|(t, _)| t.clone()).collect();
         let other_slice = optimize_slice(opts, &labels, || Ok(slice.warmup_bars()))?;
         let warm = (other_slice.warmup_bars() > 0).then(|| other_slice.warmup_bars());
@@ -814,8 +830,19 @@ fn run_multi_symbol(
                 })
         });
     let bars_per_year =
-        calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
-            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+        match calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq) {
+            Some(v) => v,
+            None => calendar::resolve(
+                None,
+                opts.asset_class,
+                effective_freq,
+                per_symbol
+                    .iter()
+                    .find(|(s, _)| s.as_ref() == representative.as_ref())
+                    .and_then(|(_, a)| calendar::measure_bars_per_year(a.iter().map(|(_, at)| at))),
+            )
+            .map_err(anyhow::Error::msg)?,
+        };
 
     let windowed_bars = opts
         .windowed
