@@ -78,13 +78,14 @@ use crate::strategy::*;
 // function is named explicitly. The list doubles as the module's index.
 use crate::constructors::{
     ad, adx, aroon, atr, bars_since, bars_since_high, bars_since_low, beta, bollinger, cci, close,
-    compute_overlays, correlation, covariance, day, day_of_week, day_of_year, dmi, donchian, ema,
-    every, exp, garman_klass, get, get_bool, get_real, get_str, high, hma, hour, identity, if_else,
-    is_weekday, is_weekend, keltner, kurtosis_indicator, latch, linreg, log, low, macd, median,
-    mfi, minute, month, obv, open, parkinson, percentile, percentile_rank, pick, quarter, resample,
-    rma, rogers_satchell, rsi, sar, second, skewness_indicator, sma, stddev, stoch_rsi, stochastic,
-    str_eq, str_ne, true_range, typical, unix_millis, unix_seconds, unstable, value, value_str,
-    variance_ratio, volume, vwap, week_of_year, williams_r, wma, year, zscore,
+    compute_overlays, correlation, covariance, day, day_of_week, day_of_year, dmi, dollar_bars,
+    donchian, ema, every, exp, garman_klass, get, get_bool, get_real, get_str, high, hma, hour,
+    identity, if_else, is_weekday, is_weekend, keltner, kurtosis_indicator, latch, linreg, log,
+    low, macd, median, mfi, minute, month, obv, open, parkinson, percentile, percentile_rank, pick,
+    quarter, resample, rma, rogers_satchell, rsi, sar, second, skewness_indicator, sma, stddev,
+    stoch_rsi, stochastic, str_eq, str_ne, true_range, typical, unix_millis, unix_seconds,
+    unstable, value, value_str, variance_ratio, volume, volume_bars, vwap, week_of_year,
+    williams_r, wma, year, zscore,
 };
 // Unpickling entry points. Not surface — but `__reduce__` names its callable by
 // `module.qualname`, so each has to be a real, importable module member.
@@ -238,6 +239,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         linreg,
         stoch_rsi,
         resample,
+        volume_bars,
+        dollar_bars,
         latch,
         unstable,
         if_else,

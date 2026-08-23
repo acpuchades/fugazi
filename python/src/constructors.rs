@@ -2003,6 +2003,57 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
     ))))
 }
 
+/// Aggregate base candles into one bar per `threshold` units of traded
+/// **volume**, and run `inner` (any candle-rooted Real source) over that
+/// stream. `resample()`'s information-driven sibling: identical in every
+/// respect except what closes a bar.
+///
+/// ```python
+/// import fugazi as ta
+/// # EMA-20 over bars of 5,000 units of traded quantity.
+/// bars = ta.latch(ta.volume_bars(5000.0, ta.ema(ta.close(), 20)))
+/// ```
+#[pyfunction]
+pub(crate) fn volume_bars(threshold: f64, inner: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    let inner_candle = accumulate_inner(threshold, "volume_bars", inner)?;
+    Ok(PyIndicator::wrap(AnySource::Atom(runtime::erase(
+        AccumulateThen::<VolumeMeasure>::new(threshold, inner_candle),
+    ))))
+}
+
+/// Aggregate base candles into one bar per `threshold` units of traded
+/// **notional** (`typical x volume`), and run `inner` over that stream. See
+/// [`volume_bars`].
+///
+/// ```python
+/// import fugazi as ta
+/// # EMA-20 over $1M dollar bars.
+/// bars = ta.latch(ta.dollar_bars(1_000_000.0, ta.ema(ta.close(), 20)))
+/// ```
+#[pyfunction]
+pub(crate) fn dollar_bars(threshold: f64, inner: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    let inner_candle = accumulate_inner(threshold, "dollar_bars", inner)?;
+    Ok(PyIndicator::wrap(AnySource::Atom(runtime::erase(
+        AccumulateThen::<DollarMeasure>::new(threshold, inner_candle),
+    ))))
+}
+
+/// Shared validation for the two accumulate constructors: the library
+/// constructor asserts on a bad threshold, and a Python caller gets a
+/// `ValueError` instead of a panic crossing the FFI boundary.
+fn accumulate_inner(
+    threshold: f64,
+    name: &str,
+    inner: PyRef<'_, PyIndicator>,
+) -> PyResult<Source<Atom>> {
+    if !threshold.is_finite() || threshold <= 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "{name} threshold must be finite and greater than zero"
+        )));
+    }
+    require_candle_source(inner.src.clone())
+}
+
 /// Hold the last `Some` output of an indicator or signal, re-emitting it on
 /// ticks where the source returns `None`. Domain-preserving: `latch()` of a
 /// candle-rooted source is candle-rooted, of an identity-rooted signal is

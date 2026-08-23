@@ -1319,8 +1319,10 @@ of terms:
   `--series` are concatenated.
 
 Across multiple `--series` the tables are **full-outer joined on
-`(symbol, freq, time)`** into one long dataframe. `time` is compared as an
-opaque, caller-sorted string (dates, epoch timestamps — anything).
+`(symbol, freq, index)`** into one long dataframe, where `index` is the row's
+`index` column if it has one and its `time` column otherwise. A `time` cell is
+compared as an opaque, caller-sorted string (dates, epoch timestamps —
+anything); see [Index columns](#index-columns) for the other kind.
 
 The `freq` column is part of the join key so that two cadences of the same
 symbol stay two series. `fugazi get binance:BTCUSDT[1d,1h]` writes both into
@@ -1331,9 +1333,62 @@ declared cadence, so a hand-written overlay CSV with only `symbol,time,<col>`
 still joins onto a `get`-written price file. See
 [Bar cadence](#bar-cadence).
 
-Required columns after the join: `symbol`, `time`, `open`, `high`, `low`,
-`close`. `volume` is optional (defaults to 0). Extra columns ride along
-(you can join fundamentals or a per-symbol regime tag as another series).
+Required columns after the join: `symbol`, `open`, `high`, `low`, `close`, and
+one of `time` or `index`. `volume` is optional (defaults to 0). Extra columns
+ride along (you can join fundamentals or a per-symbol regime tag as another
+series).
+
+#### Index columns
+
+A bar stream needs a key saying *which* bar this is and how bars order. Time is
+the familiar one, but not the only sound one: bars cut on traded quantity
+(volume, dollar or tick bars) close on activity, and the bucket's sequence
+number is what identifies a bar there. An `index` column is that key.
+
+```csv
+symbol,index,time,open,high,low,close,volume
+BTC,0,2024-01-01T00:14:22Z,42010,42120,41990,42080,23.7
+BTC,1,2024-01-01T00:31:05Z,42080,42300,42060,42250,24.1
+```
+
+**Give it a `time` column too whenever you can.** The two are not
+alternatives — the `index` decides *ordering and joining*, the `time` decides
+how much of the calendar layer keeps working. With both present, carry is
+pro-rated over the interval each bar actually spans, the calendar leaves
+(`!day_of_week`, `!is_weekday`, …) read real dates, and `bars_per_year` is
+measured from the span the input covers. With `index` alone, carry charges
+nothing, the calendar leaves read `None` on every bar, and `--bars-per-year`
+must be passed explicitly.
+
+**A numeric index orders numerically.** `9` sorts before `10`, which a plain
+string key would not do. An `index` cell that is not an integer stays a label
+and sorts lexicographically — which is how a *shared non-numeric* key (a
+session id, an auction sequence) works.
+
+**One kind per frame.** A load mixing a numeric `index` with a time label is
+refused: the two order by different rules and there is no interleaving of the
+union that is right for both.
+
+**A bare integer means different things in the two columns.** In `time` it is a
+Unix epoch; in `index` it is a sequence number. Which column the cell came from
+is the only thing that can tell them apart.
+
+**What an index-sampled run gives up.** There is no cadence, so annualization
+cannot be looked up from a calendar (it is measured, or you pass
+`--bars-per-year`), `-w`'s duration form is unavailable (use the bar-count form
+`-w N`), and freq-scoped `--costs` entries match nothing. `run` says so once, at
+load.
+
+**Multi-symbol needs a *shared* index.** Two symbols' dollar bars never close at
+the same instant, so an index that is each symbol's own bucket number puts one
+symbol in every snapshot and cross-sectional selection sees nothing. An index
+all symbols are sampled against — a basket-level dollar clock, a session
+counter — is sound and is what this supports. If yours is not actually shared,
+the usual fragmented-universe warning fires.
+
+To sample *inside* a run that is otherwise time-indexed, use the
+`!volume_bars` / `!dollar_bars` tags instead — see
+[STRATEGIES.md](STRATEGIES.md#cross-timeframe-composition--resample--volume_bars--dollar_bars--latch).
 
 **Which symbols a run actually carries.** Not necessarily all of them. A run
 carries the symbols its document *trades* — `symbol:` for a single-asset

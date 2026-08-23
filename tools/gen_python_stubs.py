@@ -132,6 +132,7 @@ RETURNS = {
             "stddev skewness kurtosis zscore correlation percentile percentile_rank bars_since "
             "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
             "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
+            "volume_bars dollar_bars "
             "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
             "week_of_year quarter unix_seconds unix_millis covariance beta"
         ).split()

@@ -1930,25 +1930,42 @@ def test_funding_is_charged_from_the_series_and_counted():
     assert blind.equity == pytest.approx(free.equity)
 
 
-def test_margin_interest_needs_a_bar_length_and_refuses_to_guess():
-    """An annualized rate cannot be split across a bar of unknown length, so a
-    wallet that was not told charges nothing rather than inventing a year."""
+def test_margin_interest_is_measured_from_the_bars_when_it_can_be():
+    """A wallet not told a cadence still charges correctly when the *bars* carry
+    times: the interval is measured from consecutive stamps, so declaring `1d`
+    over daily bars is the same answer arrived at twice."""
     bars = _levered_bars([100.0] * 60)
 
-    untimed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
-    ta.load_spec(_LEVERED).run(untimed, bars)
+    measured = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
+    ta.load_spec(_LEVERED).run(measured, bars)
 
-    timed = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08, bar_freq="1d")
-    ta.load_spec(_LEVERED).run(timed, bars)
+    declared = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08, bar_freq="1d")
+    ta.load_spec(_LEVERED).run(declared, bars)
 
-    assert timed.equity < untimed.equity, "borrowing 20k at 8% should cost something"
-    assert timed.margin_rate == pytest.approx(0.08)
+    assert measured.equity < 10_000.0, "borrowing 20k at 8% should cost something"
+    assert measured.equity == pytest.approx(declared.equity), (
+        "daily bars measure to the cadence they were declared with"
+    )
+    assert declared.margin_rate == pytest.approx(0.08)
     # An unlevered book never borrows, so it is never billed.
     flat = ta.PaperWallet(10_000.0, margin_rate=0.08, bar_freq="1d")
     ta.load_spec("root: S\nlong:\n  enter: !gt { lhs: !close, rhs: 0 }\n").run(
         flat, bars
     )
     assert flat.equity == pytest.approx(10_000.0)
+
+
+def test_margin_interest_refuses_to_guess_when_nothing_can_measure_it():
+    """With no times on the bars *and* no declared cadence there is nothing to
+    pro-rate an annual rate over, so the wallet charges nothing rather than
+    inventing a year length."""
+    untimed = [
+        ta.Snapshot({"S": ta.Atom(ta.Candle(100.0, 100.1, 99.9, 100.0, 1.0))})
+        for _ in range(60)
+    ]
+    wallet = ta.PaperWallet(10_000.0, max_gross=3.0, margin_rate=0.08)
+    ta.load_spec(_LEVERED).run(wallet, untimed)
+    assert wallet.equity == pytest.approx(10_000.0)
 
 
 def test_margin_settings_reject_nonsense():

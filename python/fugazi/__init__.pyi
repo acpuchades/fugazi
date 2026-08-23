@@ -875,6 +875,11 @@ def day_of_year(source: AtomSource | None = ...) -> Indicator:
 def dmi(period: int = ...) -> MultiIndicator:
     """Directional movement index: {plus_di, minus_di} (Wilder's 14 by default)."""
     ...
+def dollar_bars(threshold: Any, inner: Any) -> Indicator:
+    """Aggregate base candles into one bar per `threshold` units of traded **notional**
+    (`typical x volume`), and run `inner` over that stream. See [`volume_bars`].
+    """
+    ...
 def donchian(high: Any, low: Any, period: int = ...) -> MultiIndicator:
     """Donchian channel from a `high` source and a `low` source: {upper, middle,
     lower}. Both sources must be rooted in the same domain. `period` defaults to the
@@ -1238,6 +1243,12 @@ def volatility_of(strategy: Any, period: int, bars_per_year: float) -> Indicator
     ...
 def volume(source: AtomSource | None = ...) -> Indicator:
     """Source: the bar's volume."""
+    ...
+def volume_bars(threshold: Any, inner: Any) -> Indicator:
+    """Aggregate base candles into one bar per `threshold` units of traded **volume**,
+    and run `inner` (any candle-rooted Real source) over that stream. `resample()`'s
+    information-driven sibling: identical in every respect except what closes a bar.
+    """
     ...
 def vwap(period: int) -> Indicator:
     """Volume-weighted average price over `period` (rolling)."""

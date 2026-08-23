@@ -247,6 +247,23 @@ pub(super) fn default_low() -> Box<NodeSpec> {
     Box::new(NodeSpec::Low { source: None })
 }
 /// Default candle source for bar indicators — the current bar itself.
+/// Validate a sampler's bucket threshold as a **build error**, not a panic.
+///
+/// `Accumulate::new` asserts, which is right for a Rust caller who wrote the
+/// number in code. A threshold reaching us from a YAML document is *input*, and
+/// bad input is reported — the same rule every other `try_build` arm follows.
+/// `NonZeroUsize` does this job for `!resample`'s `every`; a `Real` has no such
+/// spelling, so the check is explicit here.
+fn positive_threshold(threshold: Real, tag: &str) -> Result<Real, String> {
+    if threshold.is_finite() && threshold > 0.0 {
+        Ok(threshold)
+    } else {
+        Err(format!(
+            "`{tag}` needs a finite threshold greater than zero, got {threshold}"
+        ))
+    }
+}
+
 pub(super) fn default_bar_source() -> Box<NodeSpec> {
     Box::new(NodeSpec::Current { source: None })
 }
@@ -2045,6 +2062,48 @@ pub enum NodeSpec {
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
+    /// Aggregates base candles into one bar per `threshold` units of traded
+    /// **quantity**, then runs `inner` over each completed bar. Sibling of
+    /// [`Resample`](NodeSpec::Resample) in every respect except what closes a
+    /// bar: volume rather than elapsed bars. Emits on the tick that completes a
+    /// bucket and `None` between, so a recursive `inner` recurses over the
+    /// sampled bars rather than the base ones; wrap the downstream chain in
+    /// [`Latch`](NodeSpec::Latch) for per-base-tick reads.
+    ///
+    /// A bucket closes on the first candle that takes it *at or past* the
+    /// threshold and the overshoot is not carried, so precision is bounded by
+    /// how fine the base candles are.
+    #[grammar(kind = "operator")]
+    VolumeBars {
+        /// Traded quantity that fills one bar.
+        threshold: Real,
+        /// Source run over each completed bar.
+        inner: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
+        #[serde(default = "default_bar_source")]
+        source: Box<NodeSpec>,
+    },
+    /// Aggregates base candles into one bar per `threshold` units of traded
+    /// **notional** (`typical x volume`), then runs `inner` over each completed bar. Sibling of
+    /// [`Resample`](NodeSpec::Resample) in every respect except what closes a
+    /// bar: notional rather than elapsed bars. Emits on the tick that completes a
+    /// bucket and `None` between, so a recursive `inner` recurses over the
+    /// sampled bars rather than the base ones; wrap the downstream chain in
+    /// [`Latch`](NodeSpec::Latch) for per-base-tick reads.
+    ///
+    /// A bucket closes on the first candle that takes it *at or past* the
+    /// threshold and the overshoot is not carried, so precision is bounded by
+    /// how fine the base candles are.
+    #[grammar(kind = "operator")]
+    DollarBars {
+        /// Traded notional that fills one bar.
+        threshold: Real,
+        /// Source run over each completed bar.
+        inner: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
+        #[serde(default = "default_bar_source")]
+        source: Box<NodeSpec>,
+    },
     /// Passthrough wrapper that reports `unstable_bars() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
     /// (which counts up to `stable_bars()`) no longer waits for this
@@ -3205,6 +3264,20 @@ enum NodeSpecRaw {
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
+    /// See [`NodeSpec::VolumeBars`].
+    VolumeBars {
+        threshold: Real,
+        inner: Box<NodeSpec>,
+        #[serde(default = "default_bar_source")]
+        source: Box<NodeSpec>,
+    },
+    /// See [`NodeSpec::DollarBars`].
+    DollarBars {
+        threshold: Real,
+        inner: Box<NodeSpec>,
+        #[serde(default = "default_bar_source")]
+        source: Box<NodeSpec>,
+    },
     /// Passthrough wrapper that reports `unstable_bars() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
     /// (which counts up to `stable_bars()`) no longer waits for this
@@ -3713,6 +3786,24 @@ impl From<NodeSpecRaw> for NodeSpec {
                 source,
             } => NodeSpec::Resample {
                 every,
+                inner,
+                source,
+            },
+            NodeSpecRaw::VolumeBars {
+                threshold,
+                inner,
+                source,
+            } => NodeSpec::VolumeBars {
+                threshold,
+                inner,
+                source,
+            },
+            NodeSpecRaw::DollarBars {
+                threshold,
+                inner,
+                source,
+            } => NodeSpec::DollarBars {
+                threshold,
                 inner,
                 source,
             },
@@ -5096,6 +5187,32 @@ impl NodeSpec {
                 let resampled = crate::runtime::erase(self::Resample::new(candle_src, every.get()));
                 let inner_dyn = inner.try_build(anchor, book, portfolio_book, schema, root)?;
                 crate::runtime::chain_over_candle(resampled, inner_dyn)
+            }
+            VolumeBars {
+                threshold,
+                inner,
+                source,
+            } => {
+                let threshold = positive_threshold(*threshold, "volume_bars")?;
+                let candle_src = candle(source)?;
+                let sampled = crate::runtime::erase(crate::indicators::VolumeBars::new(
+                    candle_src, threshold,
+                ));
+                let inner_dyn = inner.try_build(anchor, book, portfolio_book, schema, root)?;
+                crate::runtime::chain_over_candle(sampled, inner_dyn)
+            }
+            DollarBars {
+                threshold,
+                inner,
+                source,
+            } => {
+                let threshold = positive_threshold(*threshold, "dollar_bars")?;
+                let candle_src = candle(source)?;
+                let sampled = crate::runtime::erase(crate::indicators::DollarBars::new(
+                    candle_src, threshold,
+                ));
+                let inner_dyn = inner.try_build(anchor, book, portfolio_book, schema, root)?;
+                crate::runtime::chain_over_candle(sampled, inner_dyn)
             }
             Unstable { source } => source
                 .try_build(anchor, book, portfolio_book, schema, root)?

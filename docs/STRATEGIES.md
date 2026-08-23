@@ -1550,6 +1550,8 @@ not a row that says `NaN`.
 | `!rolling_max`, `!rolling_min` | `{ period, source = close }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` or `<source>` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (one `source:` slot for any output type, signals included) |
+| `!volume_bars` | `{ threshold, inner, source = !current }` | as `!resample`, but a bar closes once `threshold` units of **volume** have traded rather than after N base bars. `inner` is **required** |
+| `!dollar_bars` | `{ threshold, inner, source = !current }` | as `!volume_bars`, measuring traded **notional** (`typical × volume`) instead of quantity. `inner` is **required** |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
 
@@ -1604,7 +1606,7 @@ unreported*: the tag emits `None` for that bar and the next real sample folds
 into the value carried across the gap. `None` here means "no reading this bar",
 never "the total reset".
 
-#### Cross-timeframe composition — `!resample` + `!latch`
+#### Cross-timeframe composition — `!resample` / `!volume_bars` / `!dollar_bars` + `!latch`
 
 There is no dedicated cross-timeframe tag; compose `!resample` and `!latch`
 directly. `!resample { every: N, inner: <source> }` runs `inner` over the
@@ -1633,6 +1635,47 @@ long:
         every: 4
         inner: !ema { period: 20, source: close }
 ```
+
+##### Information-driven sampling — `!volume_bars` and `!dollar_bars`
+
+`!volume_bars { threshold: V, inner: … }` and `!dollar_bars { threshold: D,
+inner: … }` are `!resample` with a different rule for *what closes a bar*:
+traded quantity, or traded notional (`typical × volume`), rather than a count of
+base bars. Everything else is identical — same `inner`, same optional `source:`,
+same `None` between emissions, same requirement to wrap in `!latch` for
+per-base-tick reads, same ordering rule above.
+
+```yaml
+# Base bars: 1m. Sample every $1M of traded notional, and run an EMA-20 over
+# the resulting dollar bars.
+root: BTC
+long:
+  enter: !crosses_above
+    lhs: close
+    rhs: !latch
+      source: !dollar_bars
+        threshold: 1000000
+        inner: !ema { period: 20, source: close }
+```
+
+**Why bother.** Time bars over-sample a quiet market and under-sample a busy
+one, which makes their returns heteroskedastic and serially dependent. Sampling
+on activity gives returns closer to IID — which is the assumption the
+significance layer leans on (`psr`, `selection.deflated_sharpe`, and the block
+bootstrap behind `--montecarlo`). The gain is statistical, not cosmetic.
+
+**Two approximations, both real.** A bucket is made of *whole base candles*, so
+it closes on the first candle that takes the running total at or past the
+threshold and the overshoot is **not** carried forward — feed finer base candles
+to shrink it. And warm-up is not a bar count: how many base candles fill a
+bucket is data, so `warm_up_bars()` reports the earliest an emission *could*
+land, and the first one may arrive well after it.
+
+**Not the same as an index-sampled input.** These tags sample *inside* one run,
+which still has a time-bar clock: the run's cadence, annualization and `-w`
+duration windows all still come from the base bars. Feeding fugazi bars that
+were already cut on volume or dollars is the other thing — see the `index`
+column in [CLI.md](CLI.md).
 
 **The resample's clock stays base-timeframe.** It's fed one base candle per
 tick and reports at that same cadence — the emitted `Option<Real>` marks
