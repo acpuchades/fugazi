@@ -1845,14 +1845,44 @@ mod tests {
         assert!(built.into_bool().is_err());
     }
 
+    /// **Superseded by D4.** `freq:` used to be parsed as a `Frequency` and a
+    /// non-duration was a build error. It is a [`StreamId`] now — an opaque
+    /// identifier — so an arbitrary one builds, and what it selects is decided
+    /// by matching rather than by parsing.
+    ///
+    /// [`StreamId`]: crate::types::StreamId
     #[test]
-    fn pick_rejects_a_malformed_frequency() {
-        let spec: NodeSpec = serde_norway::from_str("!pick { symbol: BTC, freq: banana }").unwrap();
-        let err = expr_build_err(&spec, &Schema::empty());
-        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
-        assert_eq!(trail, vec!["!pick"], "{err}");
-        assert!(message.contains("invalid frequency"), "{err}");
-        assert!(message.contains("banana"), "names the offender: {err}");
+    fn pick_accepts_an_arbitrary_stream_id_and_matches_on_it() {
+        use crate::types::{Atom, Candle, Snapshot, stream, symbol};
+
+        // Projected through `!close` so the chain is a Real source; the `!pick`
+        // is what is under test.
+        let spec: NodeSpec =
+            serde_norway::from_str("!close { source: !pick { symbol: BTC, freq: dollar-1e6 } }")
+                .unwrap();
+        let mut built = spec
+            .try_build(
+                &Position::new(),
+                &Book::new(1.0),
+                None,
+                &Schema::empty(),
+                Root::sole(),
+            )
+            .expect("an opaque stream id is not a malformed cadence")
+            .into_real()
+            .expect("a pick of a candle series is a Real source");
+
+        let bar = |c: Real| Atom::new(Candle::new(c, c, c, c, 1.0));
+        let mut snap = Snapshot::<crate::types::Symbol>::new();
+        // Same symbol, two streams: only the named one may be read.
+        snap.push(Some(symbol("BTC")), Some(stream("1d")), bar(10.0));
+        snap.push(Some(symbol("BTC")), Some(stream("dollar-1e6")), bar(99.0));
+
+        assert_eq!(
+            built.update(snap),
+            Some(99.0),
+            "the stream id selected the series, not the cadence parser"
+        );
     }
 
     #[test]

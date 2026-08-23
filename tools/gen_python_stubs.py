@@ -58,6 +58,8 @@ BY_PARAM = {
     "symbol": "str",
     "symbols": "Sequence[str]",
     "freq": "str | Frequency | None",
+    # An opaque stream id: any str, or a Frequency whose token is used.
+    "stream": "str | Frequency | None",
     "key": "str",
     "name": "str",
     "schema": "Schema",
@@ -237,7 +239,7 @@ MEMBER_RETURNS = {
     ("Atom", "time"): "int | None",
     ("Atom", "is_priceable"): "bool",
     ("OverlayInfo", "schema"): "Schema",
-    ("Selector", "freq"): "Frequency | None",
+    ("Selector", "stream"): "str | None",
     ("Fill", "order"): "Order",
     ("Size", "value"): "float",
     ("Size", "units"): "Size",

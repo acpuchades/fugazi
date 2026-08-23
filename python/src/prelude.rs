@@ -48,7 +48,7 @@ pub(crate) use fugazi_core::strategies::{
 };
 pub(crate) use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
-    Selector, Snapshot,
+    Selector, Snapshot, StreamId,
 };
 pub(crate) use fugazi_core::types::{Symbol, symbol as intern};
 pub(crate) use fugazi_core::wallet::{

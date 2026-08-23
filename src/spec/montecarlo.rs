@@ -397,7 +397,7 @@ impl RebuildPlan {
                         volume: shape.volume,
                     });
                 }
-                snap.push(sym.cloned(), freq, new_atom);
+                snap.push(sym.cloned(), freq.cloned(), new_atom);
             }
             out.push(snap);
         }

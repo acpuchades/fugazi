@@ -9,7 +9,7 @@
 use fugazi::indicator::Indicator;
 use fugazi::indicators::{Atr, Close, CurrentBar, Pick, Year};
 use fugazi::prelude::*;
-use fugazi::types::{Symbol, symbol as intern};
+use fugazi::types::{StreamId, Symbol, symbol as intern};
 use fugazi::{Frequency, Selector, Snapshot, Timestamp};
 
 fn atom_at(ms: i64, close: Real) -> Atom {
@@ -20,10 +20,10 @@ fn atom(close: Real) -> Atom {
     Atom::new(Candle::new(1.0, 2.0, 0.5, close, 100.0))
 }
 
-fn snap(pairs: &[(Option<Symbol>, Option<Frequency>, Atom)]) -> Snapshot<Symbol> {
+fn snap(pairs: &[(Option<Symbol>, Option<StreamId>, Atom)]) -> Snapshot<Symbol> {
     let mut s = Snapshot::new();
     for (sym, freq, a) in pairs {
-        s.push(sym.clone(), *freq, a.clone());
+        s.push(sym.clone(), freq.clone(), a.clone());
     }
     s
 }
@@ -101,10 +101,18 @@ fn missing_asset_stays_none_downstream() {
 
 #[test]
 fn pick_by_freq_wildcards_symbol() {
-    let mut hourly = Pick::<Symbol>::matching(Selector::by_freq(Frequency::Hour(1)));
+    let mut hourly = Pick::<Symbol>::matching(Selector::by_stream(Frequency::Hour(1)));
     let s_ = snap(&[
-        (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
-        (s("ETH"), Some(Frequency::Day(1)), atom(50.0)),
+        (
+            s("BTC"),
+            Some(StreamId::from(Frequency::Hour(1))),
+            atom(100.0),
+        ),
+        (
+            s("ETH"),
+            Some(StreamId::from(Frequency::Day(1))),
+            atom(50.0),
+        ),
     ]);
     let out = hourly.update(s_).expect("some hourly entry");
     assert_eq!(out.candle.unwrap().close, 100.0);
@@ -114,8 +122,16 @@ fn pick_by_freq_wildcards_symbol() {
 fn pick_exact_disambiguates_between_frequencies() {
     let mut btc_hour = Pick::<Symbol>::matching(Selector::exact("BTC", Frequency::Hour(1)));
     let s_ = snap(&[
-        (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
-        (s("BTC"), Some(Frequency::Day(1)), atom(300.0)),
+        (
+            s("BTC"),
+            Some(StreamId::from(Frequency::Hour(1))),
+            atom(100.0),
+        ),
+        (
+            s("BTC"),
+            Some(StreamId::from(Frequency::Day(1))),
+            atom(300.0),
+        ),
     ]);
     assert_eq!(
         btc_hour.update(s_).map(|a| a.candle.unwrap().close),

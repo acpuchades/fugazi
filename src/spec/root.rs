@@ -187,6 +187,16 @@ impl RootSpec {
     /// not declare one" — so a wrapped or computed root returns `None` and the
     /// chain behaves exactly as it did before `root:` existed. It degrades; it
     /// does not refuse.
+    ///
+    /// **This is the one place a [`StreamId`] is read back as a cadence, and it
+    /// is why the field can be opaque everywhere else.** The returned string is
+    /// a stream id, not a parsed `Frequency`; every caller finishes the job with
+    /// `Frequency::from_str(f).ok()`, so a stream that names something other
+    /// than a duration — `dollar-1e6`, a session id — simply yields `None` here
+    /// and the precedence chain moves to the next rung. A duration is one
+    /// parseable form of a stream id, and this is where the parse happens.
+    ///
+    /// [`StreamId`]: crate::types::StreamId
     pub fn declared_freq(&self) -> Option<&str> {
         self.tree.get("pick")?.get("freq")?.as_str()
     }

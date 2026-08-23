@@ -1101,9 +1101,24 @@ source on its own:
   rhs: !close { source: !pick { symbol: ETH } }
 ```
 
-Both fields are optional: `symbol` names the asset, `freq` disambiguates a
-cross-frequency snapshot (`!pick { symbol: BTC, freq: 1h }`, the same `N<unit>`
-alphabet `--frequency` uses). An empty `!pick {}` — and every leaf that omits
+Both fields are optional: `symbol` names the asset, `freq` names the **stream**
+— which of a symbol's series to read.
+
+A bar cadence is the common answer (`!pick { symbol: BTC, freq: 1h }`, the same
+`N<unit>` alphabet `--frequency` uses), but it is not the only one. The field is
+an **opaque identifier**, matched verbatim against the stream tag the loader
+attached; it is not parsed as a duration, so `!pick { symbol: BTC, freq:
+dollar-1e6 }` is as valid as `1h`. That is what lets two series of one symbol
+coexist when neither is distinguished by a cadence — volume bars at two
+thresholds, a settlement series beside a spot one, one venue's book beside
+another's.
+
+Only one place still reads it as a cadence: a document's `root:`, whose declared
+stream joins the CLI's bar-cadence precedence chain. There it is parsed as a
+`Frequency` if it can be, and simply skipped if it cannot — so naming a
+non-duration stream costs you the declared-cadence rung, nothing else.
+
+An empty `!pick {}` — and every leaf that omits
 `source:` — resolves to the context's **blessed series**: the document's own
 `root:` in a single-asset spec, the leg's symbol in a basket or multi-asset
 one. A pairs document has no blessed series — two legs, neither privileged — so

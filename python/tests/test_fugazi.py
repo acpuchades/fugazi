@@ -3257,42 +3257,50 @@ def test_selector_construction_forms():
     # no-query single-entry unpack.
     assert ta.Selector().is_empty()
     assert ta.Selector(symbol="BTC").symbol == "BTC"
-    assert ta.Selector(symbol="BTC").freq is None
-    assert ta.Selector(freq="1h").symbol is None
-    assert str(ta.Selector(freq="1h").freq) == "1h"
-    assert ta.Selector(symbol="BTC", freq="1h").symbol == "BTC"
-    # `freq` accepts a Frequency instance too, not just a str.
-    assert ta.Selector(freq=ta.Frequency("1h")).freq == ta.Frequency("1h")
+    assert ta.Selector(symbol="BTC").stream is None
+    assert ta.Selector(stream="1h").symbol is None
+    assert ta.Selector(stream="1h").stream == "1h"
+    assert ta.Selector(symbol="BTC", stream="1h").symbol == "BTC"
+    # `stream` accepts a Frequency instance too — a cadence is one spelling of a
+    # stream id, and it is stored as its token.
+    assert ta.Selector(stream=ta.Frequency("1h")).stream == "1h"
+    # And an id that is not a duration at all, which is the point of the type.
+    assert ta.Selector(symbol="BTC", stream="dollar-1e6").stream == "dollar-1e6"
 
 
 def test_selector_matches_wildcard_semantics():
-    query = ta.Selector(symbol="BTC")  # freq is a wildcard
-    assert query.matches(ta.Selector(symbol="BTC", freq="1h"))
+    query = ta.Selector(symbol="BTC")  # stream is a wildcard
+    assert query.matches(ta.Selector(symbol="BTC", stream="1h"))
     assert query.matches(ta.Selector(symbol="BTC"))
-    assert not query.matches(ta.Selector(symbol="ETH", freq="1h"))
+    assert not query.matches(ta.Selector(symbol="ETH", stream="1h"))
     # An empty query matches every storage entry.
     empty = ta.Selector()
     assert empty.matches(ta.Selector(symbol="BTC"))
-    assert empty.matches(ta.Selector(symbol="ETH", freq="1d"))
+    assert empty.matches(ta.Selector(symbol="ETH", stream="1d"))
+    # A stream query discriminates two streams of one symbol — the case a
+    # closed enum of durations could not express.
+    dollars = ta.Selector(symbol="BTC", stream="dollar-1e6")
+    assert dollars.matches(ta.Selector(symbol="BTC", stream="dollar-1e6"))
+    assert not dollars.matches(ta.Selector(symbol="BTC", stream="1d"))
 
 
 def test_snapshot_accepts_selector_keys():
     snap = ta.Snapshot(
         {
-            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
-            ta.Selector(symbol="BTC", freq="1d"): _atom(ms=1, close=300.0),
+            ta.Selector(symbol="BTC", stream="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="BTC", stream="1d"): _atom(ms=1, close=300.0),
         }
     )
     # Exact lookup disambiguates.
-    exact = snap[ta.Selector(symbol="BTC", freq="1h")]
+    exact = snap[ta.Selector(symbol="BTC", stream="1h")]
     assert exact.candle.close == 100.0
 
 
 def test_snapshot_find_wildcards_over_freq():
     snap = ta.Snapshot(
         {
-            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
-            ta.Selector(symbol="ETH", freq="1h"): _atom(ms=1, close=50.0),
+            ta.Selector(symbol="BTC", stream="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="ETH", stream="1h"): _atom(ms=1, close=50.0),
         }
     )
     # A symbol-only query wildcards freq — finds the BTC entry.
@@ -3305,7 +3313,7 @@ def test_snapshot_tuple_key_coerces_to_selector():
     snap = ta.Snapshot()
     snap[("BTC", "1h")] = _atom(ms=1, close=100.0)
     # Round-tripped through Selector::exact.
-    assert snap[ta.Selector(symbol="BTC", freq="1h")].candle.close == 100.0
+    assert snap[ta.Selector(symbol="BTC", stream="1h")].candle.close == 100.0
 
 
 def test_pick_no_query_unpacks_single_entry_snapshot():
@@ -3823,7 +3831,7 @@ def _pickle_cases():
         "Atom": atom,
         "Snapshot": snapshot,
         "Frequency": ta.Frequency("1h"),
-        "Selector": ta.Selector(symbol="BTC", freq=ta.Frequency("1d")),
+        "Selector": ta.Selector(symbol="BTC", stream=ta.Frequency("1d")),
         "Size": ta.Size.value_frac(0.5),
         "Order": order,
         "Fill": fill,

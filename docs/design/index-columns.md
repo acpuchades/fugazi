@@ -1,6 +1,6 @@
 # Index columns — generalising the bar clock
 
-**Status:** Stages 1-3 implemented on `feat/index-columns`. Stage 3 item 9 (D4/B6, the stream discriminant) is deliberately still open — see *Staging*.
+**Status:** Stages 1-3 implemented on `feat/index-columns`, D4 included. B6 (freq-scoped `--costs`) is the one item left — see *Staging*.
 **Scope:** replace the assumption "a bar stream is indexed by wall-clock time"
 with "a bar stream is indexed by an *ordered index*, of which time is one kind".
 
@@ -109,10 +109,22 @@ closed enum of durations, but `DataFrame` already keys the freq component as a
 **verbatim uninterpreted string**. Under an index world that field means "which
 stream of this symbol", of which a duration is one parseable form.
 
-Low risk: TODO.md records that the freq tag is never pushed under `run` at all
-(the drivers push `None`), so nothing downstream depends on it being a duration
-today. Deferred to Stage 3 regardless — it is not needed for single-symbol
-event bars, which is where the value is.
+**Done.** `Selector.freq: Option<Frequency>` is now `Selector.stream:
+Option<StreamId>`, an opaque `Arc<str>`. Two things made this cheaper than it
+looked:
+
+- The `!pick` build sites *parsed* the string with `Frequency::from_str` and
+  errored on anything else. Deleting that parse is the whole feature: an
+  identifier that is not a duration was previously a build error.
+- Exactly one caller still wants a cadence — `RootSpec::declared_freq`, which
+  already returned `Option<&str>` and whose callers already finish with
+  `Frequency::from_str(f).ok()`. So a non-duration stream falls through the
+  precedence chain by construction, with no new code.
+
+`StreamId` deliberately carries **no** precomputed hash, unlike `Symbol`.
+`Selector::matches` tests it only after the symbol matched, and tests
+`is_none()` first — true for every blessed root and basket leg — so the common
+path never touches the bytes.
 
 ### D5 — Refuse, don't guess
 
@@ -196,11 +208,11 @@ verified to fail against the old code first.
    home next to `!resample`. Dollar bars built from 1m klines are close enough
    for most work and need **no new data provider**: no provider serves anything
    but time bars today (`SeriesSource::atoms(symbol, interval, since, until)`).
-9. **D4** / **B6** — the stream discriminant. **Still open, deliberately.** It is
-   not needed for single-symbol event bars, which is where the value is, and
-   TODO.md records that the `freq` tag is never pushed under `run` at all — so
-   widening `Selector.freq` today would be a type change nothing consumes.
-   Revisit alongside the multi-cadence question it actually belongs to.
+9. **D4** — done, see above.
+10. **B6** — freq-scoped `--costs` (`SYMBOL[FREQ]:`) still matches on a parsed
+    `Frequency`. Left open: it is a *scope* grammar, where demanding a duration
+    is defensible, and nothing needs it to accept a stream id yet. The change is
+    mechanical when something does.
 
 ### Explicitly not in scope
 
@@ -229,6 +241,7 @@ verified to fail against the old code first.
 | `f23b6b2` | B4 (measured annualization), B2 (reworded `-w`), B7 (documented `volume_participation`'s degeneracy), B8 (verified no change needed) |
 | `b791dc7` | D3/B5 — `IndexKey`, the `index` column, the mixed-frame refusal, `Finding::IndexSampled` |
 | `733aada` | Stage 3 — `Accumulate<S, M>`, `!volume_bars` / `!dollar_bars`, Python parity, docs |
+| _(this)_ | D4 — `Selector.freq: Frequency` becomes `Selector.stream: StreamId` |
 
 Two things worth recording because they changed the design mid-flight:
 

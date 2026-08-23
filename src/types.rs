@@ -14,5 +14,5 @@
 pub use crate::market::{
     Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
 };
-pub use crate::snapshot::{Selector, Snapshot, Symbol, symbol};
+pub use crate::snapshot::{Selector, Snapshot, StreamId, Symbol, stream, symbol};
 pub use crate::time::{Frequency, Timestamp};

@@ -1360,6 +1360,9 @@ measured from the span the input covers. With `index` alone, carry charges
 nothing, the calendar leaves read `None` on every bar, and `--bars-per-year`
 must be passed explicitly.
 
+**If you already have a column named `index`,** it is now a reserved name and
+becomes the join key. Rename it (`index_level`, say) to keep it as an overlay.
+
 **A numeric index orders numerically.** `9` sorts before `10`, which a plain
 string key would not do. An `index` cell that is not an integer stays a label
 and sorts lexicographically — which is how a *shared non-numeric* key (a

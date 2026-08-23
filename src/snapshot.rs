@@ -276,12 +276,90 @@ pub fn symbol(name: impl AsRef<str>) -> Symbol {
     }
 }
 
+/// Which **stream** of a symbol a [`Snapshot`] entry belongs to — an opaque,
+/// caller-defined identifier.
+///
+/// # Why this is not a `Frequency`
+///
+/// It was one. A cadence is the overwhelmingly common answer, but it was never
+/// the *question*: what this field distinguishes is two series of the same
+/// symbol that must not be interleaved, and a bar cadence is only one reason
+/// for that. Volume bars at two thresholds, a settlement series beside a spot
+/// one, one venue's book beside another's — none of those is a duration, and
+/// under a closed enum of durations none of them is expressible.
+///
+/// The data layer already agreed: `DataFrame` keys its `freq` component as the
+/// **cell as written**, trimmed but never case-folded and never parsed. So the
+/// string was already the identity and `Frequency` was a lossy interpretation
+/// laid over it. This makes the identity the type, and leaves the
+/// interpretation to the one place that needs it — [`RootSpec::declared_freq`],
+/// which parses a stream id as a cadence when it can and answers `None` when it
+/// cannot. **A duration is one parseable form of a stream id, not its
+/// definition.**
+///
+/// [`RootSpec::declared_freq`]: crate::spec::root::RootSpec::declared_freq
+///
+/// # Why no precomputed hash, unlike [`Symbol`]
+///
+/// `Symbol` carries a hash because [`Snapshot::find`] rejects `N − 1` entries
+/// per lookup and same-length symbols forced a `memcmp` each time — measured at
+/// 47% of a 64-symbol backtest.
+///
+/// This field has neither property. [`Selector::matches`] tests it only after
+/// the symbol has already matched, and it tests `self.stream.is_none()` first —
+/// which is the case for every blessed root, every basket leg and every
+/// selector that does not name a stream, i.e. nearly all of them. So the common
+/// path never touches these bytes at all, and the uncommon one compares a
+/// two-or-three-character string against a handful of candidates. Adding a hash
+/// would cost memory on every snapshot entry to speed up a comparison that
+/// mostly does not happen.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamId(Arc<str>);
+
+impl StreamId {
+    /// The identifier's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for StreamId {
+    fn from(s: &str) -> Self {
+        StreamId(Arc::from(s))
+    }
+}
+
+impl From<String> for StreamId {
+    fn from(s: String) -> Self {
+        StreamId(Arc::from(s.as_str()))
+    }
+}
+
+/// A [`Frequency`] is one parseable form of a stream id — the common one, and
+/// the only one the calendar layer can do arithmetic on.
+impl From<Frequency> for StreamId {
+    fn from(f: Frequency) -> Self {
+        StreamId(Arc::from(f.as_token().as_str()))
+    }
+}
+
+/// Intern a stream identifier. Twin of [`symbol`].
+pub fn stream(id: impl AsRef<str>) -> StreamId {
+    StreamId(Arc::from(id.as_ref()))
+}
+
 /// A **selector**: a matching predicate naming *which* asset in a [`Snapshot`]
 /// a [`Pick`](crate::indicators::Pick) should read.
 ///
 /// Both fields are `Option` so a caller can specify only the ones they need:
 /// `Selector::by_symbol("BTC")` matches every BTC entry regardless of
-/// frequency, `Selector::by_freq(Frequency::Hour(1))` matches every hourly
+/// frequency, `Selector::by_stream(Frequency::Hour(1))` matches every hourly
 /// entry regardless of symbol, `Selector::exact(sym, freq)` matches a single
 /// tagged entry. A fully-empty selector (both fields `None`, the [`Default`])
 /// is legal — it stands for "no query at all" and drives [`Pick`](crate::indicators::Pick) onto the
@@ -303,7 +381,7 @@ pub fn symbol(name: impl AsRef<str>) -> Symbol {
 /// # Selector as a matcher, not a key
 ///
 /// A selector is a **predicate**, not the [`Snapshot`] entry key. [`Snapshot`]
-/// entries carry raw `(Option<Sym>, Option<Frequency>, Atom)` tuples; a
+/// entries carry raw `(Option<Sym>, Option<StreamId>, Atom)` tuples; a
 /// selector only decides whether it *matches* an entry. That means a
 /// snapshot never needs `Sym: Eq + Hash` (just `PartialEq` for the match
 /// predicate) and duplicates at push time are allowed — the first-match rule
@@ -311,14 +389,14 @@ pub fn symbol(name: impl AsRef<str>) -> Symbol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selector<Sym> {
     pub symbol: Option<Sym>,
-    pub freq: Option<Frequency>,
+    pub stream: Option<StreamId>,
 }
 
 impl<Sym> Default for Selector<Sym> {
     fn default() -> Self {
         Self {
             symbol: None,
-            freq: None,
+            stream: None,
         }
     }
 }
@@ -327,8 +405,8 @@ impl<Sym> Selector<Sym> {
     /// Build a selector. Both fields may be `None` — the empty selector is
     /// legal and stands for the [`Pick`](crate::indicators::Pick) single-entry-unpack path (see
     /// [`Selector::is_empty`]).
-    pub fn new(symbol: Option<Sym>, freq: Option<Frequency>) -> Self {
-        Self { symbol, freq }
+    pub fn new(symbol: Option<Sym>, stream: Option<StreamId>) -> Self {
+        Self { symbol, stream }
     }
 
     /// Selector matching every entry whose `symbol` equals `sym`, regardless
@@ -336,24 +414,23 @@ impl<Sym> Selector<Sym> {
     pub fn by_symbol(sym: impl Into<Sym>) -> Self {
         Self {
             symbol: Some(sym.into()),
-            freq: None,
+            stream: None,
         }
     }
 
-    /// Selector matching every entry whose `freq` equals `freq`, regardless
-    /// of symbol.
-    pub fn by_freq(freq: Frequency) -> Self {
+    /// Selector matching every entry on `stream`, regardless of symbol.
+    pub fn by_stream(stream: impl Into<StreamId>) -> Self {
         Self {
             symbol: None,
-            freq: Some(freq),
+            stream: Some(stream.into()),
         }
     }
 
-    /// Selector matching a single `(symbol, freq)` pair exactly.
-    pub fn exact(sym: impl Into<Sym>, freq: Frequency) -> Self {
+    /// Selector matching a single `(symbol, stream)` pair exactly.
+    pub fn exact(sym: impl Into<Sym>, stream: impl Into<StreamId>) -> Self {
         Self {
             symbol: Some(sym.into()),
-            freq: Some(freq),
+            stream: Some(stream.into()),
         }
     }
 
@@ -361,7 +438,7 @@ impl<Sym> Selector<Sym> {
     /// treats as a single-entry unpack ([`Snapshot::sole_atom_or_panic`]) rather than
     /// a structural match.
     pub fn is_empty(&self) -> bool {
-        self.symbol.is_none() && self.freq.is_none()
+        self.symbol.is_none() && self.stream.is_none()
     }
 }
 
@@ -369,9 +446,11 @@ impl<Sym: PartialEq> Selector<Sym> {
     /// Match this selector as a query against a snapshot entry's `(symbol,
     /// freq)` tags: each `None` field on the query is a wildcard (matches any
     /// entry value); a `Some` field must equal the entry's field.
-    pub fn matches(&self, symbol: Option<&Sym>, freq: Option<Frequency>) -> bool {
+    pub fn matches(&self, symbol: Option<&Sym>, stream: Option<&StreamId>) -> bool {
         (self.symbol.is_none() || self.symbol.as_ref() == symbol)
-            && (self.freq.is_none() || self.freq == freq)
+            // Tested second and short-circuited first: see `StreamId`'s note on
+            // why this field needs no precomputed hash.
+            && (self.stream.is_none() || self.stream.as_ref() == stream)
     }
 }
 
@@ -379,7 +458,7 @@ impl<Sym: PartialEq> Selector<Sym> {
 ///
 /// The multi-asset input frame that lets a strategy or an indicator reason
 /// about more than one instrument at a time. Each entry is a
-/// `(Option<Sym>, Option<Frequency>, Atom)` tuple: the tag is what a
+/// `(Option<Sym>, Option<StreamId>, Atom)` tuple: the tag is what a
 /// [`Selector`] matches against; the atom is what a [`Pick`](crate::indicators::Pick)
 /// projects out.
 ///
@@ -545,7 +624,7 @@ impl<Sym: Hash> Entries<Sym> {
 
 /// One tagged atom inside a [`Snapshot`]: `(symbol, frequency, atom)`, with
 /// both tags optional. Named so the shared storage type stays readable.
-pub type Entry<Sym> = (Option<Sym>, Option<Frequency>, Atom);
+pub type Entry<Sym> = (Option<Sym>, Option<StreamId>, Atom);
 
 /// The panic text for an ambiguous [`Snapshot::sole_atom_or_panic`] unpack.
 ///
@@ -621,12 +700,12 @@ impl<Sym> Snapshot<Sym> {
     /// Copy-on-write: mutates in place while this snapshot is the sole owner of
     /// its entries (the case during driver construction), and clones them first
     /// if it is not.
-    pub fn push(&mut self, symbol: Option<Sym>, freq: Option<Frequency>, atom: Atom)
+    pub fn push(&mut self, symbol: Option<Sym>, stream: Option<StreamId>, atom: Atom)
     where
         Sym: Clone,
     {
         let e = Arc::make_mut(&mut self.entries);
-        e.rows.push((symbol, freq, atom));
+        e.rows.push((symbol, stream, atom));
         e.invalidate();
     }
 
@@ -641,11 +720,11 @@ impl<Sym> Snapshot<Sym> {
     }
 
     /// Iterate over `(symbol, freq, atom)` triples in insertion order.
-    pub fn iter(&self) -> impl Iterator<Item = (Option<&Sym>, Option<Frequency>, &Atom)> {
+    pub fn iter(&self) -> impl Iterator<Item = (Option<&Sym>, Option<&StreamId>, &Atom)> {
         self.entries
             .rows
             .iter()
-            .map(|(s, f, a)| (s.as_ref(), *f, a))
+            .map(|(s, f, a)| (s.as_ref(), f.as_ref(), a))
     }
 
     /// The first atom in the snapshot, or `None` if empty. Never panics,
@@ -780,7 +859,7 @@ impl<Sym: PartialEq> Snapshot<Sym> {
             _ => 0,
         };
         rows[from..].iter().find_map(|(s, f, a)| {
-            if query.matches(s.as_ref(), *f) {
+            if query.matches(s.as_ref(), f.as_ref()) {
                 Some(a)
             } else {
                 None
@@ -797,7 +876,8 @@ impl<Sym: PartialEq> Snapshot<Sym> {
         Sym: Clone,
     {
         let e = Arc::make_mut(&mut self.entries);
-        e.rows.retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
+        e.rows
+            .retain(|(s, f, _)| !query.matches(s.as_ref(), f.as_ref()));
         e.invalidate();
     }
 }
@@ -1061,7 +1141,7 @@ mod index_tests {
         snap.entries
             .rows
             .iter()
-            .find_map(|(s, f, a)| q.matches(s.as_ref(), *f).then_some(a))
+            .find_map(|(s, f, a)| q.matches(s.as_ref(), f.as_ref()).then_some(a))
     }
 
     /// Wide enough to index, with duplicate symbols on different cadences and
@@ -1076,13 +1156,17 @@ mod index_tests {
             let s = symbol(format!("S{i:02}"));
             snap.push(
                 Some(s.clone()),
-                Some(Frequency::Hour(1)),
+                Some(StreamId::from(Frequency::Hour(1))),
                 atom(100.0 + i as Real),
             );
             // Every third symbol appears twice — once hourly, once daily — so
             // first-match-wins and freq-qualified lookups are both exercised.
             if i % 3 == 0 {
-                snap.push(Some(s), Some(Frequency::Day(1)), atom(900.0 + i as Real));
+                snap.push(
+                    Some(s),
+                    Some(StreamId::from(Frequency::Day(1))),
+                    atom(900.0 + i as Real),
+                );
             }
         }
         assert!(
@@ -1090,7 +1174,7 @@ mod index_tests {
             "test must exercise the index"
         );
 
-        let mut queries = vec![Selector::default(), Selector::by_freq(Frequency::Day(1))];
+        let mut queries = vec![Selector::default(), Selector::by_stream(Frequency::Day(1))];
         for i in 0..42 {
             let s = symbol(format!("S{i:02}")); // S40/S41 are absent
             queries.push(Selector::by_symbol(s.clone()));

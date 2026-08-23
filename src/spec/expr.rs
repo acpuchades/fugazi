@@ -41,9 +41,8 @@ use crate::indicators::compare;
 use crate::runtime::{AnyChain, AtomChain, BoolChain, CandleChain, RealChain, StrChain, any};
 use crate::spec::dyn_indicator::PayloadType;
 
+use crate::Selector;
 use crate::types::Symbol;
-use crate::{Frequency, Selector};
-use std::str::FromStr;
 
 /// Where a `source:`-omitted leaf reads from — the **blessed series** of the
 /// context doing the build, or the reason there isn't one.
@@ -167,15 +166,12 @@ pub(super) fn root_source(
         // does not have. See `RootSpec::as_pick`.
         Some(spec) if spec.as_pick().is_some() => {
             let (symbol, freq) = spec.as_pick().expect("just checked");
-            let f = match freq {
-                Some(s) => Some(
-                    Frequency::from_str(s).map_err(|e| format!("invalid frequency {s:?}: {e}"))?,
-                ),
-                None => None,
-            };
+            // Taken verbatim: a stream id is opaque, and a cadence is only its
+            // most common spelling. Parsing it here used to reject every
+            // identifier that was not a duration.
             let selector = Selector::<Symbol> {
                 symbol: symbol.map(crate::types::symbol),
-                freq: f,
+                stream: freq.map(crate::types::stream),
             };
             Ok(crate::runtime::erase(if selector.is_empty() {
                 Pick::<Symbol>::new()
@@ -5422,15 +5418,9 @@ fn build_pick(
     let sym = symbol
         .map(crate::types::symbol)
         .or_else(|| root.blessed_symbol());
-    let f = match freq {
-        Some(s) => {
-            Some(Frequency::from_str(s).map_err(|e| format!("invalid frequency {s:?}: {e}"))?)
-        }
-        None => None,
-    };
     let selector = Selector::<Symbol> {
         symbol: sym,
-        freq: f,
+        stream: freq.map(crate::types::stream),
     };
     Ok(if selector.is_empty() {
         // A bare `!pick {}` naming neither symbol nor freq, with no root to

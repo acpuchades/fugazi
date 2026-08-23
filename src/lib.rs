@@ -110,7 +110,7 @@ pub use market::{
 pub use metrics::{DrawdownSegment, Trade};
 pub use portfolio::{Portfolio, PortfolioBuilder};
 pub use signal::Signal;
-pub use snapshot::{Selector, Snapshot, Symbol, symbol};
+pub use snapshot::{Selector, Snapshot, StreamId, Symbol, stream, symbol};
 pub use strategy::Strategy;
 pub use time::{Frequency, Timestamp};
 pub use wallet::{
@@ -127,7 +127,7 @@ pub mod prelude {
         Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     };
     pub use crate::signal::Signal;
-    pub use crate::snapshot::{Selector, Snapshot, Symbol, symbol};
+    pub use crate::snapshot::{Selector, Snapshot, StreamId, Symbol, stream, symbol};
     pub use crate::strategy::Strategy;
     pub use crate::time::{Frequency, Timestamp};
     pub use crate::wallet::{

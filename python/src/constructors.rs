@@ -136,7 +136,7 @@ fn extract_snapshot_with(
                 continue;
             }
             let key = coerce_selector(&k)?;
-            out.push(key.symbol, key.freq, atom);
+            out.push(key.symbol, key.stream, atom);
         }
         return Ok(out);
     }
@@ -1348,7 +1348,7 @@ pub(crate) fn pick(
             // tuple, honor it verbatim. Otherwise treat it as a symbol str.
             coerce_selector(s)?
         }
-        (None, Some(f)) => Selector::by_freq(coerce_frequency(f)?),
+        (None, Some(f)) => Selector::by_stream(coerce_stream(f)?),
         (Some(s), Some(f)) => {
             let sym = s.extract::<String>().map_err(|_| {
                 PyTypeError::new_err(
@@ -2593,13 +2593,13 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     let existing_len = existing.len();
 
     // Pass 1: collect each (symbol, freq) series in first-appearance order.
-    type Key = (Option<Symbol>, Option<Frequency>);
+    type Key = (Option<Symbol>, Option<StreamId>);
     let mut order: Vec<Key> = Vec::new();
     let mut index: HashMap<Key, usize> = HashMap::new();
     let mut series_atoms: Vec<Vec<Atom>> = Vec::new();
     for snap in &snaps {
         for (sym, freq, atom) in snap.iter() {
-            let key = (sym.cloned(), freq);
+            let key = (sym.cloned(), freq.cloned());
             let i = *index.entry(key.clone()).or_insert_with(|| {
                 order.push(key.clone());
                 series_atoms.push(Vec::new());
@@ -2629,7 +2629,7 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     for snap in &snaps {
         let mut rebuilt = Snapshot::<Symbol>::new();
         for (sym, freq, _) in snap.iter() {
-            let key = (sym.cloned(), freq);
+            let key = (sym.cloned(), freq.cloned());
             let i = index[&key];
             let c = cursor.entry(key.clone()).or_insert(0);
             let aug = augmented[i][*c].clone();
