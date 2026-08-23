@@ -1373,7 +1373,9 @@ It's a `,`-separated list of terms, itself repeatable:
 - `NAME=value` — set one placeholder. The value parses as a JSON scalar
   (`FAST=3` → number, `TRUE=true` → bool, `SYM=BTC` → string). On
   `optimize`, `NAME=[v1,v2,…]` or `NAME=start..end[:step]` declares a
-  [sweep axis](#sweep-axes).
+  [sweep axis](#sweep-axes). A range is inclusive at both ends, needs a
+  positive step, and may expand to at most **1 000 000 points** — past that it
+  is an error naming the count rather than an allocation the OOM killer ends.
 - `@file.yml` — load a whole `NAME: value` mapping. See
   [`examples/params.yml`](../examples/params.yml).
 

@@ -49,7 +49,7 @@
 use std::collections::HashMap;
 
 use crate::prelude::*;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use serde_json::Value;
 
@@ -735,12 +735,17 @@ pub fn split_axes(params: &HashMap<String, Value>) -> Result<Partition> {
                 reject_repeated_values(k, items)?;
                 axes.push((k.clone(), items.clone()));
             }
-            Value::String(s) => match try_parse_range(s) {
-                Some(values) => axes.push((k.clone(), values)),
-                None => {
-                    fixed.insert(k.clone(), v.clone());
+            // The fallible spelling: a range that is well-formed but too
+            // large to materialize is an error naming the count, not a scalar
+            // string that later reads as "the grid has only 1 point".
+            Value::String(s) => {
+                match parse_range(s).with_context(|| format!("--grid axis `{k}`"))? {
+                    Some(values) => axes.push((k.clone(), values)),
+                    None => {
+                        fixed.insert(k.clone(), v.clone());
+                    }
                 }
-            },
+            }
             _ => {
                 fixed.insert(k.clone(), v.clone());
             }
@@ -806,56 +811,115 @@ fn reject_repeated_values(name: &str, items: &[Value]) -> Result<()> {
     Ok(())
 }
 
+/// How many points one axis may expand to.
+///
+/// A range is materialized before anything counts it, so `FAST=1..100000000000`
+/// spent minutes allocating a hundred billion `Value`s and was killed by the
+/// OOM killer — no message, no grid, no way to tell it from a slow sweep. The
+/// count is arithmetic, so it can be checked before the allocation.
+///
+/// A million points is already an absurd sweep — at a millisecond a backtest
+/// that is a quarter of an hour on **one** axis, and `cartesian` multiplies
+/// axes — so this is a bound on the unusable, not on the ambitious.
+pub const MAX_AXIS_POINTS: usize = 1_000_000;
+
 /// `start..end[:step]` → the inclusive integer or float sequence. `None` for a
 /// string that doesn't look like a range (so the caller falls back to
 /// treating it as a fixed scalar string).
+///
+/// The infallible face of [`parse_range`]: a range that *is* well-formed but too
+/// large to materialize reads as "not a range" here, which is why every caller
+/// that has an error channel uses `parse_range` instead.
 pub fn try_parse_range(s: &str) -> Option<Vec<Value>> {
+    parse_range(s).ok().flatten()
+}
+
+/// `start..end[:step]` → the inclusive sequence, `Ok(None)` for a string that is
+/// not range-shaped, and `Err` for one that is but cannot be expanded — see
+/// [`MAX_AXIS_POINTS`].
+pub fn parse_range(s: &str) -> Result<Option<Vec<Value>>> {
+    /// Refuse an expansion this large before allocating it.
+    fn check(points: u128, s: &str) -> Result<()> {
+        if points > MAX_AXIS_POINTS as u128 {
+            bail!(
+                "`{s}` expands to {points} grid points, over the {MAX_AXIS_POINTS} an \
+                 axis may hold. Widen the step or narrow the range."
+            );
+        }
+        Ok(())
+    }
     let (range, step) = match s.split_once(':') {
         Some((r, st)) => (r, Some(st)),
         None => (s, None),
     };
-    let (start, end) = range.split_once("..")?;
+    let Some((start, end)) = range.split_once("..") else {
+        return Ok(None);
+    };
     let start = start.trim();
     let end = end.trim();
     if start.is_empty() || end.is_empty() {
-        return None;
+        return Ok(None);
     }
     // Prefer an integer range when start/end/step are all integers — it keeps
     // JSON integer typing (which is how `--params FAST=5` reads), which the
     // strategy spec's `usize` fields need.
     if let (Ok(s0), Ok(s1)) = (start.parse::<i64>(), end.parse::<i64>()) {
         let step_i = match step {
-            Some(st) => st.trim().parse::<i64>().ok()?,
+            Some(st) => match st.trim().parse::<i64>() {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            },
             None => 1,
         };
         if step_i <= 0 || s1 < s0 {
-            return None;
+            return Ok(None);
         }
+        // In `i128`, so the span of a full `i64` range cannot itself overflow.
+        let span = (s1 as i128) - (s0 as i128);
+        check((span / step_i as i128) as u128 + 1, s)?;
         let mut out = Vec::new();
         let mut i = s0;
-        while i <= s1 {
+        // `s0 <= s1` is established above, so the first point always exists;
+        // stepping is `checked` because the increment past the last point can
+        // leave the `i64` range even when `s1` is inside it.
+        loop {
             out.push(Value::from(i));
-            i += step_i;
+            match i.checked_add(step_i) {
+                Some(next) if next <= s1 => i = next,
+                _ => break,
+            }
         }
-        return Some(out);
+        return Ok(Some(out));
     }
     // Float fallback for real-valued sweeps (thresholds, %s).
-    let s0 = start.parse::<f64>().ok()?;
-    let s1 = end.parse::<f64>().ok()?;
+    let (Ok(s0), Ok(s1)) = (start.parse::<f64>(), end.parse::<f64>()) else {
+        return Ok(None);
+    };
     let step_f = match step {
-        Some(st) => st.trim().parse::<f64>().ok()?,
+        Some(st) => match st.trim().parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        },
         None => 1.0,
     };
-    if step_f <= 0.0 || s1 < s0 {
-        return None;
+    // A non-finite bound or step is not a range: `nan` fails `step_f <= 0.0`
+    // (every comparison against it is false), then `x += nan` ends the loop on
+    // its first test and the axis comes out **empty** — a sweep with no rows,
+    // reported as if the user had asked for one point.
+    if !s0.is_finite() || !s1.is_finite() || !step_f.is_finite() {
+        return Ok(None);
     }
+    if step_f <= 0.0 || s1 < s0 {
+        return Ok(None);
+    }
+    check(((s1 - s0) / step_f).floor() as u128 + 1, s)?;
     let mut out = Vec::new();
     let mut x = s0;
     while x <= s1 + step_f * 1e-9 {
         out.push(Value::from(x));
         x += step_f;
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Cartesian product of the axes, preserving axis order in each combination.
@@ -2682,6 +2746,66 @@ mod tests {
         let out = try_parse_range("0.5..2.0:0.5").unwrap();
         let floats: Vec<f64> = out.iter().map(|v| v.as_f64().unwrap()).collect();
         assert_eq!(floats, vec![0.5, 1.0, 1.5, 2.0]);
+    }
+
+    /// A range is materialized before anything counts it, so a wide one spent
+    /// minutes allocating and was killed by the OOM killer — no message, no
+    /// grid, indistinguishable from a slow sweep. The count is arithmetic, so
+    /// it is checked first.
+    #[test]
+    fn an_axis_too_large_to_materialize_is_an_error_naming_the_count() {
+        let err = parse_range("1..100000000000").expect_err("must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("grid points"), "{msg}");
+        assert!(msg.contains(&MAX_AXIS_POINTS.to_string()), "{msg}");
+        // The float path too, and the widest `i64` span, which used to overflow
+        // the `i += step` increment as well as exhaust memory.
+        assert!(parse_range("0.0..1.0:0.0000001").is_err());
+        assert!(parse_range("-9223372036854775808..9223372036854775807").is_err());
+        // Exactly at the bound is allowed; one past it is not.
+        let at = format!("1..{MAX_AXIS_POINTS}");
+        assert_eq!(
+            parse_range(&at).unwrap().expect("a range").len(),
+            MAX_AXIS_POINTS
+        );
+        assert!(parse_range(&format!("0..{MAX_AXIS_POINTS}")).is_err());
+        // A wide range with a step that keeps it small is fine.
+        assert_eq!(
+            parse_range("0..100000000000:10000000000")
+                .unwrap()
+                .expect("a range")
+                .len(),
+            11
+        );
+        // The bound reaches the caller that has an error channel.
+        let mut params = HashMap::new();
+        params.insert("FAST".to_string(), Value::from("1..100000000000"));
+        let err = split_axes(&params).expect_err("split_axes must propagate it");
+        assert!(format!("{err:#}").contains("FAST"), "{err:#}");
+    }
+
+    /// A non-finite bound or step is not a range. `nan` survives `step <= 0.0`
+    /// (every comparison against it is false), and then `x += nan` ends the
+    /// loop on its first test — so the axis came out **empty**, and an
+    /// `--grid FAST=0.5..2.5:nan` swept nothing while reporting itself as a
+    /// one-point grid.
+    #[test]
+    fn a_non_finite_range_bound_or_step_is_not_a_range() {
+        for bad in [
+            "0.5..2.5:nan",
+            "0.5..2.5:inf",
+            "nan..2.5",
+            "0.5..inf",
+            "-inf..inf:1.0",
+        ] {
+            assert_eq!(
+                parse_range(bad).unwrap(),
+                None,
+                "`{bad}` should not parse as a range"
+            );
+        }
+        // The finite neighbours still do.
+        assert_eq!(parse_range("0.5..2.5:0.5").unwrap().unwrap().len(), 5);
     }
 
     #[test]
