@@ -170,10 +170,31 @@ impl CsvSource {
             let line = line_no + 2; // header is line 1
             let record = record.with_context(|| format!("{path}: reading row {line}"))?;
             let field = |i: usize| record.get(i).unwrap_or("").trim();
+            // `"nan"`, `"NaN"`, `"inf"` and `"-inf"` all parse as `f64`, and an
+            // OHLCV field has no `None` to fall back to the way an overlay cell
+            // does — a `Candle` carries five bare `Real`s. Left alone, one such
+            // cell poisoned the whole run silently: the position marked at a
+            // `NaN` price, equity went `NaN`, and the report printed
+            // `return NaN% ann` beside a plausible fill list. An unparseable
+            // number is already a row error here; a non-finite one is the same
+            // kind of bad data and is reported the same way. A genuine gap is a
+            // row that is absent, not a row that says `NaN`.
+            let finite = |x: Real, name: &str, raw: &str| -> Result<Real> {
+                if x.is_finite() {
+                    Ok(x)
+                } else {
+                    Err(anyhow!(
+                        "{path}: row {line}: column `{name}` = {raw:?} is not a finite \
+                         number — a price has no \"absent\" value; omit the row instead"
+                    ))
+                }
+            };
             let parse_real = |i: usize, name: &str| -> Result<Real> {
                 let raw = field(i);
-                raw.parse::<Real>()
-                    .with_context(|| format!("{path}: row {line}: column `{name}` = {raw:?}"))
+                let x = raw
+                    .parse::<Real>()
+                    .with_context(|| format!("{path}: row {line}: column `{name}` = {raw:?}"))?;
+                finite(x, name, raw)
             };
             let interval = parse_interval(field(i_freq))
                 .with_context(|| format!("{path}: row {line}: column `freq`"))?;
@@ -189,9 +210,10 @@ impl CsvSource {
                     if raw.is_empty() {
                         0.0
                     } else {
-                        raw.parse::<Real>().with_context(|| {
+                        let v = raw.parse::<Real>().with_context(|| {
                             format!("{path}: row {line}: column `volume` = {raw:?}")
-                        })?
+                        })?;
+                        finite(v, "volume", raw)?
                     }
                 }
                 None => 0.0,
@@ -461,5 +483,31 @@ mod tests {
         let err = CsvSource::new(path).read().unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("column `freq`"), "{msg}");
+    }
+
+    /// The `get`-side reader guards the same thing `data.rs`' `--series` reader
+    /// does: `"nan"` / `"inf"` parse as an `f64`, and a `Candle` has no `None`
+    /// to fall back to.
+    #[test]
+    fn a_non_finite_price_is_refused() {
+        for bad in ["NaN", "inf", "-inf"] {
+            let body = format!(
+                "symbol;freq;time;open;high;low;close;volume\nBTC;1d;1;10;11;9;{bad};100\n"
+            );
+            let path = tmp_csv("fugazi_csv_source_nonfinite.csv", &body);
+            let err = CsvSource::new(path)
+                .read()
+                .expect_err(&format!("`{bad}` must be refused"));
+            assert!(
+                format!("{err:#}").contains("finite"),
+                "the error should say why: {err:#}"
+            );
+        }
+        // …and an ordinary row still loads.
+        let path = tmp_csv(
+            "fugazi_csv_source_finite.csv",
+            "symbol;freq;time;open;high;low;close;volume\nBTC;1d;1;10;11;9;10.5;100\n",
+        );
+        assert_eq!(CsvSource::new(path).read().unwrap().len(), 1);
     }
 }

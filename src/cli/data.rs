@@ -609,17 +609,40 @@ fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Option<Candle>> {
             missing.join("`, `")
         );
     }
+    // `"nan"`, `"NaN"`, `"inf"` and `"-inf"` all parse as `f64`, and a price has
+    // no `None` to fall back to the way an overlay cell does — a `Candle` is
+    // five bare `Real`s. Left alone, one such cell poisoned the whole run
+    // silently: the position marked at a `NaN`, equity went `NaN`, and the
+    // report printed `return NaN% ann` beside a plausible fill list. An
+    // unparseable number is already a row error here; a non-finite one is the
+    // same kind of bad data. A genuine gap is a row that is *absent*, not a row
+    // that says `NaN`.
+    let finite = |x: Real, name: &str, raw: &str| -> Result<Real> {
+        if x.is_finite() {
+            Ok(x)
+        } else {
+            bail!(
+                "{sym} @ {time}: column `{name}` = {raw:?} is not a finite \
+                 number — a price has no \"absent\" value; omit the row instead"
+            )
+        }
+    };
     let field = |name: &str| -> Result<Real> {
         let raw = row
             .get(name)
             .ok_or_else(|| anyhow!("{sym} @ {time}: missing required column `{name}`"))?;
-        raw.parse::<Real>()
-            .with_context(|| format!("{sym} @ {time}: column `{name}` = {raw:?}"))
+        let x = raw
+            .parse::<Real>()
+            .with_context(|| format!("{sym} @ {time}: column `{name}` = {raw:?}"))?;
+        finite(x, name, raw)
     };
     let volume = match row.get("volume") {
-        Some(raw) if !raw.is_empty() => raw
-            .parse::<Real>()
-            .with_context(|| format!("{sym} @ {time}: column `volume` = {raw:?}"))?,
+        Some(raw) if !raw.is_empty() => {
+            let v = raw
+                .parse::<Real>()
+                .with_context(|| format!("{sym} @ {time}: column `volume` = {raw:?}"))?;
+            finite(v, "volume", raw)?
+        }
         _ => 0.0,
     };
     Ok(Some(Candle::new(
@@ -1403,5 +1426,46 @@ mod tests {
                 ("ETH".to_string(), "1d".to_string(), 1),
             ]
         );
+    }
+
+    /// `"nan"`, `"NaN"`, `"inf"` and `"-inf"` all parse as an `f64`, and a
+    /// `Candle` is five bare `Real`s with no `None` to fall back to. One such
+    /// cell used to poison the whole run silently — the position marked at a
+    /// `NaN`, equity went `NaN`, and the report printed `return NaN% ann`
+    /// beside a plausible fill list. A genuine gap is a row that is absent, not
+    /// a row that says `NaN`.
+    #[test]
+    fn a_non_finite_price_is_refused_rather_than_marked() {
+        for bad in ["NaN", "nan", "inf", "-inf", "Infinity"] {
+            let path = tmp_csv(
+                "fugazi_nonfinite.csv",
+                &format!("symbol;time;open;high;low;close;volume\nBTC;1;10;11;9;{bad};100\n"),
+            );
+            let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()])
+                .expect("the frame loads; the candle is parsed on demand");
+            let err = frame
+                .atoms("BTC")
+                .expect_err(&format!("`{bad}` must be refused as a close"));
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("finite"),
+                "the error should say why, got: {msg}"
+            );
+        }
+        // A non-finite *volume* is refused on the same footing.
+        let path = tmp_csv(
+            "fugazi_nonfinite_vol.csv",
+            "symbol;time;open;high;low;close;volume\nBTC;1;10;11;9;10.5;NaN\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert!(frame.atoms("BTC").is_err());
+
+        // An ordinary row is untouched, and an empty volume still defaults.
+        let path = tmp_csv(
+            "fugazi_finite.csv",
+            "symbol;time;open;high;low;close;volume\nBTC;1;10;11;9;10.5;\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 1);
     }
 }

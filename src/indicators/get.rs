@@ -130,8 +130,11 @@ fn read_slot<'a>(
 /// [`Schema`] *at construction* — the runtime object holds only the resolved
 /// `usize` index, so per-bar access is one array read plus a variant match.
 ///
-/// Reads `None` before the first bar and `None` on any atom whose
-/// [`overlays`](Atom::overlays) is absent or bound to a different schema.
+/// Reads `None` before the first bar, `None` on any atom whose
+/// [`overlays`](Atom::overlays) is absent or bound to a different schema, and
+/// `None` on a **non-finite** cell — the `NaN` a `Real` column stores for an
+/// absent sample, since the slot has no `None` of its own. See
+/// [`update`](Indicator::update).
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -157,8 +160,9 @@ pub struct GetReal<S = Identity<Atom>> {
     index: usize,
     #[state(source)]
     source: S,
-    /// Latest extracted value; `None` before the first bar (and `None` on any
-    /// atom whose `overlays` is absent or bound to a different schema).
+    /// Latest extracted value; `None` before the first bar, on any atom whose
+    /// `overlays` is absent or bound to a different schema, and on a non-finite
+    /// cell (the stored form of an absent sample).
     #[state(skip)]
     pub value: Option<Real>,
 }
@@ -216,7 +220,25 @@ impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
 
     fn update(&mut self, input: S::Input) -> Option<Real> {
         self.value = self.source.update(input).and_then(|atom| {
-            read_slot(&self.schema, atom.overlays.as_ref()).and_then(|ov| ov.get_real(self.index))
+            read_slot(&self.schema, atom.overlays.as_ref())
+                .and_then(|ov| ov.get_real(self.index))
+                // A `Real` overlay cell has no `None` in storage, so an absent
+                // sample is stored as a `NaN` — a blank cell in a CSV, or a full
+                // join that gave one symbol a column another carries. This is
+                // where that sentinel becomes the crate's actual "no reading".
+                //
+                // Passing it through was a silent, *permanent* failure. A
+                // windowed core accumulates a running total, and `sum += NaN`
+                // followed later by `sum -= NaN` leaves `NaN`: one blank cell in
+                // an overlay column turned every downstream `!sma` / `!zscore` /
+                // `!stddev` into `NaN` for the rest of the run, with no
+                // diagnostic. In a comparison it is quieter and no better — a
+                // `NaN` reads false on both sides, so a gate neither opens nor
+                // closes and the position is simply held.
+                //
+                // An infinity is refused on the same footing: no windowed core
+                // recovers from one either.
+                .filter(|v| v.is_finite())
         });
         self.value
     }
@@ -545,5 +567,45 @@ mod tests {
             ],
         );
         assert_eq!(r.update(Atom::with_overlays(candle(), ov_b)), None);
+    }
+
+    /// A `Real` overlay slot has no `None`, so an absent sample — a blank cell,
+    /// or a full join that gave one symbol a column another carries — is stored
+    /// as a `NaN`. Passing that through was a **permanent, silent** failure: a
+    /// windowed core carries a running total, and `sum += NaN` followed later by
+    /// `sum -= NaN` stays `NaN`, so one blank cell turned every downstream
+    /// `!sma` / `!zscore` / `!stddev` into `NaN` for the rest of the run.
+    #[test]
+    fn an_absent_overlay_cell_reads_none_rather_than_poisoning_the_chain() {
+        use crate::indicators::Sma;
+
+        let mut b = Schema::builder();
+        b.add_real("funding");
+        let schema = b.finish();
+        let cell = |v: Real| {
+            Atom::with_overlays(
+                crate::types::Candle::new(1.0, 1.0, 1.0, 1.0, 1.0),
+                OverlayInfo::new(Arc::clone(&schema), [crate::types::OverlayValue::Real(v)]),
+            )
+        };
+
+        let mut get = GetReal::new(&schema, "funding");
+        assert_eq!(get.update(cell(0.5)), Some(0.5));
+        assert_eq!(get.update(cell(Real::NAN)), None, "a NaN cell is absent");
+        assert_eq!(get.update(cell(Real::INFINITY)), None, "so is an infinity");
+        assert_eq!(get.update(cell(-0.25)), Some(-0.25), "and it recovers");
+
+        // The property that matters: one absent cell no longer poisons a
+        // window forever.
+        let mut sma = Sma::new(GetReal::new(&schema, "funding"), 3);
+        for i in 0..10 {
+            let v = if i == 4 { Real::NAN } else { 1.0 };
+            let out = sma.update(cell(v));
+            assert!(
+                out.is_none_or(|x| x.is_finite()),
+                "the SMA went non-finite at bar {i}: {out:?}"
+            );
+        }
+        assert_eq!(sma.value(), Some(1.0));
     }
 }

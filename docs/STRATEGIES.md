@@ -1522,6 +1522,16 @@ An unknown key, or a type that doesn't fit the position it's used in, is a
 build-time error. `source:` re-roots the read on another asset, exactly as on the
 candle-field leaves.
 
+A numeric column reads **`None` for an absent cell**, not a number. The slot has
+no `None` of its own, so an absent sample — a blank cell, or a full join that
+gave one symbol a column another carries — is stored as a `NaN` and translated
+back on the read. That is what keeps one blank cell from turning every
+downstream `!sma` / `!zscore` into `NaN` for the rest of the run: a windowed
+core carries a running total, and a `NaN` added to one never leaves it. A
+non-finite cell in an OHLCV column is a different case and is **refused at
+load** — a price has no absent value, so a genuine gap is a row that is missing,
+not a row that says `NaN`.
+
 ### Transforms
 
 | Tags | Fields | Meaning |
