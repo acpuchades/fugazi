@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.74.0"
+version = "0.75.0"
 # Keep stray working-tree files out of the published tarball. A `git add -A`
 # once swept 15.5 MiB of scratch screenshots into the repo; the packaged crate
 # went over crates.io's 10 MiB limit and the upload came back as a bare 503
@@ -116,7 +116,7 @@ clap_complete = { version = "4", optional = true }
 # per-indicator run-state save/load bodies for run resuming. It is a normal
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
-fugazi-derive = { path = "fugazi-derive", version = "0.74.0" }
+fugazi-derive = { path = "fugazi-derive", version = "0.75.0" }
 # `rc` provides `Serialize`/`Deserialize` for `Arc<str>` — the crate's `Symbol`
 # type. serde gates it because deserializing two `Arc`s that were shared at
 # serialize time yields two independent allocations; that is fine here, since a
