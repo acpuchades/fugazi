@@ -126,10 +126,24 @@ impl RootSpec {
             Some(serde_json::Value::String(v)) => Some(Some(v.as_str())),
             Some(_) => None,
         };
-        if body.keys().any(|k| k != "symbol" && k != "freq") {
+        if body
+            .keys()
+            .any(|k| k != "symbol" && k != "freq" && k != "stream")
+        {
             return None;
         }
-        Some((field("symbol")?, field("freq")?))
+        // Both spellings reach here unresolved; `expr::resolve_stream` is what
+        // validates `freq` and refuses the pair, so this reports whichever is
+        // present and lets the one checker do the checking.
+        let stream = match (field("freq")?, field("stream")?) {
+            (Some(f), None) => Some(f),
+            (None, Some(s)) => Some(s),
+            // Both named is a build error, not a selector — fall through to the
+            // full build path so the error is raised there rather than here.
+            (Some(_), Some(_)) => return None,
+            (None, None) => None,
+        };
+        Some((field("symbol")?, stream))
     }
 
     /// The resolved untyped tree this root parsed from.
@@ -198,6 +212,9 @@ impl RootSpec {
     ///
     /// [`StreamId`]: crate::types::StreamId
     pub fn declared_freq(&self) -> Option<&str> {
+        // Only the *validated* spelling. A `stream:` promises no format, so
+        // reading one here would put an unchecked string into the cadence
+        // precedence chain — precisely what `freq:` exists to keep out of it.
         self.tree.get("pick")?.get("freq")?.as_str()
     }
 }

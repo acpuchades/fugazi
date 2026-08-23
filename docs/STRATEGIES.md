@@ -1101,22 +1101,34 @@ source on its own:
   rhs: !close { source: !pick { symbol: ETH } }
 ```
 
-Both fields are optional: `symbol` names the asset, `freq` names the **stream**
-— which of a symbol's series to read.
+`symbol` names the asset. Which **stream** of that symbol to read has two
+spellings, and the difference is a *format contract*:
 
-A bar cadence is the common answer (`!pick { symbol: BTC, freq: 1h }`, the same
-`N<unit>` alphabet `--frequency` uses), but it is not the only one. The field is
-an **opaque identifier**, matched verbatim against the stream tag the loader
-attached; it is not parsed as a duration, so `!pick { symbol: BTC, freq:
-dollar-1e6 }` is as valid as `1h`. That is what lets two series of one symbol
-coexist when neither is distinguished by a cadence — volume bars at two
-thresholds, a settlement series beside a spot one, one venue's book beside
-another's.
+| | promises | checked? |
+|---|---|---|
+| `freq: 1h` | a bar cadence, the same `N<unit>` alphabet `--frequency` uses | **yes** — `freq: 1hh` is a build error |
+| `stream: dollar-1e6` | nothing | no — taken verbatim |
 
-Only one place still reads it as a cadence: a document's `root:`, whose declared
-stream joins the CLI's bar-cadence precedence chain. There it is parsed as a
-`Frequency` if it can be, and simply skipped if it cannot — so naming a
-non-duration stream costs you the declared-cadence rung, nothing else.
+Both resolve to the same stream id, and a validated `freq:` contributes the
+round-trip of its parse. Naming both is a build error: they select the same
+thing, and there is no reading of two different streams on one leaf that is
+right.
+
+The split exists because a field named for a format should be checked against
+it. One open field doing both jobs would have been simpler and worse — a typo
+in the common spelling would build cleanly and then read nothing on every bar,
+which shows up as a plausible backtest rather than an error.
+
+`stream:` is what lets two series of one symbol coexist when neither is
+distinguished by a cadence — volume bars at two thresholds, a settlement series
+beside a spot one, one venue's book beside another's. And because it promises
+no format, a document's `root:` reads only the **validated** spelling into the
+CLI's bar-cadence precedence chain: `root: !pick { symbol: BTC, stream: … }`
+declares no cadence, by construction.
+
+Whichever spelling is used, the named stream is checked against the input before
+the run — an id the series do not carry is refused rather than left to read
+nothing on every bar.
 
 An empty `!pick {}` — and every leaf that omits
 `source:` — resolves to the context's **blessed series**: the document's own

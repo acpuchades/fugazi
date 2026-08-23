@@ -1065,7 +1065,7 @@ def percentile_rank(source: Indicator, period: int) -> Indicator:
     `1/period`.
     """
     ...
-def pick(symbol: str = ..., freq: str | Frequency | None = ...) -> AtomSource:
+def pick(symbol: str = ..., freq: str | Frequency | None = ..., *, stream: str | Frequency | None = ...) -> AtomSource:
     """[`Selector`]. Compose with any atom-input leaf by passing the returned
     `AtomSource` as its `source=` argument.
     """

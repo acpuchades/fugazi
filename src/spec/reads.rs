@@ -144,6 +144,7 @@ fn collect(value: &serde_json::Value, out: &mut BTreeSet<String>) {
 pub fn picked_streams(doc: &serde_json::Value) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     collect_field(doc, "freq", false, &mut out);
+    collect_field(doc, "stream", false, &mut out);
     out
 }
 

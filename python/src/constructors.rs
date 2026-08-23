@@ -1328,34 +1328,51 @@ atom_leaf_signal!(
 /// import fugazi as ta
 /// btc_close = ta.close(source=ta.pick("BTC"))
 /// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
-/// # Cross-frequency:
+/// # Cross-frequency (`freq` is validated as a cadence):
 /// hourly   = ta.close(ta.pick(freq="1h"))
+/// # Any other series id (`stream` is opaque):
+/// dollars  = ta.close(ta.pick("BTC", stream="dollar-1e6"))
 /// # Single-series:
 /// close    = ta.close(source=ta.pick())
 /// ```
 #[pyfunction]
-#[pyo3(signature = (symbol = None, freq = None))]
+#[pyo3(signature = (symbol = None, freq = None, *, stream = None))]
 pub(crate) fn pick(
     symbol: Option<&Bound<'_, PyAny>>,
     freq: Option<&Bound<'_, PyAny>>,
+    stream: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyAtomSource> {
+    // `freq` promises a bar cadence and is validated as one; `stream` promises
+    // nothing and is taken verbatim. Mirrors `!pick`'s two spellings — see
+    // `spec::expr::resolve_stream` for why the split rather than one open field.
+    let stream = match (freq, stream) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "pick() takes `freq` or `stream`, not both; they select the same thing                  (`freq` for a bar cadence, `stream` for any other series id)",
+            ));
+        }
+        // Validated, then round-tripped to its token.
+        (Some(f), None) => Some(StreamId::from(coerce_frequency(f)?)),
+        (None, Some(s)) => Some(coerce_stream(s)?),
+        (None, None) => None,
+    };
     // Allow `pick("BTC")` alongside `pick(symbol="BTC")`: the first positional
     // arg accepts either a plain str (→ symbol) or a Selector.
-    let selector = match (symbol, freq) {
+    let selector = match (symbol, stream) {
         (None, None) => Selector::default(),
         (Some(s), None) => {
             // If the first arg is already a full Selector / Frequency /
             // tuple, honor it verbatim. Otherwise treat it as a symbol str.
             coerce_selector(s)?
         }
-        (None, Some(f)) => Selector::by_stream(coerce_stream(f)?),
+        (None, Some(f)) => Selector::by_stream(f),
         (Some(s), Some(f)) => {
             let sym = s.extract::<String>().map_err(|_| {
                 PyTypeError::new_err(
-                    "when both `symbol` and `freq` are given, `symbol` must be a str",
+                    "when both `symbol` and `freq`/`stream` are given, `symbol` must be a str",
                 )
             })?;
-            Selector::exact(sym, coerce_frequency(f)?)
+            Selector::exact(sym, f)
         }
     };
     let pick = if selector.is_empty() {

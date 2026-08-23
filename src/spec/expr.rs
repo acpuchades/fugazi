@@ -166,12 +166,18 @@ pub(super) fn root_source(
         // does not have. See `RootSpec::as_pick`.
         Some(spec) if spec.as_pick().is_some() => {
             let (symbol, freq) = spec.as_pick().expect("just checked");
-            // Taken verbatim: a stream id is opaque, and a cadence is only its
-            // most common spelling. Parsing it here used to reject every
-            // identifier that was not a duration.
+            // `as_pick` hands back whichever spelling was present without
+            // checking it; the shared resolver is what validates a `freq`. The
+            // root's own `!pick` gets the same treatment as any other, so a
+            // typo in `root:` is the same build error as one in a leaf.
+            let stream = if spec.declared_freq().is_some() {
+                resolve_stream(freq, None)?
+            } else {
+                resolve_stream(None, freq)?
+            };
             let selector = Selector::<Symbol> {
                 symbol: symbol.map(crate::types::symbol),
-                stream: freq.map(crate::types::stream),
+                stream: stream.map(crate::types::stream),
             };
             Ok(crate::runtime::erase(if selector.is_empty() {
                 Pick::<Symbol>::new()
@@ -828,8 +834,33 @@ pub enum NodeSpec {
         #[serde(default)]
         symbol: Option<String>,
         /// Bar cadence for a cross-frequency snapshot (e.g. `1h`, `1d`).
+        /// **Validated** — see [`stream`](Self::Pick::stream).
         #[serde(default)]
         freq: Option<String>,
+        /// Which series of `symbol` to read, when it carries more than one.
+        ///
+        /// Two spellings, and the difference is a *format contract*:
+        ///
+        /// - `freq:` promises a bar cadence, and is **validated** against the same
+        ///   `N<unit>` alphabet `--frequency` uses (`1m` / `4h` / `1d` / `1w` /
+        ///   `1M`). `freq: 1hh` is a build error, as it always was.
+        /// - `stream:` promises nothing, and is taken **verbatim**. That is what a
+        ///   series with no cadence needs — `stream: dollar-1e6`, a session id, a
+        ///   venue tag — and it is unavailable through `freq:` on purpose.
+        ///
+        /// Both resolve to the same [`StreamId`]; a
+        /// validated `freq:` contributes its canonical token. Naming both is a
+        /// build error rather than a precedence rule, because there is no reading
+        /// of two different streams on one leaf that is right.
+        ///
+        /// The split is the general rule, not a special case: a field named for a
+        /// format is checked against it, and an open field is left open. Dropping
+        /// the `freq:` check to make room for opaque ids would have traded a build
+        /// error for a leaf that silently reads nothing on every bar.
+        ///
+        /// [`StreamId`]: crate::types::StreamId
+        #[serde(default)]
+        stream: Option<String>,
     },
 
     /// A constant value — a number (`!value 70`, a `Real` source) or a string
@@ -2479,6 +2510,8 @@ enum NodeSpecRaw {
         symbol: Option<String>,
         #[serde(default)]
         freq: Option<String>,
+        #[serde(default)]
+        stream: Option<String>,
     },
 
     /// A constant value — a number (`!value 70`, a `Real` source) or a string
@@ -3454,7 +3487,15 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Typical { source } => NodeSpec::Typical { source },
             NodeSpecRaw::Median { source } => NodeSpec::Median { source },
             NodeSpecRaw::Current { source } => NodeSpec::Current { source },
-            NodeSpecRaw::Pick { symbol, freq } => NodeSpec::Pick { symbol, freq },
+            NodeSpecRaw::Pick {
+                symbol,
+                freq,
+                stream,
+            } => NodeSpec::Pick {
+                symbol,
+                freq,
+                stream,
+            },
             NodeSpecRaw::Value(x) => NodeSpec::Value(x),
             NodeSpecRaw::Entry => NodeSpec::Entry,
             NodeSpecRaw::Peak => NodeSpec::Peak,
@@ -4674,9 +4715,13 @@ impl NodeSpec {
                 any(crate::indicators::CurrentBar::of(s))
             }
 
-            Pick { symbol, freq } => build_pick(
+            Pick {
+                symbol,
+                freq,
+                stream,
+            } => build_pick(
                 symbol.as_deref(),
-                freq.as_deref(),
+                resolve_stream(freq.as_deref(), stream.as_deref())?.as_deref(),
                 root,
                 anchor,
                 book,
@@ -5403,6 +5448,40 @@ fn trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
 /// symbol explicitly always wins — that's how a leaf reaches across to another
 /// asset, and it stays a strict [`Pick::matching`] that reads `None` on a bar
 /// where the named asset is absent.
+/// Resolve `!pick`'s two stream spellings into one id, checking the format the
+/// field name promises.
+///
+/// `freq:` is validated against the `N<unit>` cadence alphabet and contributes
+/// its **canonical token**, so `1H` and `1h` name the same stream and a typo is
+/// a build error. `stream:` is taken verbatim.
+///
+/// Naming both is refused rather than resolved by precedence: two different
+/// streams on one leaf have no reading that is right, and picking one would be
+/// a guess with a plausible-looking result.
+///
+/// This is the general rule and not a special case — a field named for a format
+/// is checked against it, an open field is left open. It is also what keeps the
+/// common spelling safe: an opaque `freq:` would have turned a typo into a leaf
+/// that silently reads nothing on every bar.
+fn resolve_stream(freq: Option<&str>, stream: Option<&str>) -> Result<Option<String>, String> {
+    match (freq, stream) {
+        (Some(_), Some(_)) => Err(
+            "names both `freq` and `stream`; they select the same thing, so give one \
+             (`freq` for a bar cadence, `stream` for any other series id)"
+                .to_string(),
+        ),
+        (Some(f), None) => {
+            // Canonicalized, not echoed: the parse is the check, and its token
+            // is what the loader tagged the series with.
+            let parsed = <crate::types::Frequency as std::str::FromStr>::from_str(f)
+                .map_err(|e| format!("invalid frequency {f:?}: {e}"))?;
+            Ok(Some(parsed.as_token()))
+        }
+        (None, Some(s)) => Ok(Some(s.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
 fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
