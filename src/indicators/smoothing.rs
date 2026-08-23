@@ -120,6 +120,41 @@ impl WilderState {
     }
 }
 
+impl crate::indicators::stats::LoadCore for EmaState {
+    /// `alpha` is derived from the period by a fixed formula, so an exact
+    /// mismatch means the document's period changed — see [`LoadCore`].
+    ///
+    /// [`LoadCore`]: crate::indicators::stats::LoadCore
+    fn load_core(&self, v: &serde_json::Value) -> Result<Self, String> {
+        let restored: Self = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        if restored.alpha != self.alpha {
+            return Err(format!(
+                "state was saved with a smoothing factor of {} but this run is \
+                 configured with {} — resuming continues the same strategy, so the \
+                 document must not have changed",
+                restored.alpha, self.alpha
+            ));
+        }
+        Ok(restored)
+    }
+}
+
+impl crate::indicators::stats::LoadCore for WilderState {
+    /// See [`LoadCore`](crate::indicators::stats::LoadCore).
+    fn load_core(&self, v: &serde_json::Value) -> Result<Self, String> {
+        let restored: Self = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        if restored.period != self.period {
+            return Err(format!(
+                "state was saved at period {} but this run is configured with period \
+                 {} — resuming continues the same strategy, so the document must not \
+                 have changed",
+                restored.period, self.period
+            ));
+        }
+        Ok(restored)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

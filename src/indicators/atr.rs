@@ -16,6 +16,7 @@ use crate::types::{Candle, Real};
 pub struct Atr<S> {
     #[state(source)]
     true_range: TrueRange<S>,
+    #[state(core)]
     state: WilderState,
     /// Latest ATR value; `None` until warmed up.
     pub value: Option<Real>,

@@ -17,7 +17,9 @@ use crate::types::Real;
 pub struct Stochastic<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     min: WindowExtreme<MinOp>,
+    #[state(core)]
     max: WindowExtreme<MaxOp>,
     /// Latest oscillator value in `[0, 1]`; `None` until the window is full.
     pub value: Option<Real>,

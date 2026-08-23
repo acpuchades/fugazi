@@ -21,6 +21,7 @@ use crate::types::Real;
 pub struct Kurtosis<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest kurtosis; `None` until the window is full.
     pub value: Option<Real>,

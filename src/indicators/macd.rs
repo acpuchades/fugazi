@@ -27,8 +27,11 @@ pub struct MacdValue {
 pub struct Macd<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     fast: EmaState,
+    #[state(core)]
     slow: EmaState,
+    #[state(core)]
     signal_ema: EmaState,
     /// Latest MACD line value.
     pub macd: Option<Real>,

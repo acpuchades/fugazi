@@ -384,6 +384,7 @@ impl<Sym: std::hash::Hash + Eq + Clone, In> Indicator for DrawdownThrottle<Sym, 
 struct Seeded<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     seed: Real,
 }
 
@@ -426,7 +427,9 @@ impl<S: Indicator<Output = Real>> Indicator for Seeded<S> {
 struct FractionalKelly<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
+    #[state(config)]
     kelly_fraction: Real,
     value: Option<Real>,
 }

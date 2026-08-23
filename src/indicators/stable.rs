@@ -39,6 +39,7 @@ use crate::indicator::Indicator;
 /// ```
 #[derive(Debug, Clone, SaveState)]
 pub struct Stable<In> {
+    #[state(config)]
     stable_bars: usize,
     samples: usize,
     #[state(skip)]

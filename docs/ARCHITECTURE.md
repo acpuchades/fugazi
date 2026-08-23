@@ -760,9 +760,12 @@ instantiations are open-ended). The *structure* is rebuilt from the spec; only t
   the `Strategy` handle the metric holds.
 - **`#[derive(SaveState)]`** (`fugazi-derive`) generates the per-indicator bodies:
   default = plain serde state, `#[state(source)]` = a child indicator (recurse via
-  `crate::Indicator::save_state`), `#[state(skip)]` = `PhantomData` / config /
+  `crate::Indicator::save_state`), `#[state(skip)]` = `PhantomData` /
   `Arc<Mutex>` shared handles, `#[state(window)]` = a fixed-capacity
-  `indicators::stats::Ring<T>`. **Default-is-state is deliberate:** forgetting
+  `indicators::stats::Ring<T>`, `#[state(config)]` = a value the *spec* fixes
+  (a period, a band multiplier, a tolerance), `#[state(core)]` = an embedded
+  stateful core that carries its own configuration (`WindowStats`, `EmaState`,
+  …). **Default-is-state is deliberate:** forgetting
   `#[state(source)]` on a new box field is a **compile error** (a box isn't
   `Serialize`), not silent loss.
   - **Why `window` is its own role.** A `Ring` serializes as a bare
@@ -775,6 +778,20 @@ instantiations are open-ended). The *structure* is rebuilt from the spec; only t
     that is sound precisely because the contract above is that the structure is
     rebuilt from the spec first and only values are replayed in. This is why
     `Ring` has no `Deserialize` impl and must not grow one.
+  - **Why `config` and `core` are their own roles.** Both are saved like plain
+    state; both are **checked** rather than replayed on load. Nothing stops
+    `--resume` being pointed at a state file written by a *different* document,
+    and replaying config in place made that silently wrong in the worst way — a
+    `Diff` of period 4 restored from a period-2 blob took the blob's `period`
+    field and kept the destination's four-slot buffer, so it reported a warm-up
+    of 3 while differencing over 4 bars; a `Percentile` built for the 90th
+    became the 10th; an `Sma(5)` became a self-consistent `Sma(3)` that
+    contradicted the document it came from. `config` compares the field against
+    the rebuilt destination; `core` routes through `stats::LoadCore`, which does
+    the same for the period (or smoothing factor) the core records inside its
+    own blob. Either mismatch is an `Err` with the `field > ` breadcrumb, so the
+    operator sees which knob moved. **A missing key is accepted** — a state
+    written before a field existed cannot disagree with anything.
 
 **Shared/path-dependent state** is serialized once at the strategy level, never
 per-indicator: `Position::snapshot`/`restore`, `Book::snapshot_state`/`restore_state`,
@@ -882,9 +899,18 @@ tests/resume.rs is the acceptance gate.
 **Bounded, documented limitations:** the generic-typed prior of `Change` and the held
 value of `Latch` are skipped (their `S::Output` is unbounded) → a one-bar re-warm at
 the resume boundary; `Shared`/`SharedComponent` are no-op (the spec layer never uses
-`.shared()`). There is **no per-field config-drift guard** — resuming a same-shape
-spec with changed params silently loads the saved config (only `kind` +
-`format_version` are checked).
+`.shared()`).
+
+Config drift *is* guarded, per field, by `#[state(config)]` / `#[state(core)]`
+(above) on top of the `kind` + `format_version` checks — but the guard is only as
+complete as the annotations, and it can only catch a knob that is **written into
+the state at all**. A parameter that no `SaveState` struct carries (a strategy's
+`bars_per_year`, a cost model's rates, a portfolio weight literal) still resumes
+without complaint, because there is nothing in the blob to disagree with. The
+whole-document fingerprint that would close that gap is not written: it would
+have to be stable across an equivalent re-spelling of the same document to avoid
+refusing legitimate resumes, and nothing in the loader produces such a
+normalisation today.
 
 ## Metrics — one function per metric (`src/metrics.rs`)
 

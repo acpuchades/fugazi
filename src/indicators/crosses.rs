@@ -36,6 +36,7 @@ pub struct CrossesAbove<L, R> {
     lhs: L,
     #[state(source)]
     rhs: R,
+    #[state(config)]
     tolerance: Tolerance,
     prev: Option<bool>,
     value: Option<bool>,
@@ -109,7 +110,17 @@ where
     }
 
     fn unstable_bars(&self) -> usize {
-        self.lhs.unstable_bars().max(self.rhs.unstable_bars())
+        // Relative to *this* indicator's warm-up, exactly as `Combine` computes
+        // it — the settling point is `max(stable)` and the warm-up is
+        // `max(warm_up)`, both shifted by the same `+ 1` for the edge, which
+        // cancels. `max(unstable)` is the wrong subtraction and over-reports
+        // whenever the two operands have different warm-ups: an `Sma(30)`
+        // against an `Ema(5)` settles at bar 31, and the max-of-unstable form
+        // claimed 49. That is `fugazi get` trimming 18 leading cells the
+        // composed `And<Gt, Change<Gt>>` keeps.
+        let settles = self.lhs.stable_bars().max(self.rhs.stable_bars()).max(1);
+        let warmed = self.lhs.warm_up_bars().max(self.rhs.warm_up_bars()).max(1);
+        settles - warmed
     }
 
     fn reset(&mut self) {
@@ -208,6 +219,11 @@ mod tests {
             composed.warm_up_bars(),
             "warm_up_bars mismatch",
         );
+        assert_eq!(
+            native.stable_bars(),
+            composed.stable_bars(),
+            "stable_bars mismatch",
+        );
         for &x in samples {
             let n = native.update(x);
             let c = composed.update(x);
@@ -278,5 +294,45 @@ mod tests {
         assert_eq!(xa.value(), None);
         // First bar after reset: unwarmed.
         assert_eq!(xa.update(5.0), None);
+    }
+
+    /// The equivalence claim covers readiness, not just the fired values —
+    /// `stable_bars` is what `fugazi get` trims by and what gates a strategy,
+    /// so a native crossover that reports a longer settling than the
+    /// composition it replaced silently discards leading bars the composed
+    /// form kept. The case that separates them is **two operands with
+    /// different warm-ups**, at least one of them recursive: the unstable count
+    /// is expressed relative to this indicator's own warm-up, so it is
+    /// `max(stable) - max(warm_up)`, not `max(unstable)`.
+    #[test]
+    fn a_crossover_of_two_unequal_operands_settles_when_the_composition_does() {
+        use crate::indicators::Ema;
+        // Sma(30): warm-up 30, no instability. Ema(5): warm-up 5, recursive.
+        let composed = || {
+            let lhs = Sma::new(Identity::<Real>::new(), 30);
+            let rhs = Ema::new(Identity::<Real>::new(), 5);
+            lhs.clone().gt(rhs.clone()).and(lhs.gt(rhs).changed())
+        };
+        let native = || {
+            CrossesAbove::new(
+                Sma::new(Identity::<Real>::new(), 30),
+                Ema::new(Identity::<Real>::new(), 5),
+            )
+        };
+        assert_eq!(native().warm_up_bars(), composed().warm_up_bars());
+        assert_eq!(native().stable_bars(), composed().stable_bars());
+        // …and the other way round, so neither operand order is special.
+        let composed_rev = || {
+            let lhs = Ema::new(Identity::<Real>::new(), 5);
+            let rhs = Sma::new(Identity::<Real>::new(), 30);
+            lhs.clone().gt(rhs.clone()).and(lhs.gt(rhs).changed())
+        };
+        let native_rev = || {
+            CrossesAbove::new(
+                Ema::new(Identity::<Real>::new(), 5),
+                Sma::new(Identity::<Real>::new(), 30),
+            )
+        };
+        assert_eq!(native_rev().stable_bars(), composed_rev().stable_bars());
     }
 }

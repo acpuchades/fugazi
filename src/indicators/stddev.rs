@@ -14,6 +14,7 @@ use crate::types::Real;
 pub struct StdDev<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest standard deviation; `None` until the window is full.
     pub value: Option<Real>,

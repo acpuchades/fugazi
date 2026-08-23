@@ -18,7 +18,9 @@ use crate::types::{Candle, Real};
 pub struct WilliamsR<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     highest: WindowExtreme<MaxOp>,
+    #[state(core)]
     lowest: WindowExtreme<MinOp>,
     /// Latest %R value in `[-100, 0]`; `None` until the window is full.
     pub value: Option<Real>,

@@ -15,6 +15,7 @@ use crate::types::Real;
 pub struct Wma<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     state: WmaState,
     /// Latest output value; `None` until `period` source values have been seen.
     pub value: Option<Real>,

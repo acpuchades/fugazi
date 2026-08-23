@@ -20,6 +20,7 @@ use crate::types::{Candle, Real};
 pub struct Vwap<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     period: usize,
     #[state(window)]
     window: Ring<(Real, Real)>,

@@ -94,6 +94,7 @@ pub struct PairStat<L, R, Op> {
     lhs: L,
     #[state(source)]
     rhs: R,
+    #[state(core)]
     cov: WindowCovariance,
     /// Latest reading; `None` until ready.
     pub value: Option<Real>,
@@ -151,7 +152,14 @@ where
     }
 
     fn unstable_bars(&self) -> usize {
-        self.lhs.unstable_bars().max(self.rhs.unstable_bars())
+        // The excess above *this* indicator's own warm-up, the shape `Combine`
+        // and `Keltner` use — not `max(unstable)`, which is a different
+        // subtraction and over-reports whenever the two legs have different
+        // warm-ups. The `+ period - 1` appears on both sides and cancels; it is
+        // spelled out so the parallel with `warm_up_bars` is visible.
+        let settles =
+            self.lhs.stable_bars().max(self.rhs.stable_bars()).max(1) + self.cov.period() - 1;
+        settles - self.warm_up_bars()
     }
 
     fn reset(&mut self) {
@@ -262,5 +270,37 @@ mod tests {
         b.update(1.0);
         b.update(2.0);
         assert_eq!(b.update(3.0), Some(0.0));
+    }
+
+    /// `unstable_bars` is the excess above *this* indicator's warm-up, not the
+    /// larger of the legs' own instabilities — two different subtractions that
+    /// coincide only when the legs warm up together. A recursive short leg
+    /// beside a long windowed one is fully settled long before the covariance
+    /// window has filled, and the max-of-unstable form claimed otherwise.
+    #[test]
+    fn unstable_bars_is_measured_from_this_indicators_own_warm_up() {
+        use crate::indicators::{Ema, Sma};
+
+        let long_fir = Sma::new(Identity::<Real>::new(), 60);
+        let short_iir = Ema::new(Identity::<Real>::new(), 5);
+        let settles = long_fir.stable_bars().max(short_iir.stable_bars());
+        // Precondition: the short recursive leg is what carries the instability,
+        // and it has already settled by the time the long leg is merely warm.
+        assert!(short_iir.unstable_bars() > 0);
+        assert!(settles == long_fir.stable_bars());
+
+        let c: Correlation<Sma<Identity<Real>>, Ema<Identity<Real>>> =
+            PairStat::new(long_fir, short_iir, 10);
+        assert_eq!(c.warm_up_bars(), 60 + 10 - 1);
+        assert_eq!(c.stable_bars(), settles + 10 - 1);
+        assert_eq!(c.unstable_bars(), c.stable_bars() - c.warm_up_bars());
+
+        // Legs that warm up together are the case the two forms agree on, and
+        // must stay agreed.
+        let a = Ema::new(Identity::<Real>::new(), 7);
+        let b = Ema::new(Identity::<Real>::new(), 7);
+        let un = a.unstable_bars();
+        let c: Correlation<Ema<Identity<Real>>, Ema<Identity<Real>>> = PairStat::new(a, b, 4);
+        assert_eq!(c.unstable_bars(), un);
     }
 }

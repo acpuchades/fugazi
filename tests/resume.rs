@@ -991,3 +991,121 @@ fn a_state_carrying_legacy_history_keys_still_resumes() {
         assert_eq!(a.to_bits(), b.to_bits(), "legacy state diverged at bar {i}");
     }
 }
+
+/// **A resume into an edited document is refused.**
+///
+/// Nothing stops `--resume` being pointed at a state file written by a
+/// different spec, and replaying configuration in place made that silently
+/// wrong in the worst possible way: a `Diff` of period 4 restored from a
+/// period-2 blob took the blob's `period` field and kept the destination's
+/// four-slot buffer, so it reported a warm-up of 3 while differencing over 4
+/// bars; a `Percentile` built for the 90th became the 10th; an `Sma(5)` became
+/// a self-consistent `Sma(3)` that contradicted the document it came from.
+///
+/// None of those is a resumable run. The mismatch is now an error carrying the
+/// breadcrumb, so the operator sees *which* knob moved.
+#[test]
+fn resuming_into_a_changed_document_is_refused_rather_than_silently_hybridised() {
+    let sch = schema();
+    let snaps = single_snaps(60);
+
+    let mut original = single_ema_spec().build(CASH, &sch);
+    let (_, state) = original
+        .drive_resumable(&snaps[..30], CASH, &[], None, false)
+        .expect("first chunk");
+
+    // The same document with one period changed — a plausible edit between two
+    // halves of a run.
+    let edited = parse!(
+        SingleStrategySpec,
+        r#"
+        root: X
+        long:
+          enter: !crosses_above
+            lhs: !ema { period: 4, source: !close }
+            rhs: !ema { period: 8, source: !close }
+          exit: !crosses_below
+            lhs: !ema { period: 4, source: !close }
+            rhs: !ema { period: 8, source: !close }
+    "#
+    );
+    let err = edited
+        .build(CASH, &sch)
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .expect_err("a state from a different document must not resume");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("smoothing factor"),
+        "the error should name the knob that moved, got: {msg}"
+    );
+
+    // The unchanged document still resumes, so the check is not blanket.
+    single_ema_spec()
+        .build(CASH, &sch)
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .expect("the original document must still resume");
+}
+
+/// The same guard one layer down, on the indicators whose configuration is a
+/// plain field rather than an embedded core's. Each of these silently adopted
+/// the blob's value before.
+#[test]
+fn a_config_field_from_a_different_build_is_refused() {
+    use fugazi::Indicator;
+    use fugazi::indicators::{Diff, Identity, Percentile, Sma, Vwap};
+
+    // `Lookback::period`: took the blob's period while keeping the
+    // destination's buffer — a `Diff(4)` that reported the warm-up of a
+    // `Diff(2)`.
+    let mut short: Diff<Identity<Real>> = Diff::new(Identity::new(), 2);
+    for x in [1.0, 2.0, 3.0, 4.0, 5.0] {
+        short.update(x);
+    }
+    let blob = short.save_state();
+    let mut long: Diff<Identity<Real>> = Diff::new(Identity::new(), 4);
+    assert!(
+        long.load_state(&blob).is_err(),
+        "Diff accepted a foreign period"
+    );
+
+    // `Percentile::pct`: the 90th silently became the 10th.
+    let mut p90 = Percentile::new(Identity::<Real>::new(), 3, 0.9);
+    for x in [1.0, 2.0, 3.0] {
+        p90.update(x);
+    }
+    let blob = p90.save_state();
+    let mut p10 = Percentile::new(Identity::<Real>::new(), 3, 0.1);
+    assert!(
+        p10.load_state(&blob).is_err(),
+        "Percentile accepted a foreign pct"
+    );
+
+    // An embedded core: `Sma(5)` rebuilt itself at the blob's period 3.
+    let mut sma3 = Sma::new(Identity::<Real>::new(), 3);
+    for x in [1.0, 2.0, 3.0] {
+        sma3.update(x);
+    }
+    let blob = sma3.save_state();
+    let mut sma5 = Sma::new(Identity::<Real>::new(), 5);
+    assert!(
+        sma5.load_state(&blob).is_err(),
+        "Sma accepted a foreign period"
+    );
+
+    // …and a matching destination still round-trips, so the check is not a
+    // blanket refusal.
+    let mut same = Sma::new(Identity::<Real>::new(), 3);
+    same.load_state(&blob)
+        .expect("same period must still resume");
+    assert_eq!(same.value(), sma3.value());
+
+    // `Vwap::period` is a plain config field over a hand-written window.
+    let mut v10: Vwap<Identity<fugazi::types::Candle>> = Vwap::new(Identity::new(), 10);
+    v10.update(fugazi::types::Candle::new(1.0, 2.0, 0.5, 1.5, 10.0));
+    let blob = v10.save_state();
+    let mut v20: Vwap<Identity<fugazi::types::Candle>> = Vwap::new(Identity::new(), 20);
+    assert!(
+        v20.load_state(&blob).is_err(),
+        "Vwap accepted a foreign period"
+    );
+}

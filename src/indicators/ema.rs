@@ -14,6 +14,7 @@ use crate::types::Real;
 pub struct Ema<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     state: EmaState,
     /// Latest output value; `None` until the source produces its first value.
     pub value: Option<Real>,

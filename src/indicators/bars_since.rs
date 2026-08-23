@@ -155,6 +155,7 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
 pub struct BarsSinceExtreme<S, Op> {
     #[state(source)]
     source: S,
+    #[state(core)]
     extreme: WindowExtreme<Op>,
     /// Latest bars-since-extremum; `None` until the window is full.
     pub value: Option<Real>,

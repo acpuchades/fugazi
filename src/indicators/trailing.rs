@@ -342,7 +342,11 @@ where
                 .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
-            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+            // `LoadCore`, not a bare `from_value`: the blob carries the
+            // window's own period, and adopting it would silently re-window a
+            // trailing metric that the document says is something else.
+            self.stats = crate::indicators::stats::LoadCore::load_core(&self.stats, v)
+                .map_err(|e| format!("stats: {e}"))?;
         }
         self.value = None;
         Ok(())
@@ -444,7 +448,11 @@ where
                 .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
-            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+            // `LoadCore`, not a bare `from_value`: the blob carries the
+            // window's own period, and adopting it would silently re-window a
+            // trailing metric that the document says is something else.
+            self.stats = crate::indicators::stats::LoadCore::load_core(&self.stats, v)
+                .map_err(|e| format!("stats: {e}"))?;
         }
         self.value = None;
         Ok(())
@@ -528,7 +536,11 @@ where
                 .map_err(|e| format!("engine > {e}"))?;
         }
         if let Some(v) = obj.get("stats") {
-            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+            // `LoadCore`, not a bare `from_value`: the blob carries the
+            // window's own period, and adopting it would silently re-window a
+            // trailing metric that the document says is something else.
+            self.stats = crate::indicators::stats::LoadCore::load_core(&self.stats, v)
+                .map_err(|e| format!("stats: {e}"))?;
         }
         self.value = None;
         Ok(())

@@ -37,6 +37,7 @@ use crate::types::Real;
 pub struct Log<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     base: Real,
     /// Latest logarithm; `None` until the source is warmed *and* the input is
     /// strictly positive.

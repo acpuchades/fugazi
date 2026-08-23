@@ -43,7 +43,9 @@ use crate::types::Real;
 pub struct Percentile<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     window: WindowQuantile,
+    #[state(config)]
     pct: Real,
     /// Latest quantile; `None` until the window is full.
     pub value: Option<Real>,
@@ -145,6 +147,7 @@ impl<S: Indicator<Output = Real>> Indicator for Percentile<S> {
 pub struct PercentileRank<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     window: WindowQuantile,
     /// Latest rank in `(0, 1]`; `None` until the window is full.
     pub value: Option<Real>,

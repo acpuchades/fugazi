@@ -21,7 +21,9 @@ pub struct Mfi<S> {
     #[state(source)]
     source: S,
     prev_typical: Option<Real>,
+    #[state(core)]
     positive: WindowStats,
+    #[state(core)]
     negative: WindowStats,
     /// Latest MFI value in `[0, 100]`; `None` until warmed up.
     pub value: Option<Real>,

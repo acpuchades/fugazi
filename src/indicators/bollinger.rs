@@ -27,7 +27,9 @@ pub struct BollingerValue {
 pub struct Bollinger<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
+    #[state(config)]
     k: Real,
     /// Latest upper band.
     pub upper: Option<Real>,

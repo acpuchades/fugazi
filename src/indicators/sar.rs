@@ -26,7 +26,9 @@ const DEFAULT_MAX: Real = 0.2;
 pub struct Sar<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     step: Real,
+    #[state(config)]
     max: Real,
     bars: usize,
     is_long: bool,

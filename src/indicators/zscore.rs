@@ -22,6 +22,7 @@ use crate::types::Real;
 pub struct ZScore<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest z-score; `None` until the window is full.
     pub value: Option<Real>,

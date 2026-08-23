@@ -14,6 +14,7 @@ use crate::types::Real;
 pub struct Rma<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     state: WilderState,
     /// Latest output value; `None` until warmed up.
     pub value: Option<Real>,

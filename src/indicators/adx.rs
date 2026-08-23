@@ -31,6 +31,7 @@ pub struct AdxValue {
 pub struct Adx<S> {
     #[state(source)]
     dmi: Dmi<S>,
+    #[state(core)]
     dx: WilderState,
     /// Latest `+DI`.
     pub plus_di: Option<Real>,

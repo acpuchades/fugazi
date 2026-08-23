@@ -30,6 +30,7 @@ pub struct Keltner<P, C> {
     ema: Ema<P>,
     #[state(source)]
     atr: Atr<C>,
+    #[state(config)]
     multiplier: Real,
     /// Latest upper channel.
     pub upper: Option<Real>,

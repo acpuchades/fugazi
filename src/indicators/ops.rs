@@ -425,6 +425,7 @@ pub trait LookbackOp {
 pub struct Lookback<I, Op> {
     #[state(source)]
     source: I,
+    #[state(config)]
     period: usize,
     #[state(window)]
     buffer: Ring<Option<Real>>,
@@ -625,6 +626,7 @@ pub type Min<L, R> = Combine<L, R, MinOp>;
 pub struct Extreme<S, Op> {
     #[state(source)]
     source: S,
+    #[state(core)]
     inner: WindowExtreme<Op>,
     /// Latest extremum; `None` until warmed up.
     pub value: Option<Real>,

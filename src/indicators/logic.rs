@@ -408,6 +408,7 @@ impl<In> Indicator for ValueBool<In> {
 /// contents.
 #[derive(Debug, Clone, Copy, SaveState)]
 pub struct Every<In> {
+    #[state(config)]
     period: usize,
     /// Total bars seen so far. On update N (1-indexed) we fire iff
     /// `N % period == 0` — giving the delayed-first-fire semantics

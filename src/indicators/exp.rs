@@ -45,6 +45,7 @@ use crate::types::Real;
 pub struct Exp<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     base: Real,
     /// Latest exponential; `None` until the source is warmed, and on any step
     /// whose result overflows the finite range.

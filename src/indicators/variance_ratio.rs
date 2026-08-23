@@ -57,7 +57,9 @@ pub struct VarianceRatio<S> {
     #[state(source)]
     source: S,
     window: VecDeque<Real>,
+    #[state(config)]
     period: usize,
+    #[state(config)]
     lag: usize,
     /// Latest variance ratio; `None` until the window is full.
     pub value: Option<Real>,

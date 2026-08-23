@@ -76,6 +76,7 @@ use crate::types::{Candle, Real};
 pub struct Resample<S> {
     #[state(source)]
     inner: S,
+    #[state(config)]
     every: usize,
     count: usize,
     open: Option<Real>,

@@ -32,8 +32,11 @@ pub struct Dmi<S> {
     source: S,
     // Previous bar's high, low and close.
     prev: Option<(Real, Real, Real)>,
+    #[state(core)]
     plus_dm: WilderState,
+    #[state(core)]
     minus_dm: WilderState,
+    #[state(core)]
     true_range: WilderState,
     /// Latest `+DI`.
     pub plus_di: Option<Real>,

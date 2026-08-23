@@ -283,6 +283,50 @@ impl<T: Copy + Default + serde::de::DeserializeOwned> LoadWindow for Ring<T> {
     }
 }
 
+/// Restore an embedded stateful core from a blob, **checking the configuration
+/// it carries against the destination** instead of adopting it.
+///
+/// The sibling of [`LoadWindow`], and it exists for the sharper half of the same
+/// problem. A `Ring` cannot restore itself because the blob does not record its
+/// capacity; these cores *do* record theirs, which is worse — a period-3
+/// `WindowStats` blob loaded into an `Sma(5)` rebuilt itself at period 3, so the
+/// indicator silently became an `Sma(3)` and contradicted the document it was
+/// built from. Resuming continues *the same* strategy; a document that changed
+/// underneath is an error, not a run.
+///
+/// `#[state(core)]` is the field annotation that routes through this.
+pub(crate) trait LoadCore: Sized {
+    fn load_core(&self, v: &serde_json::Value) -> Result<Self, String>;
+}
+
+/// `period`-carrying cores: deserialize, then refuse a period that is not the
+/// one the destination was constructed with.
+macro_rules! load_core_by_period {
+    ($ty:ty $(, $($gen:tt)*)?) => {
+        impl$(<$($gen)*>)? LoadCore for $ty {
+            fn load_core(&self, v: &serde_json::Value) -> Result<Self, String> {
+                let restored: Self =
+                    serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                if restored.period != self.period {
+                    return Err(format!(
+                        "state was saved at period {} but this run is configured with \
+                         period {} — resuming continues the same strategy, so the \
+                         document must not have changed",
+                        restored.period, self.period
+                    ));
+                }
+                Ok(restored)
+            }
+        }
+    };
+}
+
+load_core_by_period!(WindowStats);
+load_core_by_period!(WindowCovariance);
+load_core_by_period!(WmaState);
+load_core_by_period!(WindowQuantile);
+load_core_by_period!(WindowExtreme<Op>, Op);
+
 /// A fixed-capacity ring buffer of the last `period` samples.
 ///
 /// A `VecDeque` would do the same job, and did. The window's capacity is known

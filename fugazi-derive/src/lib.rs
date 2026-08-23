@@ -31,6 +31,29 @@
 //!   the *destination's* capacity. A bare array does not record a capacity, and
 //!   a window saved mid-warm-up is shorter than its period, so a plain
 //!   `Deserialize` would restore it at the wrong size.
+//! - `#[state(config)]` → a value the **spec** fixes, not the data: a period, a
+//!   band multiplier, a comparison tolerance. Saved like plain state, but on
+//!   load it is *compared* against the already-rebuilt destination and a
+//!   mismatch is an error rather than an overwrite. See below.
+//! - `#[state(core)]` → an embedded stateful core (`WindowStats`, `EmaState`,
+//!   …) that carries its own configuration. Restored through
+//!   `crate::indicators::stats::LoadCore`, which checks that configuration
+//!   against the destination for the same reason `config` does.
+//!
+//! # Why config is checked rather than replayed
+//!
+//! Nothing stops a caller pointing `--resume` at a state file written by a
+//! *different* document — an edited period, a retuned tolerance. Replaying
+//! config in place made that silently wrong in the worst way: a `Diff` of period
+//! 4 restored from a period-2 blob took the blob's `period` field and kept the
+//! destination's four-slot buffer, so it reported a warm-up of 3 while
+//! differencing over 4 bars. A `Percentile` built for the 90th silently became
+//! the 10th. An `Sma(5)` silently became an `Sma(3)`, self-consistently, and
+//! contradicted the document it was built from.
+//!
+//! None of those is a resumable run: resuming continues *the same* strategy.
+//! So config is compared and a disagreement is reported, which is the one
+//! outcome that cannot be mistaken for a good run.
 //!
 //! Default-is-state is deliberate: forgetting `#[state(source)]` on a new child
 //! field makes the derive try to `serde_json::to_value` a non-`Serialize`
@@ -56,6 +79,14 @@ enum FieldRole {
     /// already-rebuilt destination rather than from the blob, which does not
     /// record it. See that trait's docs.
     Window,
+    /// Configuration the spec fixes: saved, but *checked* on load rather than
+    /// replayed, so resuming into an edited document is an error instead of a
+    /// silent hybrid. See the module docs.
+    Config,
+    /// An embedded stateful core carrying its own configuration: restored
+    /// through `crate::indicators::stats::LoadCore`, which checks that
+    /// configuration against the destination.
+    Core,
 }
 
 /// Parse `#[state(source)]` / `#[state(skip)]` off a field; unannotated = state.
@@ -77,8 +108,14 @@ fn field_role(field: &syn::Field) -> Result<FieldRole, syn::Error> {
             } else if meta.path.is_ident("window") {
                 role = FieldRole::Window;
                 Ok(())
+            } else if meta.path.is_ident("config") {
+                role = FieldRole::Config;
+                Ok(())
+            } else if meta.path.is_ident("core") {
+                role = FieldRole::Core;
+                Ok(())
             } else {
-                Err(meta.error("expected `source`, `skip` or `window`"))
+                Err(meta.error("expected `source`, `skip`, `window`, `config` or `core`"))
             }
         })?;
     }
@@ -86,7 +123,8 @@ fn field_role(field: &syn::Field) -> Result<FieldRole, syn::Error> {
     if seen && matches!(role, FieldRole::State) {
         return Err(syn::Error::new_spanned(
             field,
-            "`#[state(...)]` needs `source` or `skip` (unannotated fields are already state)",
+            "`#[state(...)]` needs `source`, `skip`, `window`, `config` or `core` \
+             (unannotated fields are already state)",
         ));
     }
     Ok(role)
@@ -160,6 +198,50 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
                 });
                 load_stmts.push(quote! {
                     self.#ident = crate::indicators::stats::LoadWindow::load_window(
+                        &self.#ident,
+                        obj.get(#key).unwrap_or(&::serde_json::Value::Null),
+                    ).map_err(|e| ::std::format!("field `{}`: {}", #key, e))?;
+                });
+            }
+            FieldRole::Config => {
+                save_stmts.push(quote! {
+                    map.insert(
+                        #key.to_owned(),
+                        ::serde_json::to_value(&self.#ident).unwrap_or_else(|e| {
+                            panic!(concat!("save_state: field `", #key, "` is not serializable: {}"), e)
+                        }),
+                    );
+                });
+                load_stmts.push(quote! {
+                    // Absent is accepted: a state written before this field
+                    // existed cannot disagree with anything.
+                    if let ::std::option::Option::Some(saved) = obj.get(#key)
+                        && !saved.is_null()
+                    {
+                        let here = ::serde_json::to_value(&self.#ident)
+                            .unwrap_or(::serde_json::Value::Null);
+                        if &here != saved {
+                            return ::std::result::Result::Err(::std::format!(
+                                "field `{}`: state was saved with {} but this run is \
+                                 configured with {} — resuming continues the same \
+                                 strategy, so the document must not have changed",
+                                #key, saved, here
+                            ));
+                        }
+                    }
+                });
+            }
+            FieldRole::Core => {
+                save_stmts.push(quote! {
+                    map.insert(
+                        #key.to_owned(),
+                        ::serde_json::to_value(&self.#ident).unwrap_or_else(|e| {
+                            panic!(concat!("save_state: field `", #key, "` is not serializable: {}"), e)
+                        }),
+                    );
+                });
+                load_stmts.push(quote! {
+                    self.#ident = crate::indicators::stats::LoadCore::load_core(
                         &self.#ident,
                         obj.get(#key).unwrap_or(&::serde_json::Value::Null),
                     ).map_err(|e| ::std::format!("field `{}`: {}", #key, e))?;

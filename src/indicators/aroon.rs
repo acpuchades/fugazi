@@ -28,8 +28,11 @@ pub struct AroonValue {
 pub struct Aroon<S> {
     #[state(source)]
     source: S,
+    #[state(config)]
     period: usize,
+    #[state(core)]
     highest: WindowExtreme<MaxOp>,
+    #[state(core)]
     lowest: WindowExtreme<MinOp>,
     /// Latest Aroon Up.
     pub up: Option<Real>,

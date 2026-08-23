@@ -47,6 +47,7 @@ pub struct LinRegValue {
 pub struct LinReg<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     cov: WindowCovariance,
     /// The bar index of the *next* sample — advanced on every update, whether
     /// or not the source produced a value.

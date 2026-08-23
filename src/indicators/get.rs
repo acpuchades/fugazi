@@ -153,6 +153,7 @@ pub struct GetReal<S = Identity<Atom>> {
     // from the spec; `value` is a per-bar cache re-read on the next `update`.
     #[state(skip)]
     schema: Arc<Schema>,
+    #[state(config)]
     index: usize,
     #[state(source)]
     source: S,
@@ -260,6 +261,7 @@ impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
 pub struct GetBool<S = Identity<Atom>> {
     #[state(skip)]
     schema: Arc<Schema>,
+    #[state(config)]
     index: usize,
     #[state(source)]
     source: S,
@@ -359,6 +361,7 @@ impl<S: Indicator<Output = Atom>> Indicator for GetBool<S> {
 pub struct GetStr<S = Identity<Atom>> {
     #[state(skip)]
     schema: Arc<Schema>,
+    #[state(config)]
     index: usize,
     #[state(source)]
     source: S,

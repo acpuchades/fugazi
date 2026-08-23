@@ -13,6 +13,7 @@ use crate::types::Real;
 pub struct Sma<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest output value; `None` until `period` source values have been seen.
     pub value: Option<Real>,

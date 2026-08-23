@@ -24,6 +24,7 @@ use crate::types::{Candle, Real};
 pub struct GarmanKlass<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest estimate; `None` until the window is full.
     pub value: Option<Real>,

@@ -16,7 +16,9 @@ pub struct Rsi<S> {
     #[state(source)]
     source: S,
     prev: Option<Real>,
+    #[state(core)]
     gain: WilderState,
+    #[state(core)]
     loss: WilderState,
     /// Latest RSI value in `[0, 100]`; `None` until warmed up.
     pub value: Option<Real>,

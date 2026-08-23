@@ -20,6 +20,7 @@ const CCI_FACTOR: Real = 0.015;
 pub struct Cci<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest output value; `None` until the window is full.
     pub value: Option<Real>,

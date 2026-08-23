@@ -20,6 +20,7 @@ use crate::types::Real;
 pub struct Skewness<S> {
     #[state(source)]
     source: S,
+    #[state(core)]
     stats: WindowStats,
     /// Latest skewness; `None` until the window is full.
     pub value: Option<Real>,

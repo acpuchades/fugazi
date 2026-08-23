@@ -21,6 +21,7 @@ pub struct Hma<S> {
     half: Wma<S>,
     #[state(source)]
     full: Wma<S>,
+    #[state(core)]
     smooth: WmaState,
     /// Latest output value; `None` until warmed up.
     pub value: Option<Real>,
