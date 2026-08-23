@@ -118,7 +118,12 @@ curve indistinguishable from one where carry was genuinely free — the exact
 failure this leg exists to remove — so `run` warns before the sweep, and
 `PaperWallet::carry_coverage()` reports `(bars that wanted a rate, bars that got
 one)` after it. An absent sample is **"no carry recorded"**, never "carry was
-nil".
+nil" — and that holds cell by cell, not just column by column. A `Real` overlay
+slot has no `None`, so a *blank cell* in a column that is otherwise present
+arrives as a `NaN`; it is read as no sample, counted as a bar that wanted a rate
+and did not get one, and charged nothing. The `run` warning covers a column that
+is wholly absent; a column with **holes** shows up as `carry_coverage()`
+reporting fewer seen than wanted.
 
 ### Cash interest and the margin call
 

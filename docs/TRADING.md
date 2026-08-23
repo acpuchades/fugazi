@@ -121,6 +121,14 @@ protective resters — all return an `Ack`, never a fill. On a `PaperWallet`:
   flatters itself.
 - **`set_stop` / `set_take_profit` rest.** One bracket per symbol, latest wins.
   The wallet triggers and prices them itself against each bar's range (§3).
+  When **both legs sit inside one bar** the range says only that the price
+  visited each level, not in which order — so the **stop wins**, on both a long
+  and a short. That is the pessimistic reading of an ambiguity the data cannot
+  settle, and the same choice on either side of the book. A bracket set while
+  flat guards the entry from the bar the entry fills on, since market fills
+  resolve before protective legs; a fill that **reverses through zero** drops
+  the bracket with the position it left, rather than reinterpreting a long's
+  stop as a short's.
 - **`set_limit` rests** as an *entry* instrument: it drives the position toward a
   target once the market trades through the limit price, at that price or better.
 

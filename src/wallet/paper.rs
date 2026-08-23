@@ -1540,7 +1540,20 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         };
         if let Some(crate::types::OverlayValue::Real(rate)) = overlays.get_by_key(column) {
             let rate = *rate;
-            self.carry_rates.insert(symbol.clone(), rate);
+            // A `Real` overlay slot has no `None`, so an **absent sample is
+            // stored as a `NaN`** — a blank cell, or a full join that gave this
+            // symbol a column another carries. That is precisely the case this
+            // method's contract calls "leaves nothing recorded", and recording
+            // it was catastrophic rather than merely wrong: `accrue_carry`
+            // computes `position × price × rate` and subtracts it from `funds`,
+            // so one blank funding cell turned the account's cash *and* every
+            // equity reading after it into `NaN`, permanently — while
+            // `carry_coverage` counted the bar as *seen* and reported full
+            // coverage, which is the one diagnostic that exists to catch a
+            // funding series with holes in it.
+            if rate.is_finite() {
+                self.carry_rates.insert(symbol.clone(), rate);
+            }
         }
     }
 
@@ -4073,6 +4086,362 @@ mod tests {
                 amount: 5.0,
             })
             .is_ok()
+        );
+    }
+
+    /// The OCO precedence is symmetric. `oco_stop_takes_precedence_and_cancels_the_target`
+    /// pins the long branch; `protective_trigger` has a **separate mirror
+    /// branch** for a short, and nothing held the two to the same rule — a
+    /// short whose take-profit won a wide bar would report the optimistic side
+    /// of an ambiguity the long side resolves pessimistically.
+    #[test]
+    fn oco_stop_takes_precedence_on_a_short_too() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(110.0), Size::position_frac(1.0))
+            .unwrap();
+        w.set_take_profit("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
+        // A bar that crosses both. The stop is the adverse leg, and it wins.
+        let fills = w.update("X", Candle::new(100.0, 111.0, 89.0, 105.0, 0.0));
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].kind, OrderKind::Stop);
+        assert_fill(&fills[0], Side::Buy, 1.0, 110.0, OrderKind::Stop);
+        assert!(w.positions().is_empty(), "the cover should flatten");
+        // The whole bracket goes with it.
+        assert!(
+            w.update("X", Candle::new(105.0, 112.0, 88.0, 100.0, 0.0))
+                .is_empty(),
+            "a leg survived the flatten"
+        );
+    }
+
+    /// A bracket set **before** the position exists guards it from the bar the
+    /// entry fills on, not from the bar after.
+    ///
+    /// That falls out of the phase order — market fills (3, 4) precede
+    /// protective legs (5) — but it is the case a caller is most likely to get
+    /// wrong in the other direction, and `protective_trigger` returns `None`
+    /// while flat, so a reader could reasonably expect the leg to be discarded
+    /// on the bar it was set.
+    #[test]
+    fn a_bracket_set_while_flat_guards_the_entry_from_its_own_bar() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        // Stop first, entry second — both resting when the next bar arrives.
+        w.set_stop("X", Reference(95.0), Size::position_frac(1.0))
+            .unwrap();
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+
+        // One bar: opens at 100 (the entry fills there) and trades down through
+        // 95 (the stop fires on the same bar).
+        let fills = w.update("X", ohlc(100.0, 101.0, 94.0, 96.0));
+        assert_eq!(fills.len(), 2, "expected entry then stop: {fills:?}");
+        assert_fill(&fills[0], Side::Buy, 1.0, 100.0, OrderKind::Market);
+        assert_fill(&fills[1], Side::Sell, 1.0, 95.0, OrderKind::Stop);
+        assert!(w.positions().is_empty());
+    }
+
+    /// **A reversal through zero drops the bracket**, and this is the one that
+    /// would have hurt.
+    ///
+    /// `protective_trigger` reads the position's *current* sign to decide which
+    /// side of the trigger is adverse, so a long's stop at 90 left resting
+    /// against a fresh short becomes a short's stop at 90 — which fires the
+    /// moment the bar's high reaches it, i.e. almost immediately, closing a
+    /// position the strategy had just opened. It does not, because the fill
+    /// that crosses zero clears the bracket; nothing pinned that.
+    #[test]
+    fn reversing_through_zero_drops_the_brackets_of_the_position_it_left() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0))
+            .unwrap();
+
+        // Long 1 → short 1 in one market order.
+        w.set_position(Units {
+            symbol: "X",
+            amount: -1.0,
+        })
+        .unwrap();
+        let fills = w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_eq!(fills.len(), 1, "the reversal is one fill: {fills:?}");
+        assert_fill(&fills[0], Side::Sell, 2.0, 100.0, OrderKind::Market);
+        assert_eq!(w.position(&"X").amount, -1.0);
+
+        // A bar whose high is well above the old long-stop's 90. If the leg had
+        // survived, it would now read as the short's stop and cover here.
+        let after = w.update("X", ohlc(100.0, 120.0, 99.0, 118.0));
+        assert!(
+            after.is_empty(),
+            "the old long's stop fired against the new short: {after:?}"
+        );
+        assert_eq!(
+            w.position(&"X").amount,
+            -1.0,
+            "the short should still be open"
+        );
+    }
+
+    /// `requested_units` is what tells a rounding sliver apart from a 17×
+    /// reduction, and the two shrink paths reach it differently: cash binds a
+    /// long, the gross cap binds a short. Both, plus the guarantee that an
+    /// explicit unit count is never quietly shrunk.
+    #[test]
+    fn a_fitted_fill_records_what_it_was_asked_for() {
+        use crate::costs::{PercentageCommission, TradingCosts};
+
+        let account = |cash: Real, max_gross: Real, commission: Real| {
+            let c = TradingCosts {
+                commission: Box::new(PercentageCommission::new(commission)),
+                ..Default::default()
+            };
+            let mut w: PaperWallet<&str> =
+                PaperWallet::with_costs(cash, c).with_max_gross(max_gross);
+            w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+            w
+        };
+
+        // Cash binds: an all-in long has to shed exactly the commission.
+        let mut w = account(10_000.0, 1.0, 0.001);
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        let f = w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_fill(&f[0], Side::Buy, 99.9, 100.0, OrderKind::Market);
+        assert_eq!(f[0].requested_units, 100.0);
+        assert!(
+            (f[0].fill_ratio() - 0.999).abs() < 1e-9,
+            "ratio {}",
+            f[0].fill_ratio()
+        );
+        assert!(w.funds().0 >= 0.0, "an all-in must not overdraw");
+
+        // The gross cap binds: `sizing: 3.0` on an unlevered account executes at
+        // 1x, and says so. This is the case the field exists for — a rounding
+        // sliver and a 3× reduction used to look identical in the blotter.
+        let mut w = account(10_000.0, 1.0, 0.0);
+        w.set("X", Side::Sell, Size::value_frac(3.0)).unwrap();
+        let f = w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_fill(&f[0], Side::Sell, 100.0, 100.0, OrderKind::Market);
+        assert_eq!(f[0].requested_units, 300.0);
+        assert!((f[0].fill_ratio() - 1.0 / 3.0).abs() < 1e-9);
+
+        // An explicit unit count carries a specific intent, so an infeasible one
+        // fails loudly at submission rather than being fitted down.
+        let mut w = account(1_000.0, 1.0, 0.0);
+        assert_eq!(
+            w.set("X", Side::Buy, Size::units(1_000.0)),
+            Err(WalletError::InsufficientFunds)
+        );
+    }
+
+    /// **A `funds_frac` buy on an account whose cash has gone negative
+    /// flattens the position.**
+    ///
+    /// Two documented rules compose into it. `set` targets a position rather
+    /// than adding to one, and `FundsFraction` reads `funds.max(0.0)` — chosen
+    /// so a negative balance cannot come back through `side.sign() * magnitude`
+    /// as a fill on the opposite side. The consequence is that "go as long as
+    /// my cash allows", on an account with no spare cash, resolves to a target
+    /// of zero units, and a target of zero is a full liquidation.
+    ///
+    /// It is not reachable from a YAML document — the spec layer only ever
+    /// builds `ValueFraction`, which sizes against equity and stays positive on
+    /// a levered book — so this is a Rust/Python caller's sharp edge. Pinned
+    /// because it is surprising, not because it is settled: a `Buy` that books
+    /// a `Sell` of the whole position is worth someone deciding on
+    /// deliberately.
+    #[test]
+    fn a_funds_fraction_buy_with_no_spare_cash_targets_zero_and_so_flattens() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0).with_max_gross(3.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Buy, Size::value_frac(2.5)).unwrap();
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_eq!(w.position(&"X").amount, 250.0);
+        assert!(w.funds().0 < 0.0, "precondition: the book is levered");
+
+        w.set("X", Side::Buy, Size::funds_frac(1.0)).unwrap();
+        let f = w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_fill(&f[0], Side::Sell, 250.0, 100.0, OrderKind::Market);
+        assert_eq!(w.position(&"X").amount, 0.0);
+
+        // `value_frac` does not have the edge: equity survives the leverage that
+        // cash does not, so the same request holds the position.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0).with_max_gross(3.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Buy, Size::value_frac(2.5)).unwrap();
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Buy, Size::value_frac(2.5)).unwrap();
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_eq!(w.position(&"X").amount, 250.0, "the position should hold");
+    }
+
+    /// The short side of the margin call, which the long-only tests above do
+    /// not reach: the breach comes from a price **rise**, and closing it is a
+    /// *buy* — the one direction `fill_at`'s cash rule can refuse. It clears,
+    /// because an account levered enough to be margin-called has
+    /// `max_gross > 1` and the cash rule is lifted there; a rejection would
+    /// leave the book open past its own maintenance floor.
+    #[test]
+    fn a_levered_short_is_covered_when_it_breaches_maintenance() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_maintenance_margin(0.10);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+        assert_eq!(w.position(&"X").amount, -300.0);
+
+        // Up 20%: equity 4,000 against 36,000 of gross is 11% — still above.
+        assert!(w.advance(&[("X", bar(120.0))]).is_empty());
+        assert_eq!(w.position(&"X").amount, -300.0);
+
+        // Up 25%: equity 2,500 against 37,500 is 6.7%. Covered.
+        let fills = w.advance(&[("X", bar(125.0))]);
+        assert_eq!(fills.len(), 1, "expected a forced cover: {fills:?}");
+        assert_fill(&fills[0], Side::Buy, 300.0, 125.0, OrderKind::Liquidation);
+        assert_eq!(w.position(&"X").amount, 0.0);
+        assert!(
+            w.rejections().is_empty(),
+            "the cover must not be refused: {:?}",
+            w.rejections()
+        );
+        assert!(w.equity().0 > 0.0, "solvent, but closed out");
+    }
+
+    /// A margin call is an account-level event, so it closes **every** symbol,
+    /// not the one whose bar tripped it — and in a deterministic order, since
+    /// the fills land in a blotter a resumed run has to reproduce.
+    #[test]
+    fn a_margin_call_closes_every_open_symbol() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_maintenance_margin(0.10);
+        w.update("A", bar(100.0));
+        w.update("B", bar(50.0));
+        w.set("A", Side::Buy, Size::units(150.0)).unwrap();
+        w.set("B", Side::Buy, Size::units(300.0)).unwrap();
+        w.advance(&[("A", bar(100.0)), ("B", bar(50.0))]);
+        assert_eq!(w.position(&"A").amount, 150.0);
+        assert_eq!(w.position(&"B").amount, 300.0);
+
+        let fills = w.advance(&[("A", bar(73.0)), ("B", bar(36.5))]);
+        assert_eq!(fills.len(), 2, "both legs should close: {fills:?}");
+        assert!(fills.iter().all(|f| f.kind == OrderKind::Liquidation));
+        // Ordered by mark, ascending — arbitrary, but the same every run.
+        assert_eq!(fills[0].symbol, "B");
+        assert_eq!(fills[1].symbol, "A");
+        assert!(w.positions().is_empty());
+    }
+
+    /// The call clears the *resting* book too. A stop or a limit left behind
+    /// would fire against a position that no longer exists, or re-enter one the
+    /// account was just closed out of.
+    #[test]
+    fn a_margin_call_cancels_the_resting_book() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0)
+            .with_max_gross(3.0)
+            .with_maintenance_margin(0.10);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(3.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(50.0), Size::position_frac(1.0))
+            .unwrap();
+        w.set_limit("X", Side::Buy, Size::units(1.0), Reference(60.0))
+            .unwrap();
+
+        let fills = w.advance(&[("X", bar(73.0))]);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].kind, OrderKind::Liquidation);
+
+        // A bar that would have triggered both: down through 60 and through 50.
+        let after = w.advance(&[("X", ohlc(73.0, 74.0, 40.0, 45.0))]);
+        assert!(
+            after.is_empty(),
+            "a resting order survived the call: {after:?}"
+        );
+        assert_eq!(w.position(&"X").amount, 0.0);
+    }
+
+    /// **An absent funding cell must not be charged as a rate.**
+    ///
+    /// A `Real` overlay slot has no `None`, so an absent sample is stored as a
+    /// `NaN` — a blank cell, or a full join that gave this symbol a column
+    /// another carries. `observe` reads the column straight off the atom rather
+    /// than through `GetReal`, so it saw the sentinel as data: `accrue_carry`
+    /// computed `position × price × NaN` and subtracted it from `funds`, and
+    /// **one blank cell turned the account's cash and every later equity
+    /// reading into `NaN`, permanently**. Worse, the bar counted as *seen*, so
+    /// `carry_coverage` reported full coverage — the one diagnostic that exists
+    /// to catch a funding series with holes in it said there were none.
+    #[test]
+    fn an_absent_funding_cell_is_no_sample_rather_than_a_nan_charge() {
+        use crate::costs::{FundingRate, TradingCosts};
+        use crate::market::{OverlayInfo, Schema};
+        use crate::types::{Atom, OverlayValue};
+        use std::sync::Arc;
+
+        let mut b = Schema::builder();
+        b.add_real("funding_rate");
+        let schema = b.finish();
+        let with_rate = |rate: Real| {
+            Atom::with_overlays(
+                ohlc(100.0, 101.0, 99.0, 100.0),
+                OverlayInfo::new(Arc::clone(&schema), [OverlayValue::Real(rate)]),
+            )
+        };
+
+        let costs = TradingCosts {
+            carry: Box::new(FundingRate::default()),
+            ..Default::default()
+        };
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set("X", Side::Buy, Size::units(10.0)).unwrap();
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert_eq!(w.position(&"X").amount, 10.0);
+
+        // A real rate: 10 units at 100 times 0.0001 is 0.10.
+        Wallet::observe(&mut w, &"X", &with_rate(0.0001));
+        w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+        assert!(
+            (w.funds().0 - 8_999.9).abs() < 1e-9,
+            "funds {}",
+            w.funds().0
+        );
+        assert_eq!(w.carry_coverage(), (1, 1));
+
+        // An absent cell. Nothing is charged, and coverage says so.
+        for absent in [Real::NAN, Real::INFINITY, Real::NEG_INFINITY] {
+            let before = w.funds().0;
+            let (wanted, seen) = w.carry_coverage();
+            Wallet::observe(&mut w, &"X", &with_rate(absent));
+            w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+            assert!(
+                w.funds().0.is_finite() && w.equity().0.is_finite(),
+                "a {absent} funding cell reached the cash balance"
+            );
+            assert!(
+                (w.funds().0 - before).abs() < 1e-12,
+                "a {absent} funding cell was charged"
+            );
+            assert_eq!(
+                w.carry_coverage(),
+                (wanted + 1, seen),
+                "a {absent} cell was counted as a sample the run actually got"
+            );
+        }
+
+        // And a real rate afterwards still charges — the hole is not sticky.
+        Wallet::observe(&mut w, &"X", &with_rate(0.0001));
+        w.advance(&[("X", ohlc(100.0, 101.0, 99.0, 100.0))]);
+        assert!(
+            (w.funds().0 - 8_999.8).abs() < 1e-9,
+            "funds {}",
+            w.funds().0
         );
     }
 }

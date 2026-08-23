@@ -446,9 +446,14 @@ impl AnnualRate {
     /// fractions (`0.06` is 6% a year). Negatives are clamped to zero — this
     /// model charges, it does not pay.
     pub fn new(long: Real, short: Real) -> Self {
+        // `f64::max` suppresses a `NaN`, so `NaN.max(0.0)` is already `0.0` —
+        // but an *infinity* survives it and would charge the whole account away
+        // on the first bar. Neither is a rate; both read as "no charge on that
+        // side", which is what a non-rate means here.
+        let sane = |r: Real| if r.is_finite() { r.max(0.0) } else { 0.0 };
         Self {
-            long: long.max(0.0),
-            short: short.max(0.0),
+            long: sane(long),
+            short: sane(short),
         }
     }
 
@@ -1035,5 +1040,29 @@ mod tests {
             Box::new(NoSlippage),
         );
         assert!(!b.is_none());
+    }
+
+    /// A rate that is not a number is not a rate. `f64::max` already suppresses
+    /// a `NaN` — `NaN.max(0.0)` is `0.0` — but an infinity survives it, and an
+    /// infinite annualized rate charges the whole account away on the first
+    /// bar it is pro-rated onto.
+    #[test]
+    fn an_annual_rate_that_is_not_finite_charges_nothing() {
+        let ctx = |position: Real| CarryContext {
+            position,
+            price: 100.0,
+            year_fraction: Some(1.0 / 365.0),
+            rate: None,
+        };
+        for bad in [Real::NAN, Real::INFINITY, Real::NEG_INFINITY] {
+            let m = AnnualRate::flat(bad);
+            assert_eq!(m.carry(&ctx(10.0)), 0.0, "long at {bad}");
+            assert_eq!(m.carry(&ctx(-10.0)), 0.0, "short at {bad}");
+        }
+        // A negative rate is still clamped to zero — this model charges, it
+        // does not pay — and a real one still charges.
+        assert_eq!(AnnualRate::flat(-0.05).carry(&ctx(10.0)), 0.0);
+        let charged = AnnualRate::flat(0.365).carry(&ctx(10.0));
+        assert!((charged - 1.0).abs() < 1e-9, "charged {charged}");
     }
 }
