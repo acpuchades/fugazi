@@ -111,6 +111,22 @@ fugazi run @strategy.yml -s @btc.csv -s @funding.csv \
   --max-gross 3 --costs 'carry=!funding {}' --costs commission=!percentage:0.0005
 ```
 
+**`year_fraction` is measured, not declared.** A bar's carry is pro-rated by the
+gap between its own open time and the previous bar's whenever the series carries
+times, and only falls back to the run's declared cadence when it does not. That
+is a correction, not a preference: a daily equity bar stamped Monday follows one
+stamped Friday, so the position was held over three days of a broker's interest
+and a flat `1d` cadence bills for one — an under-charge of 3x across every
+weekend, worse across a holiday. It is also what lets an **index-sampled** series
+(volume, dollar or tick bars, whose bars span no fixed interval by construction)
+charge carry correctly at all: there is no cadence to declare, and the elapsed
+gap is the only honest answer. Calendar seconds, not trading seconds — a broker
+charges over the weekend; the market does not pay returns over it.
+
+Funding is unaffected either way. It is *settlement*-denominated — the venue
+states the charge in full and the column already sums it per bar — so it ignores
+`year_fraction` entirely, and scaling it by one would be the mistake.
+
 **Two ways it silently charges nothing, and both are checked.** A `!funding`
 whose column is absent from the input reads no sample on every bar; an `!annual`
 with no resolvable bar cadence cannot pro-rate its rate. Either leaves an equity
