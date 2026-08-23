@@ -131,7 +131,7 @@ Worth saying plainly, so you don't find out in week three:
 
 ```toml
 [dependencies]
-fugazi = "0.75"
+fugazi = "0.76"
 ```
 
 **Command-line backtester**

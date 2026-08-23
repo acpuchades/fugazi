@@ -139,7 +139,7 @@ request above the cap is fitted and recorded rather than reinterpreted.
 
 ### Cost of carry — *settled*
 
-**Settled: a fourth cost leg.** `CarryModel` is charged once per bar by
+**Settled in 0.76.0: a fourth cost leg.** `CarryModel` is charged once per bar by
 `advance`, on the position carried *into* the bar and marked at its `open`, with
 three models — `!funding` (per-bar rate read from an overlay column, signed both
 ways), `!annual` (a constant annualized rate per side), `!both`. Cash interest on
