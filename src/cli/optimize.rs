@@ -275,6 +275,26 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let base_value =
         imports::resolve(base_value, opts.strategy_dir).context("resolving strategy imports")?;
 
+    // `--pooled` is only wired for the single-asset path: it reduces over the
+    // same per-root stream map `distinct_roots` builds there, which the
+    // multi-symbol shapes don't have (pairs resolves a fixed `left`/`right`
+    // pair rather than a set of independent roots; basket/multi/portfolio
+    // trade the frame's whole universe in one snapshot stream, not one root
+    // per grid point). Refused here rather than left to read silently as an
+    // ordinary axis, which is what it did before this check existed.
+    if opts.pooled.is_some() && !matches!(opts.strategy_kind, StrategyKind::Single) {
+        bail!(
+            "--pooled is only wired for single-asset (`root:`) strategies — a {} document has              no per-grid-point traded root to reduce over",
+            match opts.strategy_kind {
+                StrategyKind::Pairs => "pairs:",
+                StrategyKind::Basket => "basket:",
+                StrategyKind::Multi => "multi:",
+                StrategyKind::Portfolio => "portfolio:",
+                StrategyKind::Single => unreachable!("excluded by the outer match"),
+            },
+        );
+    }
+
     match opts.strategy_kind {
         StrategyKind::Single => run_single(&opts, subgrids, frame, &base_value),
         StrategyKind::Pairs
@@ -2710,29 +2730,7 @@ fn write_pooled_composite_yaml(
             .with_context(|| format!("creating output dir `{}`", parent.display()))?;
     }
     let members = result.composite_members();
-    let mut pooled = serde_json::Map::new();
-    if let Some(sample) = members.first() {
-        for (metric_path, _) in metrics::flatten(&sample.metrics) {
-            if let Some(p) = fugazi::spec::panel::pool_metric(&members, metric_path) {
-                pooled.insert(
-                    metric_path.to_string(),
-                    serde_json::json!({
-                        "mean": p.mean,
-                        "std": p.std,
-                        "defined": p.defined,
-                        "members": p.members,
-                    }),
-                );
-            }
-        }
-    }
-    let doc = serde_json::json!({
-        "pooled": pooled,
-        "members": members
-            .iter()
-            .map(|m| (m.member.clone(), serde_json::to_value(&m.metrics).unwrap_or_default()))
-            .collect::<serde_json::Map<_, _>>(),
-    });
+    let doc = fugazi::spec::panel::pooled_document(&members);
     let text = serde_norway::to_string(&doc).context("serializing pooled composite metrics")?;
     std::fs::write(path, text).with_context(|| format!("writing `{}`", path.display()))?;
     Ok(())

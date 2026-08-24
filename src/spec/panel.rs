@@ -131,6 +131,41 @@ pub fn pool_metric(members: &[PanelMetrics], path: &str) -> Option<Pooled> {
     })
 }
 
+/// The `{pooled: {...}, members: {...}}` document a pooled `metrics.yml`
+/// writes: every metric path's cross-member `mean`/`std`/`defined`/`members`,
+/// plus every member's own whole metrics document keyed by name — the same
+/// pair [`PanelMetrics`] carries, just serialized.
+///
+/// Shared by `optimize`'s pooled-walkforward composite writer and `fugazi run
+/// --pooled`'s pooled `metrics.yml` — both reduce the same `PanelMetrics`
+/// slice to the same on-disk shape, so a reader who has seen one already
+/// knows the other.
+pub fn pooled_document(members: &[PanelMetrics]) -> serde_json::Value {
+    let mut pooled = serde_json::Map::new();
+    if let Some(sample) = members.first() {
+        for (metric_path, _) in metrics::flatten(&sample.metrics) {
+            if let Some(p) = pool_metric(members, metric_path) {
+                pooled.insert(
+                    metric_path.to_string(),
+                    serde_json::json!({
+                        "mean": p.mean,
+                        "std": p.std,
+                        "defined": p.defined,
+                        "members": p.members,
+                    }),
+                );
+            }
+        }
+    }
+    serde_json::json!({
+        "pooled": pooled,
+        "members": members
+            .iter()
+            .map(|m| (m.member.clone(), serde_json::to_value(&m.metrics).unwrap_or_default()))
+            .collect::<serde_json::Map<_, _>>(),
+    })
+}
+
 /// The member that ruined, if any — the panel's answer to
 /// [`crate::spec::optimize::Evaluation::ruin_bar`].
 ///

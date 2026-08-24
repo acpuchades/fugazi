@@ -1526,6 +1526,12 @@ into one account needs a weighting and a rebalance cadence, which is an
 allocation policy fugazi expresses explicitly with `portfolio:` rather than
 inventing inside `optimize`.
 
+The CLI has an ergonomic twin of the plain (non-walk-forward) case:
+`fugazi run --pooled AXIS` reports one already-chosen parameter set's pooled
+reading — the same thing `ta.optimize(..., panel=panel, grid=[{}])` computes,
+with per-member `fills.csv`/`trades.csv`/`returns.csv`/`metrics.yml` written to
+disk instead of read back as `row.metrics_panel`.
+
 `smooth=` mirrors the CLI's `--smooth`: rank `best_by` by a kernel-weighted
 average over each grid point's *parameter neighbourhood* rather than by the
 point estimate, so a broad plateau outranks a lone spike. `"box:R"`,

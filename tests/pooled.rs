@@ -19,6 +19,13 @@
 //! The guard that matters most is #1: a test asserting only "the sweep produced
 //! rows" would pass the un-pooled behaviour too, so every assertion here is
 //! about the *shape* of what came back, not merely that something did.
+//!
+//! Also covered: `fugazi run --pooled` — the `run` twin restricted to a single
+//! parameter set, sharing the same axis-extraction grammar and the same
+//! kept-not-nulled ruin policy — and a regression pin for a real bug this
+//! session's own earlier pass introduced: `optimize --pooled` on a
+//! `pairs:`/`basket:`/`multi:`/`portfolio:` document used to be silently
+//! ignored rather than refused.
 
 mod common;
 
@@ -375,6 +382,264 @@ fn a_panel_of_one_is_refused() {
     assert!(
         out.stderr.contains("panel of one"),
         "expected the panel-of-one refusal, got:\n{}",
+        out.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `fugazi run --pooled` — the `run` twin, restricted to one parameter set
+// ---------------------------------------------------------------------------
+//
+// `optimize`'s job is finding the best parameter set; `run`'s is reporting
+// what one already-chosen set actually does. `--pooled` on `run` answers that
+// across a panel: fit the same document to every member's own data and report
+// the panel's `mean ∓ std`, with each member's own artefacts written to its
+// own subdirectory so a pooled run is diagnosable one member at a time.
+
+/// A document that shorts unconditionally on the first opportunity and never
+/// covers — the same "shortest path to insolvency" recipe `tests/ruin.rs`
+/// uses, ported to the spec layer. No `rebalance_on:` (defaults to `!never`),
+/// so once the short is opened it is held at a fixed unit count rather than
+/// resized bar to bar — which is what lets a large enough adverse move ruin
+/// the account outright instead of being continuously de-risked.
+const SHORT_FOREVER: &str = "\
+root: !pick { symbol: !param SYM }
+short:
+  enter: !gt { lhs: !value 2, rhs: !value 1 }
+  exit: !never
+sizing: !value 1.0
+";
+
+/// 100 → 100 → 150 → 260 → 320 → 400 → 450 → 500 → 600 — the exact `DOOMED`
+/// series `tests/ruin.rs` uses: a >100% adverse move against a fully-invested
+/// short, which crosses equity through zero with no leverage knob involved.
+const DOOMED: [f64; 9] = [
+    100.0, 100.0, 150.0, 260.0, 320.0, 400.0, 450.0, 500.0, 600.0,
+];
+
+/// A calm series a short survives easily — the control proving the fixture,
+/// not the feature: without a DOOMED-shaped adverse move, the same strategy on
+/// the same account does not ruin.
+const CALM: [f64; 9] = [100.0, 99.0, 101.0, 100.0, 99.0, 101.0, 100.0, 99.0, 100.0];
+
+#[test]
+fn a_pooled_run_writes_one_full_run_per_member_and_a_pooled_reduction() {
+    let up: Vec<f64> = (0..24).map(|i| 100.0 + i as f64 * 2.0).collect();
+    let down: Vec<f64> = (0..24).map(|i| 150.0 - i as f64 * 2.0).collect();
+    let (frame_path, _keep) = scratch_file(
+        "run_pooled_two.csv",
+        &frame(&[("UP", 0, &up), ("DOWN", 0, &down)]),
+    );
+    let (doc_path, _keep_doc) = scratch_file("run_pooled_doc.yml", DOC);
+
+    let out = Cmd::new("run")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
+        .args(&["--params", "FAST=2"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--crypto"])
+        .output_dir("run_pooled_two_out")
+        .ok();
+
+    // Each member gets its own full `run` output — the same four files a
+    // plain `run` would write for that member alone.
+    for member in ["UP", "DOWN"] {
+        for artefact in ["fills.csv", "trades.csv", "returns.csv", "metrics.yml"] {
+            assert!(
+                out.wrote(&format!("{member}/{artefact}")),
+                "expected {member}/{artefact} to be written"
+            );
+        }
+    }
+    // The top-level metrics.yml is the pooled reduction, not a third member's
+    // worth of run output — it has to name both members and carry a pooled
+    // section, not just be another whole-run Metrics document.
+    let pooled_yaml = out.read("metrics.yml");
+    assert!(
+        pooled_yaml.contains("pooled:"),
+        "missing `pooled:` section:\n{pooled_yaml}"
+    );
+    assert!(
+        pooled_yaml.contains("members:"),
+        "missing `members:` section:\n{pooled_yaml}"
+    );
+    assert!(
+        pooled_yaml.contains("UP:"),
+        "pooled doc must name member UP:\n{pooled_yaml}"
+    );
+    assert!(
+        pooled_yaml.contains("DOWN:"),
+        "pooled doc must name member DOWN:\n{pooled_yaml}"
+    );
+
+    // The console names the panel and both members.
+    assert!(out.stdout.contains("pooled"), "{}", out.stdout);
+    assert!(out.stdout.contains("member UP"), "{}", out.stdout);
+    assert!(out.stdout.contains("member DOWN"), "{}", out.stdout);
+}
+
+/// A ruined member's pre-ruin numbers are folded into the pooled mean rather
+/// than dropped — the same "kept, not nulled" rule a single ruined run's own
+/// `metrics.yml` follows — and the console names which member ruined.
+///
+/// This is a control-and-treatment pair rather than one member: DOOMED proves
+/// the strategy really can ruin under this document, CALM proves it does not
+/// ruin *unconditionally* — without the control, a bug that ruined every
+/// member (or none) would pass just as easily.
+#[test]
+fn a_ruined_members_pre_ruin_numbers_are_kept_and_named() {
+    let (frame_path, _keep) = scratch_file(
+        "run_pooled_ruin.csv",
+        &frame(&[("DOOMED", 0, &DOOMED), ("CALM", 0, &CALM)]),
+    );
+    let (doc_path, _keep_doc) = scratch_file("run_pooled_ruin_doc.yml", SHORT_FOREVER);
+
+    let out = Cmd::new("run")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--params", "SYM=[\"DOOMED\",\"CALM\"]"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--crypto"])
+        .output_dir("run_pooled_ruin_out")
+        .ok();
+
+    // `ruin_bar` is `#[serde(skip_serializing_if = "Option::is_none")]` — a
+    // solvent run has no `ruin_bar:` line at all, not one reading `null`.
+    let doomed_yaml = out.read("DOOMED/metrics.yml");
+    assert!(
+        doomed_yaml.contains("ruin_bar:"),
+        "DOOMED must have ruined — a >100% adverse move against a fully-invested, \
+         never-covered short is exactly the recipe tests/ruin.rs pins as ruin:\n{doomed_yaml}"
+    );
+    let calm_yaml = out.read("CALM/metrics.yml");
+    assert!(
+        !calm_yaml.contains("ruin_bar:"),
+        "CALM is the control — it must survive the same strategy on a flat series:\n{calm_yaml}"
+    );
+
+    // The pooled mean is still computed — DOOMED's pre-ruin numbers are kept,
+    // not nulled, exactly as a single ruined run's own cells stay.
+    let pooled_yaml = out.read("metrics.yml");
+    assert!(
+        pooled_yaml.contains("pooled:"),
+        "pooling must still produce a reduction despite one ruined member:\n{pooled_yaml}"
+    );
+
+    // The console names the ruined member rather than leaving it implicit.
+    assert!(
+        out.stdout.contains("ruined") && out.stdout.contains("DOOMED"),
+        "console must name the ruined member:\n{}",
+        out.stdout
+    );
+}
+
+/// The four `--pooled` refusals `run` shares with `optimize`'s axis-extraction
+/// discipline: a missing axis, a single-value axis, another axis-shaped
+/// `--params` entry, and (the case `optimize` has no equivalent for)
+/// composing with state that has no per-member meaning yet.
+#[test]
+fn run_pooled_refusals() {
+    let (frame_path, _keep) = scratch_file("run_pooled_refusals.csv", &two_member_frame());
+    let (doc_path, _keep_doc) = scratch_file("run_pooled_refusals.yml", DOC);
+    let base = || {
+        Cmd::new("run")
+            .arg(&format!("@{}", doc_path.display()))
+            .series(&format!("@{}", frame_path.display()))
+            .args(&["--crypto"])
+    };
+
+    let missing_axis = base()
+        .args(&["--params", "FAST=2"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--output-dir", "/dev/null"])
+        .fails();
+    assert!(
+        missing_axis.stderr.contains("names no --params entry"),
+        "{}",
+        missing_axis.stderr
+    );
+
+    let single_value = base()
+        .args(&["--params", "SYM=[\"UP\"]"])
+        .args(&["--params", "FAST=2"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--output-dir", "/dev/null"])
+        .fails();
+    assert!(
+        single_value.stderr.contains("only 1 value"),
+        "{}",
+        single_value.stderr
+    );
+
+    let other_axis = base()
+        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
+        .args(&["--params", "FAST=[2,3]"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--output-dir", "/dev/null"])
+        .fails();
+    assert!(
+        other_axis.stderr.contains("only accepts scalar values"),
+        "{}",
+        other_axis.stderr
+    );
+
+    let with_flatten = base()
+        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
+        .args(&["--params", "FAST=2"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM"])
+        .args(&["--flatten"])
+        .args(&["--output-dir", "/dev/null"])
+        .fails();
+    assert!(
+        with_flatten
+            .stderr
+            .contains("doesn't compose with --resume/--save-state/--flatten"),
+        "{}",
+        with_flatten.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: `optimize --pooled` on a non-single shape must refuse, not
+// silently sweep the axis as an ordinary ranked one.
+// ---------------------------------------------------------------------------
+
+/// A minimal, parseable `pairs:` document — the refusal fires on the strategy
+/// **kind** (from the `pairs:` source prefix) before the body is even typed,
+/// but a document that fails to parse for unrelated reasons would make that
+/// hard to tell apart from this check working, so this one is valid.
+const PAIRS_DOC: &str = "\
+left: AAA
+right: BBB
+enter: !crosses_above
+  lhs: !close { source: !pick { symbol: AAA } }
+  rhs: !close { source: !pick { symbol: BBB } }
+exit: !never
+sizing: !value 1.0
+";
+
+#[test]
+fn optimize_pooled_on_a_pairs_document_is_refused_not_silently_ignored() {
+    let (frame_path, _keep) = scratch_file("pooled_pairs.csv", &two_member_frame());
+    let (doc_path, _keep_doc) = scratch_file("pooled_pairs.yml", PAIRS_DOC);
+
+    let out = Cmd::new("optimize")
+        .arg(&format!("pairs:@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--grid", "FAST=[2,3]"])
+        .args(&["--pooled", "FAST"])
+        .args(&["--crypto"])
+        .args(&["--output", "/dev/null"])
+        .fails();
+    assert!(
+        out.stderr.contains("only wired for single-asset") && out.stderr.contains("pairs:"),
+        "expected an explicit refusal naming the shape, got:\n{}",
         out.stderr
     );
 }

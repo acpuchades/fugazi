@@ -700,12 +700,39 @@ One refusal kept, one lifted for a case it never covered:
     account — the same perversity `ranking_lookup` exists to prevent, one layer
     up.
 
-  Still open: `fugazi run --pooled`. `optimize --pooled` over a one-point grid
-  already *is* a pooled run and emits the same `_mean`/`_std`/`_n` columns, so
-  the gap is ergonomic rather than functional. Giving `run` its own spelling
-  needs a value-list grammar it does not have (its `--params` are scalars) plus
-  a decision about what a pooled run's equity-curve output, `--resume` and
-  `--montecarlo` mean per member — none of which pooling answers on its own.
+**`fugazi run --pooled` — settled.** `optimize --pooled` over a one-point grid
+already *was* a pooled run, so the gap was purely ergonomic: `run`'s job is
+reporting what one already-chosen parameter set does, and that's exactly what
+`--pooled` on `run` now reports, pooled. Resolved the three open questions:
+
+- **The value-list grammar.** `--params AXIS=[...]` (or a range) now carries
+  the member list for the pooled axis specifically — every other `--params`
+  entry still has to resolve to one value (checked with the same
+  `reject_axes_in_params` `optimize`'s baseline table uses). Reuses
+  `optimize::split_axes` for the list/range parse rather than inventing a
+  second one.
+- **Equity-curve output.** No netted curve — same refusal as the pooled
+  walk-forward composite, for the same reason: netting `M` members needs a
+  weighting and a rebalance cadence, which `portfolio:` already states
+  explicitly. Each member writes its own full `run` output
+  (`fills.csv`/`trades.csv`/`returns.csv`/`metrics.yml`, plus the windowed CSVs
+  under `-w`) under `<out_dir>/<MEMBER>/`, so a pooled run is diagnosable one
+  member at a time; the top-level `metrics.yml` is the pooled reduction
+  (`fugazi::spec::panel::pooled_document`, shared with the pooled walk-forward
+  composite writer rather than a second serializer).
+- **`--resume`/`--montecarlo` per member.** Split rather than answered
+  uniformly: `--resume`/`--save-state`/`--flatten` are refused outright — a
+  pooled run has one member's worth of state per member, not one `RunState`
+  for the panel, and resuming a panel one member short of last time is a
+  footgun worth naming rather than silently allowing. `--montecarlo` needed no
+  decision at all: it already runs and writes `montecarlo.csv` per member,
+  since each member drives its own `iterate()` call.
+
+One more bug this surfaced and fixed in passing: `optimize --pooled` on a
+`pairs:`/`basket:`/`multi:`/`portfolio:` document was **silently ignored**
+rather than refused — `opts.pooled` was only ever read on the single-asset
+path. Now refused with a message naming the shape, matching how every other
+  single-asset-only knob here is refused rather than swallowed.
 
 - **A `pairs:` grid varying its legs.** A pairs run evaluates the **inner join**
   of its two legs. Widening the stream to the union of every swept pair would

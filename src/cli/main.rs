@@ -263,8 +263,35 @@ struct RunArgs {
     /// Resolve the strategy's `param` placeholders. Like `--series`: a
     /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
     /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
+    ///
+    /// Under `--pooled AXIS`, `AXIS`'s value carries the panel's member list
+    /// instead of a scalar — `SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]` or a
+    /// `start..end[:step]` range, same grammar as `optimize --grid`. Every
+    /// other name still has to resolve to a single value.
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
+
+    /// Reduce over a named parameter instead of resolving it to one value —
+    /// fit this same document across a **panel** of instruments and report
+    /// the pooled reading, rather than one series' metrics.
+    ///
+    /// `AXIS` names a `--params` entry whose value is a member list (see
+    /// `--params`), typically the one driving `root:`
+    /// (`!pick { symbol: !param SYM }`). Each member is evaluated against its
+    /// own series — one prepared stream per value, never a merged one, so a
+    /// member never sees a bar it doesn't have — and the pooled
+    /// `mean ∓ std` over the members that reported each metric is written to
+    /// `metrics.yml`, support included. Per-member artefacts (`fills.csv`,
+    /// `trades.csv`, `returns.csv`, `metrics.yml`, and the windowed CSVs under
+    /// `-w`) land in `<output-dir>/<MEMBER>/`.
+    ///
+    /// This is `optimize --pooled`'s reduction over a single parameter set
+    /// rather than a grid — the two share the pooling kernel. Only wired for
+    /// single-asset (`root:`) strategies, and not yet composable with
+    /// `--resume`/`--save-state`/`--flatten` (each of those is a single
+    /// `RunState`, and a pooled run has one per member).
+    #[arg(long = "pooled", value_name = "AXIS")]
+    pooled: Option<String>,
 
     /// US-equity trading calendar (252 trading days a year, 6.5-hour day).
     /// Combines with `--frequency` to derive `bars_per_year`; `--bars-per-year`
@@ -1250,7 +1277,77 @@ fn run(args: RunArgs) -> Result<()> {
     let costs_were_supplied = !args.costs.is_empty();
 
     let param_table = params::table(&args.params)?;
-    let params_label = params_label(&param_table);
+
+    // `--pooled AXIS`: this run reduces over a panel of members instead of
+    // resolving to one series. Extracted here, before the params label and the
+    // reads probe below, so both work from a **concrete** substitution (one
+    // member) rather than the pooled axis' raw list/range value — the same
+    // "probe one row" convention `optimize`'s reads/streams checks use.
+    let pooled: Option<(
+        String,
+        HashMap<String, serde_json::Value>,
+        Vec<serde_json::Value>,
+    )> = match &args.pooled {
+        None => None,
+        Some(axis) => {
+            if !matches!(args.strategy.kind, StrategyKind::Single) {
+                anyhow::bail!(
+                    "--pooled is only wired for single-asset (`root:`) strategies — this document has no per-run traded root to reduce over"
+                );
+            }
+            if args.resume.is_some() || args.save_state.is_some() || args.flatten {
+                anyhow::bail!(
+                    "--pooled doesn't compose with --resume/--save-state/--flatten yet — a pooled run has one member's worth of state per member, not one for the whole panel. Run each member on its own (`--params '{axis}=<one value>'`, no `--pooled`) to resume or save its state"
+                );
+            }
+            let axis_value = param_table.get(axis).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--pooled `{axis}` names no --params entry — pass its member list, e.g. --params '{axis}=[\"A\",\"B\",\"C\"]'"
+                    )
+                })?;
+            let mut probe = HashMap::new();
+            probe.insert(axis.clone(), axis_value);
+            let (_, axes) = optimize::split_axes(&probe)?;
+            let Some((_, members)) = axes.into_iter().next() else {
+                anyhow::bail!(
+                    "--pooled `{axis}` must be a list or range (e.g. --params '{axis}=[\"A\",\"B\",\"C\"]'), not a single value"
+                );
+            };
+            if members.len() < 2 {
+                anyhow::bail!(
+                    "--pooled `{axis}` has only 1 value — pooling reduces across a panel, and a panel of one is just a plain run with an extra layer of indirection"
+                );
+            }
+            let mut shared = param_table.clone();
+            shared.remove(axis);
+            optimize::reject_axes_in_params(&shared).with_context(|| {
+                    format!(
+                        "--pooled: every parameter but the pooled axis `{axis}` must resolve to one value"
+                    )
+                })?;
+            Some((axis.clone(), shared, members))
+        }
+    };
+    // The table every downstream probe (reads, stream checks) substitutes
+    // against: the pooled axis' first member for a pooled run, the table
+    // as-is otherwise. Never the raw axis-shaped table — a `!pick` walk over
+    // an unsubstituted array value is not what either probe means to check.
+    let probe_table: HashMap<String, serde_json::Value> = match &pooled {
+        Some((axis, shared, members)) => {
+            let mut probe = shared.clone();
+            probe.insert(axis.clone(), members[0].clone());
+            probe
+        }
+        None => param_table.clone(),
+    };
+    let params_label = match &pooled {
+        Some((axis, shared, members)) => format!(
+            "{} (pooled `{axis}` over {} members)",
+            params_label(shared),
+            members.len()
+        ),
+        None => params_label(&param_table),
+    };
     // Load a `--resume` state file up front so it outlives the RunOptions borrow.
     let resume_state = match &args.resume {
         Some(path) => {
@@ -1294,7 +1391,7 @@ fn run(args: RunArgs) -> Result<()> {
     // the typed spec.
     let reads = spec::reads::picked_symbols_of(
         &text,
-        &param_table,
+        &probe_table,
         &args.strategy.base_dir(),
         &strat_label,
     )
@@ -1307,7 +1404,7 @@ fn run(args: RunArgs) -> Result<()> {
         &args.frequency,
         &spec::reads::picked_streams_of(
             &text,
-            &param_table,
+            &probe_table,
             &args.strategy.base_dir(),
             &strat_label,
         )
@@ -1339,6 +1436,27 @@ fn run(args: RunArgs) -> Result<()> {
         reads: &reads,
     };
     let base = args.strategy.base_dir();
+
+    // A pooled run never reaches the single-shape match below: it builds one
+    // `StrategyRef` per member (each substituted with its own value for the
+    // pooled axis) and hands the whole panel to `run::run_pooled`, which owns
+    // the per-member file layout and the pooled console/metrics.yml reduction.
+    if let Some((axis, shared, members)) = &pooled {
+        let member_specs: Vec<(String, spec::StrategyRef)> = members
+            .iter()
+            .map(|value| {
+                let mut table = shared.clone();
+                table.insert(axis.clone(), value.clone());
+                let strategy =
+                    spec::StrategyRef::from_text_with_params_in(&text, &table, &base, &strat_label)
+                        .with_context(|| parse_error_hint(&args.strategy))?;
+                Ok::<_, anyhow::Error>((optimize::format_value(value), strategy))
+            })
+            .collect::<Result<_>>()?;
+        run::run_pooled(axis, &member_specs, &frame, &opts)?;
+        return Ok(());
+    }
+
     match args.strategy.kind {
         StrategyKind::Single => {
             let strategy = spec::StrategyRef::from_text_with_params_in(

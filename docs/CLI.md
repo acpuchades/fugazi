@@ -107,7 +107,7 @@ driver filters on when the frame carries several symbols.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
-          [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
+          [--params <SPEC> …] [--pooled <AXIS>] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-w <LEN>] [-q]
           [--from <DATE>] [--until <DATE>] [--strict-from]
@@ -119,6 +119,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-o`, `--output-dir <DIR>` | Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
+| `--pooled <AXIS>` | Reduce over a named parameter instead of resolving it to one value: fit this document across a **panel** of instruments and report the pooled reading, rather than one series' metrics. `AXIS` names a `--params` entry whose value is a member list (list or `start..end[:step]` range — same grammar as `optimize --grid`), typically the one driving `root:`. Single-asset only; not yet composable with `--resume`/`--save-state`/`--flatten`. See [Pooling across a panel, from `run`](#pooling-across-a-panel-from-run). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--margin-rate <RATE>` | Annualized interest charged on a **negative cash balance**, as a decimal (`0.06` = 6%/yr). Default `0`. What a margin account bills for the cash it lent you; only non-zero once `--max-gross` is above 1 and a levered long drives cash below zero. Accrued per bar on the balance carried into it, pro-rated by the run's **calendar** cadence — so it needs a resolvable `-f/--frequency`, and warns if it has none rather than charging nothing silently. |
 | `--maintenance-margin <RATIO>` | Force-close the book when equity falls below `RATIO × gross notional` — a margin call. **Off by default**, because the ratio is a *venue* assumption that varies by exchange, instrument and tier. Omitting it is the larger of the two leverage errors: a 3x book that draws down past its maintenance ratio is gone, and a run that trades on reports the recovery of an account that no longer existed. Triggered on each bar's **adverse extreme** (a wick is what liquidates); the forced fills book at the close as `liquidation` in `fills.csv`, and a post-run banner names the first one. |
@@ -146,6 +147,61 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 
 No charts are produced. Plotting is a post-hoc analysis on the CSVs —
 see the README's *Analyzing a run in R* section.
+
+#### Pooling across a panel, from `run`
+
+`optimize`'s job is finding the best parameter set; `run`'s is reporting what
+**one** already-chosen set actually does. `--pooled AXIS` answers that
+question across a panel instead of one series: fit the same document to every
+member's own data and reduce to the panel's `mean ∓ std`, rather than one
+series' numbers.
+
+```bash
+fugazi run @ma.yml -s @panel.csv \
+  --params 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' --params FAST=10 --params SLOW=20 \
+  --pooled SYM -o out/pooled_run --crypto
+```
+
+`AXIS` names a `--params` entry carrying the member list — same grammar as
+`optimize --grid` (a JSON list or a `start..end[:step]` range) — and every
+other `--params` entry must still resolve to one value. Each member is
+evaluated against its own series (one prepared stream per value, never a
+merged one, so a member never sees a bar it doesn't have) and writes its own
+sibling artefacts under `<output-dir>/<MEMBER>/` — `fills.csv`, `trades.csv`,
+`returns.csv`, `metrics.yml`, and the windowed CSVs under `-w` — exactly what a
+plain `run` would write for that member alone, so a pooled run is diagnosable
+one member at a time. The top-level `metrics.yml` is the pooled reduction
+instead:
+
+```yaml
+pooled:
+  risk_adjusted.sharpe: { mean: 1.42, std: 0.61, defined: 3, members: 3 }
+  returns.total_pct: { mean: 88.55, std: 44.07, defined: 3, members: 3 }
+  # ...
+members:
+  BTC/USDT: { ... }   # that member's whole metrics.yml document
+  ETH/USDT: { ... }
+  SOL/USDT: { ... }
+```
+
+`defined`/`members` on every pooled entry is the support behind the mean: an
+undefined metric — a member that never traded has no win rate — is dropped
+from it rather than counted as zero, so `defined < members` is visible instead
+of silently averaged away. A ruined member's pre-ruin numbers are still folded
+into the pooled mean, exactly as a single ruined run's own `metrics.yml` keeps
+its pre-ruin figures (see [Ruin](METRICS.md#ruin)); the console names which
+members ruined so it isn't missed.
+
+There is deliberately no netted, single-account view of the panel: netting `M`
+members into one curve needs a weighting and a rebalance cadence, which is an
+allocation policy fugazi expresses explicitly with `portfolio:` rather than
+inventing inside `run`. This shares its pooling kernel with
+[`optimize --pooled`](#pooling-across-a-panel), restricted to a single
+parameter set rather than a grid — see that section for the deflated-Sharpe
+motivation and the walk-forward composition. Only wired for single-asset
+(`root:`) documents, and not yet composable with
+`--resume`/`--save-state`/`--flatten` (each is one `RunState`, and a pooled
+run has one per member).
 
 #### Strategy shape prefix
 

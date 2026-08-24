@@ -61,6 +61,11 @@ use fugazi::spec::StrategySpec;
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
 /// Held by the `run` subcommand's driver; never enters [`crate::backtest`],
 /// which stays IO-free.
+///
+/// `Copy`: every field is a scalar or a borrow, so [`run_pooled`] can take one
+/// `RunOptions` per member with only `out_dir` overridden, rather than
+/// threading every other field through by hand.
+#[derive(Clone, Copy)]
 pub struct RunOptions<'a> {
     /// Initial cash for the paper wallet.
     pub cash: Real,
@@ -298,15 +303,32 @@ fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
 /// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
 /// work to [`backtest::run_iteration`], and write the result files +
 /// narrate the tiered run/trade/result/metrics logs.
-pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
-    let started = SystemTime::now();
+/// The measurement half of [`run`], factored out so [`run_pooled`] can reuse
+/// it per panel member: symbol resolution, effective cadence, annualization,
+/// the snapshot stream (the traded symbol lifted into snapshots, with the
+/// document's read-only series attached), and the `--from`/`--until` slice.
+///
+/// Stops short of driving the backtest deliberately — `iterate()` runs after
+/// the caller has printed its inputs block, so a long run still shows the
+/// user what it's doing before the first bar is measured rather than after.
+struct SingleSetup<'a> {
+    symbol: String,
+    effective_freq: Option<Frequency>,
+    skipped_overlay_columns: Vec<String>,
+    spec: StrategySpec,
+    sliced: Sliced,
+    inputs: EvalContext<'a>,
+}
+
+fn setup_single_asset<'a>(
+    strategy: &StrategyRef,
+    frame: &DataFrame,
+    opts: &RunOptions<'a>,
+) -> Result<SingleSetup<'a>> {
     let symbol = strategy.symbol().map_err(backtest::build_error)?;
     let series = frame.atoms(&symbol)?;
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
-
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
 
     // The effective bar cadence for both annualization and cost-scope
     // matching, best evidence first: a symbol-matching `-f/--frequency` entry,
@@ -342,7 +364,6 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         )
         .map_err(anyhow::Error::msg)?,
     };
-    let no_cost_warning = !opts.costs_supplied;
     let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
     // The unified driver is snapshot-shaped; lift the single-symbol atom
@@ -376,29 +397,298 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // range that will be *measured* rather than the range the file covers.
     let sliced = sliced_inputs(&spec, bars, snapshots, &mut inputs, opts)?;
 
+    Ok(SingleSetup {
+        symbol,
+        effective_freq,
+        skipped_overlay_columns,
+        spec,
+        sliced,
+        inputs,
+    })
+}
+
+pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
+    let started = SystemTime::now();
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    let no_cost_warning = !opts.costs_supplied;
+    let setup = setup_single_asset(strategy, frame, opts)?;
+
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
     if !opts.quiet {
         let costs_active = costs_active(
             opts.cost_config,
-            [symbol.as_str()],
-            inputs.stream.as_deref(),
+            [setup.symbol.as_str()],
+            setup.inputs.stream.as_deref(),
         );
+        style::print_header("run", "backtest a strategy over CSV series");
+        style::print_warns(&style::collect_warnings(
+            &setup.skipped_overlay_columns,
+            no_cost_warning,
+            "results",
+        ));
+        print_inputs_block(opts, &setup.sliced, costs_active);
+    }
+
+    let iter = iterate(
+        &setup.spec,
+        setup.sliced.bars,
+        &setup.sliced.snapshots,
+        &setup.inputs,
+        opts,
+    )?;
+    emit_montecarlo(&iter, opts)?;
+
+    // Emit `fills.csv` and echo each fill in the same order the wallet booked
+    // them. The console stream matches the CSV row-for-row.
+    emit_run(&iter, opts, started, setup.effective_freq)
+}
+
+/// A member name as a filename component — a member is typically a symbol,
+/// and `BTC/USDT` would otherwise write into a directory that doesn't exist.
+fn sanitize_member(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// `--pooled AXIS`: the `run` twin of `optimize --pooled` restricted to a
+/// single, already-resolved parameter set. `optimize`'s job is finding the
+/// best parameter set across a panel; `run`'s is reporting what **one** set
+/// actually does — pooled, that is the panel's `mean ∓ std` over its members
+/// rather than one series' numbers.
+///
+/// `members` are separate, independent strategies — each already
+/// `!param`-substituted with its own value for the pooled axis by the caller
+/// — evaluated against their own series and never merged into one stream:
+/// merging would make every member see bars it has no quote for.
+///
+/// Each member writes its own sibling artefacts under `<out_dir>/<MEMBER>/`
+/// (`fills.csv`, `trades.csv`, `returns.csv`, `metrics.yml`, and the windowed
+/// CSVs under `-w`) — exactly what a plain [`run`] would write for that
+/// member alone, so a pooled run is diagnosable one member at a time. The
+/// top-level `metrics.yml` is the pooled reduction instead: every member's
+/// whole document keyed by name, plus the cross-member `mean`/`std`/`defined`/
+/// `members` for each metric path (see
+/// [`fugazi::spec::panel::pooled_document`]).
+///
+/// `--resume`/`--save-state`/`--flatten`/`--montecarlo` are the CLI's call,
+/// not this function's: the dispatcher in `main.rs` refuses the first three
+/// before this is ever reached (a pooled run has one member's worth of state
+/// per member, not one `RunState` for the whole panel), and Monte Carlo is
+/// left wired — it runs, and writes `montecarlo.csv`, inside each member's own
+/// subdirectory via `opts.montecarlo`.
+pub fn run_pooled(
+    axis: &str,
+    members: &[(String, StrategyRef)],
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<()> {
+    let started = SystemTime::now();
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    // Set up every member before printing anything — same reason `run()`
+    // resolves the whole-run setup before its inputs block: a probe error
+    // (an unresolvable root, a missing series) surfaces before any output is
+    // written or narrated, pooled or not.
+    let setups: Vec<(&str, SingleSetup)> = members
+        .iter()
+        .map(|(name, strategy)| Ok((name.as_str(), setup_single_asset(strategy, frame, opts)?)))
+        .collect::<Result<_>>()?;
+
+    let no_cost_warning = !opts.costs_supplied;
+    let skipped_overlay_columns: Vec<String> = setups
+        .iter()
+        .flat_map(|(_, s)| s.skipped_overlay_columns.iter().cloned())
+        .collect();
+
+    if !opts.quiet {
         style::print_header("run", "backtest a strategy over CSV series");
         style::print_warns(&style::collect_warnings(
             &skipped_overlay_columns,
             no_cost_warning,
             "results",
         ));
-        print_inputs_block(opts, &sliced, costs_active);
+        style::print_section("inputs");
+        style::field(
+            "pooled",
+            &format!(
+                "axis `{axis}` reduced over {} members — one parameter set, scored across \
+                 every member and reduced to mean ∓ std",
+                setups.len(),
+            ),
+        );
+        style::field_continuation(&format!(
+            "per-member fills.csv/trades.csv/returns.csv/metrics.yml under `{}/<MEMBER>/`; the \
+             pooled reduction is this run's own metrics.yml",
+            opts.out_dir.display(),
+        ));
     }
 
-    let iter = iterate(&spec, sliced.bars, &sliced.snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
+    let mut panel_metrics: Vec<fugazi::spec::panel::PanelMetrics> =
+        Vec::with_capacity(setups.len());
+    for (name, setup) in &setups {
+        let member_dir = opts.out_dir.join(sanitize_member(name));
+        std::fs::create_dir_all(&member_dir)
+            .with_context(|| format!("creating member output dir `{}`", member_dir.display()))?;
+        // Only `out_dir` differs per member — `RunOptions` is `Copy`, so this
+        // is a cheap struct-update rather than threading every other field
+        // through a second parameter list.
+        let member_opts = RunOptions {
+            out_dir: &member_dir,
+            ..*opts
+        };
 
-    // Emit `fills.csv` and echo each fill in the same order the wallet booked
-    // them. The console stream matches the CSV row-for-row.
-    emit_run(&iter, opts, started, effective_freq)
+        let iter = iterate(
+            &setup.spec,
+            setup.sliced.bars.clone(),
+            &setup.sliced.snapshots,
+            &setup.inputs,
+            &member_opts,
+        )?;
+        emit_montecarlo(&iter, &member_opts)?;
+
+        write_fills_csv(&iter, &member_dir.join("fills.csv"))?;
+        write_trades_csv(&iter, &member_dir.join("trades.csv"))?;
+        write_returns_csv(&iter, &member_dir.join("returns.csv"))?;
+        metrics::write_yaml(&iter.metrics, &member_dir.join("metrics.yml"))?;
+        if let Some(ws) = iter.windowed.as_deref() {
+            let dsr_context = metrics::windows_dsr_context(ws);
+            write_windowed_csv(ws, &iter.bars, dsr_context, &member_dir.join("metrics.csv"))?;
+        }
+        if let Some(rs) = iter.rolling.as_deref() {
+            write_windowed_csv(rs, &iter.bars, None, &member_dir.join("rolling.csv"))?;
+        }
+
+        if !opts.quiet {
+            let return_pct = if opts.cash != 0.0 {
+                (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
+            } else {
+                0.0
+            };
+            let change = format!("{return_pct:+.2}%");
+            let change = if return_pct >= 0.0 {
+                style::green(&change)
+            } else {
+                style::red(&change)
+            };
+            style::field(
+                &format!("member {name}"),
+                &format!(
+                    "{} ({} → {}, {} bars) · {} fills · {change}",
+                    setup.symbol,
+                    setup.sliced.start(),
+                    setup.sliced.end(),
+                    setup.sliced.evaluated_bars(),
+                    iter.summary.fills,
+                ),
+            );
+            print_ruin_warning(&iter.report);
+            print_rejection_warning(&iter.report);
+        }
+
+        panel_metrics.push(fugazi::spec::panel::PanelMetrics {
+            member: (*name).to_string(),
+            metrics: iter.metrics,
+        });
+    }
+
+    write_pooled_metrics_yaml(&panel_metrics, &opts.out_dir.join("metrics.yml"))?;
+
+    let finished = SystemTime::now();
+    if !opts.quiet {
+        print_pooled_result_block(&panel_metrics, opts, started, finished);
+    }
+    Ok(())
+}
+
+/// The pooled `metrics.yml` writer — see
+/// [`fugazi::spec::panel::pooled_document`] for the shape.
+fn write_pooled_metrics_yaml(
+    members: &[fugazi::spec::panel::PanelMetrics],
+    path: &Path,
+) -> Result<()> {
+    let doc = fugazi::spec::panel::pooled_document(members);
+    let text = serde_norway::to_string(&doc).context("serializing pooled metrics")?;
+    std::fs::write(path, text).with_context(|| format!("writing `{}`", path.display()))?;
+    Ok(())
+}
+
+/// The pooled twin of [`print_result_block`]: timing, then every member's
+/// support-qualified `mean ∓ std` for the metrics [`print_metrics_block`]
+/// would otherwise show for a single run.
+fn print_pooled_result_block(
+    members: &[fugazi::spec::panel::PanelMetrics],
+    opts: &RunOptions,
+    started: SystemTime,
+    finished: SystemTime,
+) {
+    println!();
+    style::print_section("result");
+    style::field("members", &members.len().to_string());
+    let elapsed = finished.duration_since(started).unwrap_or_default();
+    style::field("started", &style::format_utc(started));
+    style::field(
+        "finished",
+        &format!(
+            "{} ({:.2}s)",
+            style::format_utc(finished),
+            elapsed.as_secs_f64()
+        ),
+    );
+
+    println!();
+    style::print_section("metrics (pooled)");
+    // A fixed headline set, in the same order `optimize`'s pooled console
+    // block uses — a reader who has seen a pooled sweep already knows the
+    // shape. `pool_metric` returns `None` for a path no member reported
+    // (never zero-filled), which reads as an omitted line rather than a
+    // misleading one.
+    let headline: &[(&str, &str)] = &[
+        ("sharpe", "risk_adjusted.sharpe"),
+        ("sortino", "risk_adjusted.sortino"),
+        ("cagr", "returns.cagr_pct"),
+        ("total return", "returns.total_pct"),
+        ("max drawdown", "drawdown.max_pct"),
+        ("win rate", "trades.win_rate_pct"),
+    ];
+    for (label, path) in headline {
+        if let Some(p) = fugazi::spec::panel::pool_metric(members, path) {
+            style::field(
+                label,
+                &format!(
+                    "{:.4} ± {:.4}  ({} of {} members)",
+                    p.mean, p.std, p.defined, p.members
+                ),
+            );
+        }
+    }
+    let ruined: Vec<&str> = members
+        .iter()
+        .filter(|m| m.is_ruined())
+        .map(|m| m.member.as_str())
+        .collect();
+    if !ruined.is_empty() {
+        style::field(
+            "ruined",
+            &format!(
+                "{} of {} members — {}. Their pre-ruin numbers are still folded into the \
+                 pooled means above, exactly as a single ruined run's own metrics.yml keeps \
+                 its pre-ruin figures — see each member's own metrics.yml (`run.ruin_bar`) \
+                 for where it happened",
+                ruined.len(),
+                members.len(),
+                ruined.join(", "),
+            ),
+        );
+    }
+    style::field(
+        "cash",
+        &format!("{:.2} per member (not netted across the panel)", opts.cash),
+    );
 }
 
 /// The pairs twin of [`run`]: drive a
