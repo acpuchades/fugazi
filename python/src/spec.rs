@@ -1894,7 +1894,7 @@ pub(crate) fn optimize(
                 //
                 // Under `panel_axis=`, the member's *name* is substituted for
                 // that parameter first, so each member is rooted on its own
-                // series — the same thing the CLI's `--pooled AXIS` does. Built
+                // series — the same thing the CLI's `--pooled` does. Built
                 // per member rather than once, because the spec differs.
                 (Some(members), _) => spec_optimize::Evaluation::Panel(match panel_axis_ref {
                     None => spec_backtest::evaluate_panel_any(&build_shared()?, members, ctx_ref)
@@ -2146,7 +2146,7 @@ pub(crate) struct PanelMember {
 /// key substitutes as a JSON string, an `int`/`float` as a JSON number, a
 /// `bool` as a JSON boolean — so `{5: snaps, 10: snaps}` with
 /// `panel_axis="FAST"` reaches a `period:` slot as a number and pools over a
-/// *parameter*, exactly as the CLI's `--params 'FAST=[5,10]' --pooled FAST`
+/// *parameter*, exactly as the CLI's `--pooled 'FAST=[5,10]'`
 /// does. Nothing is parsed out of the label: `{"5": …}` is the string `"5"`
 /// and `{5: …}` is the number `5`, so a member genuinely named `"5"` stays
 /// unambiguous. The label is the key rendered without JSON quoting, so the
@@ -2811,7 +2811,7 @@ pub(crate) fn run_panel_walkforward(
     // spec is built — as a JSON string for a `str` key, as a number for an
     // `int`/`float` one. Rooting every member on its own series is the usual
     // use; pooling over a numeric parameter is the other. The Python twin of
-    // the CLI's `--pooled AXIS`.
+    // the CLI's `--pooled`.
     panel_axis: Option<&str>,
     cost_config: &fugazi_core::spec::costs::CostConfig,
     subgrids: Vec<spec_optimize::Subgrid>,

@@ -279,34 +279,39 @@ struct RunArgs {
     /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
     /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
     ///
-    /// Under `--pooled AXIS`, `AXIS`'s value carries the panel's member list
-    /// instead of a scalar — `SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]` or a
-    /// `start..end[:step]` range, same grammar as `optimize --grid`. Every
-    /// other name still has to resolve to a single value.
+    /// Every term sets one name to one value, `--pooled` or not. A panel's
+    /// members are declared on `--pooled` itself.
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
 
-    /// Reduce over a named parameter instead of resolving it to one value —
-    /// fit this same document across a **panel** of instruments and report
-    /// the pooled reading, rather than one series' metrics.
+    /// Reduce over a **panel** instead of resolving to one series — fit this
+    /// same document to every member and report the pooled reading rather than
+    /// one instrument's metrics.
     ///
-    /// `AXIS` names a `--params` entry whose value is a member list (see
-    /// `--params`), typically the one driving `root:`
-    /// (`!pick { symbol: !param SYM }`). Each member is evaluated against its
-    /// own series — one prepared stream per value, never a merged one, so a
-    /// member never sees a bar it doesn't have — and the pooled
+    /// Takes the panel's axes with their values, in `--params` grammar but
+    /// axis-shaped: `SYM=["BTC/USDT","ETH/USDT"]`, a `start..end[:step]` range,
+    /// or several axes at once — `SYM=["BTCUSDT","ETHUSDT"],SLIP=[1,5]` pools
+    /// over the **cartesian product**, four members here. Repeatable, and
+    /// `,`-separated within one flag, exactly like `--params`; a name it
+    /// declares may not also be set by `--params`.
+    ///
+    /// Typically the axis drives `root:` — and a document with no `root:` is
+    /// already `!pick { symbol: !param SYMBOL, freq: !param FREQ }`, so
+    /// `--pooled 'SYMBOL=[...]'` needs no edit to it. Each member is evaluated
+    /// against its own series (one prepared stream per member, never a merged
+    /// one, so a member never sees a bar it doesn't have) and the pooled
     /// `mean ∓ std` over the members that reported each metric is written to
     /// `metrics.yml`, support included. Per-member artefacts (`fills.csv`,
     /// `trades.csv`, `returns.csv`, `metrics.yml`, and the windowed CSVs under
-    /// `-w`) land in `<output-dir>/<MEMBER>/`.
+    /// `-w`) land in `<output-dir>/<N>_<MEMBER>/`.
     ///
     /// This is `optimize --pooled`'s reduction over a single parameter set
     /// rather than a grid — the two share the pooling kernel. Only wired for
     /// single-asset (`root:`) strategies, and not yet composable with
     /// `--resume`/`--save-state`/`--flatten` (each of those is a single
     /// `RunState`, and a pooled run has one per member).
-    #[arg(long = "pooled", value_name = "AXIS")]
-    pooled: Option<String>,
+    #[arg(long = "pooled", value_name = "SPEC")]
+    pooled: Vec<params::ParamSpec>,
 
     /// US-equity trading calendar (252 trading days a year, 6.5-hour day).
     /// Combines with `--frequency` to derive `bars_per_year`; `--bars-per-year`
@@ -716,16 +721,22 @@ struct OptimizeArgs {
     )]
     windowed: Option<calendar::WindowSpec>,
 
-    /// Reduce over a grid axis instead of ranking on it — fit **one** parameter
-    /// set across a panel of instruments rather than picking the best
+    /// Reduce over a **panel** instead of ranking on it — fit **one** parameter
+    /// set across every member rather than picking the best
     /// `(params, instrument)` cell.
     ///
-    /// `AXIS` names an existing `--grid` axis (typically the one driving
-    /// `root:`, e.g. `--grid 'SYM=["BTC/USDT","ETH/USDT"]' --pooled SYM`).
-    /// That axis leaves the CSV's axis columns entirely; each remaining grid
-    /// point becomes one row scored across every value of it. Every `-m` metric
-    /// becomes three columns — `<name>_mean`, `<name>_std` and `<name>_n`, the
-    /// last being how many members actually reported it.
+    /// Takes the panel's axes with their values, in `--grid` term grammar:
+    /// `--pooled 'SYM=["BTC/USDT","ETH/USDT"]'`, typically the axis driving
+    /// `root:`. Several axes pool over the **cartesian product** —
+    /// `--pooled 'SYM=["BTCUSDT","ETHUSDT"],SLIP=[1,5,10]'` is a six-member
+    /// panel, asking whether an edge survives across instruments *and* across
+    /// the fee tiers you might get. Repeatable, and `,`-separated within one
+    /// flag; a name it declares may not also appear in `--params` or `--grid`.
+    ///
+    /// The panel's names never become CSV axis columns — they are not something
+    /// the sweep chose. Every `-m` metric becomes three columns instead:
+    /// `<name>_mean`, `<name>_std` and `<name>_n`, the last being how many
+    /// members actually reported it.
     ///
     /// This is the same reduction as `-w/--windowed` over a different partition
     /// (members rather than time windows), so `-k/--risk-aversion` composes and
@@ -737,8 +748,8 @@ struct OptimizeArgs {
     /// winner on the **pooled** in-sample score and applies it out-of-sample to
     /// every member, with folds laid out on the panel's shared clock so a
     /// ragged panel's fold *k* is the same span for everyone.
-    #[arg(long = "pooled", value_name = "AXIS", group = "reduction")]
-    pooled: Option<String>,
+    #[arg(long = "pooled", value_name = "SPEC", group = "reduction")]
+    pooled: Vec<params::ParamSpec>,
 
     /// Rolling walk-forward optimization. `IS,OS[,Embargo]` — each component is
     /// a `-w`-style bar count or duration. For each fold the grid is scored on
@@ -1398,73 +1409,59 @@ fn run(args: RunArgs) -> Result<()> {
     let mut param_table = params::table(&args.params)?;
     seed_sole_symbol(&mut param_table, &frame, args.strategy.kind);
 
-    // `--pooled AXIS`: this run reduces over a panel of members instead of
+    // `--pooled 'AXIS=[...]'`: this run reduces over a panel of members instead of
     // resolving to one series. Extracted here, before the params label and the
     // reads probe below, so both work from a **concrete** substitution (one
     // member) rather than the pooled axis' raw list/range value — the same
     // "probe one row" convention `optimize`'s reads/streams checks use.
-    let pooled: Option<(
-        String,
-        HashMap<String, serde_json::Value>,
-        Vec<serde_json::Value>,
-    )> = match &args.pooled {
-        None => None,
-        Some(axis) => {
-            if !matches!(args.strategy.kind, StrategyKind::Single) {
-                anyhow::bail!(
-                    "--pooled is only wired for single-asset (`root:`) strategies — this document has no per-run traded root to reduce over"
-                );
-            }
-            if args.resume.is_some() || args.save_state.is_some() || args.flatten {
-                anyhow::bail!(
-                    "--pooled doesn't compose with --resume/--save-state/--flatten yet — a pooled run has one member's worth of state per member, not one for the whole panel. Run each member on its own (`--params '{axis}=<one value>'`, no `--pooled`) to resume or save its state"
-                );
-            }
-            let axis_value = param_table.get(axis).cloned().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--pooled `{axis}` names no --params entry — pass its member list, e.g. --params '{axis}=[\"A\",\"B\",\"C\"]'"
-                    )
-                })?;
-            let mut probe = HashMap::new();
-            probe.insert(axis.clone(), axis_value);
-            let (_, axes) = optimize::split_axes(&probe)?;
-            let Some((_, members)) = axes.into_iter().next() else {
-                anyhow::bail!(
-                    "--pooled `{axis}` must be a list or range (e.g. --params '{axis}=[\"A\",\"B\",\"C\"]'), not a single value"
-                );
-            };
-            if members.len() < 2 {
-                anyhow::bail!(
-                    "--pooled `{axis}` has only 1 value — pooling reduces across a panel, and a panel of one is just a plain run with an extra layer of indirection"
-                );
-            }
-            let mut shared = param_table.clone();
-            shared.remove(axis);
-            optimize::reject_axes_in_params(&shared).with_context(|| {
-                    format!(
-                        "--pooled: every parameter but the pooled axis `{axis}` must resolve to one value"
-                    )
-                })?;
-            Some((axis.clone(), shared, members))
+    let pooled: Option<fugazi::spec::panel::Panel> = if args.pooled.is_empty() {
+        None
+    } else {
+        if !matches!(args.strategy.kind, StrategyKind::Single) {
+            anyhow::bail!(
+                "--pooled is only wired for single-asset (`root:`) strategies — this document has no per-run traded root to reduce over"
+            );
         }
+        if args.resume.is_some() || args.save_state.is_some() || args.flatten {
+            anyhow::bail!(
+                "--pooled doesn't compose with --resume/--save-state/--flatten yet — a pooled run has one member's worth of state per member, not one for the whole panel. Run each member on its own (pass its label to `--params`, no `--pooled`) to resume or save its state"
+            );
+        }
+        let panel = fugazi::spec::panel::Panel::from_params(&params::table(&args.pooled)?)?;
+        // A name can't be a fixed value and a panel axis at once. Silently
+        // letting one win would make the run's meaning depend on which — and
+        // the two flags are now the only place either is spelled.
+        let mut clashes: Vec<&str> = panel
+            .names()
+            .filter(|name| param_table.contains_key(*name))
+            .collect();
+        if !clashes.is_empty() {
+            clashes.sort_unstable();
+            anyhow::bail!(
+                "{} set by both --params and --pooled — a pooled axis carries its own values, so drop it from --params",
+                clashes
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        Some(panel)
     };
     // The table every downstream probe (reads, stream checks) substitutes
     // against: the pooled axis' first member for a pooled run, the table
     // as-is otherwise. Never the raw axis-shaped table — a `!pick` walk over
     // an unsubstituted array value is not what either probe means to check.
     let probe_table: HashMap<String, serde_json::Value> = match &pooled {
-        Some((axis, shared, members)) => {
-            let mut probe = shared.clone();
-            probe.insert(axis.clone(), members[0].clone());
-            probe
-        }
+        Some(panel) => panel.members()[0].params_over(&param_table),
         None => param_table.clone(),
     };
     let params_label = match &pooled {
-        Some((axis, shared, members)) => format!(
-            "{} (pooled `{axis}` over {} members)",
-            params_label(shared),
-            members.len()
+        Some(panel) => format!(
+            "{} (pooled over {} members: {})",
+            params_label(&param_table),
+            panel.len(),
+            panel.describe(),
         ),
         None => params_label(&param_table),
     };
@@ -1550,12 +1547,12 @@ fn run(args: RunArgs) -> Result<()> {
     // `StrategyRef` per member (each substituted with its own value for the
     // pooled axis) and hands the whole panel to `run::run_pooled`, which owns
     // the per-member file layout and the pooled console/metrics.yml reduction.
-    if let Some((axis, shared, members)) = &pooled {
-        let member_specs: Vec<(String, spec::StrategyRef)> = members
+    if let Some(panel) = &pooled {
+        let member_specs: Vec<(String, spec::StrategyRef)> = panel
+            .members()
             .iter()
-            .map(|value| {
-                let mut table = shared.clone();
-                table.insert(axis.clone(), value.clone());
+            .map(|member| {
+                let table = member.params_over(&param_table);
                 let strategy = spec::StrategyRef::from_text_with_params_in(
                     &text,
                     &table,
@@ -1564,10 +1561,10 @@ fn run(args: RunArgs) -> Result<()> {
                     &strat_label,
                 )
                 .with_context(|| parse_error_hint(&args.strategy))?;
-                Ok::<_, anyhow::Error>((optimize::format_value(value), strategy))
+                Ok::<_, anyhow::Error>((member.label.clone(), strategy))
             })
             .collect::<Result<_>>()?;
-        run::run_pooled(axis, &member_specs, &frame, &opts)?;
+        run::run_pooled(&panel.describe(), &member_specs, &frame, &opts)?;
         return Ok(());
     }
 
@@ -1652,6 +1649,34 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .iter()
         .map(|spec| params::table(std::slice::from_ref(spec)))
         .collect::<Result<_>>()?;
+    // The panel is declared outside the grid, so it cannot also be swept: a
+    // name on both sides would be ranked on and reduced over at once, which is
+    // not a question with an answer. Checked against `--params` too, for the
+    // same reason `run` does.
+    let pooled = if args.pooled.is_empty() {
+        None
+    } else {
+        let panel = fugazi::spec::panel::Panel::from_params(&params::table(&args.pooled)?)?;
+        let mut clashes: Vec<&str> = panel
+            .names()
+            .filter(|name| {
+                param_table.contains_key(*name) || grid_tables.iter().any(|g| g.contains_key(*name))
+            })
+            .collect();
+        if !clashes.is_empty() {
+            clashes.sort_unstable();
+            anyhow::bail!(
+                "{} declared by --pooled and also set by --params/--grid — a pooled axis carries \
+                 its own values, and one name cannot be both ranked on and reduced over",
+                clashes
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        Some(panel)
+    };
     let text = args.strategy.read().context("reading strategy")?;
     let frame = load_frame(&args.series, &args.frequency)?;
     seed_sole_symbol(&mut param_table, &frame, args.strategy.kind);
@@ -1695,7 +1720,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
-        pooled: args.pooled.clone(),
+        pooled,
         walkforward: args.walkforward,
         keep_unstable: args.keep_unstable,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),

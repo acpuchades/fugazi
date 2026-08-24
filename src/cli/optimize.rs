@@ -102,14 +102,20 @@ pub struct OptimizeOptions<'a> {
     /// the trading calendar inside [`run`] (duration form requires
     /// `asset_class` and a resolvable bar cadence).
     pub windowed: Option<WindowSpec>,
-    /// `--pooled AXIS`: reduce over the named grid axis instead of ranking on
-    /// it. The axis leaves [`Sweep::union_columns`] and each remaining grid
-    /// point is scored across every value of it — one row per parameter set,
-    /// not one per `(parameter set, instrument)`.
+    /// `--pooled 'AXIS=[...]'`: the panel to reduce over, declared with its own
+    /// values rather than naming a `--grid` axis. Its names never reach
+    /// [`Sweep::union_columns`] and every grid point is scored across every
+    /// member — one row per parameter set, not one per
+    /// `(parameter set, instrument)`.
+    ///
+    /// Several axes pool over their cartesian product. Because the panel is
+    /// declared once, outside the grid, every row necessarily pools over the
+    /// same population — the property that makes two rows' `_mean` columns
+    /// comparable, previously a check across subgrids.
     ///
     /// Mutually exclusive with `windowed` (both reduce a row to `mean ∓ k·std`,
     /// over different partitions); composes with `walkforward`.
-    pub pooled: Option<String>,
+    pub pooled: Option<fugazi::spec::panel::Panel>,
     /// `--walkforward IS,OS[,Embargo]`: rolling walk-forward optimization. When
     /// set, [`run`] takes the walk-forward branch (dispatched into
     /// [`walkforward`]) instead of the plain grid sweep — mutually exclusive
@@ -251,8 +257,13 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         })
         .collect::<Result<_>>()?;
 
+    // A one-point grid is not a sweep — unless it is pooled, where the row is
+    // still a reduction over a panel (`_mean`/`_std`/`_n` across members) and
+    // the deflated-Sharpe machinery still has something to deflate. `run
+    // --pooled` reports the same panel as per-member directories plus a YAML
+    // reduction; neither subsumes the other.
     let total_points: usize = subgrids.iter().map(Subgrid::points).sum();
-    if total_points < 2 {
+    if total_points < 2 && opts.pooled.is_none() {
         bail!(
             "the stacked grid has only {total_points} point(s): pass a `[...]` list, a \
              `start..end[:step]` range, or multiple `--grid` flags with distinct values \
@@ -266,9 +277,9 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // otherwise honour silently, and a grid with no lattice smooths nothing at
     // all. The kernel repeats both errors for library callers; only here can
     // the inert-pin warnings be printed. stderr and ungated by `--quiet`, like
-    // `overlap` / `cadence`. Note this runs *before* `--pooled` carves its axis
-    // out — carving only removes axes, so it can never turn a refusal here into
-    // a false one, and the post-carve grid is re-checked by the kernel.
+    // `overlap` / `cadence`. The grid it validates against is the whole grid:
+    // `--pooled` declares its axes outside it and never adds or removes one, so
+    // there is no second, post-pooling lattice for this to disagree with.
     if let Some(cfg) = &opts.smoothing {
         for warning in cfg.validate_against(&subgrids)? {
             eprintln!("{} {warning}", style::yellow("warning:"));
@@ -294,7 +305,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // ordinary axis, which is what it did before this check existed.
     if opts.pooled.is_some() && !matches!(opts.strategy_kind, StrategyKind::Single) {
         bail!(
-            "--pooled is only wired for single-asset (`root:`) strategies — a {} document has              no per-grid-point traded root to reduce over",
+            "--pooled is only wired for single-asset (`root:`) strategies — a {} document \
+             has no per-grid-point traded root to reduce over",
             match opts.strategy_kind {
                 StrategyKind::Pairs => "pairs:",
                 StrategyKind::Basket => "basket:",
@@ -351,75 +363,6 @@ fn probe_streams(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<St
     Ok(out)
 }
 
-/// Carve the `--pooled` axis out of every subgrid, returning the reduced
-/// subgrids and the values that axis will be pooled over.
-///
-/// The reduced subgrids are what the sweep actually enumerates: one row per
-/// combination of the *remaining* axes. The pooled axis is re-substituted per
-/// member inside the evaluator, so it never reaches
-/// [`compute_union_columns`] and never becomes a CSV column — which is the
-/// literal meaning of "reduced over, not ranked on".
-///
-/// Every subgrid must offer the **same** values for the axis. Letting them
-/// differ would silently mean two rows pooled over different populations, and
-/// a `_mean` that is not comparable between them — the one property the whole
-/// sweep is built around.
-fn split_pooled_axis(subgrids: Vec<Subgrid>, axis: &str) -> Result<(Vec<Subgrid>, Vec<Value>)> {
-    let mut members: Option<Vec<Value>> = None;
-    let mut reduced = Vec::with_capacity(subgrids.len());
-    for (i, subgrid) in subgrids.into_iter().enumerate() {
-        let Some(pos) = subgrid.axes.iter().position(|(name, _)| name == axis) else {
-            let available: Vec<&str> = subgrid.axes.iter().map(|(n, _)| n.as_str()).collect();
-            bail!(
-                "--pooled `{axis}` names no axis in --grid #{} — that grid varies {}. \
-                 The pooled axis has to be a swept axis: it is the thing being reduced \
-                 over, so a scalar would leave a panel of one",
-                i + 1,
-                if available.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    available.join(", ")
-                },
-            );
-        };
-        let values = subgrid.axes[pos].1.clone();
-        match &members {
-            None => members = Some(values.clone()),
-            Some(first) if *first != values => bail!(
-                "--pooled `{axis}` takes {} value(s) in --grid #{} but {} in the first — \
-                 every subgrid has to pool over the same members, or two rows' pooled \
-                 means would be averages over different populations",
-                values.len(),
-                i + 1,
-                first.len(),
-            ),
-            Some(_) => {}
-        }
-        // Drop the axis and re-enumerate the cartesian product without it. The
-        // combos must stay a mixed-radix enumeration of `axes` with the last
-        // axis fastest — `smooth_keys` and `plateau_size` read lattices out of
-        // that layout — so this rebuilds them rather than filtering the old
-        // ones.
-        let mut axes = subgrid.axes;
-        axes.remove(pos);
-        let combos = cartesian(&axes);
-        reduced.push(Subgrid {
-            fixed: subgrid.fixed,
-            axes,
-            combos,
-        });
-    }
-    let members = members.expect("at least one subgrid");
-    if members.len() < 2 {
-        bail!(
-            "--pooled `{axis}` has only {} value — pooling reduces across a panel, and a \
-             panel of one is just a plain sweep with an extra layer of indirection",
-            members.len(),
-        );
-    }
-    Ok((reduced, members))
-}
-
 /// A traded series a grid row can resolve to: the instrument, and the cadence
 /// its `root:` declared (if it declared one).
 ///
@@ -474,27 +417,20 @@ fn run_single(
     base_value: &Value,
 ) -> Result<()> {
     let started = SystemTime::now();
-    // `--pooled AXIS` carves that axis out of the grid *before* anything else
-    // looks at it. `distinct_roots` then still walks every combination the
-    // sweep will evaluate — the pooled values are re-substituted below — so the
-    // stream map covers every member, exactly as it covers every row.
-    let (subgrids, pooled_members) = match opts.pooled.as_deref() {
-        Some(axis) => {
-            let (reduced, members) = split_pooled_axis(subgrids, axis)?;
-            (reduced, Some((axis.to_string(), members)))
-        }
-        None => (subgrids, None),
-    };
-    // Every (row, member) parameter table the sweep will build. Without
-    // pooling this is just the grid; with it, the pooled axis is spliced back
-    // in so root resolution and stream preparation see the real population.
-    let expanded: Vec<Subgrid> = match &pooled_members {
+    let panel = opts.pooled.as_ref();
+    // Every (row, member) parameter table the sweep will build. The grid is one
+    // row per parameter set either way — the panel is declared outside it — so
+    // pooling splices the panel's axes *in* here rather than carving anything
+    // out, and `distinct_roots` then walks every member of every row. That is
+    // what makes the stream map cover the whole panel, exactly as it covers
+    // every row.
+    let expanded: Vec<Subgrid> = match panel {
         None => subgrids.clone(),
-        Some((axis, values)) => subgrids
+        Some(panel) => subgrids
             .iter()
             .map(|sg| {
                 let mut axes = sg.axes.clone();
-                axes.push((axis.clone(), values.clone()));
+                axes.extend(panel.axes().iter().cloned());
                 axes.sort_by(|a, b| a.0.cmp(&b.0));
                 let combos = cartesian(&axes);
                 Subgrid {
@@ -518,7 +454,8 @@ fn run_single(
                 "--walkforward lays folds out over one bar timeline, but this grid sweeps {} \
                  traded series ({}) — each has its own bar count, so a fold index means a \
                  different span per row. Either sweep the root or walk forward, not both — or \
-                 pass `--pooled <AXIS>` to reduce over that axis instead of ranking on it, \
+                 move that axis to `--pooled 'AXIS=[...]'` to reduce over it instead of \
+                 ranking on it, \
                  which lays folds out on the panel's shared clock and fits one parameter set \
                  across every series",
                 roots.len(),
@@ -541,7 +478,7 @@ fn run_single(
             eprintln!(
                 "  {} this grid sweeps {} traded series — rows evaluate different bars, so their \
                  metrics are a batch of separate backtests rather than a like-for-like \
-                 comparison. `--pooled <AXIS>` reduces over that axis instead",
+                 comparison. `--pooled 'AXIS=[...]'` reduces over that axis instead",
                 style::yellow("warn"),
                 roots.len(),
             );
@@ -755,13 +692,12 @@ fn run_single(
         // to every member. Routed before the single-stream path because it is a
         // different geometry, not a variation on one — fold ranges index the
         // union of every member's bar times, not any single member's bars.
-        if let Some((axis, values)) = pooled_members.as_ref() {
+        if let Some(panel) = panel {
             return pooled_walkforward_run(
                 opts,
                 base_value,
                 subgrids,
-                axis,
-                values,
+                panel,
                 streams_ref,
                 walkforward_spec,
                 bars_per_year,
@@ -849,30 +785,30 @@ fn run_single(
         );
     }
 
-    let pooled_ref = pooled_members.as_ref();
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
-        // Pooled: re-splice each member's value for the carved-out axis, run
-        // that member against its own prepared stream, and hand the kernel one
-        // document per member. The reduction to `mean ∓ k·std` happens in
+        // Pooled: layer each member's substitutions over the row's parameters,
+        // run that member against its own prepared stream, and hand the kernel
+        // one document per member. The reduction to `mean ∓ k·std` happens in
         // `ranking_value`, exactly as it does for `-w`.
         //
         // Each member is measured against **its own** `EvalContext` — its own
         // annualization and cadence — because those are properties of the
         // series, not of the grid. Pooling a daily member with an hourly one is
-        // then still meaningful: both Sharpes are annualized before they meet.
-        if let Some((axis, values)) = pooled_ref {
-            let members = values
+        // then still meaningful: both Sharpes are annualized before they meet,
+        // which is what makes a `FREQ` axis a legitimate thing to pool over.
+        if let Some(panel) = panel {
+            let members = panel
+                .members()
                 .iter()
-                .map(|v| {
-                    let mut member_params = params.clone();
-                    member_params.insert(axis.clone(), v.clone());
+                .map(|member| {
+                    let member_params = member.params_over(params);
                     let spec = build_any_spec(StrategyKind::Single, base_value, &member_params)?;
                     let key = root_key_of(base_value, &member_params)?;
                     let (snapshots_ref, ctx_ref) = streams_ref
                         .get(&key)
                         .expect("every member's root was prepared by `distinct_roots`");
                     Ok(fugazi::spec::panel::PanelMetrics {
-                        member: format_value(v),
+                        member: member.label.clone(),
                         metrics: backtest::evaluate_any(&spec, snapshots_ref, ctx_ref)
                             .map_err(backtest::build_error)?,
                     })
@@ -2305,12 +2241,15 @@ fn print_walkforward_inputs(
             derive_sibling(output, "composite_oos_equity", "csv").display()
         )),
         Some(members) => {
-            for member in members {
+            for (index, member) in members.iter().enumerate() {
                 style::field_continuation(&format!(
                     "+ {}",
                     derive_sibling(
                         output,
-                        &format!("composite_oos_equity.{}", sanitize_member(member)),
+                        &format!(
+                            "composite_oos_equity.{}",
+                            crate::run::member_file_stem(index, member, members.len())
+                        ),
                         "csv"
                     )
                     .display()
@@ -2441,8 +2380,7 @@ fn pooled_walkforward_run(
     opts: &OptimizeOptions,
     base_value: &Value,
     subgrids: Vec<Subgrid>,
-    axis: &str,
-    values: &[Value],
+    panel: &fugazi::spec::panel::Panel,
     streams: &HashMap<RootKey, (Vec<fugazi::types::Snapshot<Symbol>>, backtest::EvalContext)>,
     spec: WalkForwardSpec,
     bars_per_year: Real,
@@ -2463,22 +2401,22 @@ fn pooled_walkforward_run(
     // panel, so a root that varied with another axis would make fold ranges
     // mean different things per row. Checked against **every** combo rather
     // than a probe point, for the same reason `distinct_roots` does.
-    let mut member_keys: Vec<RootKey> = Vec::with_capacity(values.len());
-    for v in values {
+    let mut member_keys: Vec<RootKey> = Vec::with_capacity(panel.len());
+    for member in panel.members() {
         let mut resolved: Option<RootKey> = None;
         for subgrid in &subgrids {
             for combo in &subgrid.combos {
                 let mut params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
-                params.insert(axis.to_string(), v.clone());
+                member.apply(&mut params);
                 let key = root_key_of(base_value, &params)?;
                 match &resolved {
                     None => resolved = Some(key),
                     Some(first) if *first != key => bail!(
-                        "--pooled `{axis}` = {} resolves to `{}` for one grid point and `{}` \
+                        "--pooled member `{}` resolves to `{}` for one grid point and `{}` \
                          for another — under `--walkforward` a member's traded series has to \
-                         be fixed by the pooled axis alone, since its bar clock is what the \
-                         folds are laid out on",
-                        format_value(v),
+                         be fixed by the panel alone, since its bar clock is what the folds \
+                         are laid out on",
+                        member.label,
                         first.symbol,
                         key.symbol,
                     ),
@@ -2490,14 +2428,15 @@ fn pooled_walkforward_run(
     }
 
     // Each member's bar clock, off its own prepared stream.
-    let axes: Vec<panel::MemberAxis> = values
+    let axes: Vec<panel::MemberAxis> = panel
+        .members()
         .iter()
         .zip(&member_keys)
-        .map(|(v, key)| {
+        .map(|(member, key)| {
             let (snaps, _) = streams
                 .get(key)
                 .expect("every member's root was prepared by `distinct_roots`");
-            panel::MemberAxis::from_snapshots(format_value(v), snaps)
+            panel::MemberAxis::from_snapshots(member.label.clone(), snaps)
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -2508,11 +2447,8 @@ fn pooled_walkforward_run(
             .get(&member_keys[m])
             .expect("every member's root was prepared by `distinct_roots`")
     };
-    let params_for = |params: &HashMap<String, Value>, m: usize| {
-        let mut out = params.clone();
-        out.insert(axis.to_string(), values[m].clone());
-        out
-    };
+    let params_for =
+        |params: &HashMap<String, Value>, m: usize| panel.members()[m].params_over(params);
 
     let probe = |params: &HashMap<String, Value>, m: usize| -> Result<usize> {
         let member_params = params_for(params, m);
@@ -2566,13 +2502,14 @@ fn pooled_walkforward_run(
         &result.fold_rows,
     )?;
     // One composite curve per member — the panel does not net into one account.
-    for composite in &result.composites {
+    let total = result.composites.len();
+    for (index, composite) in result.composites.iter().enumerate() {
         write_composite_equity_csv(
             &derive_sibling(
                 opts.output,
                 &format!(
                     "composite_oos_equity.{}",
-                    sanitize_member(&composite.member)
+                    crate::run::member_file_stem(index, &composite.member, total)
                 ),
                 "csv",
             ),
@@ -2611,8 +2548,9 @@ fn pooled_walkforward_run(
         style::field(
             "pooled",
             &format!(
-                "axis `{axis}` reduced over {} members ({}) — one parameter set per fold, \
+                "{} reduced over {} members ({}) — one parameter set per fold, \
                  scored on the pooled in-sample metric",
+                panel.describe(),
                 result.axis.members.len(),
                 result
                     .axis
@@ -2631,14 +2569,6 @@ fn pooled_walkforward_run(
         print_result_block(result.fold_rows.len(), started, SystemTime::now());
     }
     Ok(())
-}
-
-/// A member name as a filename component — the member is a symbol, and `BTC/USDT`
-/// would otherwise write into a directory that doesn't exist.
-fn sanitize_member(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect()
 }
 
 fn write_pooled_walkforward_csv(

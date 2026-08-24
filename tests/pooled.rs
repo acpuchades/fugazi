@@ -115,9 +115,9 @@ fn a_pooled_axis_leaves_the_ranking_and_the_columns() {
     Cmd::new("optimize")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--grid", "SYM=[\"UP\",\"DOWN\"],FAST=[2,3]"])
+        .args(&["--grid", "FAST=[2,3]"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["-m", "returns.total_pct"])
         .args(&["--crypto"])
         .args(&["--output", &pooled_csv.to_string_lossy()])
@@ -204,9 +204,9 @@ fn an_undefined_metric_is_dropped_from_the_mean_and_counted() {
     Cmd::new("optimize")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--grid", "SYM=[\"WAVY\",\"SILENT\"],FAST=[2]"])
+        .args(&["--grid", "FAST=[2]"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"WAVY\",\"SILENT\"]"])
         .args(&["-m", "trades.total"])
         .args(&["-m", "trades.win_rate_pct"])
         .args(&["--crypto"])
@@ -285,9 +285,9 @@ fn ragged_members_contribute_only_to_folds_they_have_bars_in() {
     Cmd::new("optimize")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--grid", "SYM=[\"EARLY\",\"LATE\"],FAST=[2,3]"])
+        .args(&["--grid", "FAST=[2,3]"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"EARLY\",\"LATE\"]"])
         .args(&["--walkforward", "20,15"])
         .args(&["--best-by", "sharpe"])
         .args(&["-m", "sharpe"])
@@ -330,35 +330,53 @@ fn ragged_members_contribute_only_to_folds_they_have_bars_in() {
         ))
     };
     assert!(
-        sibling("composite_oos_equity.EARLY.csv").exists(),
+        sibling("composite_oos_equity.1_SYM_EARLY.csv").exists(),
         "expected a per-member composite for EARLY"
     );
     assert!(
-        sibling("composite_oos_equity.LATE.csv").exists(),
+        sibling("composite_oos_equity.2_SYM_LATE.csv").exists(),
         "expected a per-member composite for LATE"
     );
 }
 
-/// A pooled axis naming nothing in the grid is bad input, reported with the
-/// axes that *are* available rather than a panic or an empty panel.
+/// `--pooled` carries its own values, so the two ways of getting that wrong are
+/// a term that isn't an axis at all, and a name the grid *also* sweeps.
+///
+/// The second is the one worth a test: ranked on and reduced over are opposite
+/// treatments of one axis, and honouring either silently would produce a table
+/// whose columns don't say which happened.
 #[test]
-fn a_pooled_axis_that_names_no_grid_axis_is_refused() {
+fn a_pooled_term_that_is_not_an_axis_or_clashes_with_the_grid_is_refused() {
     let (frame_path, _keep) = scratch_file("pooled_bad_axis.csv", &two_member_frame());
     let (doc_path, _keep_doc) = scratch_file("pooled_bad_axis.yml", DOC);
+    let base = || {
+        Cmd::new("optimize")
+            .arg(&format!("@{}", doc_path.display()))
+            .series(&format!("@{}", frame_path.display()))
+            .args(&["--crypto"])
+            .args(&["--output", "/dev/null"])
+    };
 
-    let out = Cmd::new("optimize")
-        .arg(&format!("@{}", doc_path.display()))
-        .series(&format!("@{}", frame_path.display()))
-        .args(&["--grid", "SYM=[\"UP\",\"DOWN\"],FAST=[2,3]"])
+    let scalar = base()
+        .args(&["--grid", "FAST=[2,3]"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "NOPE"])
-        .args(&["--crypto"])
-        .args(&["--output", "/dev/null"])
+        .args(&["--pooled", "SYM=UP"])
         .fails();
     assert!(
-        out.stderr.contains("NOPE") && out.stderr.contains("FAST"),
-        "the error should name the missing axis and what is available, got:\n{}",
-        out.stderr
+        scalar.stderr.contains("takes axes, not single values") && scalar.stderr.contains("SYM"),
+        "the error should name the scalar term, got:\n{}",
+        scalar.stderr
+    );
+
+    let clash = base()
+        .args(&["--grid", "SYM=[\"UP\",\"DOWN\"],FAST=[2,3]"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
+        .fails();
+    assert!(
+        clash.stderr.contains("SYM") && clash.stderr.contains("ranked on and reduced over"),
+        "a name cannot be swept and pooled at once, got:\n{}",
+        clash.stderr
     );
 }
 
@@ -373,9 +391,9 @@ fn a_panel_of_one_is_refused() {
     let out = Cmd::new("optimize")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--grid", "SYM=[\"UP\"],FAST=[2,3]"])
+        .args(&["--grid", "FAST=[2,3]"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\"]"])
         .args(&["--crypto"])
         .args(&["--output", "/dev/null"])
         .fails();
@@ -384,6 +402,146 @@ fn a_panel_of_one_is_refused() {
         "expected the panel-of-one refusal, got:\n{}",
         out.stderr
     );
+}
+
+/// **The product.** `--pooled` takes N axes and reduces over their cartesian
+/// product: `SYM=[..],SLOW=[..]` is a four-member panel, not two panels or a
+/// two-axis grid.
+///
+/// The distinction this pins is that the extra axis went into the *panel* and
+/// not into the *grid*: a four-member panel over a two-point grid emits two
+/// rows with `_n = 4`, where sweeping `SLOW` instead would emit four rows with
+/// `_n = 2`. Both tables have the same number of backtests behind them and
+/// answer opposite questions, so row count alone is not enough — `_n` is
+/// asserted too.
+#[test]
+fn several_pooled_axes_reduce_over_their_cartesian_product() {
+    let (frame_path, _keep) = scratch_file("pooled_product.csv", &two_member_frame());
+    let (doc_path, _keep_doc) = scratch_file("pooled_product_doc.yml", DOC);
+
+    let csv = out_path("pooled_product");
+    Cmd::new("optimize")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--grid", "FAST=[2,3]"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"],SLOW=[4,5]"])
+        .args(&["-m", "trades.total"])
+        .args(&["--crypto"])
+        .args(&["--output", &csv.to_string_lossy()])
+        .ok();
+
+    let (header, rows) = read_csv(&csv);
+    assert_eq!(
+        rows.len(),
+        2,
+        "the grid is FAST alone — the other two axes are panel members, not rows:\n{}",
+        rows.join("\n")
+    );
+    for name in ["SYM", "SLOW"] {
+        assert!(
+            !header.split(',').any(|c| c == name),
+            "`{name}` is reduced over, so it must not be a CSV column: `{header}`"
+        );
+    }
+    let n_col = header
+        .split(',')
+        .position(|c| c == "trades.total_n")
+        .unwrap_or_else(|| panic!("no `trades.total_n` column in `{header}`"));
+    for row in &rows {
+        assert_eq!(
+            row.split(',').nth(n_col).unwrap(),
+            "4",
+            "2 symbols x 2 slow periods is a panel of 4, not 2:\n{row}"
+        );
+    }
+}
+
+/// The `run` twin of the same property, checked through the artefacts: a
+/// four-member panel writes four member directories, each labelled with every
+/// axis it holds fixed.
+#[test]
+fn a_pooled_run_over_a_product_writes_one_directory_per_cell() {
+    let (frame_path, _keep) = scratch_file("run_pooled_product.csv", &two_member_frame());
+    let (doc_path, _keep_doc) = scratch_file("run_pooled_product_doc.yml", DOC);
+
+    let out = Cmd::new("run")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--params", "FAST=2"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"],SLOW=[4,5]"])
+        .args(&["--crypto"])
+        .output_dir("run_pooled_product_out")
+        .ok();
+
+    // Axes are name-sorted and the product enumerates with the last varying
+    // fastest, so the panel order is fixed regardless of how the flag was
+    // typed — which is what makes these directory names stable.
+    for member in [
+        "1_SLOW_4_SYM_UP",
+        "2_SLOW_4_SYM_DOWN",
+        "3_SLOW_5_SYM_UP",
+        "4_SLOW_5_SYM_DOWN",
+    ] {
+        assert!(
+            out.wrote(&format!("{member}/metrics.yml")),
+            "expected {member}/metrics.yml, output dir held:\n{}",
+            out.stdout
+        );
+    }
+}
+
+/// Member directories are index-prefixed because sanitizing alone collides.
+///
+/// `BTC/USDT` and `BTC-USDT` are the same asset as two venues spell it — an
+/// ordinary thing to find in one panel — and every non-alphanumeric character
+/// folds to `_`, so both sanitize to the same name. Without the prefix the
+/// second member's artefacts overwrite the first's and the pooled `metrics.yml`
+/// reports a mean over two runs of which only one is on disk.
+#[test]
+fn members_whose_labels_sanitize_alike_get_their_own_directories() {
+    // One member trades and one never does, so the two documents differ in
+    // content as well as in path — otherwise an overwrite would be invisible.
+    let wavy: Vec<f64> = (0..24)
+        .map(|i| {
+            let phase = i % 8;
+            100.0 + if phase < 4 { phase } else { 8 - phase } as f64 * 3.0
+        })
+        .collect();
+    let flat = [50.0f64; 24];
+    let (frame_path, _keep) = scratch_file(
+        "pooled_collide.csv",
+        &frame(&[("A/B", 0, &wavy), ("A-B", 0, &flat)]),
+    );
+    let (doc_path, _keep_doc) = scratch_file("pooled_collide_doc.yml", DOC);
+
+    let out = Cmd::new("run")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--params", "FAST=2"])
+        .args(&["--params", "SLOW=4"])
+        .args(&["--pooled", "SYM=[\"A/B\",\"A-B\"]"])
+        .args(&["--crypto"])
+        .output_dir("pooled_collide_out")
+        .ok();
+
+    assert!(out.wrote("1_SYM_A_B/metrics.yml"), "{}", out.stdout);
+    assert!(out.wrote("2_SYM_A_B/metrics.yml"), "{}", out.stdout);
+    // Same sanitized stem, different members: the two runs are of opposite
+    // series, so identical documents would mean one overwrote the other.
+    assert_ne!(
+        out.read("1_SYM_A_B/metrics.yml"),
+        out.read("2_SYM_A_B/metrics.yml"),
+        "both members wrote to the same directory — one overwrote the other"
+    );
+    // The pooled reduction keys members by their real labels, not the
+    // filesystem-safe stems.
+    let pooled_yaml = out.read("metrics.yml");
+    for label in ["SYM=A/B", "SYM=A-B"] {
+        assert!(
+            pooled_yaml.contains(label),
+            "pooled doc must key members by label `{label}`:\n{pooled_yaml}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,17 +593,16 @@ fn a_pooled_run_writes_one_full_run_per_member_and_a_pooled_reduction() {
     let out = Cmd::new("run")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--params", "FAST=2"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--crypto"])
         .output_dir("run_pooled_two_out")
         .ok();
 
     // Each member gets its own full `run` output — the same four files a
     // plain `run` would write for that member alone.
-    for member in ["UP", "DOWN"] {
+    for member in ["1_SYM_UP", "2_SYM_DOWN"] {
         for artefact in ["fills.csv", "trades.csv", "returns.csv", "metrics.yml"] {
             assert!(
                 out.wrote(&format!("{member}/{artefact}")),
@@ -465,19 +622,22 @@ fn a_pooled_run_writes_one_full_run_per_member_and_a_pooled_reduction() {
         pooled_yaml.contains("members:"),
         "missing `members:` section:\n{pooled_yaml}"
     );
+    // A member is keyed by the params spec that reproduces it standalone,
+    // which is the first thing anyone does with the member that dragged the
+    // pooled mean down.
     assert!(
-        pooled_yaml.contains("UP:"),
-        "pooled doc must name member UP:\n{pooled_yaml}"
+        pooled_yaml.contains("SYM=UP"),
+        "pooled doc must name member SYM=UP:\n{pooled_yaml}"
     );
     assert!(
-        pooled_yaml.contains("DOWN:"),
-        "pooled doc must name member DOWN:\n{pooled_yaml}"
+        pooled_yaml.contains("SYM=DOWN"),
+        "pooled doc must name member SYM=DOWN:\n{pooled_yaml}"
     );
 
     // The console names the panel and both members.
     assert!(out.stdout.contains("pooled"), "{}", out.stdout);
-    assert!(out.stdout.contains("member UP"), "{}", out.stdout);
-    assert!(out.stdout.contains("member DOWN"), "{}", out.stdout);
+    assert!(out.stdout.contains("member SYM=UP"), "{}", out.stdout);
+    assert!(out.stdout.contains("member SYM=DOWN"), "{}", out.stdout);
 }
 
 /// A ruined member's pre-ruin numbers are folded into the pooled mean rather
@@ -499,21 +659,20 @@ fn a_ruined_members_pre_ruin_numbers_are_kept_and_named() {
     let out = Cmd::new("run")
         .arg(&format!("@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
-        .args(&["--params", "SYM=[\"DOOMED\",\"CALM\"]"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"DOOMED\",\"CALM\"]"])
         .args(&["--crypto"])
         .output_dir("run_pooled_ruin_out")
         .ok();
 
     // `ruin_bar` is `#[serde(skip_serializing_if = "Option::is_none")]` — a
     // solvent run has no `ruin_bar:` line at all, not one reading `null`.
-    let doomed_yaml = out.read("DOOMED/metrics.yml");
+    let doomed_yaml = out.read("1_SYM_DOOMED/metrics.yml");
     assert!(
         doomed_yaml.contains("ruin_bar:"),
         "DOOMED must have ruined — a >100% adverse move against a fully-invested, \
          never-covered short is exactly the recipe tests/ruin.rs pins as ruin:\n{doomed_yaml}"
     );
-    let calm_yaml = out.read("CALM/metrics.yml");
+    let calm_yaml = out.read("2_SYM_CALM/metrics.yml");
     assert!(
         !calm_yaml.contains("ruin_bar:"),
         "CALM is the control — it must survive the same strategy on a flat series:\n{calm_yaml}"
@@ -535,10 +694,9 @@ fn a_ruined_members_pre_ruin_numbers_are_kept_and_named() {
     );
 }
 
-/// The four `--pooled` refusals `run` shares with `optimize`'s axis-extraction
-/// discipline: a missing axis, a single-value axis, another axis-shaped
-/// `--params` entry, and (the case `optimize` has no equivalent for)
-/// composing with state that has no per-member meaning yet.
+/// The `--pooled` refusals on `run`: a term that isn't an axis, a panel of
+/// one, a name `--params` also sets, and (the case `optimize` has no equivalent
+/// for) composing with state that has no per-member meaning yet.
 #[test]
 fn run_pooled_refusals() {
     let (frame_path, _keep) = scratch_file("run_pooled_refusals.csv", &two_member_frame());
@@ -550,49 +708,49 @@ fn run_pooled_refusals() {
             .args(&["--crypto"])
     };
 
-    let missing_axis = base()
+    let scalar = base()
         .args(&["--params", "FAST=2"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=UP"])
         .args(&["--output-dir", "/dev/null"])
         .fails();
     assert!(
-        missing_axis.stderr.contains("names no --params entry"),
+        scalar.stderr.contains("takes axes, not single values"),
         "{}",
-        missing_axis.stderr
+        scalar.stderr
     );
 
     let single_value = base()
-        .args(&["--params", "SYM=[\"UP\"]"])
         .args(&["--params", "FAST=2"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\"]"])
         .args(&["--output-dir", "/dev/null"])
         .fails();
     assert!(
-        single_value.stderr.contains("only 1 value"),
+        single_value.stderr.contains("only 1 member"),
         "{}",
         single_value.stderr
     );
 
-    let other_axis = base()
-        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
-        .args(&["--params", "FAST=[2,3]"])
+    // `--params` still means *this name equals this value*, so a name on both
+    // flags at once is refused rather than silently resolved by precedence.
+    let clash = base()
+        .args(&["--params", "SYM=UP"])
+        .args(&["--params", "FAST=2"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--output-dir", "/dev/null"])
         .fails();
     assert!(
-        other_axis.stderr.contains("only accepts scalar values"),
+        clash.stderr.contains("set by both --params and --pooled"),
         "{}",
-        other_axis.stderr
+        clash.stderr
     );
 
     let with_flatten = base()
-        .args(&["--params", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--params", "FAST=2"])
         .args(&["--params", "SLOW=4"])
-        .args(&["--pooled", "SYM"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--flatten"])
         .args(&["--output-dir", "/dev/null"])
         .fails();
@@ -633,7 +791,7 @@ fn optimize_pooled_on_a_pairs_document_is_refused_not_silently_ignored() {
         .arg(&format!("pairs:@{}", doc_path.display()))
         .series(&format!("@{}", frame_path.display()))
         .args(&["--grid", "FAST=[2,3]"])
-        .args(&["--pooled", "FAST"])
+        .args(&["--pooled", "SYM=[\"UP\",\"DOWN\"]"])
         .args(&["--crypto"])
         .args(&["--output", "/dev/null"])
         .fails();

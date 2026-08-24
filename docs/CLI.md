@@ -113,7 +113,7 @@ neither (`run` and `optimize` seed `SYMBOL` from a one-symbol frame). See
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
-          [--params <SPEC> …] [--import-root <DIR>] [--pooled <AXIS>] [--cash <N>] [--costs <SPEC> …]
+          [--params <SPEC> …] [--import-root <DIR>] [--pooled <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-w <LEN>] [-q]
           [--from <DATE>] [--until <DATE>] [--strict-from]
@@ -126,7 +126,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-o`, `--output-dir <DIR>` | Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
-| `--pooled <AXIS>` | Reduce over a named parameter instead of resolving it to one value: fit this document across a **panel** of instruments and report the pooled reading, rather than one series' metrics. `AXIS` names a `--params` entry whose value is a member list (list or `start..end[:step]` range — same grammar as `optimize --grid`), typically the one driving `root:`. Single-asset only; not yet composable with `--resume`/`--save-state`/`--flatten`. See [Pooling across a panel, from `run`](#pooling-across-a-panel-from-run). |
+| `--pooled <SPEC>` | Reduce over a **panel** instead of resolving to one series: fit this document to every member and report the pooled reading, rather than one instrument's metrics. Carries the panel's axes *with their values*, in `--params` term grammar but axis-shaped — `SYM=["BTC/USDT","ETH/USDT"]`, a `start..end[:step]` range, or several axes at once, which pool over their cartesian product. Repeatable and `,`-separated like `--params`; a name it declares may not also be set by `--params`. Typically the axis drives `root:`. Single-asset only; not yet composable with `--resume`/`--save-state`/`--flatten`. See [Pooling across a panel, from `run`](#pooling-across-a-panel-from-run). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--margin-rate <RATE>` | Annualized interest charged on a **negative cash balance**, as a decimal (`0.06` = 6%/yr). Default `0`. What a margin account bills for the cash it lent you; only non-zero once `--max-gross` is above 1 and a levered long drives cash below zero. Accrued per bar on the balance carried into it, pro-rated by the run's **calendar** cadence — so it needs a resolvable `-f/--frequency`, and warns if it has none rather than charging nothing silently. |
 | `--maintenance-margin <RATIO>` | Force-close the book when equity falls below `RATIO × gross notional` — a margin call. **Off by default**, because the ratio is a *venue* assumption that varies by exchange, instrument and tier. Omitting it is the larger of the two leverage errors: a 3x book that draws down past its maintenance ratio is gone, and a run that trades on reports the recovery of an account that no longer existed. Triggered on each bar's **adverse extreme** (a wick is what liquidates); the forced fills book at the close as `liquidation` in `fills.csv`, and a post-run banner names the first one. |
@@ -158,27 +158,48 @@ see the README's *Analyzing a run in R* section.
 #### Pooling across a panel, from `run`
 
 `optimize`'s job is finding the best parameter set; `run`'s is reporting what
-**one** already-chosen set actually does. `--pooled AXIS` answers that
-question across a panel instead of one series: fit the same document to every
-member's own data and reduce to the panel's `mean ∓ std`, rather than one
-series' numbers.
+**one** already-chosen set actually does. `--pooled` answers that question
+across a panel instead of one series: fit the same document to every member's
+own data and reduce to the panel's `mean ∓ std`, rather than one series'
+numbers.
 
 ```bash
 fugazi run @ma.yml -s @panel.csv \
-  --params 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' --params FAST=10 --params SLOW=20 \
-  --pooled SYM -o out/pooled_run --crypto
+  --params FAST=10 --params SLOW=20 \
+  --pooled 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' \
+  -o out/pooled_run --crypto
 ```
 
-`AXIS` names a `--params` entry carrying the member list — same grammar as
-`optimize --grid` (a JSON list or a `start..end[:step]` range) — and every
-other `--params` entry must still resolve to one value. Each member is
-evaluated against its own series (one prepared stream per value, never a
-merged one, so a member never sees a bar it doesn't have) and writes its own
-sibling artefacts under `<output-dir>/<MEMBER>/` — `fills.csv`, `trades.csv`,
-`returns.csv`, `metrics.yml`, and the windowed CSVs under `-w` — exactly what a
-plain `run` would write for that member alone, so a pooled run is diagnosable
-one member at a time. The top-level `metrics.yml` is the pooled reduction
-instead:
+`--pooled` carries the panel itself: one or more axes, each a JSON list or a
+`start..end[:step]` range, in the same term grammar `--params` uses. `--params`
+therefore keeps meaning *this name equals this value* — a panel is never
+declared there — and a name may not appear on both flags.
+
+**Several axes pool over their cartesian product.** `--pooled
+'SYM=["BTCUSDT","ETHUSDT"],SLOW=[100,200]'` is a four-member panel: every cell
+is a member, and members are averaged, never ranked against each other. Axes are
+name-sorted and the product enumerates with the last varying fastest, so member
+order does not depend on how the flag was typed.
+
+One panel that does *not* work yet: pooling over a **cadence** axis when the
+input carries two cadences of the same symbol. That frame is refused by the
+[cadence census](#bar-cadence) — "a strategy trades one of them" — before pooling is
+consulted, and `-f/--frequency` narrows per symbol, so it cannot vary per
+member. Pooling over `FREQ` works only where each cadence is a distinct symbol.
+
+Each member is evaluated against its own series (one prepared stream per member,
+never a merged one, so a member never sees a bar it doesn't have) and writes its
+own sibling artefacts under `<output-dir>/<N>_<MEMBER>/` — `fills.csv`,
+`trades.csv`, `returns.csv`, `metrics.yml`, and the windowed CSVs under `-w` —
+exactly what a plain `run` would write for that member alone, so a pooled run is
+diagnosable one member at a time. A member is labelled `NAME=VALUE` per axis,
+`,`-joined: deliberately the `--params` spec that reproduces it standalone. The
+directory prefixes it with the member's position in the panel, because a label
+is arbitrary text and every non-alphanumeric character folds to `_` — `BTC/USDT`
+and `BTC-USDT` are the same asset as two venues spell it, and without the prefix
+the second would overwrite the first.
+
+The top-level `metrics.yml` is the pooled reduction instead:
 
 ```yaml
 pooled:
@@ -186,9 +207,9 @@ pooled:
   returns.total_pct: { mean: 88.55, std: 44.07, defined: 3, members: 3 }
   # ...
 members:
-  BTC/USDT: { ... }   # that member's whole metrics.yml document
-  ETH/USDT: { ... }
-  SOL/USDT: { ... }
+  SYM=BTC/USDT: { ... }   # that member's whole metrics.yml document
+  SYM=ETH/USDT: { ... }
+  SYM=SOL/USDT: { ... }
 ```
 
 `defined`/`members` on every pooled entry is the support behind the mean: an
@@ -502,7 +523,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …] [--import-root <DIR>]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <LEN> | --pooled <AXIS>] [-k <K>]
+               [-w <LEN> | --pooled <SPEC> …] [-k <K>]
                [--walkforward <IS,OS[,E]> [--keep-unstable]]
                [--smooth[=<KERNEL>] [--smooth-min-support <FRAC>]]
                [--cash <N>]
@@ -518,10 +539,10 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
 | `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
-| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
+| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<N>_<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). Mutually exclusive with `--walkforward`. |
-| `--pooled <AXIS>` | **Reduce over** a grid axis instead of ranking on it — fit *one* parameter set across a panel of instruments rather than picking the best `(params, instrument)` cell. `AXIS` names an existing `--grid` axis (typically the one driving `root:`). That axis leaves the CSV's axis columns entirely and each remaining grid point becomes one row scored across every value of it; every `-m` metric becomes three columns (`<name>_mean` / `<name>_std` / `<name>_n`, the last being how many members reported it). Composes with `--walkforward` and `-k`. Mutually exclusive with `-w`. See [Pooling across a panel](#pooling-across-a-panel). |
+| `--pooled <SPEC>` | **Reduce over** a panel instead of ranking on it — fit *one* parameter set across every member rather than picking the best `(params, instrument)` cell. Carries the panel's axes with their values, in `--grid` term grammar (typically the axis driving `root:`); several axes pool over their cartesian product. The panel's names are not CSV axis columns — they are not something the sweep chose — and every `-m` metric becomes three columns (`<name>_mean` / `<name>_std` / `<name>_n`, the last being how many members reported it). A name it declares may not also appear in `--params` or `--grid`. Composes with `--walkforward` and `-k`. Mutually exclusive with `-w`. See [Pooling across a panel](#pooling-across-a-panel). |
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's mean *against* it by `K` standard deviations before sorting. Requires `--best-by` plus one of `-w` (dispersion across time windows) or `--pooled` (dispersion across panel members); `K >= 0`. See [Best-by directions](#best-by-directions). |
@@ -938,27 +959,50 @@ ranks all `N × M` cells against one another and reports the best. That answers
 "which instrument cooperated best with which parameters" — and on a low-data
 market it mostly finds whichever pair happened to fit.
 
-`--pooled AXIS` answers the other question. The named axis is **reduced over**
-rather than ranked on:
+`--pooled` answers the other question. It declares a **panel** — axes with
+their values, in `--grid`'s own term grammar — which is **reduced over** rather
+than ranked on:
 
 ```bash
 fugazi optimize @ma.yml -s @panel.csv \
-  --grid 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"],FAST=[5,10,20],SLOW=[50,100]' \
-  --pooled SYM --best-by sharpe -k 0.5 -m sharpe -o out/pooled.csv --crypto
+  --grid 'FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' \
+  --best-by sharpe -k 0.5 -m sharpe -o out/pooled.csv --crypto
 ```
 
-That grid has 18 points; pooled, it emits **6 rows** — one per `(FAST, SLOW)`
-pair — each scored across all three instruments. `SYM` is not a CSV column,
+The grid has 6 points and the panel has 3 members, so this runs the same 18
+backtests as ranking all three instruments would — and emits **6 rows**, one per
+`(FAST, SLOW)` pair, each scored across all three. `SYM` is not a CSV column,
 because it is no longer something the sweep chose. Two consequences:
 
 - The grid is `N` hypotheses wide rather than `N × M`, which is the count a
-  [deflated Sharpe](#deflated-sharpe) should be parameterized by.
+  [deflated Sharpe](#deflated-sharpe) should be parameterized by. Declaring the
+  panel outside the grid is what makes that structural: a name cannot be ranked
+  on and reduced over at once, and every row necessarily pools over the same
+  population — the property that makes two rows' `_mean` columns comparable.
 - It is the same reduction as [`-w/--windowed`](#windowed-metrics) over a
   different partition — members rather than time windows — so
   [`-k/--risk-aversion`](#best-by-directions) composes and means the same
   thing: a parameter set that only works on one member is penalized for the
   spread. (For that reason the two are mutually exclusive; a `mean ∓ k·std` of
   a set of `mean ∓ k·std`s is not a statistic worth emitting silently.)
+
+**Several axes pool over their cartesian product.** A panel is not restricted
+to instruments:
+
+```bash
+fugazi optimize @ma.yml -s @panel.csv \
+  --grid 'FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled 'SYM=["BTC/USDT","ETH/USDT"],SLIP=[1,5,10]' \
+  --best-by sharpe -k 0.5 -m sharpe -o out/pooled.csv --crypto
+```
+
+is a six-member panel — every `(instrument, slippage assumption)` cell — still
+emitting 6 rows. "Does this parameter set survive across instruments *and*
+across the fee tiers I might get" is one question with one answer, not a grid of
+them, so the cells are averaged rather than ranked. Pooling over a parameter
+this way is what `-k` then penalizes: a setting that only works at the best
+assumed fill loses to one that works at all of them.
 
 Each `-m` metric becomes three columns rather than two:
 
@@ -985,8 +1029,9 @@ same dates.
 
 ```bash
 fugazi optimize @ma.yml -s @panel.csv \
-  --grid 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"],FAST=[5,10,20],SLOW=[50,100]' \
-  --pooled SYM --walkforward 2000,500 --best-by sharpe -m sharpe \
+  --grid 'FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' \
+  --walkforward 2000,500 --best-by sharpe -m sharpe \
   -o out/pwf.csv --crypto
 ```
 
@@ -1005,7 +1050,8 @@ discards most of the sample. Early folds therefore legitimately rest on fewer
 members, which the support columns make visible rather than silent.
 
 Output is one composite equity CSV **per member**
-(`<stem>.composite_oos_equity.<MEMBER>.csv`) plus a pooled
+(`<stem>.composite_oos_equity.<N>_<MEMBER>.csv`, index-prefixed for the same
+reason `run`'s member directories are) plus a pooled
 `<stem>.composite_oos_metrics.yml` carrying every member's composite document
 and the cross-member pooled reading of each. There is deliberately no single
 netted composite curve: netting `M` members into one account requires a

@@ -695,7 +695,7 @@ def test_optimize_panel_axis_pools_over_a_typed_parameter():
     """`panel_axis=` used to substitute the member name as a JSON *string*,
     which is right for a ticker and made every typed slot unreachable —
     `!ema { period: !param FAST }` got `"5"` and failed to build. The CLI's
-    `--params 'FAST=[5,10,15]' --pooled FAST` has always been typed, so the two
+    `--pooled 'FAST=[5,10,15]'` has always been typed, so the two
     surfaces disagreed on one feature. A mapping key now carries its own JSON
     type through."""
     snaps = _trend_snaps()

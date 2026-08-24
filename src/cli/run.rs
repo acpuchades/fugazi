@@ -446,15 +446,27 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     emit_run(&iter, opts, started, setup.effective_freq)
 }
 
-/// A member name as a filename component — a member is typically a symbol,
-/// and `BTC/USDT` would otherwise write into a directory that doesn't exist.
-fn sanitize_member(name: &str) -> String {
-    name.chars()
+/// A member label as a filename component: `03_SYM_BTC_USDT`.
+///
+/// Sanitizing alone is not enough. A member label is arbitrary text — a symbol
+/// with a `/`, or a multi-axis label carrying `=` and `,` — and every
+/// non-alphanumeric character folds to `_`, so `BTC/USDT` and `BTC-USDT` (the
+/// same asset as two venues spell it, an ordinary thing to find in one panel)
+/// both sanitize to `BTC_USDT`. Without the index prefix the second member's
+/// artefacts would silently overwrite the first's, one directory holding a
+/// mixture of both. The prefix is the member's position in the panel, so
+/// collisions are impossible by construction rather than detected after the
+/// fact, and `total` fixes its width so the directories sort in panel order.
+pub fn member_file_stem(index: usize, label: &str, total: usize) -> String {
+    let width = total.to_string().len();
+    let sanitized: String = label
+        .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect()
+        .collect();
+    format!("{:0width$}_{sanitized}", index + 1)
 }
 
-/// `--pooled AXIS`: the `run` twin of `optimize --pooled` restricted to a
+/// `--pooled 'AXIS=[...]'`: the `run` twin of `optimize --pooled` restricted to a
 /// single, already-resolved parameter set. `optimize`'s job is finding the
 /// best parameter set across a panel; `run`'s is reporting what **one** set
 /// actually does — pooled, that is the panel's `mean ∓ std` over its members
@@ -481,7 +493,7 @@ fn sanitize_member(name: &str) -> String {
 /// left wired — it runs, and writes `montecarlo.csv`, inside each member's own
 /// subdirectory via `opts.montecarlo`.
 pub fn run_pooled(
-    axis: &str,
+    panel: &str,
     members: &[(String, StrategyRef)],
     frame: &DataFrame,
     opts: &RunOptions,
@@ -516,22 +528,23 @@ pub fn run_pooled(
         style::field(
             "pooled",
             &format!(
-                "axis `{axis}` reduced over {} members — one parameter set, scored across \
+                "{panel} reduced over {} members — one parameter set, scored across \
                  every member and reduced to mean ∓ std",
                 setups.len(),
             ),
         );
         style::field_continuation(&format!(
-            "per-member fills.csv/trades.csv/returns.csv/metrics.yml under `{}/<MEMBER>/`; the \
-             pooled reduction is this run's own metrics.yml",
+            "per-member fills.csv/trades.csv/returns.csv/metrics.yml under `{}/<N>_<MEMBER>/`; \
+             the pooled reduction is this run's own metrics.yml",
             opts.out_dir.display(),
         ));
     }
 
     let mut panel_metrics: Vec<fugazi::spec::panel::PanelMetrics> =
         Vec::with_capacity(setups.len());
-    for (name, setup) in &setups {
-        let member_dir = opts.out_dir.join(sanitize_member(name));
+    let total = setups.len();
+    for (index, (name, setup)) in setups.iter().enumerate() {
+        let member_dir = opts.out_dir.join(member_file_stem(index, name, total));
         std::fs::create_dir_all(&member_dir)
             .with_context(|| format!("creating member output dir `{}`", member_dir.display()))?;
         // Only `out_dir` differs per member — `RunOptions` is `Copy`, so this

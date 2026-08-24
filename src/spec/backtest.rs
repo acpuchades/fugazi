@@ -511,7 +511,12 @@ pub fn check_member_universe_pub(
     let mut have: Vec<&str> = present.into_iter().collect();
     have.sort_unstable();
     Err(format!(
-        "panel member `{member}` has no bars for {} — that member's stream carries {}.          A named symbol absent from a stream reads `None` on every bar, so this member          would report a flat zero-trade backtest and still count toward the pooled mean.          Either give each member a document rooted on its own series (the CLI's          `--pooled AXIS` substitutes the member per row) or use a sole-atom `root:` that          reads whatever the bar carries",
+        "panel member `{member}` has no bars for {} — that member's stream carries {}. \
+         A named symbol absent from a stream reads `None` on every bar, so this member \
+         would report a flat zero-trade backtest and still count toward the pooled mean. \
+         Either give each member a document rooted on its own series (the CLI's \
+         `--pooled` substitutes the member per row) or use a sole-atom `root:` that \
+         reads whatever the bar carries",
         missing
             .iter()
             .map(|s| format!("`{s}`"))

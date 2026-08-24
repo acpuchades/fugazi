@@ -1435,14 +1435,14 @@ row.metrics_panel    # per member:    {"AAA": {...}, "BBB": {...}, "CCC": {...}}
 member, which is right for a sole-atom `root:` that reads whatever the bar
 carries. With it, the member's key is substituted for that `!param` first, so
 each member is rooted on its own series — the same thing the CLI's
-`--pooled AXIS` does. A document that names a symbol *no* member's stream
+`--pooled` does. A document that names a symbol *no* member's stream
 carries is an error rather than a flat zero-trade backtest that still counts
 toward the pooled mean.
 
 **A member key keeps its Python type.** `str` substitutes as a JSON string,
 `int`/`float` as a number, `bool` as a boolean — so the axis need not be an
 instrument. Pooling over a *parameter* is the CLI's
-`--params 'FAST=[5,10,15]' --pooled FAST`, and it spells the same way here:
+`--pooled 'FAST=[5,10,15]'`, and it spells the same way here:
 
 ```python
 param_doc = """
@@ -1626,7 +1626,7 @@ all. Reporting the member count there would be answering a question nobody
 could check.
 
 The CLI has an ergonomic twin of the plain (non-walk-forward) case:
-`fugazi run --pooled AXIS` reports one already-chosen parameter set's pooled
+`fugazi run --pooled 'AXIS=[...]'` reports one already-chosen parameter set's pooled
 reading — the same thing `ta.optimize(..., panel=panel, grid=[{}])` computes,
 with per-member `fills.csv`/`trades.csv`/`returns.csv`/`metrics.yml` written to
 disk instead of read back as `row.metrics_panel`.

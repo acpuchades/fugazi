@@ -757,12 +757,9 @@ already *was* a pooled run, so the gap was purely ergonomic: `run`'s job is
 reporting what one already-chosen parameter set does, and that's exactly what
 `--pooled` on `run` now reports, pooled. Resolved the three open questions:
 
-- **The value-list grammar.** `--params AXIS=[...]` (or a range) now carries
-  the member list for the pooled axis specifically — every other `--params`
-  entry still has to resolve to one value (checked with the same
-  `reject_axes_in_params` `optimize`'s baseline table uses). Reuses
-  `optimize::split_axes` for the list/range parse rather than inventing a
-  second one.
+- **The value-list grammar.** ~~`--params AXIS=[...]` carries the member
+  list~~ — **revised: `--pooled` carries the panel itself.** See *`--pooled`
+  declares its own panel* below, at the end of this section.
 - **Equity-curve output.** No netted curve — same refusal as the pooled
   walk-forward composite, for the same reason: netting `M` members needs a
   weighting and a rebalance cadence, which `portfolio:` already states
@@ -802,6 +799,74 @@ let a reader trust a ranking the numbers don't support. `--pooled` suppresses
 that warning, because it is the fix for exactly what the warning describes: the
 rows are one per parameter set again, and the axis is reduced over rather than
 compared across.
+
+### `--pooled` declares its own panel, over N axes
+
+`--params AXIS=[...] --pooled AXIS` on `run`, and `--grid AXIS=[...] --pooled
+AXIS` on `optimize`, both made `--pooled` a *reference* to a member list
+declared elsewhere. Two things were wrong with that, one cosmetic and one not.
+
+The cosmetic one: `--params` means *this name equals this value* everywhere
+else, and `optimize` **rejects** the exact string `run --pooled` required
+(`reject_axes_in_params` on the baseline table). One flag, opposite meanings, in
+sibling subcommands.
+
+The structural one: on `optimize` the referenced axis was declared inside
+`--grid` only to be immediately carved back out of every subgrid, which bought
+two error paths that existed for no other reason — the axis missing from a
+subgrid, and two subgrids disagreeing on its members (which would have meant two
+rows pooling over different populations, the one property the `_mean` columns
+rest on). Declared on `--pooled` itself, both are unrepresentable: the panel is
+one population by construction.
+
+So `--pooled` now takes the axes with their values, in the `--params`/`--grid`
+term grammar it already shared: `--pooled 'SYM=["BTCUSDT","ETHUSDT"]'`. Ranges
+and `@file` come along for free. A name it declares may not also appear in
+`--params`/`--grid` — ranked on and reduced over are opposite treatments, and
+resolving that by precedence would produce a table whose columns don't say which
+happened. `split_pooled_axis` is gone; `fugazi::spec::panel::Panel` owns the
+parse, the product and the labels for both subcommands.
+
+**N axes pool over the cartesian product.** `SYM=[...],SLOW=[...]` is a panel of
+`|SYM|·|SLOW|` members. It is one question — does this survive across
+instruments *and* across the other thing — not a grid of them, so the cells are
+averaged rather than ranked, and `-k` penalizes a parameter set that only works
+in one cell exactly as it does for one instrument. The reduction kernel never
+had to change: it takes a `Vec<PanelMetrics>` and does not care what varied.
+
+Three consequences worth naming:
+
+- **A member's label is the params spec that reproduces it** (`SYM=BTC,SLOW=100`),
+  not a bare value. It is what `metrics.yml`'s `members:` keys and the console
+  use, chosen so the first thing anyone does with a member that dragged the mean
+  down — re-run it alone — is a copy-paste. It is a label, not a parse target: a
+  value containing `,` or `=` renders literally and nothing reads it back.
+- **Member directories and per-member composite files are index-prefixed**
+  (`out/1_SYM_BTC_USDT/`). Sanitizing alone collides: every non-alphanumeric
+  character folds to `_`, so `BTC/USDT` and `BTC-USDT` — the same asset as two
+  venues spell it, an ordinary thing to find in one panel — both became
+  `BTC_USDT`, and the second member's artefacts silently overwrote the first's
+  while the pooled `metrics.yml` still reported a mean over both. That was a live
+  bug before the multi-axis labels made it likelier; `tests/pooled.rs` pins it.
+  The two copies of `sanitize_member` are now one `run::member_file_stem`.
+- **A one-point grid is no longer refused under `--pooled`.** The `use \`run\`
+  for a single combination` guard exists to catch a sweep that isn't one; a
+  pooled row over a one-point grid is still a reduction across a panel, with the
+  `_mean`/`_std`/`_n` columns and the deflated-Sharpe machinery intact. `run
+  --pooled` reports the same panel as directories plus a YAML reduction; neither
+  subsumes the other.
+
+**What this does *not* unlock: a cross-cadence panel on a shared symbol.**
+`--pooled 'SYMBOL=[...],FREQ=["1h","4h"]'` is expressible and would be the
+motivating case for the product form, but a frame carrying both cadences of one
+symbol is refused upstream by the cadence census (`Finding::Ambiguous`, "a
+strategy trades one of them") before pooling is ever consulted, and `-f` narrows
+per *symbol*, so it cannot vary per member. Making it work means teaching
+`cadence::apply` that a panel declares several traded cadences and having
+`retain_cadence` keep more than one — plus a cadence-aware `atoms()` on the
+per-member path. That is a data-layer change, not a flag-grammar one, and it is
+deliberately not in this one. Pooling over `FREQ` works today only where the
+cadences live on different symbols.
 
 ## Repo hygiene
 

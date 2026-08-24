@@ -49,14 +49,169 @@
 //! A member with no bars inside a fold's window contributes nothing to that
 //! fold and does not shift it. See [`PanelAxis::member_range`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
 use crate::market::Real;
 use crate::spec::metrics::{self, Metrics};
+use crate::spec::optimize::{cartesian, format_value, split_axes};
 use crate::types::{Snapshot, Symbol};
+
+// ---------------------------------------------------------------------------
+// What a panel is made of
+// ---------------------------------------------------------------------------
+
+/// One member of a panel: the substitutions that produce it, and the label
+/// everything downstream keys it by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    /// `NAME=VALUE` per axis, `,`-joined. Deliberately the `--pooled`/`--params`
+    /// spec that reproduces this member on its own, so a pooled `metrics.yml`
+    /// key is copy-pasteable back into a plain `run` — which is the first thing
+    /// anyone does with the member that dragged a pooled mean down.
+    ///
+    /// It is a label, not a parse target: a member value containing `,` or `=`
+    /// renders literally and does not round-trip. Nothing reads it back.
+    pub label: String,
+    /// This member's value for each pooled axis, in axis order (name-sorted).
+    pub values: Vec<(String, Value)>,
+}
+
+impl Member {
+    /// Layer this member's values over a params table, in place.
+    pub fn apply(&self, params: &mut HashMap<String, Value>) {
+        for (name, value) in &self.values {
+            params.insert(name.clone(), value.clone());
+        }
+    }
+
+    /// `params` with this member layered over it.
+    pub fn params_over(&self, params: &HashMap<String, Value>) -> HashMap<String, Value> {
+        let mut out = params.clone();
+        self.apply(&mut out);
+        out
+    }
+}
+
+/// The `--pooled` panel: N parameter axes, reduced over their **cartesian
+/// product**.
+///
+/// One axis is the common case — a list of instruments. Several is the same
+/// reduction over a product rather than a different mechanism:
+/// `SYMBOL=[...],FREQ=[...]` asks whether an edge survives across instruments
+/// *and* cadences, which is one question with one answer, not a grid of them.
+/// Every cell of the product is a member, and members are averaged, never
+/// ranked against each other.
+///
+/// The axes carry their own values (`--pooled 'SYM=["BTC","ETH"]'`) rather than
+/// naming an entry declared elsewhere. That is what makes "every member of the
+/// panel is the same population for every row" true by construction instead of
+/// by a check — and it keeps `--params` meaning *this name equals this value*
+/// in every subcommand, which naming a `--params` entry did not.
+#[derive(Clone, Debug)]
+pub struct Panel {
+    axes: Vec<(String, Vec<Value>)>,
+    members: Vec<Member>,
+}
+
+impl Panel {
+    /// Build a panel from a `--pooled` params table.
+    ///
+    /// Every entry has to be axis-shaped (a `[...]` list or a
+    /// `start..end[:step]` range): a scalar term is the one thing this flag
+    /// cannot mean, since reducing over a single value is a plain run. Axes come
+    /// out name-sorted (from [`split_axes`]) and the product is enumerated with
+    /// the last axis varying fastest, so member order never depends on how the
+    /// flag was typed.
+    pub fn from_params(table: &HashMap<String, Value>) -> Result<Self> {
+        let (fixed, axes) = split_axes(table).context("--pooled")?;
+        if !fixed.is_empty() {
+            let mut names: Vec<&str> = fixed.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            bail!(
+                "--pooled takes axes, not single values: {}. A pooled axis is a `[...]` list \
+                 or a `start..end[:step]` range — reducing over one value is what plain \
+                 `--params` already does",
+                names.join(", "),
+            );
+        }
+        if axes.is_empty() {
+            bail!(
+                "--pooled declares no axis — pass the panel's members, e.g. \
+                 --pooled 'SYMBOL=[\"BTCUSDT\",\"ETHUSDT\"]'"
+            );
+        }
+        let members: Vec<Member> = cartesian(&axes)
+            .into_iter()
+            .map(|combo| {
+                let values: Vec<(String, Value)> = axes
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .zip(combo)
+                    .collect();
+                Member {
+                    label: values
+                        .iter()
+                        .map(|(name, value)| format!("{name}={}", format_value(value)))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    values,
+                }
+            })
+            .collect();
+        if members.len() < 2 {
+            bail!(
+                "--pooled has only {} member — pooling reduces across a panel, and a panel \
+                 of one is just a plain run with an extra layer of indirection",
+                members.len(),
+            );
+        }
+        Ok(Self { axes, members })
+    }
+
+    /// The pooled axes, name-sorted. Each is a name and its declared values.
+    pub fn axes(&self) -> &[(String, Vec<Value>)] {
+        &self.axes
+    }
+
+    /// The names this panel substitutes — what may not collide with a
+    /// `--params` scalar or a `--grid` axis.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.axes.iter().map(|(name, _)| name.as_str())
+    }
+
+    /// The panel's members, in product order.
+    pub fn members(&self) -> &[Member] {
+        &self.members
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Always `false` — [`Self::from_params`] refuses a panel under two members.
+    /// Present because clippy asks for it beside [`Self::len`].
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The axes as the console reports them: `` `SYMBOL` (3) \u{00b7} `FREQ` (2) ``.
+    /// A single axis renders as just its name — the member count is already
+    /// printed beside it, and `` `SYM` (3) `` over 3 members says it twice.
+    pub fn describe(&self) -> String {
+        if let [(name, _)] = self.axes.as_slice() {
+            return format!("`{name}`");
+        }
+        self.axes
+            .iter()
+            .map(|(name, values)| format!("`{name}` ({})", values.len()))
+            .collect::<Vec<_>>()
+            .join(" \u{00b7} ")
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pooled metric readings
@@ -518,8 +673,6 @@ use crate::spec::optimize::{
     compute_union_columns, project_row, smooth_keys, walkforward_layout,
 };
 use rayon::prelude::*;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// The pooled ranking key for one fold: `mean ∓ k·std` across the members that
 /// reported `path`, or `None` for a panel with a ruined member.
@@ -999,6 +1152,66 @@ mod tests {
 
     fn axis(name: &str, keys: &[i64]) -> MemberAxis {
         MemberAxis::from_keys(name, keys.to_vec()).expect("ascending")
+    }
+
+    fn table(entries: &[(&str, Value)]) -> HashMap<String, Value> {
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// Two axes pool over their product, and the enumeration is name-sorted
+    /// with the last axis varying fastest — the same layout `cartesian` gives
+    /// a subgrid, so member order is a property of the panel and not of the
+    /// order the flag's terms were typed in.
+    #[test]
+    fn several_axes_enumerate_their_cartesian_product_in_a_fixed_order() {
+        let panel = Panel::from_params(&table(&[
+            ("SYM", serde_json::json!(["UP", "DOWN"])),
+            ("FAST", serde_json::json!([2, 3])),
+        ]))
+        .expect("two axes");
+        assert_eq!(panel.len(), 4);
+        assert_eq!(
+            panel
+                .members()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "FAST=2,SYM=UP",
+                "FAST=2,SYM=DOWN",
+                "FAST=3,SYM=UP",
+                "FAST=3,SYM=DOWN"
+            ],
+        );
+        // A member substitutes every one of its axes, over whatever the row
+        // already fixed.
+        let params = panel.members()[3].params_over(&table(&[("SLOW", serde_json::json!(9))]));
+        assert_eq!(params["SYM"], serde_json::json!("DOWN"));
+        assert_eq!(params["FAST"], serde_json::json!(3));
+        assert_eq!(params["SLOW"], serde_json::json!(9));
+    }
+
+    /// The two ways a `--pooled` term is not a panel: a scalar (which would be
+    /// a plain run), and axes whose product is a single cell (whose `_std` of
+    /// zero reads like consistency rather than like an absent comparison).
+    #[test]
+    fn a_scalar_term_and_a_product_of_one_are_both_refused() {
+        let scalar = Panel::from_params(&table(&[("SYM", serde_json::json!("UP"))]))
+            .expect_err("a scalar is not an axis");
+        assert!(
+            scalar.to_string().contains("takes axes, not single values"),
+            "{scalar}"
+        );
+
+        let one = Panel::from_params(&table(&[
+            ("SYM", serde_json::json!(["UP"])),
+            ("FAST", serde_json::json!([2])),
+        ]))
+        .expect_err("a product of one is a panel of one");
+        assert!(one.to_string().contains("only 1 member"), "{one}");
     }
 
     #[test]
