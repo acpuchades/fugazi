@@ -39,7 +39,7 @@ pub(crate) use fugazi_core::metrics as core_metrics;
 pub(crate) use fugazi_core::metrics::{DrawdownSegment, Trade};
 pub(crate) use fugazi_core::runtime::{self, PayloadType, PayloadValue, TypeOf};
 pub(crate) use fugazi_core::sources::{
-    Binance, BinanceVision, CoinGecko, Coinbase, Interval, Okx, SeriesSource, SourceError,
+    Binance, BinanceVision, CoinGecko, Coinbase, Interval, Kraken, Okx, SeriesSource, SourceError,
     Timestamp, Yahoo,
 };
 pub(crate) use fugazi_core::strategies::basket as core_basket;

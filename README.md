@@ -1125,7 +1125,7 @@ fugazi get binance:BTCUSDT[1d] --since 2023-01-01 -o btc.csv
 ```
 
 Providers: `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
-`coinbase`, `yfinance`, and `cg` (CoinGecko). `file:PATH` re-processes an existing
+`kraken`, `coinbase`, `yfinance`, and `cg` (CoinGecko). `file:PATH` re-processes an existing
 CSV instead of fetching. `fugazi list tickers <provider> 'b*usd*t'` browses a
 provider's vocabulary (case-insensitive whole-symbol globs).
 

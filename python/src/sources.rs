@@ -538,6 +538,85 @@ impl PyOkx {
     }
 }
 
+/// A Kraken spot OHLC client.
+///
+/// ```python
+/// k = fugazi.Kraken()                   # public endpoint
+/// df = k.fetch(symbol="XBTUSD", freq="1d", since="2024-01-01")
+/// ```
+///
+/// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple symbols
+/// or frequencies by looping in Python.
+///
+/// **Kraken reaches back at most 720 bars** and its API cannot page past them,
+/// so `since` values older than `720 x freq` silently start later than asked —
+/// roughly two years of daily bars, thirty days of hourly, twelve hours of
+/// 1-minute. Check the first `time` in the frame against the `since` you
+/// passed if the distinction matters.
+#[pyclass(name = "Kraken", module = "fugazi", frozen)]
+pub(crate) struct PyKraken {
+    pub(crate) inner: Kraken,
+}
+
+#[pymethods]
+impl PyKraken {
+    /// Construct a client. `base_url` overrides the API endpoint (default
+    /// `https://api.kraken.com`), useful for local test servers.
+    #[new]
+    #[pyo3(signature = (base_url = None))]
+    pub(crate) fn new(base_url: Option<String>) -> Self {
+        let mut inner = Kraken::new();
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch OHLCV candles for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — a Kraken pair name, e.g. `"XBTUSD"`, `"ETHEUR"`. Sent
+    ///   verbatim; Kraken accepts several spellings of the same pair
+    ///   (`XBTUSD`, `BTCUSD`, `XXBTZUSD` all resolve to Bitcoin/USD).
+    /// * `freq` — bar cadence. Kraken serves a fixed set only:
+    ///   `"1m"`/`"5m"`/`"15m"`/`"30m"`/`"1h"`/`"4h"`/`"1d"`/`"1w"`, plus the
+    ///   15-day bar. Anything else raises.
+    /// * `since` / `until` — dates. Formats: ISO `"YYYY-MM-DD"`, EU
+    ///   `"D-M-YYYY"`, or relative (`"today"`, `"yesterday"`, `"Nd ago"`,
+    ///   `"Nw ago"`). `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
+    /// `low`, `close`, `volume`, plus the Kraken extras `vwap` and `n_trades`
+    /// (both f64). The bar currently forming is never included.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
+    pub(crate) fn fetch(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
+    }
+
+    /// Every tradable pair name Kraken currently lists, sorted.
+    ///
+    /// Reports each pair's `altname` (`"XBTUSD"`) rather than its internal id
+    /// (`"XXBTZUSD"`), because the altname is the spelling `fetch` accepts back.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
+}
+
 /// A Coinbase Advanced Trade candles client (spot).
 ///
 /// ```python
@@ -919,8 +998,8 @@ impl PyBinanceVision {
 /// price-less one (`time` + its own columns), and the frame builder omits the
 /// OHLCV block when no row carries a bar.
 ///
-/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"yfinance"`, `"cg"`
-/// (CoinGecko), `"binance-vision"` (public archive, spot) and
+/// Providers: `"binance"`, `"okx"`, `"kraken"`, `"coinbase"`, `"yfinance"`,
+/// `"cg"` (CoinGecko), `"binance-vision"` (public archive, spot) and
 /// `"binance-vision-futures"` (the same archive's USD-M tree, which adds the
 /// funding rate and positioning columns). The market rides in the provider id
 /// rather than a `market` kwarg, matching the CLI's ids; `BinanceVision(market=
@@ -950,6 +1029,15 @@ pub(crate) fn fetch(
             until_ts,
         ),
         "okx" => fetch_frame(py, &Okx::new(), out, symbol, interval, since_ts, until_ts),
+        "kraken" => fetch_frame(
+            py,
+            &Kraken::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         "coinbase" => fetch_frame(
             py,
             &Coinbase::new(),
@@ -988,8 +1076,8 @@ pub(crate) fn fetch(
             until_ts,
         ),
         other => Err(PyValueError::new_err(format!(
-            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg, \
-             binance-vision, binance-vision-futures"
+            "unknown provider {other:?}. Known providers: binance, okx, kraken, coinbase, \
+             yfinance, cg, binance-vision, binance-vision-futures"
         ))),
     }
 }
@@ -1008,8 +1096,8 @@ pub(crate) fn fetch(
 /// Binance, `BTC-USDT` on OKX, `BTC-USD` on Coinbase, `bitcoin` on CoinGecko —
 /// and a wrong spelling is not an error, it is an empty series.
 ///
-/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"cg"` (CoinGecko),
-/// `"binance-vision"` and `"binance-vision-futures"`. `"yfinance"` is accepted
+/// Providers: `"binance"`, `"okx"`, `"kraken"`, `"coinbase"`, `"cg"`
+/// (CoinGecko), `"binance-vision"` and `"binance-vision-futures"`. `"yfinance"` is accepted
 /// by `fetch` but raises `FetchError` here — Yahoo publishes no endpoint that
 /// enumerates its universe, and most retail equity APIs are the same. It is a
 /// `FetchError` and not a `ValueError` on purpose: the id is real, the
@@ -1024,14 +1112,15 @@ pub(crate) fn tickers(py: Python<'_>, provider: &str) -> PyResult<Vec<String>> {
     match provider {
         "binance" => list_of(py, Binance::new()),
         "okx" => list_of(py, Okx::new()),
+        "kraken" => list_of(py, Kraken::new()),
         "coinbase" => list_of(py, Coinbase::new()),
         "yfinance" => list_of(py, Yahoo::new()),
         "cg" => list_of(py, CoinGecko::new()),
         "binance-vision" => list_of(py, BinanceVision::new()),
         "binance-vision-futures" => list_of(py, BinanceVision::futures()),
         other => Err(PyValueError::new_err(format!(
-            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg, \
-             binance-vision, binance-vision-futures"
+            "unknown provider {other:?}. Known providers: binance, okx, kraken, coinbase, \
+             yfinance, cg, binance-vision, binance-vision-futures"
         ))),
     }
 }

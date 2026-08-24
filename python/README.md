@@ -1817,7 +1817,13 @@ and defaults to now. The returned frame has `time` (ISO 8601 UTC), `open`,
 `high`, `low`, `close`, `volume`, and — carried through from each provider's
 own API — Binance's `quote_volume`, `n_trades`, `taker_buy_base_volume`,
 `taker_buy_quote_volume`; OKX's `vol_ccy` and `quote_volume` (its
-day/week/month bars are UTC-aligned). Coinbase carries no extras — OHLCV only,
+day/week/month bars are UTC-aligned); Kraken's `vwap` and `n_trades`. Kraken
+serves a fixed cadence set (`1m`/`5m`/`15m`/`30m`/`1h`/`4h`/`1d`/`1w`, plus a
+15-day bar) and **reaches back at most 720 bars** — its API truncates `since`
+from the front rather than paging backward, so ~2 years is the ceiling at
+`"1d"` and 30 days at `"1h"`, whatever `since` asks for. Compare the frame's
+first `time` against the `since` you passed if that distinction matters.
+Coinbase carries no extras — OHLCV only,
 and only the fixed cadences `1m`/`5m`/`15m`/`30m`/`1h`/`2h`/`6h`/`1d`. Yahoo candles are **split/dividend-adjusted by
 default** (`ta.Yahoo(adjusted=False)` to opt out): `close` is the adjusted
 price and the extra column is `raw_close` (the untouched close), or with
@@ -1842,7 +1848,7 @@ ta.Okx().tickers()[:3]                     # ['ADA-USDT', 'AGLD-USDT', ...]
 
 Worth reaching for because the same instrument is spelled differently at every
 venue — `BTCUSDT` on Binance, `BTC-USDT` on OKX, `BTC-USD` on Coinbase,
-`bitcoin` on CoinGecko — and a wrong spelling is not an error: it fetches an
+`XBTUSD` on Kraken, `bitcoin` on CoinGecko — and a wrong spelling is not an error: it fetches an
 empty series. `"yfinance"` is the one id that raises (`FetchError`) rather than
 answering; Yahoo publishes no endpoint that enumerates its universe, as most
 retail equity APIs do not.

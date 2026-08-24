@@ -46,9 +46,9 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, CoinGecko, Coinbase, Interval, Okx, SeriesSource, Timestamp,
-    Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
-    coingecko::coingecko_schema, okx::okx_schema, yahoo::yahoo_schema,
+    self, Binance, BinanceVision, CoinGecko, Coinbase, Interval, Kraken, Okx, SeriesSource,
+    Timestamp, Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
+    coingecko::coingecko_schema, kraken::kraken_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
 use serde_json::Value as Json;
@@ -314,6 +314,13 @@ pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
         description: "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
              `ETH-USDT`). Day/week/month bars are UTC-aligned",
         schema: Some(|| okx_schema().clone()),
+    },
+    ProviderInfo {
+        name: "kraken",
+        description: "Kraken spot OHLC endpoint (symbols are Kraken pair names: `XBTUSD`, \
+             `ETHEUR`). Cadences 1m/5m/15m/30m/1h/4h/1d/1w/15d only. Reaches back at most \
+             720 bars — ~2 years daily, 30 days hourly — and the API cannot page past that",
+        schema: Some(|| kraken_schema().clone()),
     },
     ProviderInfo {
         name: "coinbase",
@@ -1350,6 +1357,9 @@ async fn fetch(
         "okx" => Ok(Okx::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "kraken" => Ok(Kraken::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         "coinbase" => Ok(Coinbase::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
@@ -1378,6 +1388,7 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
         "binance-vision" => Ok(BinanceVision::new().tickers().await?),
         "binance-vision-futures" => Ok(BinanceVision::futures().tickers().await?),
         "okx" => Ok(Okx::new().tickers().await?),
+        "kraken" => Ok(Kraken::new().tickers().await?),
         "coinbase" => Ok(Coinbase::new().tickers().await?),
         "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
@@ -2183,6 +2194,7 @@ mod tests {
         for (provider, column) in [
             ("binance", "quote_volume"),
             ("okx", "quote_volume"),
+            ("kraken", "vwap"),
             ("yfinance", "raw_close"),
             ("binance-vision", "quote_volume"),
             ("binance-vision-futures", "funding_rate"),

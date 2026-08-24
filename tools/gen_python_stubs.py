@@ -274,6 +274,7 @@ MEMBER_RETURNS = {
     ("BinanceVision", "tickers"): "list[str]",
     ("CoinGecko", "tickers"): "list[str]",
     ("Coinbase", "tickers"): "list[str]",
+    ("Kraken", "tickers"): "list[str]",
     ("Okx", "tickers"): "list[str]",
     ("Yahoo", "tickers"): "list[str]",
     ("OkxWallet", "demo"): "OkxWallet",

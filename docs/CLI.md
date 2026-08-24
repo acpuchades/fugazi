@@ -18,8 +18,8 @@ Eight subcommands:
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
-  `binance-vision`, `binance-vision-futures`, `okx`, `coinbase`, `yfinance`,
-  `cg`) or re-process a local file (`file:PATH`) into a `run`-ready file,
+  `binance-vision`, `binance-vision-futures`, `okx`, `kraken`, `coinbase`,
+  `yfinance`, `cg`) or re-process a local file (`file:PATH`) into a `run`-ready file,
   optionally with `-x/--overlay` columns computed on top. `fugazi list sources`
   prints the current table.
 - [`list`](#list) — printed catalogue of what the CLI knows about
@@ -1177,6 +1177,7 @@ Frequency tokens have no remap form — each is parsed as a real cadence and the
 | --- | --- | --- |
 | `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
 | `okx` | `okx:BTC-USDT[1d,1h],ETH-USDT[1d]` | OKX spot candlesticks. Symbols are dash-separated instrument ids (`BTC-USDT`, not `BTCUSDT`). Frequencies: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `2d`, `3d`, `1w`, `1M`, `3M` — day/week/month bars are UTC-aligned. |
+| `kraken` | `kraken:XBTUSD[1d,4h],ETHEUR[1d]` | Kraken spot OHLC. Symbols are Kraken pair names (`XBTUSD`, `ETHEUR`); several spellings resolve to the same pair (`XBTUSD`, `BTCUSD` and `XXBTZUSD` are all Bitcoin/USD), and `fugazi list tickers kraken` prints the `altname` form to send. Fixed cadences only: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `15d` — no month bar and no arbitrary multiples. Adds `vwap` and `n_trades` columns. **Reaches back at most 720 bars** — Kraken's `since` truncates from the front rather than paging backward, so the endpoint cannot serve older history at all: ~2 years at `[1d]`, 30 days at `[1h]`, 12 hours at `[1m]`. A `--since` beyond that is reported by the usual "earliest available candle is later than --since" warning. The bar currently forming is dropped, so the last row is always a settled one. |
 | `coinbase` | `coinbase:BTC-USD[1d,1h],ETH-USD[1d]` | Coinbase Advanced Trade candles. Symbols are dash-separated product ids (`BTC-USD`, not `BTCUSD`). Fixed cadences only: `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `6h`, `1d` — no week/month and no arbitrary multiples. OHLCV only, no side channel. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
 | `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |

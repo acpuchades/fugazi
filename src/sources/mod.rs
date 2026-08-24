@@ -7,7 +7,7 @@
 //! The pieces are:
 //!
 //! * [`SeriesSource`] — every provider, whatever it returns. Fetches yield
-//!   **`Vec<Atom>`**. A price provider ([`Binance`], [`Okx`], [`Yahoo`]) fills each
+//!   **`Vec<Atom>`**. A price provider ([`Binance`], [`Okx`], [`Kraken`], [`Yahoo`]) fills each
 //!   atom's candle; a provider of side-channel columns with no OHLCV
 //!   ([`CoinGecko`], [`BinanceVision`] — market capitalisation, supply, open
 //!   interest, funding rates) leaves it `None` and carries only the overlay
@@ -52,6 +52,7 @@ pub mod binance;
 pub mod binance_vision;
 pub mod coinbase;
 pub mod coingecko;
+pub mod kraken;
 pub mod okx;
 pub mod yahoo;
 
@@ -66,6 +67,7 @@ pub use binance::Binance;
 pub use binance_vision::BinanceVision;
 pub use coinbase::Coinbase;
 pub use coingecko::CoinGecko;
+pub use kraken::Kraken;
 pub use okx::Okx;
 pub use yahoo::Yahoo;
 
