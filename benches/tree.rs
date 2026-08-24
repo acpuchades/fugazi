@@ -51,6 +51,7 @@ fn build(depth: usize) -> DynSingleStrategy {
         &spine_yaml(depth),
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(bench)",
     )
     .expect("bench spec parses");

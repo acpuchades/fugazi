@@ -210,6 +210,7 @@ fn performance_invariants_hold() {
         YAML,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(perf_guard)",
     )
     .expect("guard spec parses");

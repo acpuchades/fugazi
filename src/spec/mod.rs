@@ -95,9 +95,12 @@ pub mod pool;
 ///
 /// Imports run before params so an imported fragment is a first-class part of
 /// the document: it may carry its own `!param` placeholders, resolved from the
-/// same table as the importer. `base` is the directory relative import paths
-/// resolve against — the importing document's own directory (see
-/// [`imports`] and [`input::Source::base_dir`]).
+/// same table as the importer. `base` is the directory the document's own
+/// relative import paths resolve against — its own directory (see [`imports`]
+/// and [`input::Source::base_dir`]); `root` is the confinement boundary a
+/// nested import may not resolve outside of (pass `base` for both to confine a
+/// document to its own directory, the historical default every CLI call site
+/// uses unless `--import-root` widens it).
 ///
 /// `label` is a short origin string (a file path, `(inline)`, …) folded into
 /// the parse-error prefix so a user reading the error sees which document
@@ -107,9 +110,10 @@ pub fn load_value(
     text: &str,
     params: &std::collections::HashMap<String, serde_json::Value>,
     base: &std::path::Path,
+    root: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let value = load_value_pre_params(text, base, label)?;
+    let value = load_value_pre_params(text, base, root, label)?;
     crate::spec::params::substitute(value, params)
 }
 
@@ -121,10 +125,11 @@ pub fn load_value(
 pub fn load_value_pre_params(
     text: &str,
     base: &std::path::Path,
+    root: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let value = crate::spec::input::parse_value_at(text, label)?;
-    crate::spec::imports::resolve(value, base)
+    crate::spec::imports::resolve(value, base, root)
 }
 
 /// [`load_value`] for a caller that disables `!import` entirely — no
@@ -1610,6 +1615,7 @@ mod tests {
         let spec = SingleStrategySpec::from_text_with_params_in(
             "root: BTC\nlong:\n  enter: !import enter.yml\n  exit: !value false\n",
             &params,
+            &dir,
             &dir,
             "(inline)",
         )

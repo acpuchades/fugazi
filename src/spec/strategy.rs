@@ -124,7 +124,9 @@ impl SingleStrategySpec {
     /// any other concretely-typed field, and an import for any subtree.
     ///
     /// Import paths resolve against `base`, the importing document's own
-    /// directory ([`crate::spec::input::Source::base_dir`]).
+    /// directory ([`crate::spec::input::Source::base_dir`]); `root` is the
+    /// confinement boundary (see [`super::load_value`]) — pass `base` for both
+    /// for the historical "confined to its own directory" default.
     ///
     /// The CLI's top-level Single-strategy load goes through
     /// [`StrategyRef::from_text_with_params_in`](super::preset::StrategyRef::from_text_with_params_in)
@@ -134,10 +136,11 @@ impl SingleStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
         base: &std::path::Path,
+        root: &std::path::Path,
         label: &str,
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, label)?;
+        let value = super::load_value(text, params, base, root, label)?;
         serde_json::from_value(value)
             .with_context(|| format!("building single-asset strategy from {label}"))
     }
@@ -152,7 +155,13 @@ impl SingleStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
+        Self::from_text_with_params_in(
+            text,
+            params,
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            "(inline)",
+        )
     }
 
     /// Build the live [`DynSingleStrategy`] this spec describes.

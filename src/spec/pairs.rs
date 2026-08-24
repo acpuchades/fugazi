@@ -218,10 +218,11 @@ impl PairsStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
         base: &std::path::Path,
+        root: &std::path::Path,
         label: &str,
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, label)?;
+        let value = super::load_value(text, params, base, root, label)?;
         serde_json::from_value(value)
             .with_context(|| format!("building pairs strategy from {label}"))
     }
@@ -235,7 +236,13 @@ impl PairsStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
+        Self::from_text_with_params_in(
+            text,
+            params,
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            "(inline)",
+        )
     }
 
     /// The long-spread side, however it was spelled: either the `long_spread:`

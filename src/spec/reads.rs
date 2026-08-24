@@ -73,10 +73,11 @@ pub fn picked_symbols_of(
     text: &str,
     params: &std::collections::HashMap<String, serde_json::Value>,
     base: &std::path::Path,
+    root: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<BTreeSet<String>> {
     Ok(picked_symbols(&super::load_value(
-        text, params, base, label,
+        text, params, base, root, label,
     )?))
 }
 
@@ -86,10 +87,11 @@ pub fn picked_streams_of(
     text: &str,
     params: &std::collections::HashMap<String, serde_json::Value>,
     base: &std::path::Path,
+    root: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<BTreeSet<String>> {
     Ok(picked_streams(&super::load_value(
-        text, params, base, label,
+        text, params, base, root, label,
     )?))
 }
 
@@ -189,6 +191,7 @@ mod tests {
             text,
             &Default::default(),
             std::path::Path::new("."),
+            std::path::Path::new("."),
             "(test)",
         )
         .expect("document loads");
@@ -199,6 +202,7 @@ mod tests {
         let doc = super::super::load_value(
             text,
             &Default::default(),
+            std::path::Path::new("."),
             std::path::Path::new("."),
             "(test)",
         )

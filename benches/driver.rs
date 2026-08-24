@@ -46,6 +46,7 @@ fn spec_of(yaml: &str) -> SingleStrategySpec {
         yaml,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(bench)",
     )
     .expect("bench spec parses")

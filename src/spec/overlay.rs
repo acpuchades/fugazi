@@ -139,14 +139,16 @@ pub fn columns_from_value(value: Json, label: &str) -> Result<Vec<OverlayColumn>
 
 /// Full YAML entry point: parse `text` → resolve `!import` → substitute
 /// `!param` → [`columns_from_value`]. Mirrors the strategy loader's pipeline
-/// ([`super::load_value`]).
+/// ([`super::load_value`]). `root` is the `!import` confinement boundary —
+/// pass `base` for the historical "confined to its own directory" default.
 pub fn columns_from_yaml(
     text: &str,
     params: &HashMap<String, Json>,
     base: &std::path::Path,
+    root: &std::path::Path,
     label: &str,
 ) -> Result<Vec<OverlayColumn>> {
-    let value = super::load_value(text, params, base, label)?;
+    let value = super::load_value(text, params, base, root, label)?;
     columns_from_value(value, label)
 }
 
@@ -434,7 +436,14 @@ mod tests {
     }
 
     fn cols(yaml: &str) -> Vec<OverlayColumn> {
-        columns_from_yaml(yaml, &HashMap::new(), std::path::Path::new("."), "(test)").unwrap()
+        columns_from_yaml(
+            yaml,
+            &HashMap::new(),
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            "(test)",
+        )
+        .unwrap()
     }
 
     #[test]
@@ -455,6 +464,7 @@ mod tests {
         let c = columns_from_yaml(
             "r: !sma { period: !param P }",
             &params,
+            std::path::Path::new("."),
             std::path::Path::new("."),
             "(test)",
         )

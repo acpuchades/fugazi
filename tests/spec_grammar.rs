@@ -870,14 +870,16 @@ fn document_forms_resolve() {
         "period: !param { key: N, default: 7 }\n",
     )
     .expect("write fragment");
-    let bare = fugazi::spec::imports::resolve(serde_json::json!({ "import": "frag.yml" }), &dir)
-        .expect("bare !import resolves");
+    let bare =
+        fugazi::spec::imports::resolve(serde_json::json!({ "import": "frag.yml" }), &dir, &dir)
+            .expect("bare !import resolves");
     assert_eq!(
         bare["period"],
         serde_json::json!({ "param": { "key": "N", "default": 7 } })
     );
     let keyed = fugazi::spec::imports::resolve(
         serde_json::json!({ "import": { "path": "frag.yml", "params": { "N": 21 } } }),
+        &dir,
         &dir,
     )
     .expect("keyed !import resolves");
@@ -948,6 +950,7 @@ fn arg_is_scoped_to_templates_and_param_is_not() {
         fugazi::spec::SingleStrategySpec::from_text_with_params_in(
             text,
             &std::collections::HashMap::new(),
+            std::path::Path::new("."),
             std::path::Path::new("."),
             "probe",
         )

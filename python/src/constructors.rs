@@ -2427,6 +2427,7 @@ pub(crate) fn parse_overlay_input(
             &text,
             &table,
             std::path::Path::new("."),
+            std::path::Path::new("."),
             "(overlays)",
         )
         .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;

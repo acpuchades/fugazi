@@ -558,6 +558,7 @@ fn a_portfolio_spec_runs_against_a_live_wallet() {
         &yaml,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(live)",
     )
     .expect("parse portfolio spec");

@@ -98,6 +98,7 @@ fn main() {
            exit: !crosses_below { lhs: !sma { source: close, period: 5 }, rhs: !sma { source: close, period: 20 } }\n",
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(footprint)",
     )
     .expect("probe spec parses");

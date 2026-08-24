@@ -58,16 +58,25 @@
 //! `fugazi` was invoked from. Inline strategy text (no `@file`) has no
 //! directory of its own, so its imports resolve against the working directory.
 //!
-//! **Every import is confined to the top-level document's own directory** —
-//! the `base` [`resolve`] is called with, not the per-file directory a nested
-//! import resolves relative to. An absolute path, or a `..` that walks past
-//! `base`, is refused rather than followed: `!import /etc/hostname` and
-//! `!import ../../../../etc/passwd` are both hard errors, not filesystem
-//! reads. This matters for an embedder driving [`crate::spec::load_value`]
-//! (or the Python `load_spec`/`optimize` bindings) against user-authored
-//! documents, where `base` is the only thing standing between an author's
-//! `enter:` field and the host's filesystem — see [`refuse`] for a caller
-//! that wants no filesystem access at all.
+//! **Every import is confined to a `root` directory**, independent of `base` —
+//! [`resolve`] takes both. Confinement historically doubled as `base`
+//! (`resolve(value, base)`, `root == base`), which is still what every CLI
+//! call site and `--params`-style caller passes by default: the top-level
+//! document's own directory. But a document two levels deep that wants a
+//! fragment living in a *sibling* directory (`A/strategies/foo.yml` importing
+//! `../fragments/bar.yml`, where the caller considers `A` the project root)
+//! needs `root` wider than any one file's own `base` — hence the separate
+//! parameter, e.g. the CLI's `--import-root`. `root` is expected to be `base`
+//! or an ancestor of it; when it isn't, an import relative to the entry
+//! document's own directory can fail confinement too, which reads as an
+//! ordinary "outside the import root" error rather than a silent misconfiguration.
+//! An absolute path, or a `..` that walks past `root`, is refused rather than
+//! followed: `!import /etc/hostname` and `!import ../../../../etc/passwd` are
+//! both hard errors, not filesystem reads. This matters for an embedder
+//! driving [`crate::spec::load_value`] (or the Python `load_spec`/`optimize`
+//! bindings) against user-authored documents, where `root` is the only thing
+//! standing between an author's `enter:` field and the host's filesystem —
+//! see [`refuse`] for a caller that wants no filesystem access at all.
 //!
 //! Import cycles are a hard error naming the chain, rather than a stack
 //! overflow. So is a composed document that nests too deeply — see
@@ -101,12 +110,14 @@ struct ImportDirective {
 }
 
 /// Resolve every `!import` node in `value`, splicing in the document each one
-/// names. `base` is the directory relative import paths resolve against — the
-/// importing document's own directory (see [`crate::spec::input::Source::base_dir`]) —
-/// and also the confinement root: no import, however deeply nested, may resolve
-/// to a path outside it (see the module docs).
-pub fn resolve(value: Value, base: &Path) -> Result<Value> {
-    walk(value, base, base, &mut Vec::new(), 0)
+/// names. `base` is the directory the *top-level* document's own relative
+/// import paths resolve against — its own directory (see
+/// [`crate::spec::input::Source::base_dir`]). `root` is the confinement
+/// boundary: no import, however deeply nested, may resolve to a path outside
+/// it (see the module docs). Pass `base` for both to get the historical
+/// behavior of confining a document to its own directory.
+pub fn resolve(value: Value, base: &Path, root: &Path) -> Result<Value> {
+    walk(value, base, root, &mut Vec::new(), 0)
 }
 
 /// How deep the **composed** document may nest before resolution refuses it.
@@ -367,7 +378,7 @@ mod tests {
     }
 
     fn resolve_text(text: &str, base: &Path) -> Result<Value> {
-        resolve(crate::spec::input::parse_value(text).unwrap(), base)
+        resolve(crate::spec::input::parse_value(text).unwrap(), base, base)
     }
 
     #[test]
@@ -702,6 +713,47 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_root_wider_than_base_reaches_a_sibling_directory() {
+        // `A/strategies/foo.yml` (base = `A/strategies`) wants a fragment at
+        // `A/fragments/bar.yml` — a sibling, not a descendant of its own
+        // directory. With `root == base` (the default every CLI call site
+        // passes) that `..` walks outside root and is refused, exactly like
+        // `a_relative_escape_via_dotdot_is_refused`. Passing a wider `root`
+        // (here, `A` itself) is what lets it through while still refusing
+        // anything outside `A`.
+        let project = tmp_dir("wider_root_project");
+        let strategies_dir = project.join("strategies");
+        fs::create_dir_all(&strategies_dir).unwrap();
+        write(&project, "fragments/bar.yml", "!value 42\n");
+
+        let value = resolve(
+            crate::spec::input::parse_value("cfg: !import ../fragments/bar.yml\n").unwrap(),
+            &strategies_dir,
+            &project,
+        )
+        .unwrap();
+        let expected = crate::spec::input::parse_value("cfg: !value 42\n").unwrap();
+        assert_eq!(value, expected);
+
+        // Confinement still holds against the wider root: a `..` that walks
+        // past `project` itself is refused just like before.
+        let outside = tmp_dir("wider_root_outside");
+        write(&outside, "secret.yml", "!value 1\n");
+        let escape = format!(
+            "../../{}/secret.yml",
+            outside.file_name().unwrap().to_str().unwrap()
+        );
+        let err = resolve(
+            crate::spec::input::parse_value(&format!("cfg: !import {escape}\n")).unwrap(),
+            &strategies_dir,
+            &project,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside the import root"), "{err}");
+    }
+
+    #[test]
     fn refuse_bails_on_a_bare_string_import() {
         // No filesystem involved at all — `enter.yml` need not even exist for
         // this to be caught, unlike `resolve`.
@@ -758,7 +810,7 @@ mod tests {
         }
 
         let root = serde_json::json!({ "import": format!("f{files}.yml") });
-        let err = resolve(root, &dir).expect_err("a chain this deep must be refused");
+        let err = resolve(root, &dir, &dir).expect_err("a chain this deep must be refused");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("nests more than"),
@@ -769,7 +821,7 @@ mod tests {
         // ceiling, not a ban on nested imports.
         let shallow = serde_json::json!({ "import": "f2.yml" });
         assert!(
-            resolve(shallow, &dir).is_ok(),
+            resolve(shallow, &dir, &dir).is_ok(),
             "two files of {WRAP} wraps is {} levels, inside the bound",
             2 * WRAP * 2
         );

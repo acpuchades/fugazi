@@ -281,6 +281,7 @@ macro_rules! parse {
             $yaml,
             &Default::default(),
             std::path::Path::new("."),
+            std::path::Path::new("."),
             "(resume)",
         )
         .expect(concat!("parse ", stringify!($ty)))

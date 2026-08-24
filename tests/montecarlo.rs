@@ -53,6 +53,7 @@ fn crossover_spec() -> StrategySpec {
         yaml,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(mc)",
     )
     .expect("parse spec");
@@ -188,6 +189,7 @@ fn multi_symbol_still_produces_a_rerun_pvalue() {
     let strat = fugazi::spec::BasketStrategySpec::from_text_with_params_in(
         yaml,
         &Default::default(),
+        std::path::Path::new("."),
         std::path::Path::new("."),
         "(mc-basket)",
     )

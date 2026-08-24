@@ -126,6 +126,7 @@ fn spec_of(yaml: &str) -> SingleStrategySpec {
         yaml,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(icount)",
     )
     .expect("icount spec parses")

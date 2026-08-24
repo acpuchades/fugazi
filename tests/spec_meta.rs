@@ -28,8 +28,14 @@ use std::sync::Arc;
 /// Load a document of `kind` through the real load path (`!import` / `!param`
 /// resolution, YAML→JSON bridge, typed parse) into the any-shape handle.
 fn load(kind: StrategyKind, yaml: &str) -> StrategySpec {
-    let value = fugazi::spec::load_value(yaml, &HashMap::new(), Path::new("."), "(test)")
-        .expect("document loads");
+    let value = fugazi::spec::load_value(
+        yaml,
+        &HashMap::new(),
+        Path::new("."),
+        Path::new("."),
+        "(test)",
+    )
+    .expect("document loads");
     build_any_spec(kind, &value, &HashMap::new()).expect("document builds")
 }
 
@@ -204,7 +210,7 @@ fn import_and_param_resolve_inside_meta() {
                 long:\n  enter: !value true\n\
                 meta:\n  owner: !import owner.yml\n  revision: !param REV\n";
     let params = HashMap::from([("REV".to_string(), json!(17))]);
-    let value = fugazi::spec::load_value(yaml, &params, &dir, "(test)").expect("loads");
+    let value = fugazi::spec::load_value(yaml, &params, &dir, &dir, "(test)").expect("loads");
     let spec = build_any_spec(StrategyKind::Single, &value, &HashMap::new()).expect("builds");
 
     let meta = spec.meta().expect("meta present");
@@ -243,6 +249,7 @@ fn a_typoed_field_is_still_rejected() {
     let value = fugazi::spec::load_value(
         "root: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n",
         &HashMap::new(),
+        Path::new("."),
         Path::new("."),
         "(test)",
     )
@@ -284,6 +291,7 @@ fn an_overlay_document_treats_meta_as_an_ordinary_column() {
     let cols = fugazi::spec::overlay::columns_from_yaml(
         "meta: !sma { period: 20 }\nrsi14: !rsi { period: 14 }\n",
         &HashMap::new(),
+        Path::new("."),
         Path::new("."),
         "(test)",
     )

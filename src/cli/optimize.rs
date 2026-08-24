@@ -68,6 +68,9 @@ pub struct OptimizeOptions<'a> {
     /// text (see [`crate::input::Source::base_dir`]). Imports are spliced once,
     /// into the base value every grid point is then `!param`-substituted from.
     pub strategy_dir: &'a Path,
+    /// The `!import` confinement boundary (`--import-root`) — `strategy_dir`
+    /// unless widened. See [`fugazi::spec::imports`].
+    pub strategy_root: &'a Path,
     pub strategy_label: &'a str,
     /// `--params` baseline: shared scalars applied under every subgrid. Axes
     /// are rejected upstream via [`reject_axes_in_params`] — this table is
@@ -272,8 +275,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // grid point's `!param` substitution runs over, so a shared fragment costs
     // one read no matter how large the sweep.
     let base_value = input::parse_value_at(opts.strategy_text, opts.strategy_label)?;
-    let base_value =
-        imports::resolve(base_value, opts.strategy_dir).context("resolving strategy imports")?;
+    let base_value = imports::resolve(base_value, opts.strategy_dir, opts.strategy_root)
+        .context("resolving strategy imports")?;
 
     // `--pooled` is only wired for the single-asset path: it reduces over the
     // same per-root stream map `distinct_roots` builds there, which the

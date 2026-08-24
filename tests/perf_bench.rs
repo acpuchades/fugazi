@@ -294,6 +294,7 @@ fn bench_yaml_vs_rust_macd_crossover() {
         yaml,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(bench)",
     )
     .unwrap();

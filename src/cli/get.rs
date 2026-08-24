@@ -158,7 +158,7 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
         .with_context(|| format!("parsing dataset YAML {path:?}"))?;
     let json = crate::spec::convert::yaml_to_json(yaml)
         .with_context(|| format!("normalising tags in dataset {path:?}"))?;
-    let json = crate::imports::resolve(json, base)
+    let json = crate::imports::resolve(json, base, base)
         .with_context(|| format!("resolving !import in dataset {path:?}"))?;
     let dataset: DatasetSpec =
         serde_json::from_value(json).with_context(|| format!("parsing dataset {path:?}"))?;

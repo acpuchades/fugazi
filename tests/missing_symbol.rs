@@ -65,6 +65,7 @@ fn single(text: &str) -> StrategySpec {
         text,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "test",
     )
     .expect("document parses");
@@ -289,6 +290,7 @@ fn discovered_universes_declare_nothing_to_check() {
         basket,
         &Default::default(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "test",
     )
     .expect("parses");
@@ -304,6 +306,7 @@ fn a_pairs_document_declares_both_legs() {
     let spec = fugazi::spec::PairsStrategySpec::from_text_with_params_in(
         text,
         &Default::default(),
+        std::path::Path::new("."),
         std::path::Path::new("."),
         "test",
     )

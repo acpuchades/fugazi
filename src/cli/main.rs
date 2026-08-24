@@ -43,7 +43,7 @@ pub(crate) use fugazi::spec::metrics;
 pub(crate) use fugazi::spec::params;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
@@ -212,6 +212,21 @@ struct RunArgs {
     /// `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`.
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
+
+    /// Widen the `!import` confinement boundary beyond the strategy document's
+    /// own directory (the default).
+    ///
+    /// A strategy at `A/strategies/foo.yml` importing a fragment at
+    /// `A/fragments/bar.yml` needs this set to `A` (or any ancestor of `A`) —
+    /// `!import ../fragments/bar.yml` otherwise walks outside `A/strategies`,
+    /// the confinement boundary without it, and is refused even though the
+    /// path resolves on disk. `DIR` must contain (or equal) the strategy
+    /// document's own directory, or the document's *own* relative imports
+    /// stop resolving too. Every import, however deeply nested, still has to
+    /// resolve inside `DIR` — this relocates the confinement boundary, it
+    /// doesn't remove it.
+    #[arg(long = "import-root", value_name = "DIR")]
+    import_root: Option<PathBuf>,
 
     /// A data series: `,`-separated `key=value` literals and `@file.csv` loaders
     /// (repeatable; series full-join on `symbol` + `time`). Each file's column
@@ -509,6 +524,11 @@ struct CheckStrategyArgs {
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
 
+    /// Widen the `!import` confinement boundary beyond the strategy document's
+    /// own directory. Same flag as `run --import-root`.
+    #[arg(long = "import-root", value_name = "DIR")]
+    import_root: Option<PathBuf>,
+
     /// Resolve the strategy's `param` placeholders. Same shape as `run --params`:
     /// a `,`-separated list of `NAME=value` settings and `@file.yml` mapping
     /// loaders (repeatable; later terms win). Unlike `run`, omitting a required
@@ -565,6 +585,11 @@ struct OptimizeArgs {
     /// `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`.
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
+
+    /// Widen the `!import` confinement boundary beyond the strategy document's
+    /// own directory. Same flag as `run --import-root`.
+    #[arg(long = "import-root", value_name = "DIR")]
+    import_root: Option<PathBuf>,
 
     /// A data series — same shape as `run --series` (repeatable; series
     /// full-join on `symbol` + `time`).
@@ -886,6 +911,13 @@ fn print_error(err: &anyhow::Error) {
 /// the figure only has to be positive and unremarkable — nothing reads it.
 const DEFAULT_CHECK_CASH: fugazi::Real = 100_000.0;
 
+/// The `!import` confinement boundary: `--import-root` if given, else `base`
+/// (the strategy document's own directory) — the historical default of
+/// confining a document to its own directory.
+fn import_root(explicit: &Option<PathBuf>, base: &Path) -> PathBuf {
+    explicit.clone().unwrap_or_else(|| base.to_path_buf())
+}
+
 /// Whether the document mentions `!tag` anywhere. The loader represents a YAML
 /// tag as a single-key map, so this is a plain structural walk — no grammar
 /// knowledge, and nothing to keep in sync when a tag is added.
@@ -905,6 +937,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     let label = args.strategy.label();
     let base = args.strategy.base_dir();
+    let root = import_root(&args.import_root, &base);
 
     // `check` validates shape, not values — it never builds or drives the
     // strategy (unlike `run`/`optimize`), so a required `!param` with no
@@ -913,7 +946,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // placeholder becomes a *hole* rather than an error, and the typed parse
     // below fills each hole with a value of whatever type the field expects
     // (see `spec::undefined`).
-    let value = spec::load_value_pre_params(&text, &base, &label)
+    let value = spec::load_value_pre_params(&text, &base, &root, &label)
         .with_context(|| parse_error_hint(&args.strategy))?;
     // The site count is discarded: the report below counts distinct placeholder
     // *names* instead, which is what the user has to supply values for.
@@ -1257,6 +1290,8 @@ fn load_frame(
 fn run(args: RunArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     let frame = load_frame(&args.series, &args.frequency)?;
+    let base = args.strategy.base_dir();
+    let root = import_root(&args.import_root, &base);
 
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
@@ -1389,26 +1424,16 @@ fn run(args: RunArgs) -> Result<()> {
     // loaders below parse, so every runner gets it whatever shape this turns
     // out to be. See `spec::reads` for why it walks the document rather than
     // the typed spec.
-    let reads = spec::reads::picked_symbols_of(
-        &text,
-        &probe_table,
-        &args.strategy.base_dir(),
-        &strat_label,
-    )
-    .with_context(|| parse_error_hint(&args.strategy))?;
+    let reads = spec::reads::picked_symbols_of(&text, &probe_table, &base, &root, &strat_label)
+        .with_context(|| parse_error_hint(&args.strategy))?;
     // A stream id is matched verbatim and never parsed, so a typo builds
     // cleanly and then reads nothing. Checked against the frame before the run
     // rather than discovered as an empty backtest afterwards.
     run::check_streams(
         &frame,
         &args.frequency,
-        &spec::reads::picked_streams_of(
-            &text,
-            &probe_table,
-            &args.strategy.base_dir(),
-            &strat_label,
-        )
-        .with_context(|| parse_error_hint(&args.strategy))?,
+        &spec::reads::picked_streams_of(&text, &probe_table, &base, &root, &strat_label)
+            .with_context(|| parse_error_hint(&args.strategy))?,
         run::StreamUse::Pick,
     )?;
     let opts = run::RunOptions {
@@ -1435,7 +1460,6 @@ fn run(args: RunArgs) -> Result<()> {
         from_label: args.range.from.as_deref(),
         reads: &reads,
     };
-    let base = args.strategy.base_dir();
 
     // A pooled run never reaches the single-shape match below: it builds one
     // `StrategyRef` per member (each substituted with its own value for the
@@ -1447,9 +1471,14 @@ fn run(args: RunArgs) -> Result<()> {
             .map(|value| {
                 let mut table = shared.clone();
                 table.insert(axis.clone(), value.clone());
-                let strategy =
-                    spec::StrategyRef::from_text_with_params_in(&text, &table, &base, &strat_label)
-                        .with_context(|| parse_error_hint(&args.strategy))?;
+                let strategy = spec::StrategyRef::from_text_with_params_in(
+                    &text,
+                    &table,
+                    &base,
+                    &root,
+                    &strat_label,
+                )
+                .with_context(|| parse_error_hint(&args.strategy))?;
                 Ok::<_, anyhow::Error>((optimize::format_value(value), strategy))
             })
             .collect::<Result<_>>()?;
@@ -1463,6 +1492,7 @@ fn run(args: RunArgs) -> Result<()> {
                 &text,
                 &param_table,
                 &base,
+                &root,
                 &strat_label,
             )
             .with_context(|| parse_error_hint(&args.strategy))?;
@@ -1473,6 +1503,7 @@ fn run(args: RunArgs) -> Result<()> {
                 &text,
                 &param_table,
                 &base,
+                &root,
                 &strat_label,
             )
             .with_context(|| parse_error_hint(&args.strategy))?;
@@ -1483,6 +1514,7 @@ fn run(args: RunArgs) -> Result<()> {
                 &text,
                 &param_table,
                 &base,
+                &root,
                 &strat_label,
             )
             .with_context(|| parse_error_hint(&args.strategy))?;
@@ -1493,6 +1525,7 @@ fn run(args: RunArgs) -> Result<()> {
                 &text,
                 &param_table,
                 &base,
+                &root,
                 &strat_label,
             )
             .with_context(|| parse_error_hint(&args.strategy))?;
@@ -1503,6 +1536,7 @@ fn run(args: RunArgs) -> Result<()> {
                 &text,
                 &param_table,
                 &base,
+                &root,
                 &strat_label,
             )
             .with_context(|| parse_error_hint(&args.strategy))?;
@@ -1535,6 +1569,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .collect::<Result<_>>()?;
     let text = args.strategy.read().context("reading strategy")?;
     let frame = load_frame(&args.series, &args.frequency)?;
+    let base = args.strategy.base_dir();
+    let root = import_root(&args.import_root, &base);
 
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
@@ -1561,7 +1597,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         maintenance_margin: args.maintenance_margin,
         strategy_kind: args.strategy.kind,
         strategy_text: &text,
-        strategy_dir: &args.strategy.base_dir(),
+        strategy_dir: &base,
+        strategy_root: &root,
         strategy_label: &strat_label,
         params_table: param_table,
         grid_tables,

@@ -61,6 +61,7 @@ fn column(name: &str, yaml: &str) -> OverlayColumn {
         &format!("{name}: {yaml}"),
         &HashMap::new(),
         std::path::Path::new("."),
+        std::path::Path::new("."),
         "(test)",
     )
     .expect("overlay parses");
@@ -311,6 +312,7 @@ fn run_spec(yaml: &str) -> Vec<fugazi::Fill<Symbol>> {
     let spec = SingleStrategySpec::from_text_with_params_in(
         yaml,
         &HashMap::new(),
+        std::path::Path::new("."),
         std::path::Path::new("."),
         "(test)",
     )

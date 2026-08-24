@@ -426,16 +426,18 @@ pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
 /// `imports = false` disables `!import` entirely (see
 /// [`fugazi_core::spec::load_value_no_imports`]) rather than merely confining
 /// it to `base_dir` — the right choice for a caller that wants zero
-/// filesystem coupling to a user-authored document.
+/// filesystem coupling to a user-authored document. `root_dir` is the
+/// `!import` confinement boundary — `base_dir` unless widened.
 pub(crate) fn load_loaded_spec(
     text: &str,
     params: &std::collections::HashMap<String, JsonValue>,
     base_dir: &std::path::Path,
+    root_dir: &std::path::Path,
     kind: &str,
     imports: bool,
 ) -> PyResult<CoreStrategySpec> {
     let value = if imports {
-        fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
+        fugazi_core::spec::load_value(text, params, base_dir, root_dir, "(inline)")
     } else {
         fugazi_core::spec::load_value_no_imports(text, params, "(inline)")
     }
@@ -1256,22 +1258,31 @@ pub(crate) fn slot_demands(py: Python<'_>, tag: &str) -> PyResult<Py<PyAny>> {
 ///
 /// Auto-detects the strategy kind unless `kind` is one of
 /// `single`/`pairs`/`basket`/`multi`/`portfolio`.
+///
+/// `import_root` widens the `!import` confinement boundary beyond `base_dir`
+/// — the directory a nested import may not resolve outside of, however
+/// deeply nested. Defaults to `base_dir` itself (confining a document to its
+/// own directory, same as the CLI without `--import-root`). Must contain (or
+/// equal) `base_dir`, or `base_dir`'s own relative imports stop resolving.
 #[pyfunction]
-#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto", imports = true))]
+#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto", imports = true, import_root = None))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn load_spec(
     text: &str,
     params: Option<&Bound<'_, PyAny>>,
     base_dir: Option<&str>,
     kind: &str,
     imports: bool,
+    import_root: Option<&str>,
 ) -> PyResult<PyStrategySpec> {
     let params = extract_params(params)?;
     let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
-    let inner = load_loaded_spec(text, &params, &base, kind, imports)?;
+    let root = import_root.map_or_else(|| base.clone(), std::path::PathBuf::from);
+    let inner = load_loaded_spec(text, &params, &base, &root, kind, imports)?;
     // Collected from the same document `load_loaded_spec` parses, so a caller
     // assembling snapshots by hand can see which series the spec will need.
     let reads = if imports {
-        fugazi_core::spec::reads::picked_symbols_of(text, &params, &base, "(python)")
+        fugazi_core::spec::reads::picked_symbols_of(text, &params, &base, &root, "(python)")
     } else {
         fugazi_core::spec::reads::picked_symbols_of_no_imports(text, &params, "(python)")
     }
@@ -1554,9 +1565,10 @@ pub(crate) fn build_subgrids(
 /// returns a [`WalkForwardResult`] with per-fold IS/OOS metrics and the
 /// stitched composite OOS equity curve.
 ///
-/// `base_dir` and `imports` behave exactly as on [`load_spec`]: `base_dir`
-/// confines (and defaults to the process cwd), `imports = False` disables
-/// `!import` outright.
+/// `base_dir`, `imports` and `import_root` behave exactly as on
+/// [`load_spec`]: `base_dir` confines (and defaults to the process cwd),
+/// `imports = False` disables `!import` outright, and `import_root` widens
+/// the confinement boundary beyond `base_dir`.
 #[pyfunction]
 #[pyo3(signature = (
     text,
@@ -1590,6 +1602,7 @@ pub(crate) fn build_subgrids(
     seconds_per_bar = None,
     base_dir = None,
     imports = true,
+    import_root = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn optimize(
@@ -1620,6 +1633,7 @@ pub(crate) fn optimize(
     seconds_per_bar: Option<Real>,
     base_dir: Option<&str>,
     imports: bool,
+    import_root: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
     // Walkforward and windowed are mutually exclusive (same as the CLI).
     let walkforward_tuple = extract_walkforward(walkforward)?;
@@ -1698,12 +1712,13 @@ pub(crate) fn optimize(
     spec_optimize::reject_axes_in_params(&params_table)
         .map_err(|e| PyValueError::new_err(format!("`params`: {e}")))?;
     let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
+    let root = import_root.map_or_else(|| base.clone(), std::path::PathBuf::from);
     // Load and !import-splice the base value once — every grid point substitutes
     // over this same value.
     let base_value = fugazi_core::spec::input::parse_value_at(text, "(inline)")
         .map_err(|e| SpecError::new_err(format!("parsing strategy YAML: {e:#}")))?;
     let base_value = if imports {
-        fugazi_core::spec::imports::resolve(base_value, &base)
+        fugazi_core::spec::imports::resolve(base_value, &base, &root)
             .map_err(|e| SpecError::new_err(format!("resolving imports: {e:#}")))?
     } else {
         fugazi_core::spec::imports::refuse(&base_value)

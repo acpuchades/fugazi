@@ -107,7 +107,7 @@ driver filters on when the frame carries several symbols.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
-          [--params <SPEC> …] [--pooled <AXIS>] [--cash <N>] [--costs <SPEC> …]
+          [--params <SPEC> …] [--import-root <DIR>] [--pooled <AXIS>] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-w <LEN>] [-q]
           [--from <DATE>] [--until <DATE>] [--strict-from]
@@ -119,6 +119,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-o`, `--output-dir <DIR>` | Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
+| `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
 | `--pooled <AXIS>` | Reduce over a named parameter instead of resolving it to one value: fit this document across a **panel** of instruments and report the pooled reading, rather than one series' metrics. `AXIS` names a `--params` entry whose value is a member list (list or `start..end[:step]` range — same grammar as `optimize --grid`), typically the one driving `root:`. Single-asset only; not yet composable with `--resume`/`--save-state`/`--flatten`. See [Pooling across a panel, from `run`](#pooling-across-a-panel-from-run). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--margin-rate <RATE>` | Annualized interest charged on a **negative cash balance**, as a decimal (`0.06` = 6%/yr). Default `0`. What a margin account bills for the cash it lent you; only non-zero once `--max-gross` is above 1 and a levered long drives cash below zero. Accrued per bar on the balance carried into it, pro-rated by the run's **calendar** cadence — so it needs a resolvable `-f/--frequency`, and warns if it has none rather than charging nothing silently. |
@@ -348,7 +349,7 @@ dataset, no wallet. Nested subcommand so each kind of spec (strategy YAML vs.
 applies when …` caveats:
 
 ```
-fugazi check strategy <STRATEGY> [--params <SPEC> …] [-q]
+fugazi check strategy <STRATEGY> [--params <SPEC> …] [--import-root <DIR>] [-q]
 fugazi check overlay <SPEC>... [-q]
 fugazi check costs <SPEC>... [-q]
 ```
@@ -363,6 +364,7 @@ cleanly, non-zero = something's off. In both forms `--quiet` suppresses the
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML — same shape as `run`. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Unlike `run`, omitting a required placeholder is **not** a failure — `check` validates shape only, an unset placeholder is held as a typed *undefined value* instead (see below). |
+| `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
 | `-q`, `--quiet` | Suppress the "ok" message on success. Errors still print; exit code is unchanged (`0` ok, non-zero on failure). |
 
 `check strategy` validates the document's **shape**, not its values — it never
@@ -491,7 +493,7 @@ printed.
 
 ```
 fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
-               --params <SPEC> [--params <SPEC> …]
+               --params <SPEC> [--params <SPEC> …] [--import-root <DIR>]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
                [-w <LEN> | --pooled <AXIS>] [-k <K>]
@@ -508,6 +510,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML. Same shape as `run`. |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
+| `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
@@ -1429,8 +1432,8 @@ fugazi schema --document | jq '.oneOf | length'                        # 5
 ## Common flags
 
 The flags below have the same shape across every subcommand that accepts
-them (`run`, `optimize`, and — for `--params` and the strategy positional
-— `check strategy`).
+them (`run`, `optimize`, and — for `--params`, `--import-root` and the
+strategy positional — `check strategy`).
 
 ### `<STRATEGY>` (positional)
 
@@ -1445,6 +1448,21 @@ The strategy is the first positional argument, not a flag. It takes two forms:
 The format is YAML. JSON is a subset of YAML, so a JSON-shaped document
 still parses — a `!sma { … }` tag is just the singleton map
 `{"sma": …}`. See [Strategy YAML reference](#strategy-yaml-reference).
+
+### `--import-root`
+
+`!import <path>` inside the strategy document resolves relative to the
+document's own directory, and every import — however deeply nested — is
+confined to it: a path that resolves outside is refused, even one reached by
+a legitimate `..` that exists on disk. `--import-root <DIR>` widens that
+confinement boundary without changing where relative paths *start* resolving
+from. A strategy at `A/strategies/foo.yml` importing a fragment that lives at
+`A/fragments/bar.yml` needs `--import-root A` (or any ancestor of `A`) for
+`!import ../fragments/bar.yml` to work — without it, `A/strategies` is the
+boundary and that `..` walks outside it. `DIR` must contain (or equal) the
+strategy document's own directory, or the document's *own* relative imports
+stop resolving too. Every import, no matter how deep, still has to resolve
+inside `DIR` — this relocates the boundary, it doesn't remove it.
 
 ### `--series`
 

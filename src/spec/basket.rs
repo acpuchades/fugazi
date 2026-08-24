@@ -302,10 +302,11 @@ impl BasketStrategySpec {
         text: &str,
         params: &HashMap<String, Value>,
         base: &std::path::Path,
+        root: &std::path::Path,
         label: &str,
     ) -> Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, label)?;
+        let value = super::load_value(text, params, base, root, label)?;
         serde_json::from_value(value)
             .with_context(|| format!("building basket strategy from {label}"))
     }
@@ -316,7 +317,13 @@ impl BasketStrategySpec {
     /// and `label()`).
     #[cfg(test)]
     pub fn from_text_with_params(text: &str, params: &HashMap<String, Value>) -> Result<Self> {
-        Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
+        Self::from_text_with_params_in(
+            text,
+            params,
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            "(inline)",
+        )
     }
 
     /// Build the live [`DynBasketStrategy`] this spec describes.
