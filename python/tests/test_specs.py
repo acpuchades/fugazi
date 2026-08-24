@@ -591,6 +591,163 @@ def test_optimize_smooth_scale_pin_for_an_unknown_axis_is_refused():
     ta.optimize(_trend_yaml(), _trend_snaps(), smooth_scale="FAST:linear", **kwargs)
 
 
+def test_optimize_smooth_over_a_concrete_point_list_is_refused():
+    """`grid=` takes either a Cartesian block or a list of concrete points, and
+    smoothing reads a lattice *per subgrid* — so a point list is N one-point
+    lattices and `smooth=` would be the identity. It used to return the raw keys
+    at `support=1.0`, which is also what a fully interior point reports, so the
+    alarming reading and the reassuring one were the same number.
+    `smooth_min_support=` cannot catch it either: any floor in 0..=1 passes 1.0.
+    """
+    block = [{"FAST": [3, 5], "SLOW": [10, 15]}]
+    points = [{"FAST": f, "SLOW": s} for f in (3, 5) for s in (10, 15)]
+    kwargs = dict(
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+    # Same twelve-ish points, two spellings. The block smooths.
+    swept = ta.optimize(_trend_yaml(), _trend_snaps(), grid=block, **kwargs)
+    assert all(r.support is not None for r in swept.rows)
+    # The point list is refused rather than silently returning the raw ranking.
+    with pytest.raises(ValueError, match="no lattice to average over"):
+        ta.optimize(_trend_yaml(), _trend_snaps(), grid=points, **kwargs)
+    # And a floor does not rescue it — that is the whole reason it is an error.
+    with pytest.raises(ValueError, match="no lattice to average over"):
+        ta.optimize(
+            _trend_yaml(),
+            _trend_snaps(),
+            grid=points,
+            smooth_min_support=1.0,
+            **kwargs,
+        )
+    # Without `smooth=`, a concrete point list is perfectly ordinary.
+    plain = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        grid=points,
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+    )
+    assert len(plain.rows) == 4
+
+
+def test_optimize_smooth_support_is_none_for_a_point_with_no_lattice():
+    """A lone pinned point stacked beside a swept block: the grid as a whole
+    smooths, so it is allowed, but that point carries its *raw* key into the
+    smoothed ranking. `support` reports `None` — not `1.0`, which would read
+    exactly like a fully interior point — and a floor discards it."""
+    grid = [{"FAST": [3, 5, 7], "SLOW": [10, 15, 20]}, {"FAST": 9, "SLOW": 25}]
+    kwargs = dict(
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+    sweep = ta.optimize(_trend_yaml(), _trend_snaps(), grid=grid, **kwargs)
+    by_cell = {(r.values["FAST"], r.values["SLOW"]): r for r in sweep.rows}
+    pinned = by_cell[(9, 25)]
+    assert pinned.support is None, "no neighbourhood was measured for it"
+    assert pinned.smoothed == pinned.metrics["returns.total_pct"]
+    assert by_cell[(5, 15)].support == pytest.approx(1.0), "the block's interior"
+
+    floored = ta.optimize(
+        _trend_yaml(), _trend_snaps(), grid=grid, smooth_min_support=0.5, **kwargs
+    )
+    dropped = {(r.values["FAST"], r.values["SLOW"]): r for r in floored.rows}[(9, 25)]
+    assert dropped.smoothed is None, "a floor asks for evidence it cannot offer"
+    assert dropped.support is None
+
+
+def test_optimize_panel_axis_substitutes_a_string_member_as_a_symbol():
+    """The documented shape: members are instruments, and `panel_axis=` roots
+    each on its own series."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(60)]
+    panel = {
+        "AAA": _snaps_single("AAA", rising),
+        "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+    }
+    sweep = ta.optimize(
+        doc,
+        panel=panel,
+        panel_axis="SYM",
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+    )
+    assert "SYM" not in sweep.best.values, (
+        "the pooled axis is reduced over, not ranked on"
+    )
+    assert set(sweep.best.metrics_panel) == {"AAA", "BBB"}
+
+
+def test_optimize_panel_axis_pools_over_a_typed_parameter():
+    """`panel_axis=` used to substitute the member name as a JSON *string*,
+    which is right for a ticker and made every typed slot unreachable —
+    `!ema { period: !param FAST }` got `"5"` and failed to build. The CLI's
+    `--params 'FAST=[5,10,15]' --pooled FAST` has always been typed, so the two
+    surfaces disagreed on one feature. A mapping key now carries its own JSON
+    type through."""
+    snaps = _trend_snaps()
+    # One stream, three members: pooling over a nuisance *parameter* rather
+    # than over instruments. Each member needs its own feed, so the same stream
+    # is handed over once per member.
+    panel = {f: list(snaps) for f in (3, 5, 7)}
+    sweep = ta.optimize(
+        _trend_yaml(),
+        panel=panel,
+        panel_axis="FAST",
+        grid=[{"SLOW": [10, 15]}],
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+    )
+    assert len(sweep.rows) == 2, "FAST is pooled over, so only SLOW is swept"
+    assert set(sweep.best.values) == {"SLOW"}
+    # Members are labelled by the key, rendered without JSON quoting.
+    assert set(sweep.best.metrics_panel) == {"3", "5", "7"}
+    # All three reported, and the pooled cell is the mean over them.
+    assert sweep.best.metrics_support["returns.total_pct"] == (3, 3)
+    per_member = [m["returns"]["total_pct"] for m in sweep.best.metrics_panel.values()]
+    assert sweep.best.metrics["returns.total_pct"] == pytest.approx(sum(per_member) / 3)
+
+
+def test_optimize_panel_key_type_is_the_key_type_not_a_parse_of_its_label():
+    """A key's Python type decides, so nothing is guessed from the text: a
+    member genuinely named `"5"` stays the string `"5"`. That is the reason for
+    typing the keys rather than parsing the names."""
+    snaps = _trend_snaps()
+    with pytest.raises(Exception, match="expected a nonzero usize|invalid type"):
+        ta.optimize(
+            _trend_yaml(),
+            panel={"5": list(snaps), "7": list(snaps)},
+            panel_axis="FAST",
+            grid=[{"SLOW": [10, 15]}],
+            cash=1000.0,
+            metric_names=["returns.total_pct"],
+            best_by="returns.total_pct",
+        )
+    # A key that no document could hold is refused at the boundary.
+    with pytest.raises(TypeError, match="str, int, float or bool"):
+        ta.optimize(
+            _trend_yaml(),
+            panel={(3, 5): list(snaps), (7, 9): list(snaps)},
+            panel_axis="FAST",
+            grid=[{"SLOW": [10, 15]}],
+            cash=1000.0,
+        )
+
+
 def test_optimize_repeated_axis_value_is_refused():
     """Two equal values sit at distance 0, so the point becomes a full-weight
     neighbour of itself — and the duplicate costs a second backtest and row."""

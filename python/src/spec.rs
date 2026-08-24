@@ -1861,10 +1861,19 @@ pub(crate) fn optimize(
             // Borrowed as slices once, so the per-row closure re-borrows rather
             // than cloning every member's stream on every grid point.
             let panel_axis_ref = panel_axis.as_deref();
-            let panel_ref: Option<PanelSlices<'_>> = panel_members
-                .as_ref()
-                .map(|ms| ms.iter().map(|(n, s)| (n.clone(), s.as_slice())).collect());
+            let panel_ref: Option<PanelSlices<'_>> = panel_members.as_ref().map(|ms| {
+                ms.iter()
+                    .map(|m| (m.name.clone(), m.snaps.as_slice()))
+                    .collect()
+            });
             let panel_ref = panel_ref.as_deref();
+            // The value each member substitutes for `panel_axis=`, parallel to
+            // `panel_ref`. Carried separately because the pooled evaluators take
+            // (label, stream) pairs and the axis value is neither.
+            let axis_values: Option<Vec<JsonValue>> = panel_members
+                .as_ref()
+                .map(|ms| ms.iter().map(|m| m.axis.clone()).collect());
+            let axis_values = axis_values.as_deref();
             let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
@@ -1892,9 +1901,10 @@ pub(crate) fn optimize(
                         .map_err(spec_backtest::build_error)?,
                     Some(axis) => members
                         .iter()
-                        .map(|(name, snaps)| {
+                        .zip(axis_values.expect("panel_ref implies axis_values"))
+                        .map(|((name, snaps), axis_value)| {
                             let mut p = params.clone();
-                            p.insert(axis.to_string(), JsonValue::String(name.clone()));
+                            p.insert(axis.to_string(), axis_value.clone());
                             let value =
                                 fugazi_core::spec::params::substitute(base_value.clone(), &p)?;
                             let member_spec = spec_from_value(value, detected)?;
@@ -1991,7 +2001,7 @@ pub(crate) fn optimize(
                 panel_metrics,
                 panel_support,
                 smoothed: row.smoothed.and_then(|s| s.value),
-                support: row.smoothed.map(|s| s.support),
+                support: row.smoothed.and_then(|s| s.support),
                 ruin_bar: row.eval.ruin_bar(),
             },
         )?;
@@ -2113,6 +2123,18 @@ impl PyWalkForwardFold {
 /// snapshot stream.
 pub(crate) type PanelSlices<'a> = Vec<(String, &'a [Snapshot<Symbol>])>;
 
+/// One `panel=` member: its label, the value `panel_axis=` substitutes for it,
+/// and its own snapshot stream.
+pub(crate) struct PanelMember {
+    /// What the pooled support counts, `metrics_panel` keys, and the
+    /// walk-forward composites are labelled by.
+    pub(crate) name: String,
+    /// What `panel_axis=` substitutes for its `!param`, **in the mapping key's
+    /// own JSON type**. See [`extract_panel`].
+    pub(crate) axis: JsonValue,
+    pub(crate) snaps: Vec<Snapshot<Symbol>>,
+}
+
 /// Coerce the `panel=` argument into named snapshot streams.
 ///
 /// Accepts a mapping (`{"BTC": snaps, "ETH": snaps}`) or a plain sequence of
@@ -2120,21 +2142,33 @@ pub(crate) type PanelSlices<'a> = Vec<(String, &'a [Snapshot<Symbol>])>;
 /// preferring: pooled cells report *which* members reported a metric, and
 /// `member[7]` is a poor answer to that.
 ///
+/// **A mapping key carries its own type through to `panel_axis=`.** A `str`
+/// key substitutes as a JSON string, an `int`/`float` as a JSON number, a
+/// `bool` as a JSON boolean — so `{5: snaps, 10: snaps}` with
+/// `panel_axis="FAST"` reaches a `period:` slot as a number and pools over a
+/// *parameter*, exactly as the CLI's `--params 'FAST=[5,10]' --pooled FAST`
+/// does. Nothing is parsed out of the label: `{"5": …}` is the string `"5"`
+/// and `{5: …}` is the number `5`, so a member genuinely named `"5"` stays
+/// unambiguous. The label is the key rendered without JSON quoting, so the
+/// string case is byte-identical to what it always was.
+///
 /// Each stream is a separate feed on purpose. Handing one merged
 /// multi-instrument stream instead would make every member run over the
 /// **union** timeline and see bars on which it has no quote — which is exactly
 /// what the CLI's per-root stream preparation exists to avoid, and Python has
-/// no equivalent to inherit.
-pub(crate) fn extract_panel(
-    panel: &Bound<'_, PyAny>,
-) -> PyResult<Vec<(String, Vec<Snapshot<Symbol>>)>> {
-    let mut out: Vec<(String, Vec<Snapshot<Symbol>>)> = Vec::new();
+/// no equivalent to inherit. Pooling over a parameter is the case where that
+/// bites: every member is the same series, so it is passed (and copied) once
+/// per member.
+pub(crate) fn extract_panel(panel: &Bound<'_, PyAny>) -> PyResult<Vec<PanelMember>> {
+    let mut out: Vec<PanelMember> = Vec::new();
     if let Ok(map) = panel.cast::<pyo3::types::PyDict>() {
         for (k, v) in map.iter() {
-            let name: String = k.extract().map_err(|_| {
-                PyTypeError::new_err("`panel=` mapping keys must be strings (member names)")
-            })?;
-            out.push((name, snapshots_from_sequence(&v)?));
+            let axis = panel_key_value(&k)?;
+            out.push(PanelMember {
+                name: panel_key_label(&axis),
+                axis,
+                snaps: snapshots_from_sequence(&v)?,
+            });
         }
     } else {
         let iter = panel.try_iter().map_err(|_| {
@@ -2144,7 +2178,12 @@ pub(crate) fn extract_panel(
             )
         })?;
         for (i, item) in iter.enumerate() {
-            out.push((format!("member[{i}]"), snapshots_from_sequence(&item?)?));
+            let name = format!("member[{i}]");
+            out.push(PanelMember {
+                axis: JsonValue::String(name.clone()),
+                name,
+                snaps: snapshots_from_sequence(&item?)?,
+            });
         }
     }
     if out.is_empty() {
@@ -2153,15 +2192,51 @@ pub(crate) fn extract_panel(
         ));
     }
     let mut seen = std::collections::HashSet::new();
-    for (name, _) in &out {
-        if !seen.insert(name.clone()) {
+    for m in &out {
+        if !seen.insert(m.name.clone()) {
             return Err(PyValueError::new_err(format!(
-                "`panel=` has two members named `{name}` — member names label the \
-                 pooled support counts, so they have to be distinct"
+                "`panel=` has two members named `{}` — member names label the \
+                 pooled support counts, so they have to be distinct",
+                m.name
             )));
         }
     }
     Ok(out)
+}
+
+/// One `panel=` mapping key, as the JSON scalar `panel_axis=` will substitute.
+///
+/// `bool` is tested before `int` because Python's `bool` *is* an `int`, and a
+/// `!param` slot expecting a boolean would otherwise be handed `1`.
+fn panel_key_value(key: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+    if let Ok(s) = key.extract::<String>() {
+        return Ok(JsonValue::String(s));
+    }
+    if let Ok(b) = key.cast::<pyo3::types::PyBool>() {
+        return Ok(JsonValue::Bool(b.is_true()));
+    }
+    if let Ok(i) = key.extract::<i64>() {
+        return Ok(JsonValue::from(i));
+    }
+    if let Ok(f) = key.extract::<f64>()
+        && let Some(n) = serde_json::Number::from_f64(f)
+    {
+        return Ok(JsonValue::Number(n));
+    }
+    Err(PyTypeError::new_err(
+        "`panel=` mapping keys must be str, int, float or bool — the key labels the member \
+         *and* is what `panel_axis=` substitutes for its `!param`, so it has to be a value a \
+         document can hold",
+    ))
+}
+
+/// A member's display label: the key rendered without JSON quoting, so a `str`
+/// key reads exactly as it was written.
+fn panel_key_label(axis: &JsonValue) -> String {
+    match axis {
+        JsonValue::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// The result of a walk-forward run (`ta.optimize(..., walkforward=(is,
@@ -2391,7 +2466,7 @@ pub(crate) fn run_walkforward(
                 is_metrics: row.is_metrics.clone(),
                 oos_metrics: row.oos_metrics.clone(),
                 is_smoothed: row.is_smoothed.and_then(|s| s.value),
-                is_support: row.is_smoothed.map(|s| s.support),
+                is_support: row.is_smoothed.and_then(|s| s.support),
             },
         )?;
         fold_objs.push(fold);
@@ -2731,10 +2806,12 @@ pub(crate) fn run_panel_walkforward(
     py: Python<'_>,
     detected: &str,
     base_value: &JsonValue,
-    members: &[(String, Vec<Snapshot<Symbol>>)],
-    // When set, each member's name is substituted for this `!param` before its
-    // spec is built, so every member is rooted on its own series — the Python
-    // twin of the CLI's `--pooled AXIS`.
+    members: &[PanelMember],
+    // When set, each member's key is substituted for this `!param` before its
+    // spec is built — as a JSON string for a `str` key, as a number for an
+    // `int`/`float` one. Rooting every member on its own series is the usual
+    // use; pooling over a numeric parameter is the other. The Python twin of
+    // the CLI's `--pooled AXIS`.
     panel_axis: Option<&str>,
     cost_config: &fugazi_core::spec::costs::CostConfig,
     subgrids: Vec<spec_optimize::Subgrid>,
@@ -2760,7 +2837,7 @@ pub(crate) fn run_panel_walkforward(
     // than deep in the kernel so a stream with no `time` names the member.
     let axes: Vec<panel::MemberAxis> = members
         .iter()
-        .map(|(name, snaps)| panel::MemberAxis::from_snapshots(name, snaps))
+        .map(|m| panel::MemberAxis::from_snapshots(&m.name, &m.snaps))
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(|e| SpecError::new_err(format!("pooled walkforward: {e:#}")))?;
 
@@ -2790,7 +2867,7 @@ pub(crate) fn run_panel_walkforward(
             // their overlay columns need not agree.
             let schemas: Vec<_> = members
                 .iter()
-                .map(|(_, snaps)| spec_backtest::schema_from_snapshots(snaps))
+                .map(|m| spec_backtest::schema_from_snapshots(&m.snaps))
                 .collect();
 
             let member_params = |params: &std::collections::HashMap<String, JsonValue>,
@@ -2798,7 +2875,7 @@ pub(crate) fn run_panel_walkforward(
              -> std::collections::HashMap<String, JsonValue> {
                 let mut p = params.clone();
                 if let Some(axis) = panel_axis {
-                    p.insert(axis.to_string(), JsonValue::String(members[m].0.clone()));
+                    p.insert(axis.to_string(), members[m].axis.clone());
                 }
                 p
             };
@@ -2811,7 +2888,7 @@ pub(crate) fn run_panel_walkforward(
                 let mut built = spec
                     .try_build(cash, &schemas[m], None)
                     .map_err(spec_backtest::build_error)?;
-                if needs_probe_feed && let Some(first) = members[m].1.first() {
+                if needs_probe_feed && let Some(first) = members[m].snaps.first() {
                     built.update(first.clone());
                 }
                 Ok(built.stable_bars())
@@ -2826,9 +2903,13 @@ pub(crate) fn run_panel_walkforward(
                 let params = member_params(params, m);
                 let value = fugazi_core::spec::params::substitute(base_value.clone(), &params)?;
                 let spec = spec_from_value(value, detected)?;
-                spec_backtest::check_member_universe_pub(&spec, &members[m].0, &members[m].1)
-                    .map_err(spec_backtest::build_error)?;
-                spec_backtest::measured_report_any(&spec, &members[m].1, ctx_ref)
+                spec_backtest::check_member_universe_pub(
+                    &spec,
+                    &members[m].name,
+                    &members[m].snaps,
+                )
+                .map_err(spec_backtest::build_error)?;
+                spec_backtest::measured_report_any(&spec, &members[m].snaps, ctx_ref)
                     .map_err(spec_backtest::build_error)
             };
 
@@ -2875,7 +2956,7 @@ pub(crate) fn run_panel_walkforward(
                 is_members: to_pairs(&row.is_members),
                 oos_members: to_pairs(&row.oos_members),
                 is_smoothed: row.is_smoothed.and_then(|s| s.value),
-                is_support: row.is_smoothed.map(|s| s.support),
+                is_support: row.is_smoothed.and_then(|s| s.support),
             },
         )?);
     }

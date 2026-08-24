@@ -128,7 +128,7 @@ where
     // here the warnings have nowhere to go, but the error still catches the
     // library and Python callers.
     if let Some(cfg) = smooth {
-        cfg.scales.validate_against(&subgrids)?;
+        cfg.validate_against(&subgrids)?;
     }
 
     let union_columns = compute_union_columns(&subgrids);
@@ -1706,7 +1706,9 @@ impl std::fmt::Display for SmoothKernel {
 pub struct Smoothing {
     pub kernel: SmoothKernel,
     /// Minimum realized [`support`](SmoothedKey::support), in `0..=1`. `0.0`
-    /// (the default) keeps every row.
+    /// (the default) keeps every row. Above `0.0` it also discards a row whose
+    /// support is `None` — a subgrid with no smoothed axis offers no evidence
+    /// to clear a floor with.
     pub min_support: Real,
     /// Per-axis distance scales. [`SmoothScales::auto`] by default.
     pub scales: SmoothScales,
@@ -1733,6 +1735,77 @@ impl Smoothing {
         self.scales = scales;
         self
     }
+
+    /// Check this whole `--smooth` configuration against the grid it will run
+    /// over: the `--smooth-scale` pins ([`SmoothScales::validate_against`])
+    /// and then the grid's ability to smooth at all
+    /// ([`check_smoothable`]). Returns the inert-pin warnings the first check
+    /// produced, for the caller to surface.
+    ///
+    /// Call this instead of reaching into [`scales`](Self::scales) — every
+    /// entry point that accepts a `Smoothing` and a `Vec<Subgrid>` owes the
+    /// grid both checks, and they are wanted in this order: an unmatched pin
+    /// is the more specific mistake.
+    pub fn validate_against(&self, subgrids: &[Subgrid]) -> Result<Vec<String>> {
+        let warnings = self.scales.validate_against(subgrids)?;
+        check_smoothable(subgrids)?;
+        Ok(warnings)
+    }
+}
+
+/// Refuse a `--smooth` pass that has no lattice anywhere to average along.
+///
+/// An axis takes part in smoothing only when it is numeric with two or more
+/// values (`axis_is_numeric`), and neighbours are found **within a subgrid**
+/// ([`smooth_keys`]). So when no subgrid holds such an axis, every point is its
+/// own neighbourhood: the smoothed value is the raw ranking key unchanged, and
+/// [`SmoothedKey::support`] is the empty product — which is why the degenerate
+/// case reports `Π over nothing = 1.0` rather than "no evidence". The alarming
+/// reading and the reassuring one would be the same number, and
+/// [`Smoothing::min_support`] cannot separate them: any floor in `0..=1`
+/// passes `1.0`.
+///
+/// Two grids arrive here. A **concrete point list** — `--grid` repeated once
+/// per point, or Python's `grid=[{…}, {…}]` of one-point dicts — is N
+/// one-point subgrids, not one lattice of N points; a caller who filtered a
+/// Cartesian product down to its legal combinations (`FAST < SLOW`) is holding
+/// exactly that. An **all-categorical** grid (`SL_MODE=[none,atr]`) is the
+/// other: it partitions, and there is nothing left to partition.
+///
+/// Refused rather than warned, for the reason
+/// [`SmoothScales::validate_against`] refuses an unmatched pin and
+/// [`smooth_keys`] refuses an all-discarding floor: the user asked for
+/// something, it did not happen, and no cell in the output says so.
+pub fn check_smoothable(subgrids: &[Subgrid]) -> Result<()> {
+    if subgrids
+        .iter()
+        .any(|sg| sg.axes.iter().any(axis_is_numeric))
+    {
+        return Ok(());
+    }
+    let mut available: Vec<&str> = subgrids
+        .iter()
+        .flat_map(|sg| &sg.axes)
+        .map(|a| a.0.as_str())
+        .collect();
+    available.sort_unstable();
+    available.dedup();
+    let varies = if available.is_empty() {
+        "the grid sweeps no axes at all".to_string()
+    } else {
+        format!(
+            "the only axes are: {} — each is categorical or pinned to one value",
+            available.join(", ")
+        )
+    };
+    bail!(
+        "--smooth has no lattice to average over: no subgrid sweeps a numeric axis of two or \
+         more values, so every point would be its own neighbourhood and keep the raw key it \
+         already has — and --smooth-min-support could not catch that, since a point with no \
+         neighbourhood has no support to compare a floor against. {varies}. Smoothing reads a \
+         neighbourhood per subgrid, and an enumerated point list is one one-point subgrid per \
+         point: pass the swept axes as a block (`FAST=[3..12],SLOW=[20..60:5]`) instead"
+    );
 }
 
 /// One grid point's smoothed ranking key and the neighbourhood evidence
@@ -1749,8 +1822,20 @@ pub struct SmoothedKey {
     /// The weight actually found, as a fraction of the weight a point in the
     /// interior of a *regular* axis of this axis' own median spacing would
     /// find — `Π_j Σ_{d=−R..R} w(d)` over the smoothed axes. `1.0` = as much
-    /// evidence as a regular grid of that spacing would give. Always reported,
-    /// even when `value` was discarded — that is the diagnostic.
+    /// evidence as a regular grid of that spacing would give. Always reported
+    /// when it is defined, even when `value` was discarded — that is the
+    /// diagnostic.
+    ///
+    /// **`None` when this point's subgrid has no smoothed axis** — it is not
+    /// a low support, it is no measurement. Such a point is its own
+    /// neighbourhood, so both the weight found and the reference are the empty
+    /// product and the ratio would come out `1.0`, reading identically to a
+    /// fully interior point of a real lattice. `--smooth` refuses a grid where
+    /// *no* subgrid can smooth ([`check_smoothable`]); this covers the mixed
+    /// grid that pins a lone point beside a swept block, where the pinned row
+    /// carries its raw key into a smoothed ranking. A floor discards it, for
+    /// the same reason: [`Smoothing::min_support`] asks for measured evidence,
+    /// and there is none to measure.
     ///
     /// **Not clamped.** A stretch of an irregular axis denser than its own
     /// median packs more neighbours inside the kernel's reach and reads above
@@ -1760,7 +1845,7 @@ pub struct SmoothedKey {
     ///
     /// See [`smooth_keys`] for why the denominator stays kernel-only rather
     /// than following the local grid density.
-    pub support: Real,
+    pub support: Option<Real>,
 }
 
 /// True iff this axis takes part in smoothing: every value is a JSON number
@@ -2004,7 +2089,10 @@ fn axis_geometry(
 /// **Non-numeric and degenerate axes partition, they do not smooth.** See
 /// `axis_is_numeric`: an axis whose values aren't all numbers, or that has
 /// only one value, has its offset pinned to zero, so each combination of its
-/// levels forms an independent lattice for free.
+/// levels forms an independent lattice for free. A subgrid with *no* smoothed
+/// axis left is its own neighbourhood — its smoothed value is its raw key, and
+/// its [`support`](SmoothedKey::support) is `None`, not `1.0`. A grid where
+/// **no** subgrid can smooth is refused outright; see [`check_smoothable`].
 ///
 /// **Each subgrid is its own lattice.** `--grid` is repeatable and the point
 /// sets are a disjoint union; neighbours are computed within a subgrid's own
@@ -2061,6 +2149,11 @@ pub fn smooth_keys(
             keys.len()
         );
     }
+
+    // A grid with no lattice anywhere would smooth nothing and say so nowhere.
+    // The entry points check this before any backtest runs; repeated here so a
+    // direct caller of `smooth_keys` gets the same answer.
+    check_smoothable(subgrids)?;
 
     let kernel = &smoothing.kernel;
     let mut out: Vec<SmoothedKey> = Vec::with_capacity(total);
@@ -2147,12 +2240,27 @@ pub fn smooth_keys(
             // A row whose own raw key is `None` is `None` regardless of how
             // healthy its neighbourhood looks — smoothing reweights evidence,
             // it does not manufacture it.
-            let support = if ideal > 0.0 { weight / ideal } else { 0.0 };
-            let value = match own {
-                None => None,
+            //
+            // With no smoothed axis there is no neighbourhood *to* measure, so
+            // support is `None` rather than the `1.0` the empty product would
+            // hand back — see `SmoothedKey::support`. A floor discards such a
+            // row: it asked for measured evidence and none was measured.
+            let support = if numeric.is_empty() {
+                None
+            } else if ideal > 0.0 {
+                Some(weight / ideal)
+            } else {
+                Some(0.0)
+            };
+            let clears_floor = match support {
                 // The epsilon keeps `--smooth-min-support 1.0` from rejecting a
                 // genuinely interior point over a last-ULP division.
-                Some(_) if support + 1e-12 < smoothing.min_support => None,
+                Some(s) => s + 1e-12 >= smoothing.min_support,
+                None => smoothing.min_support <= 0.0,
+            };
+            let value = match own {
+                None => None,
+                Some(_) if !clears_floor => None,
                 Some(_) if weight > 0.0 => Some(numerator / weight),
                 Some(_) => None,
             };
@@ -2167,7 +2275,7 @@ pub fn smooth_keys(
         && keys.iter().any(Option::is_some)
         && !out.iter().any(|s| s.value.is_some())
     {
-        let best = out.iter().map(|s| s.support).fold(0.0, Real::max);
+        let best = out.iter().filter_map(|s| s.support).fold(0.0, Real::max);
         bail!(
             "--smooth-min-support {} discarded every grid point (best realized support was {best:.3}). \
              Lower it, shrink the kernel radius, or widen the grid — an axis shorter than the \
@@ -2525,7 +2633,7 @@ where
     // Same precondition [`optimize`] applies, and for the same reason — checked
     // before the pre-scan so a typo'd pin costs no backtests.
     if let Some(cfg) = smooth {
-        cfg.scales.validate_against(&subgrids)?;
+        cfg.validate_against(&subgrids)?;
     }
 
     // Grid enumeration — same shape as [`optimize`] so subgrids stack the same
@@ -3187,7 +3295,7 @@ mod tests {
         }
         // Support is full despite the partition: a categorical axis contributes
         // no weight to the ideal, so it neither helps nor penalizes.
-        assert!((smoothed[1].support - 1.0).abs() < 1e-12);
+        assert!((smoothed[1].support.unwrap() - 1.0).abs() < 1e-12);
     }
 
     /// Boundary points renormalize over the neighbours that exist, and report
@@ -3200,18 +3308,18 @@ mod tests {
         let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
         // 3x3 lattice, box:1 → ideal is 3*3 = 9 weight units.
         assert!(
-            (smoothed[4].support - 1.0).abs() < 1e-12,
+            (smoothed[4].support.unwrap() - 1.0).abs() < 1e-12,
             "the centre is fully interior"
         );
         for corner in [0usize, 2, 6, 8] {
             assert!(
-                (smoothed[corner].support - 4.0 / 9.0).abs() < 1e-12,
+                (smoothed[corner].support.unwrap() - 4.0 / 9.0).abs() < 1e-12,
                 "corner {corner} should see 4 of 9 weight units, got {}",
-                smoothed[corner].support
+                smoothed[corner].support.unwrap()
             );
         }
         for edge in [1usize, 3, 5, 7] {
-            assert!((smoothed[edge].support - 6.0 / 9.0).abs() < 1e-12);
+            assert!((smoothed[edge].support.unwrap() - 6.0 / 9.0).abs() < 1e-12);
         }
         // Every value is still exactly 1.0 — renormalization, not zero-padding.
         assert!(
@@ -3238,7 +3346,7 @@ mod tests {
             "only the fully interior centre clears min-support 1.0"
         );
         // Support is still reported for the dropped rows — that is the diagnostic.
-        assert!(smoothed.iter().all(|s| s.support > 0.0));
+        assert!(smoothed.iter().all(|s| s.support.unwrap() > 0.0));
     }
 
     /// An axis shorter than the kernel's diameter leaves no interior point at
@@ -3271,22 +3379,66 @@ mod tests {
         // Row 2's neighbourhood is {4.0, 4.0, None}: the mean stays 4.0 (not
         // 8/3, which is what treating None as zero would give) and support drops.
         assert!((smoothed[2].value.unwrap() - 4.0).abs() < 1e-12);
-        assert!((smoothed[2].support - 2.0 / 3.0).abs() < 1e-12);
+        assert!((smoothed[2].support.unwrap() - 2.0 / 3.0).abs() < 1e-12);
         // A row whose *own* key is None stays None however healthy its neighbours.
         assert_eq!(smoothed[3].value, None);
         assert!(
-            smoothed[3].support > 0.0,
+            smoothed[3].support.unwrap() > 0.0,
             "support is still measured for it"
         );
     }
 
     #[test]
-    fn a_subgrid_with_no_axes_smooths_to_itself() {
-        let sg = subgrid(&[("X", Value::from(1))], &[]);
-        assert_eq!(sg.points(), 1);
-        let smoothed = smooth_keys(&[sg], &[Some(7.0)], &box1(1.0)).unwrap();
-        assert_eq!(smoothed[0].value, Some(7.0));
-        assert!((smoothed[0].support - 1.0).abs() < 1e-12);
+    fn a_grid_with_no_lattice_anywhere_is_refused() {
+        // The shape a caller lands in by expanding a Cartesian block into a
+        // deduplicated list of concrete points: N one-point subgrids, no
+        // lattice, so smoothing would be the identity and say so nowhere.
+        let points: Vec<Subgrid> = [(5, 30), (5, 50), (10, 30), (10, 50)]
+            .iter()
+            .map(|(f, s)| subgrid(&[("FAST", Value::from(*f)), ("SLOW", Value::from(*s))], &[]))
+            .collect();
+        let keys: Vec<Option<Real>> = vec![Some(1.0); points.len()];
+        let err = smooth_keys(&points, &keys, &box1(0.0))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no lattice to average over"), "{err}");
+        assert!(err.contains("one one-point subgrid per point"), "{err}");
+        // Same refusal from the entry point, before any backtest runs.
+        assert!(check_smoothable(&points).is_err());
+        // A categorical-only grid is the other way in: it partitions, and
+        // there is nothing left to partition.
+        let cat = subgrid(
+            &[],
+            &[("SL_MODE", vec![Value::from("none"), Value::from("atr")])],
+        );
+        let err = check_smoothable(&[cat]).unwrap_err().to_string();
+        assert!(err.contains("SL_MODE"), "{err}");
+    }
+
+    #[test]
+    fn a_point_with_no_smoothed_axis_reports_no_support_rather_than_full() {
+        // A lone pinned point stacked beside a swept block: the grid as a whole
+        // smooths, so it is not refused, but that point's own key rides into
+        // the smoothed ranking unsmoothed. `support` has to say so — `1.0`
+        // would read exactly like a fully interior point of the block.
+        let block = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let pinned = subgrid(&[("P", Value::from(99))], &[]);
+        let keys = vec![Some(1.0), Some(1.0), Some(1.0), Some(7.0)];
+        let out = smooth_keys(&[block.clone(), pinned.clone()], &keys, &box1(0.0)).unwrap();
+        assert_eq!(out[3].value, Some(7.0), "its own raw key, unsmoothed");
+        assert_eq!(out[3].support, None, "no neighbourhood was measured");
+        assert_eq!(out[1].support, Some(1.0), "the block's interior point");
+
+        // A floor discards it: `--smooth-min-support` asks for measured
+        // evidence, and a point with no smoothed axis has none to offer.
+        let out = smooth_keys(&[block, pinned], &keys, &box1(0.5)).unwrap();
+        assert_eq!(out[3].value, None);
+        assert_eq!(out[3].support, None);
+        assert_eq!(
+            out[1].value,
+            Some(1.0),
+            "the interior point still clears it"
+        );
     }
 
     #[test]
@@ -3579,7 +3731,7 @@ mod tests {
         let rough = nums(&[10, 20, 50, 100, 200]);
         let out = smooth_keys(&[subgrid(&[], &[("P", rough.clone())])], &keys, &cfg).unwrap();
         assert!(
-            out.iter().all(|s| s.support >= 2.0 / 3.0 - 1e-12),
+            out.iter().all(|s| s.support.unwrap() >= 2.0 / 3.0 - 1e-12),
             "log spacing should leave every point a neighbour: {out:?}"
         );
         let linear = cfg
@@ -3587,7 +3739,7 @@ mod tests {
             .with_scales(SmoothScales::all(AxisScale::Linear));
         let out = smooth_keys(&[subgrid(&[], &[("P", rough)])], &keys, &linear).unwrap();
         assert!(
-            (out[4].support - 1.0 / 3.0).abs() < 1e-12,
+            (out[4].support.unwrap() - 1.0 / 3.0).abs() < 1e-12,
             "linear strands 200: {:?}",
             out[4]
         );
@@ -3633,11 +3785,11 @@ mod tests {
         // Smoothed *values* never moved — only the denominator did.
         assert!((a[3].value.unwrap() - 3.0).abs() < 1e-12);
         assert!(
-            (a[3].support - 1.0).abs() < 1e-12,
+            (a[3].support.unwrap() - 1.0).abs() < 1e-12,
             "an interior point reaches 1.0"
         );
         assert!(
-            (a[0].support - 2.0 / 3.0).abs() < 1e-12,
+            (a[0].support.unwrap() - 2.0 / 3.0).abs() < 1e-12,
             "the edge is still an edge"
         );
         // Same for the degenerate axis a categorical one shadows.
@@ -3698,14 +3850,18 @@ mod tests {
         let keys = vec![Some(1.0); 5];
         let out = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
         assert!(
-            (out[2].support - 1.0).abs() < 1e-12,
+            (out[2].support.unwrap() - 1.0).abs() < 1e-12,
             "a regular interior point is fully supported"
         );
         // The far point has no neighbour within one median gap: itself only.
-        assert!((out[4].support - 1.0 / 3.0).abs() < 1e-12, "{:?}", out[4]);
+        assert!(
+            (out[4].support.unwrap() - 1.0 / 3.0).abs() < 1e-12,
+            "{:?}",
+            out[4]
+        );
         // Its inward neighbour is an interior *position* but sits on the edge
         // of the sparse stretch, so it too falls short — the honest reading.
-        assert!(out[3].support < 1.0, "{:?}", out[3]);
+        assert!(out[3].support.unwrap() < 1.0, "{:?}", out[3]);
 
         // A pocket denser than the median finds *more* weight than the reference,
         // and that is reported rather than squeezed into `0..=1`: position 3
@@ -3714,7 +3870,11 @@ mod tests {
         // for two different situations.
         let dense = subgrid(&[], &[("P", floats(&[0.0, 1.0, 2.0, 3.0, 3.1, 3.2]))]);
         let out = smooth_keys(&[dense], &[Some(1.0); 6], &box1(0.0)).unwrap();
-        assert!((out[3].support - 4.0 / 3.0).abs() < 1e-12, "{:?}", out[3]);
+        assert!(
+            (out[3].support.unwrap() - 4.0 / 3.0).abs() < 1e-12,
+            "{:?}",
+            out[3]
+        );
         // `min_support` is a floor, so an over-supported point clears it either
         // way — nothing downstream depended on the clamp.
         let floored = smooth_keys(
@@ -3884,7 +4044,7 @@ mod tests {
             .iter()
             .map(|v| SmoothedKey {
                 value: Some(*v),
-                support: 1.0,
+                support: Some(1.0),
             })
             .collect();
         assert_eq!(
@@ -3908,7 +4068,7 @@ mod tests {
             vs.iter()
                 .map(|v| SmoothedKey {
                     value: Some(*v),
-                    support: 1.0,
+                    support: Some(1.0),
                 })
                 .collect()
         };

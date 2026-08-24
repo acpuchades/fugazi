@@ -1433,11 +1433,56 @@ row.metrics_panel    # per member:    {"AAA": {...}, "BBB": {...}, "CCC": {...}}
 
 `panel_axis=` is optional; without it the same document runs against every
 member, which is right for a sole-atom `root:` that reads whatever the bar
-carries. With it, the member's name is substituted for that `!param` first, so
+carries. With it, the member's key is substituted for that `!param` first, so
 each member is rooted on its own series — the same thing the CLI's
 `--pooled AXIS` does. A document that names a symbol *no* member's stream
 carries is an error rather than a flat zero-trade backtest that still counts
 toward the pooled mean.
+
+**A member key keeps its Python type.** `str` substitutes as a JSON string,
+`int`/`float` as a number, `bool` as a boolean — so the axis need not be an
+instrument. Pooling over a *parameter* is the CLI's
+`--params 'FAST=[5,10,15]' --pooled FAST`, and it spells the same way here:
+
+```python
+param_doc = """
+root: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+sizing: !value 1.0
+"""
+
+DAY = 86_400_000
+wave = [100.0 + (i % 8 if i % 8 < 4 else 8 - i % 8) * 3.0 for i in range(120)]
+one_stream = [
+    ta.Snapshot({"BTC": ta.Atom(ta.Candle(c, c, c, c, 1.0), time=i * DAY)})
+    for i, c in enumerate(wave)
+]
+
+sweep = ta.optimize(
+    param_doc,
+    # One series, three members: the axis is a *parameter*, not an instrument.
+    panel={f: list(one_stream) for f in (5, 10, 15)},
+    panel_axis="FAST",          # reaches `period:` as the number 5, not "5"
+    grid=[{"SLOW": [30, 50]}],
+    best_by="sharpe",
+    metric_names=["sharpe"],
+    bars_per_year=365,
+)
+
+sweep.best.values              # {"SLOW": ...} — FAST was pooled over, not ranked on
+set(sweep.best.metrics_panel)  # {"5", "10", "15"} — the keys, unquoted
+```
+
+Nothing is parsed out of the label, so a member genuinely named `"5"` stays the
+string `"5"` — `{5: …}` and `{"5": …}` are different members. The label a
+pooled cell reports is the key without JSON quoting (`"5"`, `"BTC"`). Note that
+a panel member always carries its own stream, so the parameter case hands the
+same series over once per member; that is the cost of members being data-keyed,
+which is what keeps a ragged instrument panel from running every member over
+the union timeline.
 
 `panel=` is the same reduction as `windowed=` over a different partition, so
 `risk_aversion=` composes and means the same thing. The two are mutually
@@ -1605,6 +1650,20 @@ lattice, and boundary points renormalize over the neighbours they have —
 fraction of a fully interior point's. It composes with `risk_aversion=` (which
 is folded into the key first) and applies per fold under `walkforward=`.
 
+**Smoothing needs a lattice, and `grid=` can be given one that has none.**
+`grid=` accepts a Cartesian block (`{"FAST": [3, 5, 7], "SLOW": [10, 15]}`) or
+a list of concrete points (`[{"FAST": 3, "SLOW": 10}, …]`) — and since each
+subgrid is its own lattice, a point list is *N one-point lattices*, not one
+lattice of N points. Anyone who filters a product down to its legal
+combinations (`FAST < SLOW`) is holding exactly that. With no numeric axis of
+two or more values anywhere in the grid, `smooth=` is a `ValueError`: it would
+otherwise return every point's raw key unchanged, and `smooth_min_support=`
+could not catch it — a point with no neighbourhood has no support to compare a
+floor against. Pass the swept axes as a block. A grid that *mixes* the two is
+fine, and the lone pinned point reports `row.support is None` rather than a
+number, because nothing was measured for it; any `smooth_min_support=` above
+`0` drops it.
+
 ```python
 smooth_yaml = """
 root: BTC
@@ -1629,7 +1688,8 @@ sweep = ta.optimize(
     smooth_min_support=0.5,
 )
 sweep.rows[0].smoothed   # -> neighbourhood average, native orientation
-sweep.rows[0].support    # -> 1.0 for a fully interior point, less at an edge
+sweep.rows[0].support    # -> 1.0 for a fully interior point, less at an edge,
+                         #    None for a point whose subgrid has no smoothed axis
 # Under walkforward=, each fold reports the key it was actually selected on:
 # fold.is_smoothed / fold.is_support
 ```

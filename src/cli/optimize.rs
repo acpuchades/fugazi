@@ -260,13 +260,17 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         );
     }
 
-    // Check `--smooth-scale`'s pins against the grid they will be applied to,
-    // before any strategy is parsed or backtested: a pin that names no axis is
-    // a typo the sweep would otherwise honour silently. The kernel repeats the
-    // error for library callers; only here can the inert-pin warnings be
-    // printed. stderr and ungated by `--quiet`, like `overlap` / `cadence`.
+    // Check the whole `--smooth` configuration against the grid it will be
+    // applied to, before any strategy is parsed or backtested: a
+    // `--smooth-scale` pin that names no axis is a typo the sweep would
+    // otherwise honour silently, and a grid with no lattice smooths nothing at
+    // all. The kernel repeats both errors for library callers; only here can
+    // the inert-pin warnings be printed. stderr and ungated by `--quiet`, like
+    // `overlap` / `cadence`. Note this runs *before* `--pooled` carves its axis
+    // out — carving only removes axes, so it can never turn a refusal here into
+    // a false one, and the post-carve grid is re-checked by the kernel.
     if let Some(cfg) = &opts.smoothing {
-        for warning in cfg.scales.validate_against(&subgrids)? {
+        for warning in cfg.validate_against(&subgrids)? {
             eprintln!("{} {warning}", style::yellow("warning:"));
         }
     }
@@ -1554,7 +1558,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
             // support number is the whole diagnostic.
             let smoothed = row.smoothed.as_ref();
             record.push(cell(smoothed.and_then(|s| s.value)));
-            record.push(cell(smoothed.map(|s| s.support)));
+            record.push(cell(smoothed.and_then(|s| s.support)));
         }
         writer.write_record(&record)?;
     }
@@ -1792,12 +1796,16 @@ fn print_smoothing_lines(
         Some(s) => s,
         None => return,
     };
+    // `support` is `None` when the winner's subgrid had no axis to smooth
+    // along — a lone pinned point beside a swept block. Printing `1.00` there
+    // would claim a fully supported estimate for one that was never smoothed.
+    let support = match winner.support {
+        Some(s) => format!("{s:.2}"),
+        None => "n/a (no smoothed axis in this subgrid)".to_string(),
+    };
     let smoothed_label = match winner.value {
-        Some(v) => format!(
-            "{v:.4} · support {:.2} · {}",
-            winner.support, smoothing.kernel
-        ),
-        None => format!("— · support {:.2} · {}", winner.support, smoothing.kernel),
+        Some(v) => format!("{v:.4} · support {support} · {}", smoothing.kernel),
+        None => format!("— · support {support} · {}", smoothing.kernel),
     };
     style::field("smoothed", &smoothed_label);
 
@@ -2218,7 +2226,7 @@ fn write_walkforward_csv(
         }
         if smoothed_path.is_some() {
             record.push(cell(row.is_smoothed.and_then(|s| s.value)));
-            record.push(cell(row.is_smoothed.map(|s| s.support)));
+            record.push(cell(row.is_smoothed.and_then(|s| s.support)));
         }
         writer.write_record(&record)?;
     }
@@ -2715,7 +2723,7 @@ fn write_pooled_walkforward_csv(
         }
         if smoothed_path.is_some() {
             record.push(cell(row.is_smoothed.and_then(|s| s.value)));
-            record.push(cell(row.is_smoothed.map(|s| s.support)));
+            record.push(cell(row.is_smoothed.and_then(|s| s.support)));
         }
         writer.write_record(&record)?;
     }

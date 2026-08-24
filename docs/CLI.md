@@ -525,9 +525,9 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's mean *against* it by `K` standard deviations before sorting. Requires `--best-by` plus one of `-w` (dispersion across time windows) or `--pooled` (dispersion across panel members); `K >= 0`. See [Best-by directions](#best-by-directions). |
-| `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by` **and a lattice**: a grid where no subgrid sweeps a numeric axis of two or more values (an enumerated point list, an all-categorical grid) is an error, since smoothing there would be the identity. Composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. A `NAME` that no subgrid sweeps is an error — an unmatched pin is never looked up, so it would silently leave the axis on the automatic choice. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
-| `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Above `0` it also drops a row whose subgrid had no axis to smooth along, whose support is blank rather than a number. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -713,6 +713,22 @@ information in either direction, and it does not count against `support`
 either (the same sweep scores the same written `SLOW=20` or `SLOW=[20]`). Each
 combination of such levels becomes an independent lattice; nothing bleeds
 across.
+
+**A grid with no lattice anywhere is refused.** Partitioning down to nothing is
+the degenerate end of the rule above: a subgrid left with no numeric axis of two
+or more values is its own neighbourhood, so its smoothed value *is* its raw key.
+When **no** subgrid has one, `--smooth` errors rather than returning the raw
+ranking dressed as a smoothed one. Two grids land there — an enumerated point
+list (`--grid` once per point, which is what filtering a product down to
+`FAST < SLOW` leaves you holding) and an all-categorical grid. Note
+`--smooth-min-support` cannot stand in for this: a point with no neighbourhood
+has no support to compare a floor against.
+
+A grid that *mixes* the two is fine — pinning one known point beside a swept
+block is legitimate — and the pinned row's `<metric>_support` cell is written
+**empty**, not `1.00`, because nothing was measured for it. Any
+`--smooth-min-support` above `0` then drops its `_smoothed` cell, for the same
+reason it drops a thin one: the flag asks for measured evidence.
 
 **Each `--grid` subgrid is its own lattice.** Stacked subgrids are a disjoint
 union, and neighbours are computed inside a subgrid before the sparse

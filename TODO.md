@@ -61,6 +61,31 @@ What would change it: someone actually waiting on a sweep they cannot cancel, or
 that `par_iter` needing to grow a `Result` for its own reasons — at which point
 the hook is nearly free and should go in with it.
 
+### A `panel=` member key is typed; there is no second pooling mechanism
+
+`panel_axis=` substitutes a member's mapping key into the named `!param`, and
+the key carries its own JSON type (`{5: snaps}` → the number `5`). It used to
+substitute the name as a string unconditionally, which is right for a ticker and
+made every typed slot unreachable — reported from downstream, and a real
+divergence: the CLI's `--pooled AXIS` reads its members from a `--params` /
+`--grid` entry as typed `serde_json::Value`s, so pooling over a numeric
+parameter was expressible there and nowhere in Python.
+
+Two alternatives were weighed. **Parsing the label** as a JSON scalar is one
+line and silently ambiguous for a member genuinely named `"5"`; the key's Python
+type answers the same question with nothing to guess. **A Python `pooled="AXIS"`
+that carves a grid axis**, mirroring the CLI exactly, was the other — rejected
+because the Python surface has one flat `snapshots=` list and no frame to slice
+per root, so a symbol axis would have to read out of a merged stream, which is
+precisely what `panel=` being data-keyed exists to avoid. It would be a second
+pooling mechanism in one surface, coherent for only one of the two axis kinds.
+
+The cost kept: a panel member always carries its own stream, so pooling over a
+parameter hands the same series over once per member and copies it that many
+times. A shared-stream spelling (`panel=[5, 10, 15]` alongside `snapshots=`)
+would fix that and is a second shape for one parameter — not worth it until
+someone pools a parameter over a stream large enough to notice.
+
 ### `Wallet.take_rejections`
 
 Still unbound, with the reason recorded in `python/tests/test_parity.py`: it
@@ -344,6 +369,33 @@ null.
 The plateau *tolerance* is likewise fixed at 5% rather than exposed as a flag:
 it is a readout, not a knob, and one more `--smooth-*` spelling buys nothing
 that reading the `_smoothed` column doesn't.
+
+### Smoothing reads lattices, not point clouds
+
+`--smooth` / `smooth=` refuses a grid where no subgrid sweeps a numeric axis of
+two or more values, rather than smoothing an arbitrary set of evaluated points.
+Reported from downstream (fugazi-web) as `smooth=` silently no-opping on a
+concrete-point grid; the no-op was real, the silence was the defect, and the
+refusal is what shipped.
+
+Smoothing a **point cloud** — nearest-neighbour weights over whatever points the
+caller happened to evaluate, no lattice required — was considered and not done.
+It sounds like a generalization and is a different estimator: without a lattice
+there is no "one typical step" per axis to normalize distance by, so the kernel
+radius stops meaning anything a user can reason about, and `support`'s
+denominator (the weight a fully interior point of a *regular* axis would find)
+has no referent at all. The honest version needs a bandwidth per axis in
+parameter units and a density-aware support, which is the design
+`smooth_keys`' doc already weighs and rejects for the lattice case. A filtered
+product (`FAST < SLOW`) is the motivating shape and is better served by passing
+the block and letting the illegal corner score `None` — a `None` neighbour
+already contributes no weight and lowers support, which is the right answer.
+
+Consequence kept: `SmoothedKey::support` is `Option<Real>`, `None` for a point
+whose subgrid has no smoothed axis. That case survives the refusal in a *mixed*
+grid (a pinned point stacked beside a swept block), where reporting the empty
+product's `1.0` would read exactly like a fully interior point. A
+`min_support > 0` floor drops it.
 
 ## Run resuming
 

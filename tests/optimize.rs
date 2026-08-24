@@ -600,6 +600,94 @@ fn min_support_empties_the_smoothed_cell_but_keeps_the_support_cell() {
 }
 
 #[test]
+fn smooth_over_a_concrete_point_list_is_refused_rather_than_silently_inert() {
+    // A caller who filters a Cartesian product down to its legal combinations
+    // (`FAST < SLOW`) hands the sweep one `--grid` per point. Smoothing reads a
+    // neighbourhood per subgrid, so that is N one-point lattices: every point
+    // would keep its raw key and report full support, and `--smooth-min-support`
+    // could not tell the difference. Refused, like an unmatched `--smooth-scale`
+    // pin.
+    let (path, _) = scratch_file("fugazi_opt_smooth_pointlist_strategy.yml", SWEEPABLE);
+    let out = common::cli::unique_path("fugazi_opt_smooth_pointlist").with_extension("csv");
+    let outcome = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--output", &out.to_string_lossy()])
+        .args(&[
+            "--grid",
+            "FAST=[2],SLOW=[6]",
+            "--grid",
+            "FAST=[2],SLOW=[8]",
+            "--grid",
+            "FAST=[3],SLOW=[8]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+            // The floor someone reaches for to be protected from thin support.
+            // It cannot catch this, which is why the refusal has to.
+            "--smooth-min-support",
+            "1.0",
+        ])
+        .fails();
+    assert!(
+        outcome.stderr.contains("no lattice to average over"),
+        "stderr did not explain the inert --smooth: {}",
+        outcome.stderr
+    );
+    assert!(!out.exists(), "a refused sweep must not leave a CSV behind");
+}
+
+#[test]
+fn a_pinned_point_beside_a_swept_block_reports_no_support() {
+    // The mixed grid the refusal above deliberately allows: one subgrid
+    // smooths, the other is a lone pinned point. That point's cell carries its
+    // raw key into a smoothed ranking, so its support cell must be blank —
+    // `1.00` there would read exactly like a fully interior point of the block.
+    let (_, csv) = sweep(
+        "fugazi_opt_smooth_mixed",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "--grid",
+            "FAST=[5],SLOW=[12]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    let (cf, cs) = (column(header, "FAST"), column(header, "SLOW"));
+    let csup = column(header, "returns.total_pct_support");
+    let csm = column(header, "returns.total_pct_smoothed");
+    let pinned = lines[1..]
+        .iter()
+        .find(|l| cells(l)[cf] == "5" && cells(l)[cs] == "12")
+        .expect("the pinned point is missing from the CSV");
+    assert_eq!(
+        cells(pinned)[csup],
+        "",
+        "the pinned point has no neighbourhood, so it has no support to report"
+    );
+    assert!(
+        !cells(pinned)[csm].is_empty(),
+        "it still carries its own key — nothing was smoothed away"
+    );
+    // The block's rows do report support.
+    assert!(
+        lines[1..]
+            .iter()
+            .filter(|l| cells(l)[cf] != "5")
+            .all(|l| !cells(l)[csup].is_empty()),
+        "the swept block's rows lost their support cells"
+    );
+}
+
+#[test]
 fn smooth_scale_pins_the_distance_scale_and_index_restores_the_old_measure() {
     // Seven values, one surface, two typings. In value space the neighbourhood
     // cannot depend on declaration order; `--smooth-scale=index` is the

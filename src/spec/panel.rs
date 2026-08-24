@@ -735,7 +735,7 @@ where
         );
     }
     if let Some(cfg) = smooth {
-        cfg.scales.validate_against(&subgrids)?;
+        cfg.validate_against(&subgrids)?;
     }
 
     let n_members = members.len();
