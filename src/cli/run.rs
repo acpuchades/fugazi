@@ -2101,7 +2101,10 @@ fn print_fitted_warning<Sym>(report: &fugazi::RunReport<Sym>) {
     let n = fitted.len();
     let worst = fitted.iter().copied().fold(f64::INFINITY, f64::min);
     style::print_warns(&[format!(
-        "{n} fill{} scaled down to fit the account — the size traded was not the          size the document asked for (smallest: {:.1}% of the request). Compare          `units` against `requested_units` in fills.csv; raising the wallet's          leverage is what lifts the ceiling",
+        "{n} fill{} scaled down to fit the account — the size traded was not the \
+         size the document asked for (smallest: {:.1}% of the request). Compare \
+         `units` against `requested_units` in fills.csv; raising the wallet's \
+         leverage is what lifts the ceiling",
         if n == 1 { " was" } else { "s were" },
         worst * 100.0,
     )]);

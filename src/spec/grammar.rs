@@ -1241,7 +1241,9 @@ fn single_root_ref() -> serde_json::Value {
     map.insert(
         "$comment".into(),
         serde_json::Value::String(
-            "The traded series: a bare symbol, or `!pick { symbol, freq }`.              Optional — omitted, it reads `!pick { symbol: !param SYMBOL, freq:              !param FREQ }`, and an unset placeholder drops its key."
+            "The traded series: a bare symbol, or `!pick { symbol, freq }`. \
+             Optional — omitted, it reads `!pick { symbol: !param SYMBOL, freq: \
+             !param FREQ }`, and an unset placeholder drops its key."
                 .into(),
         ),
     );
