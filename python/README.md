@@ -1536,7 +1536,7 @@ A pooled row reports `N` hypotheses rather than `N × M`, which is the honest
 count — and it invites the reading that `M` members are `M` pieces of evidence.
 For a panel drawn from one market's worth of instruments they are not.
 
-```python
+```py
 result.effective_breadth   # (effective, mean_correlation, members, pairs) | None
 ```
 
