@@ -38,6 +38,7 @@ pub enum StrategyPreset {
     /// Go all-in long on the first bar and hold. See
     /// [`SingleAssetStrategy::buy_and_hold`].
     BuyAndHold {
+        #[serde(default)]
         root: RootSpec,
         #[serde(default)]
         meta: Option<Meta>,
@@ -45,6 +46,7 @@ pub enum StrategyPreset {
     /// Always-in SMA fast/slow crossover. See
     /// [`crate::strategies::trend::ma_crossover`].
     MaCrossover {
+        #[serde(default)]
         root: RootSpec,
         fast: usize,
         slow: usize,
@@ -55,6 +57,7 @@ pub enum StrategyPreset {
     /// exit when it crosses back above `exit`. See
     /// [`crate::strategies::mean_reversion::rsi_reversal`].
     RsiReversal {
+        #[serde(default)]
         root: RootSpec,
         period: usize,
         oversold: Real,
@@ -65,6 +68,7 @@ pub enum StrategyPreset {
     /// Always-in Donchian channel breakout. See
     /// [`crate::strategies::trend::donchian_breakout`].
     DonchianBreakout {
+        #[serde(default)]
         root: RootSpec,
         period: usize,
         #[serde(default)]
@@ -73,6 +77,7 @@ pub enum StrategyPreset {
     /// Always-in Keltner channel breakout. See
     /// [`crate::strategies::composite::keltner_breakout`].
     KeltnerBreakout {
+        #[serde(default)]
         root: RootSpec,
         ema_period: usize,
         atr_period: usize,
@@ -225,7 +230,14 @@ impl StrategyRef {
         label: &str,
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, root, label)?;
+        let value = super::load_document(
+            text,
+            params,
+            base,
+            root,
+            label,
+            super::input::StrategyKind::Single,
+        )?;
         serde_json::from_value(value).with_context(|| format!("building strategy from {label}"))
     }
 }

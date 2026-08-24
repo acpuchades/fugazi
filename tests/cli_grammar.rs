@@ -140,8 +140,10 @@ fn schema_emits_the_expression_schema() {
 #[test]
 fn schema_document_emits_the_five_shapes() {
     let schema = run_json(&["schema", "--document"]);
-    let one_of = schema["oneOf"]
+    // `anyOf`, not `oneOf`: `root:` is optional on the single-asset shape, so a
+    // document that omits it is structurally both a `single` and a `multi`.
+    let any_of = schema["anyOf"]
         .as_array()
-        .expect("document root is a oneOf");
-    assert_eq!(one_of.len(), 5, "single/pairs/basket/multi/portfolio");
+        .expect("document root is an anyOf");
+    assert_eq!(any_of.len(), 5, "single/pairs/basket/multi/portfolio");
 }

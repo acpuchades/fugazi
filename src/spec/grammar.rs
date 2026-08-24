@@ -1007,10 +1007,21 @@ pub fn spec_json_schema() -> serde_json::Value {
 /// slots, `$ref`-ing the same `node` / `selection` grammar for every expression.
 /// Phase 2 of the proposal.
 ///
-/// The root is a `oneOf` over the five shapes, which are disjoint by their
-/// required keys (only `multi` has none — it's the structural fallback). Same
-/// caveats as [`spec_json_schema`]: it validates the JSON bridge form and checks
-/// *structure*; it is complementary to `fugazi check`, not a replacement.
+/// The root is an **`anyOf`** over the five shapes. It was a `oneOf` while
+/// `single` still required `root:` and the five were therefore disjoint by their
+/// required keys; making that key optional (it defaults to `!pick { symbol:
+/// !param SYMBOL, freq: !param FREQ }` — see [`root::apply_default`]) collapses
+/// `single` and `multi` onto the same instance, because a document that omits
+/// `root:` is a bare `long:` / `short:` map either way. That ambiguity is real —
+/// it is why the CLI's `single:` / `multi:` prefix and Python's `kind=` exist —
+/// and `oneOf` would answer it by rejecting a document both shapes accept. A
+/// consumer that needs the shape must take it from the caller, not from the
+/// document; the schema still rejects anything no shape accepts.
+///
+/// [`root::apply_default`]: crate::spec::root::apply_default
+///
+/// Same caveats as [`spec_json_schema`]: it validates the JSON bridge form and
+/// checks *structure*; it is complementary to `fugazi check`, not a replacement.
 /// Nested portfolio-child strategies are validated only as non-empty objects
 /// (presets + structural shape-detection are out of scope this iteration).
 pub fn spec_document_json_schema() -> serde_json::Value {
@@ -1030,10 +1041,13 @@ pub fn spec_document_json_schema() -> serde_json::Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": format!("https://fugazi.dev/spec/{}/document.schema.json", env!("CARGO_PKG_VERSION")),
         "$comment": "Validates the JSON bridge form of a whole fugazi strategy \
-                     document. Shape is a oneOf over single/pairs/basket/multi/\
-                     portfolio (disjoint by required keys). Structure only.",
+                     document. Shape is an anyOf over single/pairs/basket/multi/\
+                     portfolio: a document that omits the optional `root:` is \
+                     both a single and a multi, so the shape comes from the \
+                     caller (the CLI prefix, Python's kind=), not the document. \
+                     Structure only.",
         "title": "fugazi spec document",
-        "oneOf": [
+        "anyOf": [
             def_ref("single"), def_ref("pairs"), def_ref("basket"),
             def_ref("multi"), def_ref("portfolio"),
         ],
@@ -1204,9 +1218,39 @@ fn root_ref() -> serde_json::Value {
     })
 }
 
+/// The single-asset shape's `root:` — [`root_ref`] carrying its **default**.
+///
+/// Optional since the loader fills it in, and the filled-in value is published
+/// here rather than left for a consumer to hardcode: it is
+/// [`root::default_tree`](crate::spec::root::default_tree) verbatim, so a tool
+/// that renders "defaults to …" cannot drift from what
+/// [`root::apply_default`](crate::spec::root::apply_default) actually splices
+/// (`document_root_publishes_its_default` in `tests/spec_json_schema.rs` pins
+/// the two together).
+///
+/// Note this is the *pre-substitution* value — it still carries the two
+/// `!param` placeholders, because that is what the loader inserts and what the
+/// key means. JSON Schema's `default` is an annotation and is not required to
+/// validate against its own subschema, which is just as well: `!pick`'s
+/// `symbol` is a string, and a placeholder is not one until `--params` resolves
+/// it (to nothing, if unset — the key is then dropped).
+fn single_root_ref() -> serde_json::Value {
+    let mut schema = root_ref();
+    let map = schema.as_object_mut().expect("root_ref is an object");
+    map.insert("default".into(), crate::spec::root::default_tree());
+    map.insert(
+        "$comment".into(),
+        serde_json::Value::String(
+            "The traded series: a bare symbol, or `!pick { symbol, freq }`.              Optional — omitted, it reads `!pick { symbol: !param SYMBOL, freq:              !param FREQ }`, and an unset placeholder drops its key."
+                .into(),
+        ),
+    );
+    schema
+}
+
 fn doc_single() -> serde_json::Value {
     object(&[
-        ("root", root_ref(), true),
+        ("root", single_root_ref(), false),
         ("long", def_ref("side"), false),
         ("short", def_ref("side"), false),
         ("sizing", node_ref(), false),

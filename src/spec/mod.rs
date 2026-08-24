@@ -117,6 +117,33 @@ pub fn load_value(
     crate::spec::params::substitute(value, params)
 }
 
+/// [`load_value`] for a whole strategy **document** of a known shape — what
+/// every `*Spec::from_text_with_params_in` goes through.
+///
+/// Identical to [`load_value`] but for one step between the `!import` splice
+/// and `!param` substitution: [`root::apply_default`] fills in a shape's
+/// defaulted keys while the tree is still untyped, so the placeholders they
+/// carry resolve out of `params` like any the author wrote. Today that is one
+/// key on one shape — the single-asset `root:`, defaulting to `!pick { symbol:
+/// !param SYMBOL, freq: !param FREQ }` — and `kind` is what decides, because a
+/// `root:`-less document is structurally indistinguishable from a `multi:` one.
+///
+/// A caller that hand-rolls this pipeline for its own reasons (`fugazi check`
+/// substitutes hole-aware, `optimize` splices imports once and reuses the tree
+/// across grid points, Python detects the kind first) calls
+/// [`root::apply_default`] at the same point rather than re-deciding the policy.
+pub fn load_document(
+    text: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    base: &std::path::Path,
+    root: &std::path::Path,
+    label: &str,
+    kind: input::StrategyKind,
+) -> anyhow::Result<serde_json::Value> {
+    let value = load_value_pre_params(text, base, root, label)?;
+    crate::spec::params::substitute(crate::spec::root::apply_default(value, kind), params)
+}
+
 /// [`load_value`] through the `!import` splice, stopping short of `!param`
 /// substitution. Split out for `fugazi check`, which substitutes with
 /// [`params::substitute_for_check`] instead — marking a required-but-unset
@@ -144,9 +171,21 @@ pub fn load_value_no_imports(
     params: &std::collections::HashMap<String, serde_json::Value>,
     label: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    let value = load_value_refusing_imports(text, label)?;
+    crate::spec::params::substitute(value, params)
+}
+
+/// [`load_value_no_imports`] stopping short of `!param` substitution — the
+/// import-refusing twin of [`load_value_pre_params`].
+///
+/// Split out for the same reason: a caller that has to look at, or rewrite, the
+/// untyped tree between the parse and the substitution — `fugazi check`'s
+/// hole-aware pass, and the default-`root:` splice ([`root::apply_default`]),
+/// which must land while the placeholders are still placeholders.
+pub fn load_value_refusing_imports(text: &str, label: &str) -> anyhow::Result<serde_json::Value> {
     let value = crate::spec::input::parse_value_at(text, label)?;
     crate::spec::imports::refuse(&value)?;
-    crate::spec::params::substitute(value, params)
+    Ok(value)
 }
 
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};

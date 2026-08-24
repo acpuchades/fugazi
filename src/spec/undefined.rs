@@ -294,6 +294,42 @@ pub fn contains_hole(value: &Json) -> bool {
     }
 }
 
+/// Record a [`RequiredType`] for every user-visible hole in a **`serde_json`**
+/// tree, the way the hole-aware deserializer does for one it deserializes.
+///
+/// For the one parse that steps outside it: [`RootSpec`] buffers
+/// its subtree to a `serde_json::Value` and re-parses it with plain `serde_json`
+/// (it has to — it keeps the raw tree for the static analysers, and the two
+/// formats' `Value` types both self-describe). Nothing along that path answers a
+/// `deserialize_*` call at the hole, so a `root: !param SYM` used to record no
+/// observation at all: `check` reported no unset placeholder and then failed
+/// *building* a document whose only problem was a value nobody passed.
+///
+/// [`RootSpec`]: crate::spec::root::RootSpec
+pub fn observe_json(value: &Json, ty: RequiredType) {
+    match value {
+        Json::Object(map) => {
+            for (k, v) in map {
+                let origin = match k.as_str() {
+                    UNSET_PARAM_KEY => Some(UndefinedOrigin::Param),
+                    UNDEFINED_KEY => Some(UndefinedOrigin::Undefined),
+                    // `!arg` holes are a driver's to fill, not a user's — the
+                    // same exclusion `user_hole` makes.
+                    _ => None,
+                };
+                match (origin, v.as_str()) {
+                    (Some(origin), Some(name)) => {
+                        PARAM_USES.with(|u| u.borrow_mut().push((origin, name.to_string(), ty)))
+                    }
+                    _ => observe_json(v, ty),
+                }
+            }
+        }
+        Json::Array(items) => items.iter().for_each(|v| observe_json(v, ty)),
+        _ => {}
+    }
+}
+
 /// Does this parse error mention one of the reserved sentinel keys — i.e. did a
 /// placeholder, rather than the document, cause it? See [`parse_probe`].
 fn names_a_hole(message: &str) -> bool {

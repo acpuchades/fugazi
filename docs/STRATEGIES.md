@@ -241,7 +241,7 @@ The default shape (no prefix, or `single:`). A mapping with these fields
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `root` | source (atom) | — (**required**) | the **evaluation root**: the series every `source:`-omitted leaf reads, and the instrument this document trades. `root: BTCUSDT` is sugar for `root: !pick { symbol: BTCUSDT }`. An expression like any other slot, so `!param` reaches it (see [Parameterizing the root](#parameterizing-the-root)) |
+| `root` | source (atom) | `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` | the **evaluation root**: the series every `source:`-omitted leaf reads, and the instrument this document trades. `root: BTCUSDT` is sugar for `root: !pick { symbol: BTCUSDT }`. An expression like any other slot, so `!param` reaches it (see [Parameterizing the root](#parameterizing-the-root)) |
 | `long` | side | none | the long entry/exit (see [Sides](#sides)) |
 | `short` | side | none | the short entry/exit |
 | `sizing` | source | `!value 1.0` | position-size multiplier (see [Sizing](#sizing)) |
@@ -1169,14 +1169,80 @@ its own through `run`. Two consequences to know:
   grid also still refuses one: a pairs run evaluates the *inner join* of its two
   legs, so a different pair is a different timeline.
 
-A root that names no symbol, or more than one, is a **build error** — `check`
-reports it before any bar is read:
+##### Omitting the root
+
+`root:` is **optional**. Left out, the document reads as if it said
+
+```yaml
+root: !pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }
+```
+
+— which is spliced in before substitution, so `SYMBOL` and `FREQ` resolve out of
+`--params` exactly like placeholders you wrote yourself. Both are optional: an
+unset one **drops its key** rather than erroring, so a document supplying
+neither falls back to `!pick {}`, the sole-atom read that is the whole of a
+one-series input.
+
+That makes the sweep above spelling-free — the same document, with no `root:` at
+all, is a portable strategy you point at whatever you have:
+
+```console
+$ fugazi run @strategy.yml -s @btc.csv                      # one symbol: inferred
+$ fugazi run @strategy.yml -s @panel.csv --params SYMBOL=ETH
+$ fugazi optimize @strategy.yml -s @panel.csv --grid 'SYMBOL=["BTC","ETH"]' -o grid.csv
+```
+
+The first line works because `run` and `optimize` **seed `SYMBOL` from a
+single-series `--series` frame** when you didn't pass it: the sole-atom root
+reads the right bars, but a single-asset strategy still needs a symbol to route
+orders through, and a one-symbol input answers that unambiguously. An explicit
+`--params SYMBOL=…` always wins, and a frame carrying two or more symbols is
+left alone — there is nothing to infer.
+
+Note that `root:` is also what tells a `single:` document from a `multi:` one.
+At the top level the CLI's shape prefix decides (its absence means `single:`),
+so omitting `root:` costs nothing there. Everywhere the shape is inferred from
+the payload instead, a `root:`-less map reads as **`multi`** — Python's
+`load_spec(kind="auto")` (pass `kind="single"` to say otherwise), a portfolio
+`children:` entry, and a `!sharpe { strategy: … }` subtree. Spell `root:` out in
+those three, or use a preset tag, which is unambiguous either way.
+
+A root that names no symbol *and* has no symbol to fall back on, or one that
+names more than one, is a **build error** — `check` reports it before any bar is
+read:
 
 ```console
 $ fugazi check strategy @broken.yml
-  status  error · root `root:` names no symbol, so there is nothing to trade or
-          to slice the input by — name one, e.g. `root: !pick { symbol: BTCUSDT }`
+  status  error · root `root:` names 2 symbols (`BTC`, `ETH`); a single-asset
+          document trades one
 ```
+
+`check` has no data, so a document whose root resolves from `--series` is
+reported as pending rather than as a failure:
+
+```console
+$ fugazi check strategy @noroot.yml
+  status  ok · root from a single-series --series (no SYMBOL param)
+```
+
+The same holds for a root left as an unset **required** `!param` — a value
+nobody passed yet, not a broken document. `check` names the placeholder and the
+type it needs, exactly as it does for any other slot:
+
+```console
+$ fugazi check strategy @rooted.yml       # root: !param SYM
+  params  (defaults) (1 unset placeholder)
+          needs --params SYM=<string>
+  status  ok · root pending a --params value
+```
+
+`run` and `optimize` substitute for real, so there the same document is the
+ordinary "parameter `SYM` is not set" error.
+
+The default is published in the machine-readable document schema, under the
+`single` shape's `root` property — `spec_document_json_schema()["$defs"]
+["single"]["properties"]["root"]["default"]` is the expansion above, verbatim,
+so a tool that renders it does not hardcode it.
 
 `root:` may also declare the bar cadence, which joins the resolution chain one
 rung below the CLI flag — `-f/--frequency` → `root:`'s `freq` → the input's

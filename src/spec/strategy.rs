@@ -82,6 +82,16 @@ pub struct SingleStrategySpec {
     /// traded symbol is recovered from it by
     /// [`RootSpec::sole_symbol`](crate::spec::RootSpec::sole_symbol); a root
     /// naming none or several is a build error, not a parse error.
+    ///
+    /// **Optional.** Omitted, it defaults to `!pick { symbol: !param { key:
+    /// SYMBOL }, freq: !param { key: FREQ } }` — spliced in by
+    /// [`root::apply_default`](crate::spec::root::apply_default) before
+    /// substitution, with each placeholder dropping its key when unset, so a
+    /// document supplying neither lands on the sole-atom root. A tree loaded
+    /// through a path that does *not* splice it (a portfolio child, a
+    /// `serde_json::from_value` on a hand-built map) defaults the same way, via
+    /// [`RootSpec::sole`](crate::spec::RootSpec::sole).
+    #[serde(default)]
     pub root: RootSpec,
     #[serde(default)]
     pub long: Option<SideSpec>,
@@ -140,7 +150,14 @@ impl SingleStrategySpec {
         label: &str,
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, root, label)?;
+        let value = super::load_document(
+            text,
+            params,
+            base,
+            root,
+            label,
+            super::input::StrategyKind::Single,
+        )?;
         serde_json::from_value(value)
             .with_context(|| format!("building single-asset strategy from {label}"))
     }

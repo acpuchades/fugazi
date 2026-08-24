@@ -428,6 +428,34 @@ pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
 /// it to `base_dir` — the right choice for a caller that wants zero
 /// filesystem coupling to a user-authored document. `root_dir` is the
 /// `!import` confinement boundary — `base_dir` unless widened.
+///
+/// The kind is settled **before** `!param` substitution now, because a
+/// single-asset document's default `root:` is spliced in between the two (see
+/// [`fugazi_core::spec::root::apply_default`]) and only the single-asset shape
+/// accepts that key. One consequence worth knowing about `kind="auto"`: `root:`
+/// is what tells a `single:` document from a `multi:` one, and a document that
+/// omits it is genuinely ambiguous — both shapes are then a bare `long:` /
+/// `short:` map — so `auto` reads it as `multi`. Pass `kind="single"` to say
+/// otherwise.
+/// The typed shape a `kind=` string names — the same five the CLI's shape
+/// prefix picks, so `spec::root::apply_default` sees the identical vocabulary
+/// on both surfaces rather than a stringly-typed copy of it.
+fn kind_of(kind: &str) -> PyResult<fugazi_core::spec::input::StrategyKind> {
+    use fugazi_core::spec::input::StrategyKind as K;
+    Ok(match kind {
+        "single" => K::Single,
+        "pairs" => K::Pairs,
+        "basket" => K::Basket,
+        "multi" => K::Multi,
+        "portfolio" => K::Portfolio,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown strategy kind `{other}` (expected auto/single/pairs/basket/multi/portfolio)"
+            )));
+        }
+    })
+}
+
 pub(crate) fn load_loaded_spec(
     text: &str,
     params: &std::collections::HashMap<String, JsonValue>,
@@ -436,17 +464,20 @@ pub(crate) fn load_loaded_spec(
     kind: &str,
     imports: bool,
 ) -> PyResult<CoreStrategySpec> {
-    let value = if imports {
-        fugazi_core::spec::load_value(text, params, base_dir, root_dir, "(inline)")
+    let pre = if imports {
+        fugazi_core::spec::load_value_pre_params(text, base_dir, root_dir, "(inline)")
     } else {
-        fugazi_core::spec::load_value_no_imports(text, params, "(inline)")
+        fugazi_core::spec::load_value_refusing_imports(text, "(inline)")
     }
     .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
     let kind = if kind == "auto" {
-        detect_kind(&value)
+        detect_kind(&pre)
     } else {
         kind
     };
+    let pre = fugazi_core::spec::root::apply_default(pre, kind_of(kind)?);
+    let value = fugazi_core::spec::params::substitute(pre, params)
+        .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
     macro_rules! parse {
         ($variant:ident, $ty:ty, $label:literal) => {{
             let s: $ty = serde_json::from_value(value)

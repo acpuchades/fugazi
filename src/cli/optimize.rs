@@ -277,6 +277,9 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let base_value = input::parse_value_at(opts.strategy_text, opts.strategy_label)?;
     let base_value = imports::resolve(base_value, opts.strategy_dir, opts.strategy_root)
         .context("resolving strategy imports")?;
+    // Fill in the shape's defaulted keys (the single-asset `root:`) before any
+    // grid point substitutes, so `SYMBOL` / `FREQ` sweep like any other axis.
+    let base_value = fugazi::spec::root::apply_default(base_value, opts.strategy_kind);
 
     // `--pooled` is only wired for the single-asset path: it reduces over the
     // same per-root stream map `distinct_roots` builds there, which the

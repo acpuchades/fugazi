@@ -20,6 +20,22 @@
 //! root: !resample { every: 4, source: !pick { symbol: BTC } }
 //! ```
 //!
+//! # The default root
+//!
+//! Omitting `root:` from a single-asset document is the same as writing
+//!
+//! ```yaml
+//! root: !pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }
+//! ```
+//!
+//! — spliced in by [`apply_default`] *before* `!param` substitution, so those
+//! two placeholders resolve out of `--params` like any the author wrote. Both
+//! are **optional**: an unset one drops its key rather than erroring, so a
+//! document with neither supplied falls all the way back to `!pick {}` — the
+//! sole-atom unpack, which is exactly what a one-series input wants. The CLI
+//! closes the last gap by seeding `SYMBOL` from a single-series `--series`
+//! frame, so an omitted `root:` still yields a symbol to route orders through.
+//!
 //! # How an expression still answers a static question
 //!
 //! Three consumers read the traded symbol out of the document *before* anything
@@ -98,6 +114,24 @@ impl RootSpec {
         Self::for_series(symbol, None)
     }
 
+    /// The root that names nothing — `!pick {}`, the sole-atom unpack.
+    ///
+    /// What a document's [default root](apply_default) collapses to when
+    /// neither `SYMBOL` nor `FREQ` is supplied: every `source:`-omitted leaf
+    /// reads the one entry each snapshot carries, which is the whole of a
+    /// single-series input. It names no *traded* symbol, so a shape that has to
+    /// route an order still owes one — [`sole_symbol`](Self::sole_symbol) is
+    /// where that is asked for.
+    pub fn sole() -> Self {
+        let tree = serde_json::json!({ "pick": serde_json::Map::new() });
+        let node = serde_json::from_value::<NodeSpec>(tree.clone())
+            .expect("`!pick {}` is always a well-formed root");
+        Self {
+            tree,
+            node: Box::new(node),
+        }
+    }
+
     /// The expression to build. Handed to
     /// [`Root::blessed`](super::expr::Root::blessed).
     pub fn node(&self) -> &NodeSpec {
@@ -146,6 +180,18 @@ impl RootSpec {
         Some((field("symbol")?, stream))
     }
 
+    /// Is this root still holding an unresolved placeholder?
+    ///
+    /// True only under `fugazi check`, which substitutes an unset required
+    /// `!param` to a [hole](super::undefined) instead of erroring. Every other
+    /// slot answers a hole with a typed zero and builds on regardless; a root
+    /// cannot, because there is no symbol to route orders through — so `check`
+    /// asks this before building rather than reporting a document error for a
+    /// document whose only gap is a value nobody passed.
+    pub fn has_hole(&self) -> bool {
+        super::undefined::contains_hole(&self.tree)
+    }
+
     /// The resolved untyped tree this root parsed from.
     pub fn tree(&self) -> &serde_json::Value {
         &self.tree
@@ -172,7 +218,9 @@ impl RootSpec {
             (Some(one), None) => Ok(one),
             (None, _) => Err(
                 "`root:` names no symbol, so there is nothing to trade or to \
-                 slice the input by — name one, e.g. `root: !pick { symbol: BTCUSDT }`"
+                 slice the input by — write one (`root: !pick { symbol: BTCUSDT }`), \
+                 pass `--params SYMBOL=…`, or run against a single-series input, \
+                 whose sole symbol the CLI fills in"
                     .to_string(),
             ),
             (Some(a), Some(b)) => {
@@ -219,6 +267,99 @@ impl RootSpec {
     }
 }
 
+/// The sole-atom root — see [`RootSpec::sole`]. This is what a `root:`-less
+/// document lands on once its `SYMBOL` / `FREQ` placeholders resolve to
+/// nothing, and it is also the `#[serde(default)]` every root-bearing field
+/// carries, so a tree that never went through [`apply_default`] — a portfolio
+/// child, a `!sharpe { strategy: … }` subtree, a hand-built
+/// `serde_json::from_value` — defaults the same way.
+impl Default for RootSpec {
+    fn default() -> Self {
+        Self::sole()
+    }
+}
+
+/// Splice the default `root:` into a **single-asset** document tree that omits
+/// one — a full spec map, or a preset tag's payload.
+///
+/// Runs on the untyped tree *before* `!param` substitution, which is the whole
+/// point: what it splices is the ordinary expression
+///
+/// ```yaml
+/// !pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }
+/// ```
+///
+/// so both placeholders resolve out of `--params` exactly like ones the author
+/// wrote, under [`substitute`](super::params::substitute) and
+/// [`substitute_for_check`](super::params::substitute_for_check) alike. Each
+/// carries `default: null` rather than being required, and `desugar` drops a
+/// null selector field — that is what makes "leave `SYMBOL` unset" mean *omit
+/// the key* rather than *error*.
+///
+/// **The shape rule lives here, and only here.** `root:` is a key only the
+/// single-asset shape (and its preset spelling) accepts; every other shape
+/// carries `deny_unknown_fields`, so splicing one into a `basket:` document
+/// would turn a good document into a parse error. And the shape cannot be
+/// recovered from the tree: once `root:` may be absent, a `single:` document is
+/// structurally identical to a `multi:` one — both are a bare `long:` /
+/// `short:` map. Hence the `kind` parameter. Callers pass the kind they already
+/// hold (the CLI's shape prefix, Python's `kind=`) and never re-implement the
+/// policy; [`load_document`](super::load_document) is the loader that does it
+/// for them.
+pub fn apply_default(
+    value: serde_json::Value,
+    kind: super::input::StrategyKind,
+) -> serde_json::Value {
+    if !matches!(kind, super::input::StrategyKind::Single) {
+        return value;
+    }
+    let serde_json::Value::Object(mut map) = value else {
+        // Not a document map at all (a bare scalar, a list). Whatever it is,
+        // the typed parse owns the error message.
+        return value;
+    };
+    // A preset arrives as a single-key map — `{buy_and_hold: {root: …}}` — so
+    // the `root:` to default lives one level down, in the payload.
+    if map.len() == 1
+        && let Some(tag) = map.keys().next().cloned()
+        && super::preset::PRESET_TAGS.contains(&tag.as_str())
+    {
+        let payload = map.remove(&tag).expect("key just read");
+        map.insert(
+            tag,
+            apply_default(payload, super::input::StrategyKind::Single),
+        );
+        return serde_json::Value::Object(map);
+    }
+    if !map.contains_key("root") {
+        map.insert("root".into(), default_tree());
+    }
+    serde_json::Value::Object(map)
+}
+
+/// The `--params` name the default root reads its symbol from.
+///
+/// Exported because it is *ambient*: the CLI seeds it from a single-series
+/// input, so the name has to be spelled identically in two places and this is
+/// the one definition of it.
+pub const SYMBOL_PARAM: &str = "SYMBOL";
+
+/// The `--params` name the default root reads its cadence from. See
+/// [`SYMBOL_PARAM`].
+pub const FREQ_PARAM: &str = "FREQ";
+
+/// The untyped tree [`apply_default`] splices. Public so a caller can show a
+/// user what an omitted `root:` expands to, and so the tests assert against the
+/// one definition rather than a copy of it.
+pub fn default_tree() -> serde_json::Value {
+    serde_json::json!({
+        "pick": {
+            "symbol": { "param": { "key": SYMBOL_PARAM, "default": null } },
+            "freq": { "param": { "key": FREQ_PARAM, "default": null } },
+        }
+    })
+}
+
 /// Captures the untyped tree, then parses the typed node out of it.
 ///
 /// Format-agnostic on purpose: a document reaches here as `serde_json::Value`
@@ -236,7 +377,13 @@ impl<'de> Deserialize<'de> for RootSpec {
         // not meant to be read as one. Demanding `atom` of it would turn every
         // `check` of a parameterized root into a false failure, so the demand
         // stands down exactly where the tree is admittedly incomplete.
-        if !super::undefined::contains_hole(&tree) {
+        if super::undefined::contains_hole(&tree) {
+            // …and report the placeholder, which nothing else on this path
+            // would: the re-parse below is plain `serde_json`, outside the
+            // hole-aware deserializer that records these. A root's placeholder
+            // stands for a symbol, so `Str`. See `undefined::observe_json`.
+            super::undefined::observe_json(&tree, super::undefined::RequiredType::Str);
+        } else {
             require_atom(&node).map_err(D::Error::custom)?;
         }
         Ok(Self {
@@ -246,16 +393,31 @@ impl<'de> Deserialize<'de> for RootSpec {
     }
 }
 
-/// `root: BTCUSDT` → `root: !pick { symbol: BTCUSDT }`.
+/// `root: BTCUSDT` → `root: !pick { symbol: BTCUSDT }`, and a null selector
+/// field on a `!pick` root → that field omitted.
 ///
-/// Needed because [`NodeSpec`]'s own bridge reads a bare string as a *tag name*
-/// (`close` → `NodeSpec::Close`), so an unrewritten symbol would come back as an
-/// unknown variant. Keeping the terse spelling matters: it is what every
-/// document that used to say `symbol: BTCUSDT` becomes, so the migration is a
-/// rename of the key and nothing else.
+/// The string rewrite is needed because [`NodeSpec`]'s own bridge reads a bare
+/// string as a *tag name* (`close` → `NodeSpec::Close`), so an unrewritten
+/// symbol would come back as an unknown variant. Keeping the terse spelling
+/// matters: it is what every document that used to say `symbol: BTCUSDT`
+/// becomes, so the migration is a rename of the key and nothing else.
+///
+/// The null drop is what lets the [default root](apply_default) degrade
+/// cleanly. `symbol: null` already *parses* — the field is an `Option` — but it
+/// parses as a present, non-string entry, and [`as_pick`](RootSpec::as_pick)
+/// answers `None` to those. That would cost the `Pick::rooted` fast path its
+/// sole-atom fallback and turn an unset `SYMBOL` into a silent zero-fill run.
+/// Removing the key instead leaves a root byte-identical to one the author
+/// never wrote.
 fn desugar(tree: serde_json::Value) -> serde_json::Value {
     match tree {
         serde_json::Value::String(sym) => serde_json::json!({ "pick": { "symbol": sym } }),
+        serde_json::Value::Object(mut map) if map.len() == 1 && map.contains_key("pick") => {
+            if let Some(serde_json::Value::Object(body)) = map.get_mut("pick") {
+                body.retain(|_, v| !v.is_null());
+            }
+            serde_json::Value::Object(map)
+        }
         other => other,
     }
 }
@@ -281,6 +443,7 @@ fn require_atom(node: &NodeSpec) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::input::StrategyKind;
 
     fn root(yaml: &str) -> RootSpec {
         let v = super::super::input::parse_value(yaml).expect("parse");
@@ -372,6 +535,95 @@ mod tests {
             Some("4h")
         );
         assert_eq!(root("!pick { symbol: BTC }").declared_freq(), None);
+    }
+
+    #[test]
+    fn an_omitted_root_is_defaulted_from_symbol_and_freq() {
+        let doc = super::super::input::parse_value("long:\n  enter: !always\n").unwrap();
+        let doc = apply_default(doc, StrategyKind::Single);
+        assert_eq!(doc.get("root"), Some(&default_tree()));
+
+        let params = [
+            ("SYMBOL".to_string(), serde_json::json!("BTCUSDT")),
+            ("FREQ".to_string(), serde_json::json!("4h")),
+        ]
+        .into_iter()
+        .collect();
+        let doc = super::super::params::substitute(doc, &params).unwrap();
+        let r: RootSpec = serde_json::from_value(doc["root"].clone()).unwrap();
+        assert_eq!(r.as_pick(), Some((Some("BTCUSDT"), Some("4h"))));
+        assert_eq!(r.declared_freq(), Some("4h"));
+    }
+
+    /// The half the whole design turns on: an unset `SYMBOL` / `FREQ` must
+    /// *drop its key*, not error and not leave a null behind — a null would
+    /// cost `as_pick` its answer, and with it `Pick::rooted`'s sole-atom
+    /// fallback, which is a silent zero-fill run rather than a message.
+    #[test]
+    fn an_unset_symbol_or_freq_leaves_the_sole_atom_root() {
+        let doc = apply_default(serde_json::json!({}), StrategyKind::Single);
+        let doc = super::super::params::substitute(doc, &Default::default()).unwrap();
+        let r: RootSpec = serde_json::from_value(doc["root"].clone()).unwrap();
+        assert_eq!(r.tree(), &serde_json::json!({"pick": {}}));
+        assert_eq!(r.as_pick(), Some((None, None)));
+        assert!(r.named_symbols().is_empty());
+
+        // Only one of the two supplied is the same story, one key down.
+        let params = [("SYMBOL".to_string(), serde_json::json!("ETH"))]
+            .into_iter()
+            .collect();
+        let doc = super::super::params::substitute(
+            apply_default(serde_json::json!({}), StrategyKind::Single),
+            &params,
+        )
+        .unwrap();
+        let r: RootSpec = serde_json::from_value(doc["root"].clone()).unwrap();
+        assert_eq!(r.tree(), &serde_json::json!({"pick": {"symbol": "ETH"}}));
+        assert_eq!(r.as_pick(), Some((Some("ETH"), None)));
+    }
+
+    /// `check` substitutes through a different pass; the default's placeholders
+    /// carry a `default:`, so they resolve there too rather than becoming holes
+    /// that would make every `root:`-less document look under-specified.
+    #[test]
+    fn the_default_root_resolves_under_check_substitution_too() {
+        let (doc, holes) = super::super::params::substitute_for_check(
+            apply_default(serde_json::json!({}), StrategyKind::Single),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(holes, 0);
+        let r: RootSpec = serde_json::from_value(doc["root"].clone()).unwrap();
+        assert_eq!(r.tree(), &serde_json::json!({"pick": {}}));
+    }
+
+    #[test]
+    fn an_explicit_root_is_never_overwritten() {
+        let doc = serde_json::json!({"root": "BTC", "long": {"enter": "always"}});
+        assert_eq!(apply_default(doc.clone(), StrategyKind::Single), doc);
+    }
+
+    /// A preset carries its `root:` one level down, inside the tag's payload.
+    #[test]
+    fn a_preset_is_defaulted_inside_its_payload() {
+        let doc = apply_default(
+            serde_json::json!({"ma_crossover": {"fast": 3, "slow": 8}}),
+            StrategyKind::Single,
+        );
+        assert_eq!(doc["ma_crossover"]["root"], default_tree());
+        // …and an unknown single-key map is not a preset, so it is defaulted as
+        // the ordinary document map it is.
+        let doc = apply_default(
+            serde_json::json!({"long": {"enter": "always"}}),
+            StrategyKind::Single,
+        );
+        assert_eq!(doc["root"], default_tree());
+    }
+
+    #[test]
+    fn the_serde_default_is_the_sole_atom_root() {
+        assert_eq!(RootSpec::default().tree(), &serde_json::json!({"pick": {}}));
+        assert_eq!(RootSpec::sole().as_pick(), Some((None, None)));
     }
 
     #[test]

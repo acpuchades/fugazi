@@ -948,6 +948,10 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // (see `spec::undefined`).
     let value = spec::load_value_pre_params(&text, &base, &root, &label)
         .with_context(|| parse_error_hint(&args.strategy))?;
+    // Fill in the shape's defaulted keys (the single-asset `root:`) before
+    // substitution, so `check` validates the same tree `run` will build. The
+    // policy is `spec::root::apply_default`'s; this only says which shape.
+    let value = spec::root::apply_default(value, args.strategy.kind);
     // The site count is discarded: the report below counts distinct placeholder
     // *names* instead, which is what the user has to supply values for.
     let (value, _n_hole_sites) = params::substitute_for_check(value, &param_table)
@@ -984,6 +988,24 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // rather than a symbol it could not resolve.
             let detail = match strategy.symbol() {
                 Ok(sym) => format!("root {sym}"),
+                // A root that is *exactly* the sole-atom selector is not a
+                // broken document: it is what a `root:`-less spec collapses to
+                // when `SYMBOL` is unset, and `run`/`optimize` resolve it from a
+                // single-series input. `check` has no data, so it reports the
+                // pending resolution rather than the analyser's "name one".
+                //
+                // `as_pick`, not `named_symbols().is_empty()` — the latter is
+                // also true of a root held as an unresolved `!param` hole, and
+                // that one really is under-specified: the placeholder line
+                // above is what tells the user about it, and claiming the input
+                // will supply it would be wrong.
+                Err(_) if is_sole_atom_root(strategy.root()) => {
+                    "root from a single-series --series (no SYMBOL param)".to_string()
+                }
+                // A root still holding an unset `!param`. The placeholder line
+                // above already names it and the type it needs; repeating the
+                // analyser's "name one" here would read as a document error.
+                Err(_) if strategy.root().has_hole() => "root pending a --params value".to_string(),
                 Err(e) => format!("root {e}"),
             };
             (
@@ -1083,7 +1105,20 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let holes = observations
         .iter()
         .any(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined);
-    if !holes && !reads_overlay {
+    // Third "needs data" case, alongside a hole and an overlay read: a
+    // single-asset root left as the sole-atom selector. `try_build` demands a
+    // symbol to route orders through, and the `--series` frame is what supplies
+    // it — so building here would report a document the run will accept.
+    //
+    // Same for a root left as an unset `!param`. Every other placeholder
+    // answers a hole with a typed zero the build can proceed on; a root cannot
+    // — there is no symbol to route orders through — so building would report a
+    // *document* error for a document whose only gap is a value nobody passed.
+    let root_from_data = match &parsed {
+        spec::StrategySpec::Single(s) => is_sole_atom_root(s.root()) || s.root().has_hole(),
+        _ => false,
+    };
+    if !holes && !reads_overlay && !root_from_data {
         let schema = Arc::new(fugazi::Schema::default());
         parsed
             .try_build(DEFAULT_CHECK_CASH, &schema, None)
@@ -1151,6 +1186,17 @@ fn print_check_report(
             8,
         );
     }
+}
+
+/// Is this root the sole-atom selector — `!pick {}`, naming no symbol?
+///
+/// The one root `check` treats as *pending* rather than broken, because a
+/// single-series `--series` frame resolves it (see
+/// [`seed_sole_symbol`]). Deliberately `as_pick`-shaped: a root that is a
+/// nested expression, or an unresolved `!param` hole, also names no symbol, and
+/// neither of those is something the input will fill in.
+fn is_sole_atom_root(root: &spec::RootSpec) -> bool {
+    matches!(root.as_pick(), Some((None, _)))
 }
 
 fn check_costs(args: CheckCostsArgs) -> Result<()> {
@@ -1287,6 +1333,44 @@ fn load_frame(
     Ok(frame)
 }
 
+/// Seed `SYMBOL` from a **single-series** input when the user didn't pass it.
+///
+/// A single-asset document may omit `root:`, in which case it defaults to
+/// `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` (see
+/// [`fugazi::spec::root::apply_default`]). An unset `SYMBOL` drops the key,
+/// leaving the sole-atom root `!pick {}` — which reads the right bars but names
+/// no symbol to route orders through, and a single-asset strategy needs one.
+///
+/// A one-symbol frame answers that unambiguously, so fill it in rather than
+/// making the user write the instrument twice. Deliberately narrow:
+///
+/// - **Single-asset shapes only.** Every other shape trades a universe, and a
+///   lone `SYMBOL` would mean nothing there.
+/// - **Only when the frame carries exactly one symbol.** Two or more and there
+///   is nothing to infer; the build error naming the absent root is correct.
+/// - **Never over an explicit value.** A `--params SYMBOL=…` entry — a scalar,
+///   a sweep list, or a `--pooled` axis — wins outright.
+///
+/// `FREQ` is deliberately *not* seeded: a `!pick` with no `freq` already matches
+/// whatever stream the symbol carries, and `DataFrame::atoms` refuses a symbol
+/// carrying two — so filling it in could only ever subtract.
+fn seed_sole_symbol(
+    table: &mut HashMap<String, serde_json::Value>,
+    frame: &data::DataFrame,
+    kind: StrategyKind,
+) {
+    use fugazi::spec::root::SYMBOL_PARAM;
+    if !matches!(kind, StrategyKind::Single) || table.contains_key(SYMBOL_PARAM) {
+        return;
+    }
+    if let [only] = frame.symbols().as_slice() {
+        table.insert(
+            SYMBOL_PARAM.to_string(),
+            serde_json::Value::String(only.clone()),
+        );
+    }
+}
+
 fn run(args: RunArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     let frame = load_frame(&args.series, &args.frequency)?;
@@ -1311,7 +1395,8 @@ fn run(args: RunArgs) -> Result<()> {
     )?;
     let costs_were_supplied = !args.costs.is_empty();
 
-    let param_table = params::table(&args.params)?;
+    let mut param_table = params::table(&args.params)?;
+    seed_sole_symbol(&mut param_table, &frame, args.strategy.kind);
 
     // `--pooled AXIS`: this run reduces over a panel of members instead of
     // resolving to one series. Extracted here, before the params label and the
@@ -1547,7 +1632,7 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 fn optimize(args: OptimizeArgs) -> Result<()> {
-    let param_table = params::table(&args.params)?;
+    let mut param_table = params::table(&args.params)?;
     optimize::reject_axes_in_params(&param_table)?;
     // `--smooth` presence is what turns smoothing on; `--smooth-min-support`
     // only tunes it, so it collapses to 0.0 the same way `-k` does. Clap
@@ -1569,6 +1654,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .collect::<Result<_>>()?;
     let text = args.strategy.read().context("reading strategy")?;
     let frame = load_frame(&args.series, &args.frequency)?;
+    seed_sole_symbol(&mut param_table, &frame, args.strategy.kind);
     let base = args.strategy.base_dir();
     let root = import_root(&args.import_root, &base);
 

@@ -187,11 +187,29 @@ out through the `atom_src` / `atom_src_any` closures.
 `!resample` feeding its `inner:`, the `Vec<Candle>` / `Vec<Atom>` drivers — reads `None`
 on every bar without it, and reports a silent zero-fill backtest.
 
+**`root:` is optional on the single-asset shape**, and its default is spliced into the
+*untyped* tree by `spec::root::apply_default` — `!pick { symbol: !param SYMBOL, freq:
+!param FREQ }`, each placeholder carrying `default: null` so an unset one **drops its
+key** (`RootSpec::desugar` retains non-nulls) rather than erroring. Two consequences:
+the splice must happen **before** `params::substitute`, so it lives in the loaders that
+already know the shape (`spec::load_single_value`, `cli::main`'s `check` arm,
+`cli::optimize`'s `base_value`, Python's `load_loaded_spec`) and never in `load_value`;
+and a `root:`-less document is structurally a `multi:` one, so `python`'s
+`detect_kind("auto")` reads it as `multi`. Neither param set → `RootSpec::sole()`
+(`!pick {}`), which reads the right bars but names no traded symbol — `cli::main`'s
+`seed_sole_symbol` fills `SYMBOL` from a one-symbol `--series` frame, and `check` reports
+the pending resolution instead of building. The shape rule lives **only** in
+`apply_default`, which takes a `StrategyKind`; every caller passes the kind it already
+holds. The published default is `root::default_tree()`, surfaced on the document JSON
+schema as the `single` shape's `root` `default` (pinned by `tests/spec_json_schema.rs`) —
+that schema's root is an **`anyOf`**, not a `oneOf`, since a `root:`-less document is
+structurally both a `single` and a `multi`.
+
 **Who blesses what:**
 
 | Context | root |
 |---|---|
-| `SingleStrategySpec::build` | `Some(&self.root)` — the document's `root:` expression |
+| `SingleStrategySpec::build` | `Some(&self.root)` — the document's `root:` expression, or the `!param SYMBOL`/`FREQ` default when it omitted one |
 | `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(RootSpec::for_symbol(sym))` via `leg_root` |
 | overlay column, per `(symbol, freq)` series | `Some(group key)` via `cli::overlay::group_root` |
 | `PortfolioSpec` `weights:`, single-asset child | `Some(child.root())` |

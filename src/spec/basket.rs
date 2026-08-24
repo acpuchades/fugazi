@@ -306,7 +306,14 @@ impl BasketStrategySpec {
         label: &str,
     ) -> Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, root, label)?;
+        let value = super::load_document(
+            text,
+            params,
+            base,
+            root,
+            label,
+            super::input::StrategyKind::Basket,
+        )?;
         serde_json::from_value(value)
             .with_context(|| format!("building basket strategy from {label}"))
     }

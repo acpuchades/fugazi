@@ -105,6 +105,12 @@ Every candle in the input series is fed to the strategy in `time` order;
 the symbol the strategy's `root:` names (from its YAML spec) is what the
 driver filters on when the frame carries several symbols.
 
+A single-asset document may **omit `root:`** entirely, in which case it reads as
+`!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` — so
+`--params SYMBOL=…` picks the instrument, and a single-series input needs
+neither (`run` and `optimize` seed `SYMBOL` from a one-symbol frame). See
+[Omitting the root](STRATEGIES.md#omitting-the-root).
+
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--import-root <DIR>] [--pooled <AXIS>] [--cash <N>] [--costs <SPEC> …]
@@ -1630,6 +1636,13 @@ long:
 makes the param optional; without one, a missing value is an error. Substitution
 happens over the untyped YAML/JSON tree before the strategy is typed, so a
 param can stand in for a number, a string, or any other field.
+
+Two names are **ambient**: a single-asset document that omits `root:` gets
+`!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` spliced
+in before substitution, so `SYMBOL` and `FREQ` resolve out of `--params` like
+any other. Both are optional — an unset one drops its key — and `run` /
+`optimize` fill `SYMBOL` in from a single-series `--series` frame when you
+didn't. See [Omitting the root](STRATEGIES.md#omitting-the-root).
 
 ### `--costs`
 

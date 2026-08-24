@@ -234,6 +234,35 @@ def test_load_spec_with_params():
     assert spec.kind == "single"
 
 
+def test_an_omitted_root_defaults_to_the_symbol_param():
+    """`root:` is optional; omitted, it reads `!param SYMBOL` / `!param FREQ`.
+
+    `kind="single"` is not optional here, and that is the point: `root:` is what
+    tells a `single:` document from a `multi:` one, so a document without it is
+    genuinely ambiguous and `auto` reads it as `multi`.
+    """
+    yaml = "long:\n  enter: !value true\n  exit: !value false\n"
+    spec = ta.load_spec(yaml, params={"SYMBOL": "BTC"}, kind="single")
+    assert spec.kind == "single"
+
+    snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
+    assert rep.fills, "the defaulted root should name BTC and trade it"
+
+    # Same document with the root spelled out — identical run.
+    spelled = ta.load_spec("root: BTC\n" + yaml, kind="single")
+    spelled_fills = spelled.run(ta.PaperWallet(1000.0), snaps).fills
+    assert [repr(f) for f in spelled_fills] == [repr(f) for f in rep.fills]
+
+
+def test_an_omitted_root_with_no_symbol_param_is_a_build_error():
+    """Nothing to trade and no data to infer from — reported, never guessed."""
+    spec = ta.load_spec("long:\n  enter: !value true\n", kind="single")
+    with pytest.raises(ta.SpecError, match="names no symbol"):
+        spec.run(ta.PaperWallet(1000.0), _snaps_single("BTC", [100.0, 101.0]))
+
+
 def test_load_spec_explicit_kind_override():
     """Passing `kind=` bypasses auto-detection."""
     spec = ta.load_spec(

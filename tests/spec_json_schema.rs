@@ -149,10 +149,12 @@ fn document_schema_is_well_formed() {
         assert!(defs.contains_key(name), "missing $defs/{name}");
     }
 
-    // Root is a oneOf over exactly the five shapes.
-    let root: BTreeSet<String> = schema["oneOf"]
+    // Root is an `anyOf` over exactly the five shapes — `anyOf` because a
+    // document that omits the optional `root:` is structurally both a `single`
+    // and a `multi`, and `oneOf` would reject what both shapes accept.
+    let root: BTreeSet<String> = schema["anyOf"]
         .as_array()
-        .expect("root oneOf")
+        .expect("root anyOf")
         .iter()
         .filter_map(|b| b.get("$ref").and_then(|r| r.as_str()))
         .map(|r| r.trim_start_matches("#/$defs/").to_string())
@@ -163,7 +165,26 @@ fn document_schema_is_well_formed() {
             .iter()
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>(),
-        "document root must be a oneOf of the five shapes"
+        "document root must be an anyOf of the five shapes"
+    );
+
+    // The single-asset `root:` is optional, and the schema *publishes* what
+    // omitting it means. A consumer rendering "defaults to …" reads this;
+    // pinning it to `root::default_tree` is what stops the published answer
+    // drifting from the one the loader actually splices.
+    let single = &defs["single"];
+    assert!(
+        !single["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .any(|k| k == "root"),
+        "`root:` is optional on the single-asset shape"
+    );
+    assert_eq!(
+        single["properties"]["root"]["default"],
+        fugazi::spec::root::default_tree(),
+        "the schema's published default root must be the one the loader splices"
     );
 
     // Every $ref resolves.

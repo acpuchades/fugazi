@@ -222,7 +222,14 @@ impl PairsStrategySpec {
         label: &str,
     ) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let value = super::load_value(text, params, base, root, label)?;
+        let value = super::load_document(
+            text,
+            params,
+            base,
+            root,
+            label,
+            super::input::StrategyKind::Pairs,
+        )?;
         serde_json::from_value(value)
             .with_context(|| format!("building pairs strategy from {label}"))
     }

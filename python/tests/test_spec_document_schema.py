@@ -58,11 +58,18 @@ _MINIMAL = {
 
 
 def _which_shape(schema, doc):
-    """The shape def(s) `doc` validates against — should be exactly one."""
+    """Every shape def `doc` validates against.
+
+    Usually exactly one. Not always: `root:` is optional on the single-asset
+    shape (it defaults to `!pick { symbol: !param SYMBOL, freq: !param FREQ }`),
+    and a document that omits it is a bare `long:` / `short:` map — which is
+    also exactly what a `multi:` document is. The schema's root is an `anyOf`
+    for that reason, and the shape comes from the caller.
+    """
     matched = []
-    for branch in schema["oneOf"]:
+    for branch in schema["anyOf"]:
         name = branch["$ref"].split("/")[-1]
-        sub = dict(schema)
+        sub = {k: v for k, v in schema.items() if k != "anyOf"}
         sub["$ref"] = branch["$ref"]
         if jsonschema.Draft202012Validator(sub).is_valid(doc):
             matched.append(name)
@@ -91,9 +98,45 @@ def test_example_documents_validate_as_their_shape():
 def test_minimal_multi_and_portfolio_validate():
     schema = ta.spec_document_json_schema()
     for shape, doc in _MINIMAL.items():
-        assert _which_shape(schema, doc) == [shape], (
+        assert shape in _which_shape(schema, doc), (
             f"minimal {shape} doc matched {_which_shape(schema, doc)}"
         )
+        assert jsonschema.Draft202012Validator(schema).is_valid(doc)
+
+
+def test_a_rootless_document_is_both_a_single_and_a_multi():
+    """The one place two shapes overlap, and why the root is an `anyOf`.
+
+    `root:` is optional on the single-asset shape, so a document that omits it
+    is indistinguishable from a `multi:` one — both are a bare `long:` /
+    `short:` map. The schema must accept it (it is a valid document either way)
+    rather than reject it for matching twice, which is what `oneOf` would do.
+    """
+    schema = ta.spec_document_json_schema()
+    doc = _MINIMAL["multi"]
+    assert set(_which_shape(schema, doc)) == {"single", "multi"}
+    assert jsonschema.Draft202012Validator(schema).is_valid(doc)
+    # Spelled out, it is unambiguously a single-asset document again.
+    rooted = dict(doc, root="BTC")
+    assert _which_shape(schema, rooted) == ["single"]
+
+
+def test_the_single_shape_publishes_its_default_root():
+    """`root:` is optional, and the schema says what omitting it means.
+
+    A consumer that renders "defaults to …" reads this rather than hardcoding
+    the expansion. It is the pre-substitution value — the two `!param`
+    placeholders are what the loader splices, and an unset one drops its key.
+    """
+    schema = ta.spec_document_json_schema()
+    single = schema["$defs"]["single"]
+    assert "root" not in single["required"]
+    assert single["properties"]["root"]["default"] == {
+        "pick": {
+            "symbol": {"param": {"key": "SYMBOL", "default": None}},
+            "freq": {"param": {"key": "FREQ", "default": None}},
+        }
+    }
 
 
 def test_malformed_documents_are_rejected():

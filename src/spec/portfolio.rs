@@ -513,7 +513,14 @@ impl PortfolioSpec {
         root: &std::path::Path,
         label: &str,
     ) -> Result<Self> {
-        let value = super::load_value(text, params, base, root, label)?;
+        let value = super::load_document(
+            text,
+            params,
+            base,
+            root,
+            label,
+            super::input::StrategyKind::Portfolio,
+        )?;
         serde_json::from_value(value)
             .with_context(|| format!("building portfolio strategy from {label}"))
     }
