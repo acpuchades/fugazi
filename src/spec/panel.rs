@@ -131,6 +131,148 @@ pub fn pool_metric(members: &[PanelMetrics], path: &str) -> Option<Pooled> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Effective breadth
+// ---------------------------------------------------------------------------
+
+/// Below this many shared bars a pair reports no correlation at all.
+///
+/// A coefficient over a handful of points is not a weak reading, it is noise —
+/// and here it would propagate straight into a headline that claims to say how
+/// much evidence a panel holds. The same floor `pool_metric`'s "defined vs
+/// members" split draws for a metric, drawn for a pair.
+pub const MIN_SHARED_BARS: usize = 30;
+
+/// How many *independent* members a panel is actually worth.
+///
+/// A pooled row reports `N` hypotheses instead of `N×M`, which is the honest
+/// count — but it invites the reading that `M` members are `M` pieces of
+/// evidence, and for a panel of one market's worth of instruments they are not.
+/// Thirty crypto pairs that all track the same beta are worth about one; a
+/// pooled Sharpe over them deserves roughly the confidence of a single
+/// backtest, not thirty.
+///
+/// The reading is the standard one for an equal-weighted mean of `M`
+/// estimators with average pairwise correlation `ρ̄`:
+///
+/// ```text
+/// effective = M / (1 + (M − 1)·ρ̄)
+/// ```
+///
+/// It is deliberately a *reported* number rather than a correction applied to
+/// anything. What a caller does with it — deflate against it, widen an
+/// interval, or go and find less correlated members — is a decision this crate
+/// has no basis to make for them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Breadth {
+    /// Members with enough history to be correlated against anything.
+    pub members: usize,
+    /// Pairs that cleared [`MIN_SHARED_BARS`] and were actually measured.
+    pub pairs: usize,
+    /// Mean pairwise Pearson correlation over those pairs.
+    pub mean_correlation: Real,
+    /// `members / (1 + (members − 1)·mean_correlation)`.
+    pub effective: Real,
+}
+
+/// Pearson correlation of two equal-length samples, or `None` when either is
+/// constant — a flat series has no variance to share, which is a different
+/// answer from "uncorrelated" and must not be averaged in as zero.
+fn pearson(xs: &[Real], ys: &[Real]) -> Option<Real> {
+    let n = xs.len().min(ys.len());
+    if n < 2 {
+        return None;
+    }
+    let mean_x = xs[..n].iter().sum::<Real>() / n as Real;
+    let mean_y = ys[..n].iter().sum::<Real>() / n as Real;
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (dx, dy) = (xs[i] - mean_x, ys[i] - mean_y);
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    let denominator = (sxx * syy).sqrt();
+    if !denominator.is_finite() || denominator <= 0.0 {
+        return None;
+    }
+    let r = sxy / denominator;
+    r.is_finite().then_some(r.clamp(-1.0, 1.0))
+}
+
+/// The effective breadth of a panel, from each member's `(bar keys, per-bar
+/// values)`.
+///
+/// **Each pair is joined on its own shared keys**, never on a global
+/// intersection: a member that listed last week overlaps the rest by a
+/// fortnight, and intersecting everything first would collapse the axis every
+/// other pair is measured on down to that. The same rule
+/// [`PanelAxis::member_range`] follows for folds, applied to correlation.
+///
+/// `None` when fewer than two members clear [`MIN_SHARED_BARS`] against
+/// anything, or when no pair could be measured. Reporting the member count
+/// there would be answering a question nobody could check.
+///
+/// A **negative** mean correlation is floored at zero rather than allowed
+/// through. Such a panel really does carry more independent information than
+/// its member count, but the denominator crosses zero on the way to saying so
+/// and reports an infinite breadth, which is a claim no panel supports.
+pub fn effective_breadth(members: &[(&[i64], &[Real])]) -> Option<Breadth> {
+    let usable: Vec<&(&[i64], &[Real])> = members
+        .iter()
+        .filter(|(keys, values)| keys.len().min(values.len()) >= MIN_SHARED_BARS)
+        .collect();
+    if usable.len() < 2 {
+        return None;
+    }
+    let mut coefficients: Vec<Real> = Vec::new();
+    for (i, a) in usable.iter().enumerate() {
+        for b in usable.iter().skip(i + 1) {
+            let (xs, ys) = shared(a, b);
+            if xs.len() < MIN_SHARED_BARS {
+                continue;
+            }
+            if let Some(r) = pearson(&xs, &ys) {
+                coefficients.push(r);
+            }
+        }
+    }
+    if coefficients.is_empty() {
+        return None;
+    }
+    let m = usable.len();
+    let mean_correlation = coefficients.iter().sum::<Real>() / coefficients.len() as Real;
+    let denominator = 1.0 + (m as Real - 1.0) * mean_correlation.max(0.0);
+    Some(Breadth {
+        members: m,
+        pairs: coefficients.len(),
+        mean_correlation,
+        effective: m as Real / denominator,
+    })
+}
+
+/// The two members' values at the bar keys they share, in key order. Both
+/// members' keys are strictly ascending ([`MemberAxis::from_keys`] refuses
+/// otherwise), so this is a merge rather than a lookup table.
+fn shared(a: &(&[i64], &[Real]), b: &(&[i64], &[Real])) -> (Vec<Real>, Vec<Real>) {
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    let (an, bn) = (a.0.len().min(a.1.len()), b.0.len().min(b.1.len()));
+    while i < an && j < bn {
+        match a.0[i].cmp(&b.0[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                xs.push(a.1[i]);
+                ys.push(b.1[j]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    (xs, ys)
+}
+
 /// The `{pooled: {...}, members: {...}}` document a pooled `metrics.yml`
 /// writes: every metric path's cross-member `mean`/`std`/`defined`/`members`,
 /// plus every member's own whole metrics document keyed by name — the same
@@ -483,6 +625,54 @@ impl PanelWalkForward {
     /// Pool one metric across the per-member composites.
     pub fn composite_metric(&self, path: &str) -> Option<Pooled> {
         pool_metric(&self.composite_members(), path)
+    }
+
+    /// Each composite's bar keys, in the order its equity was stitched.
+    ///
+    /// Rebuilt the way the stitch was built — fold by fold, through
+    /// [`PanelAxis::member_ranges`] — rather than stored beside the curve,
+    /// because the two would then be a pair that could drift. A fold in which a
+    /// member had no bars contributed nothing to its curve and contributes
+    /// nothing here.
+    pub fn composite_keys(&self) -> Vec<Vec<i64>> {
+        let mut out = vec![Vec::new(); self.composites.len()];
+        for row in &self.fold_rows {
+            for (m, range) in self
+                .axis
+                .member_ranges(row.oos.clone())
+                .into_iter()
+                .enumerate()
+            {
+                if let Some(keys) = out.get_mut(m) {
+                    keys.extend_from_slice(&self.axis.members[m].keys[range]);
+                }
+            }
+        }
+        out
+    }
+
+    /// How many *independent* members this panel's out-of-sample results are
+    /// worth — see [`effective_breadth`].
+    ///
+    /// Measured on the composites' **own** returns rather than on the members'
+    /// price series, and the distinction is the whole reading: what a pooled
+    /// figure rests on is how much the *results* co-moved, not how much the
+    /// instruments did. A strategy that trades two correlated markets at
+    /// different times produces two more nearly independent curves than their
+    /// prices would suggest, and it should be credited for it.
+    pub fn effective_breadth(&self) -> Option<Breadth> {
+        let keys = self.composite_keys();
+        let returns: Vec<Vec<Real>> = self
+            .composites
+            .iter()
+            .map(|c| crate::metrics::per_bar_returns(&c.equity, self.cash))
+            .collect();
+        let members: Vec<(&[i64], &[Real])> = keys
+            .iter()
+            .zip(returns.iter())
+            .map(|(k, r)| (k.as_slice(), r.as_slice()))
+            .collect();
+        effective_breadth(&members)
     }
 }
 
@@ -939,5 +1129,110 @@ mod tests {
         let a = axis("A", &[1, 2]);
         let err = PanelAxis::new(vec![a], 10).unwrap_err();
         assert!(err.to_string().contains("readiness"), "{err}");
+    }
+
+    // --- effective breadth -------------------------------------------------
+
+    /// `(keys, values)` for a member on a daily clock starting at `start`.
+    fn series(start: i64, values: Vec<Real>) -> (Vec<i64>, Vec<Real>) {
+        let keys = (0..values.len() as i64)
+            .map(|i| start + i * 86_400_000)
+            .collect();
+        (keys, values)
+    }
+
+    fn breadth_of(members: &[(Vec<i64>, Vec<Real>)]) -> Option<Breadth> {
+        let refs: Vec<(&[i64], &[Real])> = members
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+        effective_breadth(&refs)
+    }
+
+    #[test]
+    fn identical_members_are_worth_one() {
+        // The reading the whole thing exists for: a panel of one market wearing
+        // three names is one piece of evidence, not three.
+        let wave: Vec<Real> = (0..60).map(|i| ((i as Real) * 0.7).sin() * 0.01).collect();
+        let members = vec![
+            series(0, wave.clone()),
+            series(0, wave.clone()),
+            series(0, wave),
+        ];
+        let b = breadth_of(&members).expect("three members share a clock");
+        assert_eq!(b.members, 3);
+        assert_eq!(b.pairs, 3);
+        assert!((b.mean_correlation - 1.0).abs() < 1e-9, "{b:?}");
+        assert!((b.effective - 1.0).abs() < 1e-9, "{b:?}");
+    }
+
+    #[test]
+    fn uncorrelated_members_are_worth_their_count() {
+        // Orthogonal by construction: a sine and a cosine over a whole number of
+        // periods have zero sample correlation.
+        let n = 120;
+        let a: Vec<Real> = (0..n)
+            .map(|i| ((i as Real) * std::f64::consts::TAU / 60.0).sin())
+            .collect();
+        let b: Vec<Real> = (0..n)
+            .map(|i| ((i as Real) * std::f64::consts::TAU / 60.0).cos())
+            .collect();
+        let members = vec![series(0, a), series(0, b)];
+        let got = breadth_of(&members).expect("two members share a clock");
+        assert!(got.mean_correlation.abs() < 0.05, "{got:?}");
+        assert!((got.effective - 2.0).abs() < 0.2, "{got:?}");
+    }
+
+    #[test]
+    fn a_negatively_correlated_panel_does_not_report_infinite_breadth() {
+        // The denominator crosses zero on the way to saying "more independent
+        // than its count", so the mean is floored at 0 and the answer caps at M.
+        let wave: Vec<Real> = (0..60).map(|i| ((i as Real) * 0.7).sin() * 0.01).collect();
+        let inverted: Vec<Real> = wave.iter().map(|v| -v).collect();
+        let members = vec![series(0, wave), series(0, inverted)];
+        let b = breadth_of(&members).expect("two members share a clock");
+        assert!(b.mean_correlation < -0.9, "{b:?}");
+        assert!(
+            b.effective.is_finite() && (b.effective - 2.0).abs() < 1e-9,
+            "{b:?}"
+        );
+    }
+
+    #[test]
+    fn each_pair_is_joined_on_its_own_shared_bars() {
+        // A late lister overlaps the others by a little; intersecting every
+        // member first would collapse the axis the other pair is measured on
+        // down to that overlap. It is measured on its own, or not at all.
+        let wave: Vec<Real> = (0..90).map(|i| ((i as Real) * 0.7).sin() * 0.01).collect();
+        let members = vec![
+            series(0, wave.clone()),
+            series(0, wave.iter().map(|v| v * 1.1).collect()),
+            // Starts 70 bars in: 20 shared bars with each of the others, under
+            // MIN_SHARED_BARS, so it contributes no pair at all.
+            series(70 * 86_400_000, wave[..40].to_vec()),
+        ];
+        let b = breadth_of(&members).expect("the first two share a clock");
+        assert_eq!(
+            b.pairs, 1,
+            "only the well-overlapped pair is measurable: {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_nothing_can_be_measured_on_reports_nothing() {
+        // Not the member count. Reporting 3 here would be answering a question
+        // nobody could check.
+        let short: Vec<Real> = vec![0.01; 5];
+        let members = vec![series(0, short.clone()), series(0, short)];
+        assert!(breadth_of(&members).is_none());
+    }
+
+    #[test]
+    fn a_flat_member_has_no_correlation_to_share() {
+        // A constant series has no variance, which is a different answer from
+        // "uncorrelated" and must not be averaged in as a zero.
+        let wave: Vec<Real> = (0..60).map(|i| ((i as Real) * 0.7).sin() * 0.01).collect();
+        let members = vec![series(0, wave), series(0, vec![0.0; 60])];
+        assert!(breadth_of(&members).is_none());
     }
 }

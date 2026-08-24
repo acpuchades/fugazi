@@ -312,6 +312,10 @@ MEMBER_RETURNS = {
     ("PanelWalkForwardResult", "axis_len"): "int",
     ("PanelWalkForwardResult", "cash"): "float",
     ("PanelWalkForwardResult", "composites"): "list[MemberComposite]",
+    (
+        "PanelWalkForwardResult",
+        "effective_breadth",
+    ): "tuple[float, float, int, int] | None",
     ("PanelWalkForwardResult", "embargo_bars"): "int",
     ("PanelWalkForwardResult", "folds"): "list[PanelFold]",
     ("PanelWalkForwardResult", "is_bars"): "int",

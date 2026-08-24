@@ -1526,6 +1526,56 @@ into one account needs a weighting and a rebalance cadence, which is an
 allocation policy fugazi expresses explicitly with `portfolio:` rather than
 inventing inside `optimize`.
 
+#### How much evidence is a panel worth?
+
+A pooled row reports `N` hypotheses rather than `N × M`, which is the honest
+count — and it invites the reading that `M` members are `M` pieces of evidence.
+For a panel drawn from one market's worth of instruments they are not.
+
+```python
+result.effective_breadth   # (effective, mean_correlation, members, pairs) | None
+```
+
+The reading is the standard one for an equal-weighted mean of `M` estimators
+with average pairwise correlation `ρ̄`:
+
+```text
+effective = M / (1 + (M − 1)·ρ̄)
+```
+
+| Members | ρ̄ = 0.3 | ρ̄ = 0.5 | ρ̄ = 0.8 |
+|---|---|---|---|
+| 10 | 2.6 | 1.8 | 1.2 |
+| 30 | 3.1 | 1.9 | 1.2 |
+| 100 | 3.3 | 2.0 | 1.2 |
+
+Crypto majors on a common timeframe sit near the right-hand column, so a
+thirty-member panel of them is worth about **1.2** independent members and its
+pooled Sharpe deserves roughly the confidence of a single backtest — not
+thirty. Note how little the columns move as `M` grows: past a handful of
+correlated members you are adding compute, not evidence.
+
+Three properties worth stating:
+
+- **Measured on the composites' own returns**, not on the members' price
+  series. What a pooled figure rests on is how much the *results* co-moved; a
+  strategy that trades two correlated markets at different times produces two
+  more nearly independent curves than their prices would suggest, and is
+  credited for it.
+- **Each pair is joined on its own shared bars**, never on a global
+  intersection — the same rule fold layout follows. A member that listed last
+  week overlaps the rest by a fortnight; intersecting everything first would
+  collapse the axis every other pair is measured on down to that. A pair with
+  fewer than 30 shared bars contributes nothing rather than a coefficient
+  computed from noise, and `pairs` reports how many were actually measured.
+- **Reported, never applied.** What to do with it — deflate against it, widen
+  an interval, or go and find less correlated members — is a decision the
+  caller has the context to make and this crate does not.
+
+`None` when fewer than two members share enough history to be correlated at
+all. Reporting the member count there would be answering a question nobody
+could check.
+
 The CLI has an ergonomic twin of the plain (non-walk-forward) case:
 `fugazi run --pooled AXIS` reports one already-chosen parameter set's pooled
 reading — the same thing `ta.optimize(..., panel=panel, grid=[{}])` computes,

@@ -2541,6 +2541,11 @@ pub(crate) struct PyPanelWalkForwardResult {
     pub(crate) columns: Vec<String>,
     pub(crate) metric_columns: Vec<(String, String)>,
     pub(crate) cash: Real,
+    /// `(effective, mean_correlation, members, pairs)`, computed once at
+    /// construction — it is a scalar property of the finished panel rather than
+    /// of any row, so recomputing it per access would re-correlate every pair
+    /// to arrive at the same number.
+    pub(crate) breadth: Option<(Real, Real, usize, usize)>,
 }
 
 #[pymethods]
@@ -2591,6 +2596,31 @@ impl PyPanelWalkForwardResult {
     pub(crate) fn cash(&self) -> Real {
         self.cash
     }
+    /// How many *independent* members this panel's results are worth:
+    /// `(effective, mean_correlation, members, pairs)`, or `None` when fewer
+    /// than two members shared enough history to be correlated at all.
+    ///
+    /// A pooled row reports `N` hypotheses rather than `N x M`, which is the
+    /// honest count — and it invites the reading that `M` members are `M`
+    /// pieces of evidence. For a panel drawn from one market's worth of
+    /// instruments they are not: at an average pairwise correlation of 0.8,
+    /// thirty members are worth about 1.2, and a pooled Sharpe over them
+    /// deserves roughly the confidence of a single backtest. The reading is
+    /// `M / (1 + (M - 1) * rho_bar)`.
+    ///
+    /// Measured on the **composites' own returns**, not on the members' price
+    /// series: what a pooled figure rests on is how much the results co-moved,
+    /// and a strategy trading two correlated markets at different times earns
+    /// more independence than their prices would suggest.
+    ///
+    /// Reported, never applied. What to do with it — deflate against it, widen
+    /// an interval, or go and find less correlated members — is a decision the
+    /// caller has the context to make and this crate does not.
+    #[getter]
+    pub(crate) fn effective_breadth(&self) -> Option<(Real, Real, usize, usize)> {
+        self.breadth
+    }
+
     #[getter]
     pub(crate) fn folds(&self, py: Python<'_>) -> Vec<Py<PyPanelFold>> {
         self.folds.iter().map(|f| f.clone_ref(py)).collect()
@@ -2832,6 +2862,9 @@ pub(crate) fn run_panel_walkforward(
             columns,
             metric_columns,
             cash: result.cash,
+            breadth: result
+                .effective_breadth()
+                .map(|b| (b.effective, b.mean_correlation, b.members, b.pairs)),
         },
     )?;
     Ok(py_result.into_any())
