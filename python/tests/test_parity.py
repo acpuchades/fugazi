@@ -525,6 +525,64 @@ def test_coinbase_wallet_surface_matches_the_ledger():
     )
 
 
+KRAKEN_WALLET_BOUND = {
+    # Constructor (staticmethod). No `demo`: Kraken publishes no demo Spot
+    # endpoint, so unlike OKX there is no safe rehearsal mode to bind.
+    "mainnet",
+    # Wallet reads.
+    "funds",
+    "position",
+    "price",
+    "equity",
+    "can_short",
+    "quote_ccy",
+    "data_sources",
+    "leverage",
+    # Order flow.
+    "update",
+    "set",
+    "set_position",
+    "close",
+    "set_stop",
+    "set_take_profit",
+    "cancel_protective",
+    "set_limit",
+    "cancel_limit",
+    "cancel",
+    "poll_fills",
+    # Live-only extras.
+    "refresh_account",
+    "errors",
+}
+
+KRAKEN_WALLET_NOT_BOUND = {
+    "positions": (
+        "the Rust wallet enumerates only marked pairs, so a dict view would "
+        "mislead; read one symbol at a time via position(symbol)"
+    ),
+    "orders": "no in-memory blotter on a live venue (paper-only convenience)",
+    "reset": "a live venue has no freshly-constructed state to restore",
+    "adjust_funds": "Kraken takes the trait default (UnsupportedOperation)",
+    "take_rejections": (
+        "needs a bar-less rejection type; errors() surfaces REST-failure detail"
+    ),
+    "set_costs_for": "a live venue owns its own fees",
+}
+
+
+def test_kraken_wallet_surface_matches_the_ledger():
+    actual = {n for n in dir(ta.KrakenWallet) if not n.startswith("_")}
+    missing = KRAKEN_WALLET_BOUND - actual
+    extra = actual - KRAKEN_WALLET_BOUND - set(KRAKEN_WALLET_NOT_BOUND)
+    assert not missing, (
+        f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    )
+    assert not extra, (
+        f"KrakenWallet gained methods the ledger doesn't record: {sorted(extra)} — "
+        "add them to KRAKEN_WALLET_BOUND, or to KRAKEN_WALLET_NOT_BOUND with a reason"
+    )
+
+
 def test_protective_legs_expose_their_size():
     """The specific regression the ledger above exists to prevent."""
     w = ta.PaperWallet(1_000.0)
@@ -658,11 +716,11 @@ def test_conventional_periods_are_omissible():
 # The methods the `Wallet` ABC's docstring claims every wallet answers. Kept in
 # step with `WALLET_SURFACE` in `python/src/strategy.rs` by the test below, which
 # reads the claim back out of the docstring rather than restating it.
-WALLET_CLASSES = ("PaperWallet", "OkxWallet", "CoinbaseWallet")
+WALLET_CLASSES = ("PaperWallet", "OkxWallet", "CoinbaseWallet", "KrakenWallet")
 
 
 def test_every_concrete_wallet_is_a_virtual_subclass():
-    """Rust has a `Wallet` trait; Python had three unrelated classes and no way
+    """Rust has a `Wallet` trait; Python had unrelated classes and no way
     to ask "is this a wallet?" or to annotate one."""
     for name in WALLET_CLASSES:
         cls = getattr(ta, name)
@@ -675,7 +733,7 @@ def test_every_concrete_wallet_is_a_virtual_subclass():
 def test_the_wallet_abc_claims_only_what_all_three_have():
     """The docstring lists a common surface. If a method is dropped from one
     wallet, or the list drifts, that claim becomes a lie — so it is checked
-    against the three classes rather than trusted."""
+    against every concrete class rather than trusted."""
     doc = ta.Wallet.__doc__
     claimed = doc.split("Common surface: ")[1].split(".\n")[0]
     claimed = {name.strip() for name in claimed.split(",")}
@@ -687,7 +745,7 @@ def test_the_wallet_abc_claims_only_what_all_three_have():
             f"ta.Wallet claims {sorted(missing)} but {name} does not have them — "
             "fix WALLET_SURFACE in python/src/strategy.rs"
         )
-    # The converse: anything all three share should be claimed, or the list is
+    # The converse: anything they all share should be claimed, or the list is
     # quietly incomplete.
     shared = set.intersection(
         *(
@@ -696,7 +754,7 @@ def test_the_wallet_abc_claims_only_what_all_three_have():
         )
     )
     assert not shared - claimed, (
-        f"all three wallets share {sorted(shared - claimed)} but ta.Wallet does "
+        f"every wallet shares {sorted(shared - claimed)} but ta.Wallet does "
         "not claim it — add it to WALLET_SURFACE"
     )
 

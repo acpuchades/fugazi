@@ -54,7 +54,8 @@ making it fast enough that you don't miss the vectorised one.
 
 **1. One engine, research to production.** `backtest::run` is generic over
 `Wallet`, so the same strategy value drives an in-memory `PaperWallet`, an
-`OkxWallet` (OKX perpetual swaps) or a `CoinbaseWallet` (Advanced Trade spot).
+`OkxWallet` (OKX perpetual swaps), a `CoinbaseWallet` (Advanced Trade spot) or a
+`KrakenWallet` (Kraken spot).
 It isn't a backtest function that *also* happens to work live — that's why it is
 called `run`. A whole `Portfolio` runs the same way.
 
@@ -155,7 +156,7 @@ pip install fugazi            # prebuilt wheels for Linux, macOS, Windows
 | `runtime` | ✅ | The type-erasure vocabulary the YAML and Python layers build on |
 | `parallel` | — | `backtest::run_many`, the rayon ensemble driver |
 | `montecarlo` | — | Bootstrap resampling and empirical-null p-values (the only use of `rand`) |
-| `live` | — | `OkxWallet` and `CoinbaseWallet` — real order routing |
+| `live` | — | `OkxWallet`, `CoinbaseWallet` and `KrakenWallet` — real order routing |
 
 Want the library alone? `default-features = false` leaves `serde`, `time`,
 `statrs` and the internal derive macro.
@@ -683,8 +684,9 @@ think about it, and provide *one* mechanism to opt out.
 ### Live trading
 
 The same `Wallet` a backtest trades into is the seam to a real broker. The `live`
-feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST) and
-`CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST), each a
+feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST),
+`CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST) and
+`KrakenWallet` (Kraken **spot**, HMAC-SHA512 over a SHA256 prehash), each a
 `Wallet<Symbol>`. A strategy driven by `backtest::run` needs no change:
 
 ```rust,ignore
@@ -706,20 +708,27 @@ contract is `0.01 BTC`) while the trait — and every strategy — speaks base-a
 units. `OkxWallet` converts at the boundary: a `0.03 BTC` target goes out as `3`
 contracts and comes back as `0.03` units. Nothing above the wallet sees a contract.
 
-**Spot can't short.** `CoinbaseWallet` holds a base-asset balance that can't go
-negative: `set_position` market-buys or -sells the difference, and a negative target
-sells to flat and reports the un-shortable remainder through `take_rejections()`.
-Construct it with `CoinbaseWallet::mainnet(key_name, private_key_pem)`.
+**Spot can't short.** `CoinbaseWallet` and `KrakenWallet` hold a base-asset
+balance that can't go negative: `set_position` market-buys or -sells the difference,
+and a negative target sells to flat and reports the un-shortable remainder through
+`take_rejections()`. Construct them with
+`CoinbaseWallet::mainnet(key_name, private_key_pem)` and
+`KrakenWallet::mainnet(api_key, api_secret)`. Kraken *does* offer shorting on
+margin, but it is opt-in per order through `AddOrder`'s `leverage` parameter and
+`KrakenWallet` never sends it, so the wallet reports the cash account it actually
+drives. Note also that Kraken publishes no demo Spot endpoint, so unlike OKX there
+is no free rehearsal environment.
 
 That limit is **introspectable**: `Wallet::can_short()` answers `false` on
-`CoinbaseWallet`, `true` on `OkxWallet` and `PaperWallet`, so a caller can degrade
+`CoinbaseWallet` and `KrakenWallet`, `true` on `OkxWallet` and `PaperWallet`, so a caller can degrade
 to a long-only path *before* trading rather than after a clamped order. It reports,
 it doesn't enforce. Wrappers delegate: a `SleeveWallet` answers for the account it
 wraps, and a portfolio child's handle answers for the account the portfolio nets
 onto. `Wallet::quote_ccy()` is the same shape for the numeraire — `None` means
 "does not say", not "no currency"; fugazi does no FX, so a run is sound only if one
 numeraire holds throughout. `Wallet::data_sources()` is the third: which providers
-quote what the account trades (`["okx"]`, `["coinbase"]`, empty on a paper wallet),
+quote what the account trades (`["okx"]`, `["coinbase"]`, `["kraken"]`, empty on a
+paper wallet),
 named exactly as a `fugazi get` spec names them, so a runner can check the feed it
 is about to drive a live account off. It reports at venue granularity and fetches
 nothing — an OKX account trades swaps, so its bars are `okx:BTC-USDT-SWAP`, not the

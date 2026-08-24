@@ -34,7 +34,7 @@ pub(crate) use fugazi_core::indicators::{
 pub(crate) use fugazi_core::indicators::{
     BoolIndicatorExt, Combine, DEFAULT_TOLERANCE, IndicatorExt, Tolerance,
 };
-pub(crate) use fugazi_core::live::{CoinbaseWallet, LiveError, OkxWallet};
+pub(crate) use fugazi_core::live::{CoinbaseWallet, KrakenWallet, LiveError, OkxWallet};
 pub(crate) use fugazi_core::metrics as core_metrics;
 pub(crate) use fugazi_core::metrics::{DrawdownSegment, Trade};
 pub(crate) use fugazi_core::runtime::{self, PayloadType, PayloadValue, TypeOf};

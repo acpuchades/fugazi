@@ -280,6 +280,7 @@ MEMBER_RETURNS = {
     ("OkxWallet", "demo"): "OkxWallet",
     ("OkxWallet", "mainnet"): "OkxWallet",
     ("CoinbaseWallet", "mainnet"): "CoinbaseWallet",
+    ("KrakenWallet", "mainnet"): "KrakenWallet",
     # --- sweep / walk-forward rows ------------------------------------------
     ("SweepRow", "metrics_windowed"): "list[dict[str, Any]] | None",
     # Pooled (`panel=`) rows: per-member documents keyed by member name, and the
@@ -928,21 +929,21 @@ def emit_wallet_protocol() -> str:
 
     A structural `Protocol` gives the checker the same answer the runtime gives,
     derived from the same source: the members come off `PaperWallet`, and the set
-    is whatever all three share, so this cannot claim more than they implement.
+    is whatever they all share, so this cannot claim more than they implement.
     """
     shared = set.intersection(
         *(
             {m for m in dir(getattr(ta, c)) if not m.startswith("_")}
-            for c in ("PaperWallet", "OkxWallet", "CoinbaseWallet")
+            for c in ("PaperWallet", "OkxWallet", "CoinbaseWallet", "KrakenWallet")
         )
     )
     lines = [
         "class Wallet(Protocol):",
         indent_doc(
             "Anything `Strategy.run` / `StrategySpec.run` will trade into: "
-            "`PaperWallet`, `OkxWallet` or `CoinbaseWallet`. Mirrors the Rust "
-            "`Wallet` trait. At run time this is an ABC with the three "
-            "registered on it, so `isinstance(w, fugazi.Wallet)` works too.",
+            "`PaperWallet`, `OkxWallet`, `CoinbaseWallet` or `KrakenWallet`. "
+            "Mirrors the Rust `Wallet` trait. At run time this is an ABC with "
+            "each registered on it, so `isinstance(w, fugazi.Wallet)` works too.",
             "    ",
         ),
     ]

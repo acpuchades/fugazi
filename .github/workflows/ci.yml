@@ -90,7 +90,7 @@ jobs:
       # above, so the **default** feature set stays the configuration whose
       # behaviour is tested. The cost is one extra compile of the library.
       - name: Test (live wallets)
-        run: cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_portfolio
+        run: cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_kraken --test live_portfolio
       - name: Clippy
         run: cargo clippy -p fugazi --all-targets -- -D warnings
       # `fugazi-derive` is an unconditional dependency providing both

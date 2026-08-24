@@ -314,6 +314,6 @@ endpoint are `#[ignore]`d and say so in their ignore reason.
 `cargo test -p fugazi` runs *none* of `tests/live_*.rs` (they are
 `#![cfg(feature = "live")]` and compile to nothing) and none of the unit tests
 inside `src/live/`. CI runs them as their own step — `cargo test -p fugazi
---features live --lib --test live_okx --test live_coinbase --test
-live_portfolio`, mirrored in `scripts/ci-local.sh`'s `rust` job. Adding a live
+--features live --lib --test live_okx --test live_coinbase --test live_kraken
+--test live_portfolio`, mirrored in `scripts/ci-local.sh`'s `rust` job. Adding a live
 test and running the plain suite will tell you nothing.

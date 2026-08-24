@@ -614,7 +614,8 @@ series just yields atoms with no bar.
 ## Add a live wallet
 
 A live venue is one `Wallet<Symbol>` impl behind the `live` feature
-(`src/live/`, alongside `OkxWallet`) — the failure-side twin of a provider.
+(`src/live/`, alongside `OkxWallet`, `CoinbaseWallet` and `KrakenWallet`) — the
+failure-side twin of a provider.
 Every strategy shape drives it unchanged:
 `backtest::run(&mut strategy, &mut venue, snaps)`.
 

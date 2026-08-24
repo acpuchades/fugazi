@@ -56,7 +56,7 @@ making it fast enough that you don't miss the vectorised one.
 | Fast indicators | `talib`, `pandas-ta` | Array-at-a-time. A live bar means recomputing the array, or writing a second implementation you now maintain twice | One `update()` per bar, and [faster than `talib`'s own bindings](#performance) on `ema` / `atr` / `macd` |
 | Only the new bars | Recompute the tail with a lookback fudge factor | You guess the warm-up, and a recursive indicator never fully agrees with the one-pass answer | [`feed` never resets](#batch-api--a-whole-series-at-once): chunked calls continue the same stream, and concatenate exactly |
 | A backtest | `vectorbt`, `backtesting.py` | A fill model expressed as array masks; the loop that trades live is a different program | [`Strategy(...).run(wallet, df)`](#the-declarative-strategy-builder) — the wallet is the only thing that changes |
-| Live execution | A broker SDK plus glue | The strategy gets rewritten against the SDK's callbacks | [`OkxWallet` / `CoinbaseWallet`](#resuming-a-run-and-running-against-a-venue) go where `PaperWallet` went |
+| Live execution | A broker SDK plus glue | The strategy gets rewritten against the SDK's callbacks | [`OkxWallet` / `CoinbaseWallet` / `KrakenWallet`](#resuming-a-run-and-running-against-a-venue) go where `PaperWallet` went |
 | Several symbols per bar | A DataFrame per symbol, then a join | Joining on the trading *date* manufactures cross-timezone lookahead | [`Snapshot`](#cross-asset-composition--snapshot-selector-and-pick) *is* the bar; `pick(sym)` projects one asset out |
 | Non-price inputs | Bolt on a column, hope | No types, no warm-up accounting | [Overlays](#computing-overlays--deriving-columns-from-a-series): typed `get(schema, key)` readers over any joined series |
 | A parameter sweep | A `for` loop over `itertools.product` | Single-threaded, and it overfits quietly | [`ta.optimize(..., jobs=N)`](#parameter-grid-optimize) with walk-forward and windowed ranking |
@@ -661,11 +661,11 @@ your own per-bar Python — no class to subclass. `PaperWallet` is the built-in,
 in-memory book (funds + positions + a trade blotter); live execution belongs in
 your own code, not here.
 
-The three concrete wallets — `PaperWallet`, `OkxWallet`, `CoinbaseWallet` — are
-registered on **`ta.Wallet`**, the mirror of Rust's `Wallet` trait, so
-`isinstance(w, ta.Wallet)` is how you ask and `w: ta.Wallet` is how you annotate.
-It is a classification, not a base class to extend: a Python subclass of it is
-not one of the three, and `run` will refuse it.
+The concrete wallets — `PaperWallet`, `OkxWallet`, `CoinbaseWallet`,
+`KrakenWallet` — are registered on **`ta.Wallet`**, the mirror of Rust's `Wallet`
+trait, so `isinstance(w, ta.Wallet)` is how you ask and `w: ta.Wallet` is how you
+annotate. It is a classification, not a base class to extend: a Python subclass of
+it is not one of them, and `run` will refuse it.
 
 ```python
 import fugazi as ta
@@ -695,15 +695,19 @@ wallet.leverage("AAPL")      # how much may it hold, as a multiple of equity? (o
 
 `can_short` is what an account *can* do, asked before trading: `True` on a
 `PaperWallet` (a sell credits cash) and on `OkxWallet` (net-mode swaps), `False`
-on the spot `CoinbaseWallet`, whose positions are owned base-asset balances. It
+on the spot `CoinbaseWallet` and `KrakenWallet`, whose positions are owned
+base-asset balances. (Kraken *does* offer shorting on margin, but that is opt-in
+per order and `KrakenWallet` never asks for it, so it reports what it actually
+does.) It
 informs rather than enforces — a spot wallet still clamps a short target to flat
 on its own — so a long/short strategy can pick a long-only path up front instead
 of learning the limit from a clamped order.
 
 `quote_ccy` is the same shape of question about the account's *unit*: `"USDT"` on
 `OkxWallet` (the margin currency a linear USDⓈ-M swap settles in), whatever the
-`CoinbaseWallet` was built against (`"USD"` by default), and `None` on a
-`PaperWallet` unless you pass one — simulated money has no venue to ask:
+`CoinbaseWallet` or `KrakenWallet` was built against (`"USD"` by default), and
+`None` on a `PaperWallet` unless you pass one — simulated money has no venue to
+ask:
 
 ```python
 wallet = ta.PaperWallet(10_000.0, quote_ccy="EUR")
@@ -719,8 +723,8 @@ against a venue — and answering does not make mixing safe. One caveat on
 the account, so the two differ by the USDT peg.
 
 `data_sources` is the third question of the same shape, asked about the *feed*:
-`["okx"]` on `OkxWallet`, `["coinbase"]` on `CoinbaseWallet`, `[]` on a
-`PaperWallet`. The names are the ones a `fugazi get` spec takes, so a live runner
+`["okx"]` on `OkxWallet`, `["coinbase"]` on `CoinbaseWallet`, `["kraken"]` on
+`KrakenWallet`, `[]` on a `PaperWallet`. The names are the ones a `fugazi get` spec takes, so a live runner
 can check the pairing before it drives an account off the wrong bars:
 
 ```py
@@ -781,9 +785,9 @@ wallet.refresh_leverage("BTC-USDT-SWAP")   # ask OKX now, and cache it
 wallet.leverage("BTC-USDT-SWAP")           # 3.0
 ```
 
-`CoinbaseWallet` answers `None` structurally — spot has nothing borrowed to
-parameterise, the same fact it reports as `can_short == False`. `None` means
-"does not say", never `1x`.
+`CoinbaseWallet` and `KrakenWallet` answer `None` structurally — spot has
+nothing borrowed to parameterise, the same fact they report as
+`can_short == False`. `None` means "does not say", never `1x`.
 
 Record the live number at connect and check it on reconcile: OKX's leverage is
 set out of band, in its own UI, and can change under a running strategy. Set the

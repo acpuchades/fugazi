@@ -125,6 +125,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWallet>()?;
     m.add_class::<PyOkxWallet>()?;
     m.add_class::<PyCoinbaseWallet>()?;
+    m.add_class::<PyKrakenWallet>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
     m.add_class::<PyStrategy>()?;

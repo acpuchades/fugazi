@@ -85,7 +85,7 @@ if [[ $job == all || $job == rust ]]; then
     # `src/live/`. `--lib` too: those unit tests are half the live coverage.
     # Offline — `wiremock` on localhost.
     run "rust / Test (live wallets)" \
-        cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_portfolio
+        cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_kraken --test live_portfolio
     run "rust / Clippy" \
         cargo clippy -p fugazi --all-targets -- -D warnings
     run "rust / Clippy (derive crate)" \

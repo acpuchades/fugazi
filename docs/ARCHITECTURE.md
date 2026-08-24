@@ -560,7 +560,7 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
 - **`can_short() -> bool`** — capability **introspection**, default `true` (a
   position is signed `Units`, so shorting is the baseline; `PaperWallet` states it
   explicitly, `OkxWallet` says `true` for net-mode swaps). A spot venue overrides to
-  `false` — `CoinbaseWallet` does, and still clamps a negative target to flat and
+  `false` — `CoinbaseWallet` and `KrakenWallet` do, and still clamp a negative target to flat and
   books a `Rejection` for the remainder: **the flag informs, it does not enforce**.
   Wrappers delegate to what they wrap (`SleeveWallet` → inner; `LedgerWallet` → the
   account's answer, cached into `PortfolioInner::account_can_short` by
@@ -572,7 +572,8 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   what this account trades, named as the `sources` layer names them (the `provider:`
   token a `fugazi get` spec takes). Default `&[]` = **"does not say"**, the reading
   `quote_ccy`'s `None` asks for; `PaperWallet` takes it (simulated money has no venue
-  whose prices are the *right* ones), `OkxWallet` answers `["okx"]`, `CoinbaseWallet`
+  whose prices are the *right* ones), `OkxWallet` answers `["okx"]`, `KrakenWallet`
+  `["kraken"]`, `CoinbaseWallet`
   `["coinbase"]`. **Introspection, not fetching** — the wallet still has no view of
   the market and is fed prices through `update`; this lets a caller preflight the
   pairing it was going to make anyway (a live runner warning it is about to drive an
@@ -590,7 +591,7 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
 - **`leverage(&sym) -> Option<Real>`** — the fourth introspection read, and the
   only **per-symbol** one, because venues configure it that way (OKX carries a
   `(instId, mgnMode)` setting, not an account-wide one). Default `None` = "does
-  not say", never `1x`. `CoinbaseWallet` answers `None` *structurally* — spot has
+  not say", never `1x`. `CoinbaseWallet` and `KrakenWallet` answer `None` *structurally* — spot has
   nothing borrowed to parameterise, the same fact `can_short() == false` reports
   the other way. `OkxWallet` answers from a cache filled for free off the
   positions payload's `lever` field and, for a symbol the account is flat in, by
@@ -640,9 +641,10 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   (`f·|position|`, adjust-only). Direction from `Side`.
 - No `Market` trait: the wallet holds prices. Python binds `PaperWallet`, the live
   `OkxWallet` (constructors `demo` / `mainnet` + `refresh_account` / `errors`; same
-  order-flow surface) and `CoinbaseWallet` (`mainnet` only; spot, so a `position` is
-  a base balance and `set_position` diffs it, market-ordering the difference — a
-  short target sells to flat and reports the un-shortable remainder), `Order`, and
+  order-flow surface), `CoinbaseWallet` and `KrakenWallet` (`mainnet` only on both;
+  spot, so a `position` is a base balance and `set_position` diffs it,
+  market-ordering the difference — a short target sells to flat and reports the
+  un-shortable remainder), `Order`, and
   `Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`).
 
 ### Live venues (`src/live/`, feature `live`)
@@ -680,15 +682,25 @@ re-borrows — a `&mut` into the core cannot be held across a hook call.
 
 What stays per-venue is what differs in *kind*: the credentials, the signing
 (`OkxWallet` base64-HMAC-SHA256 over `timestamp+method+path+body`,
-`CoinbaseWallet` an ES256 / ECDSA P-256 JWT per request), `refresh_account`, the
+`CoinbaseWallet` an ES256 / ECDSA P-256 JWT per request, `KrakenWallet` an
+HMAC-SHA512 over `path + SHA256(nonce + body)` — the one whose signature covers
+the literal form body, so it is built once and both hashed and sent),
+`refresh_account`, the
 envelope parsers, the request bodies inside the `place_*` hooks, and the six
 reads that *are* the account shape. `OkxWallet` holds one signed swap position in
 base units (`InstrumentGrid::contract_multiplier` converts, so nothing above the
-wallet sees a contract); `CoinbaseWallet` holds a table of currency balances,
-cannot short, and values its own book through `wallet::marked_sum` so the sum is
-canonical across processes.
+wallet sees a contract); `CoinbaseWallet` and `KrakenWallet` hold a table of
+currency balances, cannot short, and value their own book through
+`wallet::marked_sum` so the sum is canonical across processes. Kraken differs from
+Coinbase in two places worth knowing: its balance keys are venue asset codes with
+no derivable relation to the currency name (`XXBT`, `ZUSD`), so the base code is
+read from `AssetPairs` and the whole pair table is loaded before the first balance
+read — a `&self` `position()` cannot fetch, and a wallet synced before its first
+bar would otherwise report every holding as zero; and its fills carry a monotone
+`trade_id`, so it uses the O(1) `CursorModel::Watermark` where Coinbase must
+remember ids.
 
-Both logs are bounded at `DEFAULT_RETENTION`, and so is the fill-dedupe set —
+Every log is bounded at `DEFAULT_RETENTION`, and so is the fill-dedupe set —
 these run for months, and an unbounded reporting artifact in that deployment is a
 leak rather than a convenience.
 
@@ -901,7 +913,8 @@ would drift from the account's.
 **Surfaces.** CLI `fugazi run … --save-state <file>` / `--resume <file>` /
 `--flatten`. Python `spec.run_resumable(wallet, snapshots, resume=None, flatten=False)
 -> (report, state_json)` and `spec.warm_up(wallet, snapshots, resume=None)
--> state_json`, both taking a `PaperWallet`, an `OkxWallet` or a `CoinbaseWallet`.
+-> state_json`, both taking a `PaperWallet`, an `OkxWallet`, a `CoinbaseWallet` or
+a `KrakenWallet`.
 
 **Adding a stateful indicator ⇒ add `#[derive(SaveState)]` + field annotations + the
 two `impl Indicator` forwarding lines**, or its state is silently lost on resume.
@@ -1537,8 +1550,9 @@ the `Py<PyAny>` callable and calls it once per symbol under the GIL). `PyPortfol
 mirrors `Portfolio::builder()`; children are the other four Py builders, each
 **materialized** at its share of the seed via the `materialize(...)` seam. **All five
 shapes share one run seam** (`over_any_wallet!` / `over_prepared_wallet!` in
-`python/src/strategy.rs`): `.run(wallet, …)` accepts a `PaperWallet`, an `OkxWallet`
-or a `CoinbaseWallet`. The seam handles **external positions automatically** via the
+`python/src/strategy.rs`): `.run(wallet, …)` accepts a `PaperWallet`, an
+`OkxWallet`, a `CoinbaseWallet` or a `KrakenWallet`. The seam handles **external
+positions automatically** via the
 core `SleeveWallet`. `test_specs.py::test_portfolio_builder_matches_the_equivalent_yaml_document`
 pins the builder against the equivalent `portfolio:` document. The **spec** surface
 (`load_spec(...).run` / `.run_resumable` / `.warm_up`) goes through the same seam and

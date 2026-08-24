@@ -57,8 +57,9 @@ macro_rules! over_prepared_wallet {
     }};
 }
 
-/// Resolve `$wallet` to one of the three concrete pyclasses — [`PaperWallet`](PyWallet),
-/// [`OkxWallet`](PyOkxWallet), [`CoinbaseWallet`](PyCoinbaseWallet); anything
+/// Resolve `$wallet` to one of the four concrete pyclasses — [`PaperWallet`](PyWallet),
+/// [`OkxWallet`](PyOkxWallet), [`CoinbaseWallet`](PyCoinbaseWallet),
+/// [`KrakenWallet`](PyKrakenWallet); anything
 /// else is a `TypeError` — and hand off to [`over_prepared_wallet!`]. For a live
 /// wallet it first refreshes the account so `positions()`/`equity()` reflect the
 /// venue before the baseline is snapshotted. `$py` binds the GIL token (pass
@@ -90,9 +91,17 @@ macro_rules! over_any_wallet {
                 // which has no `PyWalletError` alias in scope.
                 .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
             over_prepared_wallet!(cell, CoinbaseWallet::placeholder(), $seed, $w => $body)
+        } else if let Ok(cell) = wallet.cast::<PyKrakenWallet>() {
+            cell.borrow_mut()
+                .inner
+                .refresh_account()
+                // Fully qualified: this macro also expands inside `spec.rs`,
+                // which has no `PyWalletError` alias in scope.
+                .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
+            over_prepared_wallet!(cell, KrakenWallet::placeholder(), $seed, $w => $body)
         } else {
             Err(PyTypeError::new_err(
-                "wallet must be a PaperWallet, an OkxWallet, or a CoinbaseWallet",
+                "wallet must be a PaperWallet, an OkxWallet, a CoinbaseWallet, or a KrakenWallet",
             ))
         }
     }};
@@ -1271,6 +1280,281 @@ impl PyCoinbaseWallet {
     /// Advanced Trade is **spot**: a position is an owned base-asset balance, so
     /// there is nothing borrowed and no multiple to configure. `symbol` is
     /// accepted and ignored.
+    pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
+        let _ = symbol;
+        None
+    }
+
+    /// Force an account-state refresh (balances) now. Raises `ValueError` on a
+    /// REST failure. `update` calls this each bar; call it directly for a one-off
+    /// sync (e.g. right after construction).
+    pub(crate) fn refresh_account(&mut self) -> PyResult<()> {
+        self.inner
+            .refresh_account()
+            .map_err(|e| PyWalletError::new_err(e.to_string()))
+    }
+
+    /// The live errors this wallet has recorded, in order — every REST failure
+    /// (the detail behind a raised `ValueError`, plus best-effort refresh /
+    /// fill-poll failures that have no return channel), as strings.
+    pub(crate) fn errors(&self) -> Vec<String> {
+        self.inner.errors().iter().map(|e| e.to_string()).collect()
+    }
+
+    /// Feed `symbol`'s current bar (whose `close` marks price) and return any
+    /// fills polled for it. Accepts a `Candle` or a bare price `float`. Refreshes
+    /// the account cache first.
+    pub(crate) fn update(
+        &mut self,
+        symbol: String,
+        bar: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyOrder>> {
+        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
+            candle.borrow().inner
+        } else {
+            let price: f64 = bar.extract()?;
+            Candle::new(price, price, price, price, 0.0)
+        };
+        Ok(self
+            .inner
+            .update(intern(symbol), candle)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
+    }
+
+    /// Send a market order driving `symbol` to `target` base units (spot: a
+    /// negative target sells to flat). Returns `None` (working — the fill
+    /// surfaces from a later `update` / `poll_fills`).
+    pub(crate) fn set_position(
+        &mut self,
+        symbol: String,
+        target: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_position(Units {
+            symbol: intern(symbol),
+            amount: target,
+        }))
+    }
+
+    /// Send a market order targeting `side` `size` of `symbol`. Returns `None`.
+    pub(crate) fn set(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(
+            self.inner
+                .set(intern(symbol), parse_side(side)?, coerce_size(size)?),
+        )
+    }
+
+    /// Send a market order flattening `symbol`. Returns `None`.
+    pub(crate) fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.close(intern(symbol)))
+    }
+
+    /// Rest a reduce-only stop-loss on `symbol` at `trigger` (a `stop_limit`
+    /// sell). Idempotent, latest-wins per symbol; re-submit to trail. `size` is
+    /// how much of the holding the leg takes off, defaulting to all of it.
+    /// Returns `None` (working until it triggers).
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_stop(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(
+            self.inner
+                .set_stop(intern(symbol), Reference(trigger), size),
+        )
+    }
+
+    /// Rest a reduce-only take-profit on `symbol` at `trigger` — the favourable
+    /// twin of `set_stop`, same reduce-only `size` semantics. Returns `None`.
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_take_profit(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(
+            self.inner
+                .set_take_profit(intern(symbol), Reference(trigger), size),
+        )
+    }
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    pub(crate) fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_protective(&intern(symbol))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Rest a limit order on `symbol`: drive the position to `side · size` once
+    /// the market trades through `limit`, filling at that price or better.
+    /// Idempotent, latest-wins per symbol. Returns `None` (working until it
+    /// triggers).
+    pub(crate) fn set_limit(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+        limit: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_limit(
+            intern(symbol),
+            parse_side(side)?,
+            coerce_size(size)?,
+            Reference(limit),
+        ))
+    }
+
+    /// Cancel any resting limit order on `symbol`. A no-op when none rests.
+    pub(crate) fn cancel_limit(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_limit(&intern(symbol))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Cancel a working order by its `id` (see `Order.id`). An unknown id is a
+    /// no-op.
+    pub(crate) fn cancel(&mut self, id: u64) -> PyResult<()> {
+        self.inner
+            .cancel(OrderId(id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Poll every traded symbol for fills booked out of band (not on a specific
+    /// `update`) and return them — a fill on a symbol that didn't tick this bar
+    /// still reaches the caller here.
+    pub(crate) fn poll_fills(&mut self) -> Vec<PyOrder> {
+        self.inner
+            .poll_fills()
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+}
+
+/// A live [`Wallet`] over Kraken **spot** — the same order-flow surface as
+/// [`PaperWallet`](PyWallet), but routed to Kraken's Spot REST API and
+/// authenticated with an HMAC-SHA512 signature over a SHA256 prehash. Construct
+/// with [`KrakenWallet.mainnet`](Self::mainnet) (**real funds** — Kraken
+/// publishes no demo environment for its Spot API, unlike OKX), passing the API
+/// key and secret (and an optional `quote_ccy`, `USD` by default).
+///
+/// Cash spot: a `position` is a base-asset **balance** (never negative), `funds`
+/// is the quote-currency balance, and `set_position` diffs the target against
+/// the held balance and market-orders the difference. A negative target can't be
+/// shorted — the wallet sells to flat and records a rejection for the remainder
+/// (drained like any other, through the strategy driver). Kraken *does* offer
+/// shorting on margin, but that is opt-in per order and this wallet never asks
+/// for it, so `can_short` is `False`.
+///
+/// Drive it exactly like the paper wallet: [`update`](Self::update) each bar
+/// marks price and returns fills; [`set_position`](Self::set_position) /
+/// [`set`](Self::set) / [`close`](Self::close) send market orders;
+/// [`set_stop`](Self::set_stop) / [`set_take_profit`](Self::set_take_profit) /
+/// [`set_limit`](Self::set_limit) rest legs. Submitting returns `None` (working)
+/// — the fill lands later, surfaced by a subsequent [`update`](Self::update) or
+/// [`poll_fills`](Self::poll_fills). A REST failure surfaces as a `ValueError`
+/// (detail also on [`errors`](Self::errors)).
+///
+/// It owns a private async runtime and blocks on each request, so it must be
+/// driven from synchronous Python, one bar at a time.
+#[pyclass(name = "KrakenWallet", module = "fugazi")]
+pub(crate) struct PyKrakenWallet {
+    pub(crate) inner: KrakenWallet,
+}
+
+#[pymethods]
+impl PyKrakenWallet {
+    /// A wallet against Kraken **production** (`api.kraken.com`). This trades
+    /// **real funds** — Kraken has no demo Spot endpoint, so there is no safe
+    /// rehearsal mode here the way `OkxWallet.demo` gives one.
+    ///
+    /// `api_key` and `api_secret` are the pair issued when the API key was
+    /// created; pass the secret as the base64 blob Kraken displays. Raises
+    /// `ValueError` if that secret is not valid base64.
+    #[staticmethod]
+    #[pyo3(signature = (api_key, api_secret, quote_ccy = None))]
+    pub(crate) fn mainnet(
+        api_key: String,
+        api_secret: String,
+        quote_ccy: Option<String>,
+    ) -> PyResult<Self> {
+        let mut inner = KrakenWallet::mainnet(api_key, &api_secret)
+            .map_err(|e| PyWalletError::new_err(e.to_string()))?;
+        if let Some(ccy) = quote_ccy {
+            inner = inner.with_quote_ccy(ccy);
+        }
+        Ok(PyKrakenWallet { inner })
+    }
+
+    /// The available cash balance (the quote-currency balance), from the cache.
+    #[getter]
+    pub(crate) fn funds(&self) -> f64 {
+        self.inner.funds().0
+    }
+
+    /// The base-asset balance held for `symbol` (never negative on spot), from
+    /// the cache.
+    pub(crate) fn position(&self, symbol: &str) -> f64 {
+        self.inner.position(&intern(symbol)).amount
+    }
+
+    /// The last price fed for `symbol` via `update`, or `None` if never fed.
+    pub(crate) fn price(&self, symbol: &str) -> Option<f64> {
+        self.inner.price(&intern(symbol)).map(|p| p.0)
+    }
+
+    /// Mark-to-market account equity (quote balance plus marked base balances),
+    /// from the cache.
+    #[getter]
+    pub(crate) fn equity(&self) -> f64 {
+        self.inner.equity().0
+    }
+
+    /// `False` — this wallet trades Kraken as cash spot, so a position is an
+    /// owned base-asset balance that cannot go negative. `set_position` clamps a
+    /// negative target to flat and reports the un-shortable remainder; read this
+    /// first to take a long-only path instead. Shorting Kraken needs margin,
+    /// which is opt-in per order and not something this wallet requests.
+    #[getter]
+    pub(crate) fn can_short(&self) -> bool {
+        self.inner.can_short()
+    }
+
+    /// The quote currency this wallet was built against — `"USD"` unless the
+    /// constructor's `quote_ccy` said otherwise. Both `funds` and `equity` are
+    /// in it. Like Coinbase's and unlike OKX's, this is genuinely per-account:
+    /// Kraken quotes the same base against USD, EUR, USDT and more.
+    #[getter]
+    pub(crate) fn quote_ccy(&self) -> Option<&str> {
+        self.inner.quote_ccy()
+    }
+
+    /// `["kraken"]` — the venue this wallet trades. The `kraken` provider
+    /// fetches the same spot market, keyed on the very pair names this wallet's
+    /// symbols already are (`XBTUSD`). Note it reaches back only 720 bars, so a
+    /// strategy with a long warm-up should be primed from a file rather than a
+    /// live fetch.
+    #[getter]
+    pub(crate) fn data_sources(&self) -> Vec<&'static str> {
+        self.inner.data_sources().to_vec()
+    }
+
+    /// `None`, structurally — the same fact `can_short` reports as `False`, said
+    /// the other way.
+    ///
+    /// A cash spot balance is not borrowed, so there is no multiple to report.
+    /// `symbol` is accepted and ignored.
     pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
         let _ = symbol;
         None
@@ -3627,7 +3911,7 @@ const WALLET_SURFACE: &[&str] = &[
 /// they should say and touches none of them.
 ///
 /// **Not an extension point.** Subclassing this in Python produces something
-/// `Strategy.run` will refuse: the wallet argument resolves to one of the three
+/// `Strategy.run` will refuse: the wallet argument resolves to one of the
 /// concrete pyclasses (see `over_any_wallet!`) because the run is generic over
 /// the Rust trait and monomorphises per arm. Hence no `@abstractmethod`s — they
 /// would advertise a contract that implementing gets you nothing. This is a
@@ -3640,7 +3924,7 @@ pub(crate) fn register_wallet_protocol(m: &Bound<'_, PyModule>) -> PyResult<()> 
         "__doc__",
         format!(
             "Anything `Strategy.run` / `StrategySpec.run` will trade into.\n\n\
-             `PaperWallet`, `OkxWallet` and `CoinbaseWallet` are registered as \
+             `PaperWallet`, `OkxWallet`, `CoinbaseWallet` and `KrakenWallet` are registered as \
              virtual subclasses, so `isinstance(w, fugazi.Wallet)` is the way to \
              ask. Mirrors the Rust `Wallet` trait.\n\n\
              Common surface: {}.\n\n\
@@ -3659,6 +3943,7 @@ pub(crate) fn register_wallet_protocol(m: &Bound<'_, PyModule>) -> PyResult<()> 
         py.get_type::<PyWallet>(),
         py.get_type::<PyOkxWallet>(),
         py.get_type::<PyCoinbaseWallet>(),
+        py.get_type::<PyKrakenWallet>(),
     ] {
         wallet.call_method1("register", (ty,))?;
     }

@@ -15,7 +15,11 @@
 //! disguise.
 //!
 //! Adding a venue means implementing [`LiveVenue`] and adding one delegating
-//! `#[test]` per body below. Nothing here needs editing.
+//! `#[test]` per body below. Editing this module should be rare, and only ever
+//! to describe a *shape* a venue can differ in rather than a venue itself —
+//! [`VenueFixture::private_read_method`] exists because Kraken signs a form body
+//! and so reads over `POST` where the other two read over `GET`, which is a
+//! property of its auth scheme, not a special case for Kraken.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -93,6 +97,13 @@ pub struct VenueFixture {
     pub grid_path: String,
     /// The fills endpoint.
     pub fills_path: String,
+    /// The HTTP method the account and fills reads use.
+    ///
+    /// `GET` on a venue that authenticates a read with headers alone (OKX,
+    /// Coinbase). Kraken signs a form body instead, so *every* private endpoint
+    /// is a `POST` — including the ones that only read. The grid is not listed
+    /// because it is a public, unsigned `GET` on all three.
+    pub private_read_method: &'static str,
     /// Where a market or limit order is POSTed.
     pub place_order_path: String,
     /// Where a protective leg is POSTed. Equal to `place_order_path` on a venue
@@ -187,6 +198,11 @@ impl VenueMock {
     pub fn cancels(&self) -> usize {
         self.cancels.load(Ordering::SeqCst)
     }
+    /// The body of the most recent order POST, as sent — where a venue file
+    /// asserts on its own payload shape.
+    pub fn last_order(&self) -> String {
+        self.last_order.lock().expect("uncontended").clone()
+    }
 }
 
 /// Stand up a mock answering every endpoint `V`'s fixture names.
@@ -232,7 +248,7 @@ async fn mount_grid(server: &MockServer, fx: &VenueFixture) {
 
 async fn mount_accounts(server: &MockServer, fx: &VenueFixture, account: Account) {
     for (p, body) in (fx.account_bodies)(account) {
-        Mock::given(method("GET"))
+        Mock::given(method(fx.private_read_method))
             .and(path(p))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(server)
@@ -248,7 +264,7 @@ async fn mount_fills(
 ) {
     let empty = (fx.fills_body)(&[]);
     let loaded = (fx.fills_body)(&fills);
-    Mock::given(method("GET"))
+    Mock::given(method(fx.private_read_method))
         .and(path(fx.fills_path.clone()))
         .respond_with(move |_: &Request| {
             // One stateful responder rather than two overlapping mocks, so the

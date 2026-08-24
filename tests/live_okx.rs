@@ -614,6 +614,7 @@ impl common::live::LiveVenue for OkxWallet {
             contract_multiplier: 0.01,
             grid_path: "/api/v5/public/instruments".into(),
             fills_path: "/api/v5/trade/fills".into(),
+            private_read_method: "GET",
             place_order_path: "/api/v5/trade/order".into(),
             place_protective_path: "/api/v5/trade/order-algo".into(),
             cancel_entry_path: "/api/v5/trade/cancel-order".into(),

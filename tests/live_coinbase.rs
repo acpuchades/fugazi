@@ -447,6 +447,7 @@ impl common::live::LiveVenue for CoinbaseWallet {
             contract_multiplier: 1.0,
             grid_path: format!("{API}/market/products/{SYMBOL}"),
             fills_path: format!("{API}/orders/historical/fills"),
+            private_read_method: "GET",
             place_order_path: format!("{API}/orders"),
             // One order endpoint, so the protective leg shares it.
             place_protective_path: format!("{API}/orders"),

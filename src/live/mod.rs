@@ -9,13 +9,14 @@
 //! venue order encoding, fill polling) lives here, behind the same trait a
 //! [`PaperWallet`](crate::PaperWallet) satisfies.
 //!
-//! Ships two backends today: [`OkxWallet`], for OKX V5 perpetual swaps (and its
-//! free demo-trading environment), and [`CoinbaseWallet`], for Coinbase Advanced
-//! Trade **spot**. Both reuse the async `reqwest`/`tokio` stack the
-//! [`sources`](crate::sources) providers already pull in; they differ only in
-//! request signing — OKX uses base64-HMAC over `timestamp+method+path+body`,
-//! Coinbase a per-request ES256 (ECDSA P-256) JWT. Gated behind the `live`
-//! feature.
+//! Ships three backends today: [`OkxWallet`], for OKX V5 perpetual swaps (and
+//! its free demo-trading environment), [`CoinbaseWallet`], for Coinbase Advanced
+//! Trade **spot**, and [`KrakenWallet`], for Kraken **spot**. All three reuse the
+//! async `reqwest`/`tokio` stack the [`sources`](crate::sources) providers
+//! already pull in; they differ only in request signing — OKX uses base64-HMAC
+//! over `timestamp+method+path+body`, Coinbase a per-request ES256 (ECDSA P-256)
+//! JWT, and Kraken an HMAC-SHA512 over `path + SHA256(nonce + body)`. Gated
+//! behind the `live` feature.
 //!
 //! **Synchronous over async.** The [`Wallet`](crate::Wallet) trait is a
 //! synchronous `&mut self` surface; a venue REST API is async. Each live wallet
@@ -24,10 +25,13 @@
 //! driver is), not from inside an existing async runtime.
 
 mod coinbase;
+mod kraken;
 mod okx;
 mod venue;
 
 pub use coinbase::CoinbaseWallet;
+
+pub use kraken::KrakenWallet;
 
 pub use okx::OkxWallet;
 
