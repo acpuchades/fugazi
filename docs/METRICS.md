@@ -71,7 +71,7 @@ from `initial_equity`.
 |---|---|---|
 | `returns.total` / `_pct` | End-to-end return over the whole run/window. | Always defined. |
 | `returns.cagr_pct` | Compound annual growth rate. | Exactly `-100` on a ruined run (see [Ruin](#ruin)). `None` only when it is genuinely *undefined* — a non-positive **initial** equity, no bars, or no `bars_per_year` to annualize against. Check `run.ruin_bar` to tell the two apart. |
-| `returns.mean_bar` / `median_bar` / `stddev_bar` | Per-bar central moments. | Always defined. |
+| `returns.mean_bar` / `median_bar` / `stddev_bar` | Per-bar central moments. | Always defined. `stddev_bar` is the **sample** (Bessel-corrected, `ddof = 1`) deviation — empyrical / pyfolio / quantstats / Excel `STDEV`, and the divisor behind every ratio here that divides by a dispersion. `0` on a single-bar run. |
 | `returns.best_bar` / `worst_bar` | Extremes of per-bar returns. | Always defined. |
 | `returns.positive_bars_pct` | Share of bars with a strictly positive return. | |
 | `returns.skewness` / `kurtosis` | Sample skew / excess kurtosis. | `None` when stddev is zero. Kurtosis is excess (normal = 0). |
@@ -415,6 +415,72 @@ there is no pooling across grid rows. When two rows produce identical
 means and stddevs it is because the underlying trades were identical
 (common on tiny toy datasets with small parameter ranges), not because
 the aggregation is global.
+
+### Pooling windows — an exact figure over any *union* of them
+
+`row.metrics_windowed` (Python) / `metrics.csv` (`run -w`) already carries
+enough to compute an **exact** pooled Sharpe over any subset of a windowed
+run's windows, contiguous or not. Nothing extra has to be kept, and the
+return series never has to leave the process.
+
+Why it is exact: the windows *tile* the evaluated bars, and each takes its
+initial equity from the bar before it — so a window's return series is
+bit-identical to the same slice of the whole run's. Its
+`(run.bars, returns.mean_bar, returns.stddev_bar)` is therefore a
+**sufficient statistic** for that slice. Per window:
+
+    n  = run.bars
+    x̄  = returns.mean_bar
+    M₂ = (n − 1) · returns.stddev_bar²      # ddof = 1 — not n · s²
+
+Pool them **pairwise** (Chan's parallel-variance form):
+
+```python
+def pool(a, b):                     # each is (n, mean, m2)
+    (na, ma, m2a), (nb, mb, m2b) = a, b
+    n = na + nb
+    d = mb - ma
+    return (n, ma + d * nb / n, m2a + m2b + d * d * na * nb / n)
+
+def sharpe(windows, bars_per_year, risk_free_rate=0.0):
+    n, mean, m2 = functools.reduce(pool, [
+        (w["run"]["bars"], w["returns"]["mean_bar"],
+         (w["run"]["bars"] - 1) * w["returns"]["stddev_bar"] ** 2)
+        for w in windows
+    ])
+    if n < 2:
+        return None
+    vol = math.sqrt(m2 / (n - 1)) * math.sqrt(bars_per_year)
+    return None if vol == 0.0 else (mean * bars_per_year - risk_free_rate) / vol
+```
+
+That is the same expression the whole-run reduction evaluates over the
+concatenated slices, and it agrees with it to ~1e-15 relative — pinned by
+`window_return_moments_pool_to_an_exact_union_sharpe`, which checks every
+subset of a five-window run.
+
+Two things to get right:
+
+- **`ddof = 1`.** `stddev_bar` is Bessel-corrected, so the centred second
+  moment is `(n − 1)·s²`. Treating it as `n·s²` biases every pooled figure
+  by `n/(n − 1)` per window.
+- **Don't accumulate `Σx²`.** `Σx² − n·x̄²` is algebraically the same and
+  numerically much worse: on a low-volatility, high-drift equity curve it
+  loses ~5 significant digits where the pairwise form above loses none.
+
+This is what a **CSCV / PBO** pass wants (Bailey, Borwein, López de Prado &
+Zhu, 2015): the paper scores each combinatorial split by a Sharpe over the
+*concatenated* sub-periods, and the recipe above reproduces that exactly
+from a stored sweep, rather than approximating it with a mean of the
+windows' individual Sharpes (which differs whenever the windows have
+unequal volatility).
+
+Same recipe for any figure that is a function of `(n, x̄, s)` —
+`annualized_mean_pct`, `annualized_volatility_pct`, `returns.total` (compound
+`1 + returns.total` across the union's windows). Metrics that are **not**
+moments of the return series — drawdowns, trade statistics, quantiles
+(`var_95`, `median_bar`, `tail_ratio`) — do not pool this way and cannot be
+recovered from a windowed reduction.
 
 ### `median_bar` on flat runs
 

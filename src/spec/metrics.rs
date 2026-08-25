@@ -148,8 +148,24 @@ pub struct ReturnSection {
     /// Compound annual growth rate (CAGR), or `None` for a non-positive equity path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cagr_pct: Option<Real>,
+    /// Arithmetic mean of the per-bar returns.
+    ///
+    /// With [`stddev_bar`](Self::stddev_bar) and
+    /// [`run.bars`](RunSection::bars) this is a **sufficient statistic** for
+    /// the window's return distribution — see
+    /// [`windowed_from_report`]'s *Pooling windows*.
     pub mean_bar: Real,
     pub median_bar: Real,
+    /// **Sample** (Bessel-corrected, `ddof = 1`) standard deviation of the
+    /// per-bar returns — the same divisor empyrical / pyfolio / quantstats and
+    /// Excel's `STDEV` use, so this reads identically to those references.
+    /// `0` on a single-bar run, where the corrected estimator is undefined.
+    ///
+    /// The `ddof` matters when reconstructing moments: the window's centred
+    /// second moment is `Σ(x − x̄)² = (n − 1)·stddev_bar²`, **not**
+    /// `n·stddev_bar²`. Same convention behind
+    /// [`annualized_volatility_pct`](Self::annualized_volatility_pct) and every
+    /// ratio that divides by a dispersion (Sharpe, Sortino, PSR/DSR).
     pub stddev_bar: Real,
     pub best_bar: Real,
     pub worst_bar: Real,
@@ -633,6 +649,37 @@ fn booked_within<'a, T>(
 /// is the equity marked on the bar before it, and only the fills booked inside
 /// it count — a position carried across a boundary shows up in the entering
 /// window as an unmatched closing fill, the usual windowed-analysis convention.
+///
+/// # Pooling windows
+///
+/// The windows **tile** the report and each takes its initial equity from the
+/// bar before it, so a window's return series is bit-identical to the same
+/// slice of the whole run's. That makes each window's
+/// `(run.bars, returns.mean_bar, returns.stddev_bar)` a **sufficient
+/// statistic**: a caller can recover the exact mean / variance / Sharpe over
+/// *any* union of windows — non-contiguous ones included, which is what a CSCV
+/// / PBO pass (Bailey, Borwein, López de Prado & Zhu, 2015) scores its
+/// combinations over — without the return series ever leaving this crate.
+///
+/// Per window, `n = run.bars`, `x̄ = returns.mean_bar`, and — because
+/// [`stddev_bar`](ReturnSection::stddev_bar) is the **`ddof = 1`** estimator —
+/// the centred second moment is `M₂ = (n − 1)·stddev_bar²`. Pool pairwise
+/// (Chan's parallel-variance form), never by accumulating `Σx²`:
+///
+/// ```text
+/// δ  = x̄_b − x̄_a
+/// n  = n_a + n_b
+/// x̄  = x̄_a + δ·n_b/n
+/// M₂ = M₂_a + M₂_b + δ²·n_a·n_b/n
+/// ```
+///
+/// then `s² = M₂/(n − 1)` and `sharpe = (x̄·bars_per_year − rf) /
+/// (s·√bars_per_year)` — the same expression [`crate::metrics::sharpe`]
+/// evaluates over the concatenated slices, agreeing with it to ~1e-15
+/// relative (`window_return_moments_pool_to_an_exact_union_sharpe`). The
+/// textbook `Σx² − n·x̄²` route is algebraically identical and numerically
+/// worse: on a low-volatility, high-drift curve it loses ~5 significant
+/// digits where the form above loses none.
 /// The per-window reductions are pure and independent, so this farms them out
 /// to whatever pool the caller has installed — the same treatment
 /// [`rolling_from_report`] gets.
@@ -1299,6 +1346,102 @@ mod tests {
             .product::<Real>()
             - 1.0;
         assert!((whole - compounded).abs() < 1e-12);
+    }
+
+    /// A windowed reduction's per-window return moments are **sufficient
+    /// statistics** for the union: `(run.bars, returns.mean_bar,
+    /// returns.stddev_bar)` recovers `(n, x̄, Σ(x−x̄)²)` for each window, and
+    /// those pool to the *exact* Sharpe over any subset of windows —
+    /// non-contiguous ones included, which is what CSCV / PBO (Bailey,
+    /// Borwein, López de Prado & Zhu 2015) scores its combinations over.
+    ///
+    /// Two facts make it exact, and this test is what pins them:
+    ///
+    /// * the windows **tile** the evaluated bars, and each one's initial
+    ///   equity is the bar *before* it ([`report_slice`]) — so a window's
+    ///   return series is bit-identical to the same slice of the whole run's;
+    /// * the estimator is `ddof=1` throughout ([`crate::metrics::stddev_return`]),
+    ///   so `Σ(x−x̄)² = (n−1)·s²`. A population reading would be off by
+    ///   `n/(n−1)` per window.
+    #[test]
+    fn window_return_moments_pool_to_an_exact_union_sharpe() {
+        const BPY: Real = 252.0;
+        const RF: Real = 0.02;
+
+        // Two curves, because the pooling arithmetic is only interesting when
+        // the moments differ in scale: an ordinary path, and a low-vol /
+        // high-drift one where the centred and uncentred second moments are
+        // three orders of magnitude apart.
+        for (label, amp, drift) in [("ordinary", 0.02, 0.001), ("low-vol drift", 1e-5, 0.01)] {
+            let mut equity = Vec::new();
+            let mut e: Real = 10_000.0;
+            for i in 0..37u32 {
+                let step = (i as Real * 0.7).sin() * amp + drift;
+                e *= 1.0 + step;
+                equity.push(e);
+            }
+            let report: RunReport<Symbol> = RunReport {
+                equity_curve: equity.clone(),
+                fills: Vec::new(),
+                rejections: Vec::new(),
+                initial_equity: 10_000.0,
+                ruin_bar: None,
+                carry_coverage: None,
+            };
+
+            // 37 bars, window 9 → 9,9,9,9,1: uneven, with a one-bar tail whose
+            // stddev is zero.
+            let windows = windowed_from_report(&report, 9, BPY, RF, None);
+            assert_eq!(windows.len(), 5);
+            let all = crate::metrics::per_bar_returns(&equity, report.initial_equity);
+
+            // Every non-empty subset of the five windows.
+            for mask in 1u32..(1 << windows.len()) {
+                let chosen: Vec<&WindowMetrics> = windows
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, w)| w)
+                    .collect();
+
+                // Chan's parallel-variance pooling over each window's
+                // `(n, x̄, M2)`, recovered from its published moments.
+                let (mut n, mut mean, mut m2) = (0usize, 0.0, 0.0);
+                for w in &chosen {
+                    let n_w = w.metrics.run.bars;
+                    let mean_w = w.metrics.returns.mean_bar;
+                    let s_w = w.metrics.returns.stddev_bar;
+                    let m2_w = (n_w.saturating_sub(1)) as Real * s_w * s_w;
+                    let total = n + n_w;
+                    let delta = mean_w - mean;
+                    mean += delta * n_w as Real / total as Real;
+                    m2 += m2_w + delta * delta * (n * n_w) as Real / total as Real;
+                    n = total;
+                }
+                let recovered = if n < 2 {
+                    None
+                } else {
+                    let vol = (m2 / (n - 1) as Real).sqrt() * BPY.sqrt();
+                    (vol != 0.0).then(|| (mean * BPY - RF) / vol)
+                };
+
+                // The direct answer: Sharpe over the concatenated slices.
+                let concat: Vec<Real> = chosen
+                    .iter()
+                    .flat_map(|w| all[w.start_bar..=w.end_bar].iter().copied())
+                    .collect();
+                let direct = crate::metrics::sharpe(&concat, RF, BPY);
+
+                match (recovered, direct) {
+                    (Some(a), Some(b)) => assert!(
+                        (a - b).abs() <= 1e-12 * b.abs().max(1.0),
+                        "{label} mask {mask:#07b}: pooled {a} vs direct {b}"
+                    ),
+                    (None, None) => {}
+                    other => panic!("{label} mask {mask:#07b}: definedness disagrees: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]

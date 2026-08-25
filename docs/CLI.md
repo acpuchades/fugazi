@@ -2415,7 +2415,7 @@ Non-metric inputs echoed at the top of the file.
 | `total` | Total return as a fraction (`0.15` = +15%). |
 | `total_pct` | Same, as a percent. |
 | `cagr_pct` | Compound annual growth rate as a percent. Omitted for a non-positive equity path. |
-| `mean_bar` / `median_bar` / `stddev_bar` | Per-bar return moments. |
+| `mean_bar` / `median_bar` / `stddev_bar` | Per-bar return moments. `stddev_bar` is the sample (`ddof = 1`) deviation. Under `-w`, `(run.bars, mean_bar, stddev_bar)` per window pools to an exact figure over any *union* of windows — see [METRICS.md](METRICS.md#pooling-windows--an-exact-figure-over-any-union-of-them). |
 | `best_bar` / `worst_bar` | Max / min per-bar return. |
 | `positive_bars_pct` | Percentage of bars with a strictly positive return. |
 | `skewness` / `kurtosis` | Distribution shape (biased skew and excess kurtosis; `kurtosis = 0` for a normal). Omitted when stddev is zero. |

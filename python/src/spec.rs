@@ -1458,6 +1458,21 @@ impl PySweepRow {
         }
     }
 
+    /// One metrics document per **window** (`-w` / `windowed=`), in bar order.
+    /// `None` when the sweep wasn't windowed.
+    ///
+    /// The windows tile the evaluated bars and each takes its initial equity
+    /// from the bar before it, so a window's return series is the same slice of
+    /// the whole run's. Each window's `(run.bars, returns.mean_bar,
+    /// returns.stddev_bar)` is therefore a **sufficient statistic** for that
+    /// slice: an exact mean / volatility / Sharpe over *any* union of windows —
+    /// non-contiguous ones included, as a CSCV / PBO pass needs — follows from
+    /// these three numbers per window, with no per-point return series kept.
+    ///
+    /// `returns.stddev_bar` is the `ddof = 1` estimator, so the window's
+    /// centred second moment is `(n - 1) * stddev_bar ** 2`. Pool pairwise
+    /// rather than by accumulating a sum of squares; the full recipe, and why,
+    /// is in `docs/METRICS.md` under *Pooling windows*.
     #[getter]
     pub(crate) fn metrics_windowed(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.windowed_metrics {

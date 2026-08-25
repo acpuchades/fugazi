@@ -1,5 +1,6 @@
 """Tests for the YAML-driven strategy surface: load_spec, evaluate, optimize."""
 
+import math
 import os
 
 import pytest
@@ -414,6 +415,19 @@ def _trend_yaml():
         lhs: !sma { period: !param FAST }
         rhs: !sma { period: !param SLOW }
     """
+
+
+def _oscillating_snaps(n=120):
+    """A 120-bar drifting sine — a path the trend document actually trades.
+
+    `_trend_snaps` is monotone enough that the crossover never fires, which is
+    fine for shape assertions but leaves every return moment at zero. The
+    windows here differ in volatility, which is the case the pooling tests are
+    about.
+    """
+    return _snaps_single(
+        "BTC", [100.0 * (1.0 + 0.05 * math.sin(i / 4.0) + 0.004 * i) for i in range(n)]
+    )
 
 
 def _trend_snaps():
@@ -860,6 +874,110 @@ def test_optimize_windowed_produces_per_window_metrics():
         assert len(row.metrics_windowed) >= 1
         # Each entry is a Metrics dict.
         assert "run" in row.metrics_windowed[0]
+
+
+def _pool_windows(windows):
+    """Chan's pairwise pooling of per-window `(n, mean, M2)` moments.
+
+    `returns.stddev_bar` is the `ddof = 1` estimator, so a window's centred
+    second moment is `(n - 1) * s ** 2`.
+    """
+    n, mean, m2 = 0, 0.0, 0.0
+    for w in windows:
+        n_w = w["run"]["bars"]
+        mean_w = w["returns"]["mean_bar"]
+        m2_w = (n_w - 1) * w["returns"]["stddev_bar"] ** 2
+        total = n + n_w
+        delta = mean_w - mean
+        mean += delta * n_w / total
+        m2 += m2_w + delta * delta * n * n_w / total
+        n = total
+    return n, mean, m2
+
+
+def _pooled_sharpe(windows, bars_per_year, risk_free_rate=0.0):
+    n, mean, m2 = _pool_windows(windows)
+    if n < 2:
+        return None
+    vol = math.sqrt(m2 / (n - 1)) * math.sqrt(bars_per_year)
+    if vol == 0.0:
+        return None
+    return (mean * bars_per_year - risk_free_rate) / vol
+
+
+def test_windowed_metrics_pool_to_the_whole_run_figures():
+    """Per-window `(run.bars, mean_bar, stddev_bar)` are sufficient statistics.
+
+    Pooling every window of a windowed sweep reproduces the *whole-run* Sharpe
+    and annualized volatility of the same grid point exactly — which is what
+    lets a caller score an arbitrary union of windows (CSCV / PBO) without the
+    per-point return series ever leaving the process. See `docs/METRICS.md`,
+    *Pooling windows*.
+    """
+    bpy, rf = 365.0, 0.03
+    snaps = _oscillating_snaps()
+    grid = [{"FAST": [3, 5], "SLOW": [12]}]
+    common = dict(
+        cash=1000.0,
+        grid=grid,
+        metric_names=[
+            "risk_adjusted.sharpe",
+            "returns.annualized_volatility_pct",
+            "returns.mean_bar",
+        ],
+        bars_per_year=bpy,
+        risk_free_rate=rf,
+    )
+    whole = ta.optimize(_trend_yaml(), snaps, **common)
+    windowed = ta.optimize(_trend_yaml(), snaps, windowed=30, **common)
+
+    assert len(whole.rows) == len(windowed.rows) == 2
+    for direct, row in zip(whole.rows, windowed.rows):
+        assert direct.values == row.values  # same grid point, same order
+        n, mean, m2 = _pool_windows(row.metrics_windowed)
+
+        # The windows tile the run, so the pooled count is the run's bar count.
+        assert n == sum(w["run"]["bars"] for w in row.metrics_windowed)
+        assert direct.metrics["risk_adjusted.sharpe"] is not None  # not vacuous
+        assert direct.metrics["returns.mean_bar"] == pytest.approx(mean, rel=1e-12)
+
+        vol_pct = math.sqrt(m2 / (n - 1)) * math.sqrt(bpy) * 100.0
+        assert direct.metrics["returns.annualized_volatility_pct"] == pytest.approx(
+            vol_pct, rel=1e-12
+        )
+        assert direct.metrics["risk_adjusted.sharpe"] == pytest.approx(
+            _pooled_sharpe(row.metrics_windowed, bpy, rf), rel=1e-12
+        )
+
+
+def test_windowed_pooling_is_not_the_mean_of_window_sharpes():
+    """The pooled figure is the one a CSCV pass wants, and it is *not* the mean.
+
+    Guards the reason the sufficient statistics are worth publishing: averaging
+    the windows' own Sharpes answers a different question whenever the windows
+    differ in volatility, so a caller that has only per-window Sharpes cannot
+    recover this number.
+    """
+    bpy = 365.0
+    sweep = ta.optimize(
+        _trend_yaml(),
+        _oscillating_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3], "SLOW": [12]}],
+        metric_names=["risk_adjusted.sharpe"],
+        windowed=30,
+        bars_per_year=bpy,
+    )
+    (row,) = sweep.rows
+    pooled = _pooled_sharpe(row.metrics_windowed, bpy)
+    per_window = [
+        w["risk_adjusted"]["sharpe"]
+        for w in row.metrics_windowed
+        if w["risk_adjusted"].get("sharpe") is not None
+    ]
+    assert pooled is not None
+    assert len(per_window) >= 2
+    assert pooled != pytest.approx(sum(per_window) / len(per_window), rel=1e-6)
 
 
 def test_optimize_walkforward_two_tuple():
