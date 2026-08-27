@@ -246,8 +246,15 @@ pub fn reject_contradictory(observations: &[HoleTypes]) -> Result<(), String> {
             // demanding different things — caught one step earlier, and
             // attributable to the declaration rather than to a tie between two
             // slots.
+            // `compatible_with`, not `!=`: a refined slot type and the
+            // coarser declaration it refines are one claim, not two. A
+            // `!pick { symbol: !param { key: SYM, type: string } }` demands
+            // `Symbol` at the slot and declares `Str`, and has always been
+            // valid — the refined types must not make it a contradiction.
             if let Some(declared) = hole.declared
-                && let Some(clash) = demanded.iter().find(|t| **t != declared.required())
+                && let Some(clash) = demanded
+                    .iter()
+                    .find(|t| !t.compatible_with(declared.required()))
             {
                 return Some(format!(
                     "`{name}` is declared `{}` but used where a {} is required",
@@ -330,8 +337,8 @@ long:
             story(&c),
             [
                 ("FAST", None, vec!["number"]),
-                ("FREQ", None, vec!["string"]),
-                ("SYMBOL", None, vec!["string"]),
+                ("FREQ", None, vec!["frequency"]),
+                ("SYMBOL", None, vec!["symbol"]),
             ]
         );
     }
@@ -385,7 +392,7 @@ long:
         .expect_err("no single value is both a symbol and a period");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("`X` is used as number and as string"),
+            msg.contains("`X` is used as number and as symbol"),
             "unexpected: {msg}"
         );
     }
@@ -423,7 +430,7 @@ long:
              long:\n  enter: !gt { lhs: !sma { period: 20 }, rhs: !value 0 }\n",
         )
         .expect("checks");
-        assert_eq!(story(&c), [("SYM", Some("string"), vec!["string"])]);
+        assert_eq!(story(&c), [("SYM", Some("string"), vec!["symbol"])]);
     }
 
     /// The ledger is a thread-local the parse appends to. A check that returns
@@ -438,7 +445,7 @@ long:
              long:\n  enter: !gt { lhs: !sma { period: 20 }, rhs: !value 0 }\n",
         )
         .expect("checks");
-        assert_eq!(story(&c), [("KEPT", None, vec!["string"])]);
+        assert_eq!(story(&c), [("KEPT", None, vec!["symbol"])]);
     }
 
     /// A fully determined document is built as well as parsed — the one check
@@ -528,10 +535,80 @@ long:
              long:\n  enter: !gt { lhs: !sma { period: 20 }, rhs: !value 0 }\n",
         )
         .expect("checks");
-        assert_eq!(story(&c), [("KEPT", None, vec!["string"])]);
+        assert_eq!(story(&c), [("KEPT", None, vec!["symbol"])]);
     }
 
-    /// A placeholder standing where a whole expression goes records `Expr`,
+    /// The refinement lattice, which is the whole reason `Symbol` and
+    /// `Frequency` can be real types rather than a side-table of hints.
+    ///
+    /// A refinement never contradicts what it refines — one value satisfies
+    /// both, and the finer one is the binding constraint to report. Two
+    /// *different* refinements of the same type do contradict: both are
+    /// strings, and no string is both a ticker and a bar cadence.
+    #[test]
+    fn a_refinement_agrees_with_what_it_refines_and_not_with_its_sibling() {
+        // `symbol:` is `SymbolName`, `stream:` a plain `String`. One name in
+        // both is one ticker, and `symbol` is what to ask the caller for.
+        let c = single(
+            "root: !pick { symbol: !param X }\nlong:\n  enter: !gt\n    \
+             lhs: !close { source: !pick { stream: !param X } }\n    rhs: !value 0\n",
+        )
+        .expect("a symbol is a string");
+        assert_eq!(story(&c), [("X", None, vec!["symbol"])]);
+        assert!(
+            c.holes[0].used.contains(&RequiredType::Str),
+            "the coarse demand is still recorded, just not reported: {:?}",
+            c.holes[0].used
+        );
+
+        for (name, text) in [
+            (
+                "symbol and frequency",
+                "root: !pick { symbol: !param X, freq: !param X }\nlong: { enter: !value true }\n",
+            ),
+            (
+                "symbol and number",
+                "root: !pick { symbol: !param X }\nlong:\n  \
+                 enter: !gt { lhs: !sma { period: !param X }, rhs: !value 0 }\n",
+            ),
+        ] {
+            let err = single(text)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: should have been refused as contradictory"));
+            assert!(
+                format!("{err:#}").contains("contradictory placeholder types"),
+                "{name}: {err:#}"
+            );
+        }
+    }
+
+    /// A declaration and a refined slot are one claim when the declaration is
+    /// the *coarser* of the two. `type: string` on a `!pick { symbol: }` has
+    /// been the documented way to keep a numeric ticker a string since before
+    /// the refined types existed, and it must not become a contradiction.
+    #[test]
+    fn a_coarser_declaration_agrees_with_a_refined_slot() {
+        let c = single(
+            "root: !pick { symbol: !param { key: X, type: string } }\n\
+             long: { enter: !value true }\n",
+        )
+        .expect("`string` is what `symbol` refines");
+        assert_eq!(story(&c), [("X", Some("string"), vec!["symbol"])]);
+
+        // The other direction still clashes: `symbol` is not a cadence.
+        let err = single(
+            "root: !pick { freq: !param { key: X, type: symbol } }\n\
+             long: { enter: !value true }\n",
+        )
+        .expect_err("a ticker is not a bar cadence");
+        assert!(
+            format!("{err:#}")
+                .contains("`X` is declared `symbol` but used where a frequency is required"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    /// A placeholder standing where a whole expression goes records `Expr`,    /// A placeholder standing where a whole expression goes records `Expr`,
     /// which is not a *demand* — every scalar a caller can pass is an
     /// expression, so it constrains nothing and contradicts nothing.
     #[test]
@@ -555,8 +632,8 @@ long:
         assert_eq!(
             story(&c),
             [
-                ("FREQ", None, vec!["string"]),
-                ("SYMBOL", None, vec!["string"])
+                ("FREQ", None, vec!["frequency"]),
+                ("SYMBOL", None, vec!["symbol"])
             ]
         );
     }

@@ -243,6 +243,10 @@ fn check_reports_a_deferred_root_as_ok() {
 /// did not even name what to pass.
 #[test]
 fn check_reports_an_unresolved_root_param_rather_than_failing() {
+    // Both report `symbol`, by different routes: the bare root is *asserted* to
+    // be one (nothing demands a type of a placeholder that is the whole root),
+    // while the nested one is *inferred* from the `SymbolName`-typed slot it
+    // sits in. The label being the same either way is the point.
     for (name, doc, param) in [
         ("bare", "root: !param SYMBOL\n", "SYMBOL"),
         ("nested", "root: !pick { symbol: !param SYM }\n", "SYM"),
@@ -258,7 +262,7 @@ fn check_reports_an_unresolved_root_param_rather_than_failing() {
             out.stdout
         );
         assert!(
-            out.stdout.contains(&format!("--params {param}=<string>")),
+            out.stdout.contains(&format!("--params {param}=<symbol>")),
             "{name}: and named, with the type it needs: {}",
             out.stdout
         );

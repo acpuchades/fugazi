@@ -141,6 +141,25 @@ pub enum RequiredType {
     Bool,
     Number,
     Str,
+    /// An **asset name** — a `String` slot that names a series, not arbitrary
+    /// text. A [refinement](Self::refines) of [`Str`](Self::Str): every symbol
+    /// is a string, so the two never contradict, but a placeholder demanded as
+    /// a symbol is a ticker and a caller can be told so.
+    ///
+    /// Carried by the `SymbolName` newtype, not asserted alongside the parse —
+    /// the field's *type* is what says it, which is also what makes
+    /// `spec_grammar()` report `symbol` where it used to report `str`.
+    Symbol,
+    /// A **bar cadence token** — the `N<unit>` alphabet `--frequency` uses
+    /// (`1m` / `4h` / `1d`). The other refinement of [`Str`](Self::Str), and
+    /// the reason one was not enough: `!pick`'s `symbol:` and `freq:` are both
+    /// `String` slots, sit side by side in the default `root:`, and want
+    /// opposite things from a caller.
+    ///
+    /// Distinct from `!pick`'s `stream:`, which promises nothing and stays a
+    /// plain [`Str`](Self::Str) — the same format contract the two spellings
+    /// already had, now visible in the type.
+    Frequency,
     List,
     Table,
     /// A whole *expression* — the hole stands in for a spec node (or a `!value`
@@ -153,12 +172,67 @@ pub enum RequiredType {
     Expr,
 }
 
+/// The `deserialize_newtype_struct` name each refined-`String` spec field
+/// carries, and the demand it stands for.
+///
+/// A newtype is how serde lets a `String` field say *which kind* of string it
+/// is: `#[derive(Deserialize)] struct SymbolName(String)` calls
+/// `deserialize_newtype_struct("SymbolName", …)`, and the name reaches the hole
+/// deserializer as an ordinary part of the protocol. No side table, no
+/// annotation — the field's type is the declaration, and the same type is what
+/// the grammar derive reads to report `symbol` instead of `str`.
+const NEWTYPE_DEMANDS: &[(&str, RequiredType)] = &[
+    ("SymbolName", RequiredType::Symbol),
+    ("FreqToken", RequiredType::Frequency),
+];
+
+/// The demand a newtype-struct name stands for, if it is one of the refined
+/// string types. `None` for every other newtype, which deserializes unchanged.
+fn newtype_demand(name: &str) -> Option<RequiredType> {
+    NEWTYPE_DEMANDS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, ty)| *ty)
+}
+
 impl RequiredType {
+    /// The coarser type this one is a **refinement** of, if any.
+    ///
+    /// A refinement is satisfied by a subset of what it refines, so the two can
+    /// never contradict: a `!param` demanded as a `Symbol` in one place and a
+    /// `Str` in another wants one value — a ticker — and that value is a
+    /// string. [`HoleTypes::demanded`] collapses the pair to the finer of the
+    /// two, which is the binding constraint and the one to show a caller.
+    ///
+    /// Two *different* refinements of the same type do contradict: `Symbol` and
+    /// `Frequency` are both strings, but no string is both a ticker and a bar
+    /// cadence.
+    pub fn refines(self) -> Option<RequiredType> {
+        match self {
+            RequiredType::Symbol | RequiredType::Frequency => Some(RequiredType::Str),
+            _ => None,
+        }
+    }
+
+    /// Can one value satisfy both demands?
+    ///
+    /// True when they are equal, or when one [refines](Self::refines) the
+    /// other. That second arm is what keeps a declaration and a refined slot
+    /// from fighting: `type: string` on a `!pick { symbol: }` is a *coarser*
+    /// claim than the slot's `Symbol`, not a conflicting one, and a document
+    /// that has said `type: string` there since before the refined types
+    /// existed must go on loading.
+    pub fn compatible_with(self, other: RequiredType) -> bool {
+        self == other || self.refines() == Some(other) || other.refines() == Some(self)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             RequiredType::Bool => "bool",
             RequiredType::Number => "number",
             RequiredType::Str => "string",
+            RequiredType::Symbol => "symbol",
+            RequiredType::Frequency => "frequency",
             RequiredType::List => "list",
             RequiredType::Table => "table",
             RequiredType::Expr => "expression",
@@ -250,10 +324,20 @@ impl HoleTypes {
     /// dropped, because it is not a demand: it says the hole stands where a
     /// whole expression goes, and every scalar a user can pass is one.
     pub fn demanded(&self) -> Vec<RequiredType> {
-        self.used
+        let kept: Vec<RequiredType> = self
+            .used
             .iter()
             .copied()
             .filter(|t| *t != RequiredType::Expr)
+            .collect();
+        kept.iter()
+            .copied()
+            // Drop a type some other demand *refines*: a slot typed `Symbol`
+            // also answers `deserialize_str` on the way to its inner `String`,
+            // so `Str` rides along with every refined demand and would read as
+            // a second, contradictory one. The refinement is the binding
+            // constraint — a value satisfying it satisfies what it refines.
+            .filter(|t| !kept.iter().any(|other| other.refines() == Some(*t)))
             .collect()
     }
 }
@@ -377,6 +461,25 @@ pub fn parse_probe<T: DeserializeOwned>(value: Json) -> Result<(), String> {
     }
 }
 
+/// Is `value` **itself** a placeholder sentinel — as opposed to a structure with
+/// one somewhere inside it ([`contains_hole`])?
+///
+/// The distinction is what separates a hole with a slot to be typed from and one
+/// without. `root: !param SYM` *is* a hole and no field ever demanded a type of
+/// it; `root: !pick { symbol: !param SYM }` is a `!pick` whose `symbol:` slot
+/// did. See [`crate::spec::root::RootSpec`]'s `Deserialize`.
+pub fn is_hole(value: &Json) -> bool {
+    match value {
+        Json::Object(map) => {
+            map.len() == 1
+                && map
+                    .keys()
+                    .all(|k| [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY].contains(&k.as_str()))
+        }
+        _ => false,
+    }
+}
+
 /// Does `value` hold a placeholder sentinel anywhere inside it?
 ///
 /// The structural twin of `names_a_hole`, for the callers that inspect a tree
@@ -401,10 +504,17 @@ pub fn contains_hole(value: &Json) -> bool {
 /// For the one parse that steps outside it: [`RootSpec`] buffers
 /// its subtree to a `serde_json::Value` and re-parses it with plain `serde_json`
 /// (it has to — it keeps the raw tree for the static analysers, and the two
-/// formats' `Value` types both self-describe). Nothing along that path answers a
-/// `deserialize_*` call at the hole, so a `root: !param SYM` used to record no
-/// observation at all: `check` reported no unset placeholder and then failed
-/// *building* a document whose only problem was a value nobody passed.
+/// formats' `Value` types both self-describe). A `root: !param SYM` used to
+/// record no observation at all: `check` reported no unset placeholder and then
+/// failed *building* a document whose only problem was a value nobody passed.
+///
+/// **Only for a root that is itself the hole.** Once `root:` became a whole
+/// expression, a hole *inside* one sits in a field, and `NodeSpec`'s inner
+/// payload parse routes back through the hole-aware deserializer — which types
+/// it from the field that demanded it. Calling this over the whole tree on top
+/// of that adds `Str` to every such hole, and a numeric slot then reads as
+/// `number` *and* `string`: a contradiction, on a document that is fine. See
+/// [`is_hole`].
 ///
 /// [`RootSpec`]: crate::spec::root::RootSpec
 pub fn observe_json(value: &Json, ty: RequiredType) {
@@ -550,9 +660,16 @@ impl<'de> Deserializer<'de> for UndefinedDeserializer {
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        // A refined string type (`SymbolName`, `FreqToken`) names itself here.
+        // Record the finer demand; the inner `String` still records `Str` when
+        // it asks, and `HoleTypes::demanded` collapses the pair — cheaper and
+        // less fragile than threading a "don't record" flag down one level.
+        if let Some(ty) = newtype_demand(name) {
+            observe(&self.0, ty);
+        }
         visitor.visit_newtype_struct(self)
     }
 

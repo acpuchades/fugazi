@@ -1238,7 +1238,7 @@ long:
 check = ta.check_spec(doc)                # no params= — nothing to bind yet
 assert check.kind == "single"
 assert check.param_types == {
-    "FAST": "number", "FREQ": "string", "SLOW": "number", "SYMBOL": "string",
+    "FAST": "number", "FREQ": "frequency", "SLOW": "number", "SYMBOL": "symbol",
 }
 ```
 
@@ -1286,6 +1286,32 @@ one demand as far as a position is concerned, but they reject different values).
 contradiction above — and is empty when the placeholder stands where a whole
 *expression* goes and nothing narrowed it, in which case `required_type` reads
 `'expression'`.
+
+**Not every string is the same string.** `!pick`'s `symbol:` and `freq:` are
+both `String` slots and they sit side by side in the default `root:`, so typing
+them both `'string'` tells a caller nothing about either. They are distinct
+types — `SymbolName` and `FreqToken` — so the demand comes off the parse with no
+declaration anywhere:
+
+```python
+ta.check_spec(
+    "root: !pick { symbol: !param SYMBOL, freq: !param FREQ }\n"
+    "long: { enter: !value true }\n"
+).param_types
+# {'SYMBOL': 'symbol', 'FREQ': 'frequency'}
+```
+
+`!pick`'s `stream:` stays `'string'`, because it genuinely promises nothing —
+that asymmetry was already the contract between the two spellings and is now
+visible in the types. `spec_grammar()` reports the same three, so a form built
+over the grammar rather than over a checked document gets it too; the field's
+type is the single source and the two surfaces cannot disagree.
+
+`symbol` and `frequency` **refine** `string`: one value satisfies both, so they
+never contradict it and `required_type` reports the finer one. Two different
+refinements do contradict — no string is both a ticker and a bar cadence. Both
+are also spellable as declarations (`type: symbol`, `type: frequency`), and
+`type: frequency` validates against the `N<unit>` cadence alphabet.
 
 `check.built` says whether the document was **built** as well as parsed. The
 build catches the one class of error a typed parse structurally cannot — a leaf

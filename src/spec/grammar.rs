@@ -168,10 +168,19 @@ pub struct GrammarField {
     /// The YAML key, exactly as written under the tag.
     pub name: String,
     /// The value's grammar type: `node` (a nested expression) · `node_list` ·
-    /// `str_list` · `number_list` · `uint` · `number` · `str` · `bool` ·
-    /// `strategy` (an embedded strategy document) · `match_cases` ·
-    /// `str_operand`. A closed vocabulary the derive maps each Rust field type
-    /// onto.
+    /// `str_list` · `number_list` · `uint` · `number` · `str` · `symbol` ·
+    /// `frequency` · `bool` · `strategy` (an embedded strategy document) ·
+    /// `match_cases` · `str_operand`. A closed vocabulary the derive maps each
+    /// Rust field type onto.
+    ///
+    /// `symbol` and `frequency` are `str` **refinements**: still strings, but
+    /// naming an asset and a bar cadence respectively, so a form built over
+    /// this can offer an instrument picker and a cadence list instead of two
+    /// text boxes. A field earns one by being typed
+    /// [`SymbolName`](crate::spec::expr::SymbolName) /
+    /// [`FreqToken`](crate::spec::expr::FreqToken) rather than `String` —
+    /// there is no annotation, the type is the declaration. `!pick`'s
+    /// `stream:` stays `str` because it genuinely promises nothing.
     #[serde(rename = "type")]
     pub ty: String,
     /// `false` when the key may be omitted — either the Rust field is an
@@ -1512,6 +1521,13 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         "positive_uint" => or_placeholder(json!({ "type": "integer", "minimum": 1 })),
         "number" => or_placeholder(json!({ "type": "number" })),
         "str" => or_placeholder(json!({ "type": "string" })),
+        // The two refined string types. Both are strings to a JSON-schema
+        // validator — the refinement is what the *field* means, not a narrower
+        // set of characters — so the `format` annotation carries it, which is
+        // exactly what JSON Schema's `format` is for and is why neither needs a
+        // `pattern` it could not honestly write.
+        "symbol" => or_placeholder(json!({ "type": "string", "format": "symbol" })),
+        "frequency" => or_placeholder(json!({ "type": "string", "format": "frequency" })),
         "bool" => or_placeholder(json!({ "type": "boolean" })),
         "str_operand" => json!({ "oneOf": [{ "type": "string" }, node_ref()] }),
         "match_cases" => json!({ "type": "array", "items": { "$ref": "#/$defs/match_case" } }),

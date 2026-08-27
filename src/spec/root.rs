@@ -352,10 +352,18 @@ pub const FREQ_PARAM: &str = "FREQ";
 /// user what an omitted `root:` expands to, and so the tests assert against the
 /// one definition rather than a copy of it.
 pub fn default_tree() -> serde_json::Value {
+    // Both placeholders declare their type. The slots they sit in already
+    // demand it (`symbol:` is a `SymbolName`, `freq:` a `FreqToken`), so this
+    // adds nothing to a `check` report — what it adds is **coercion**, on the
+    // path where nothing else can: `--params SYMBOL=123` is parsed as a number
+    // by `params::scalar` and a numeric ticker stops being a symbol. Spelling
+    // the root out longhand with `type: string` has always been the fix; the
+    // implicit root had no way to ask for it. Same for `FREQ=1hh`, which now
+    // fails at load naming the parameter instead of at the build.
     serde_json::json!({
         "pick": {
-            "symbol": { "param": { "key": SYMBOL_PARAM, "default": null } },
-            "freq": { "param": { "key": FREQ_PARAM, "default": null } },
+            "symbol": { "param": { "key": SYMBOL_PARAM, "default": null, "type": "symbol" } },
+            "freq": { "param": { "key": FREQ_PARAM, "default": null, "type": "frequency" } },
         }
     })
 }
@@ -378,11 +386,23 @@ impl<'de> Deserialize<'de> for RootSpec {
         // `check` of a parameterized root into a false failure, so the demand
         // stands down exactly where the tree is admittedly incomplete.
         if super::undefined::contains_hole(&tree) {
-            // …and report the placeholder, which nothing else on this path
-            // would: the re-parse below is plain `serde_json`, outside the
-            // hole-aware deserializer that records these. A root's placeholder
-            // stands for a symbol, so `Str`. See `undefined::observe_json`.
-            super::undefined::observe_json(&tree, super::undefined::RequiredType::Str);
+            // …and, for a root that *is* the placeholder, report it — nothing
+            // else on this path would. The hand-rolled node parse records only
+            // that an *expression* goes here, which is true of every scalar and
+            // so says nothing about what to pass. A bare root stands for a
+            // symbol, so `Symbol` — the same thing this always asserted, now
+            // that there is a type that spells it. See `undefined::observe_json`.
+            //
+            // Only for that shape. A root that is a *structure* around a hole —
+            // `!pick { symbol: !param S }`, `!resample { every: !param N }` —
+            // has every hole sitting in a field, and `NodeSpec`'s inner payload
+            // parse routes back through the hole-aware deserializer, which types
+            // each one from the field that demanded it. Painting the whole tree
+            // `Str` on top of that made a numeric slot read as `number` *and*
+            // `string`, and `check` refused the document as self-contradictory.
+            if super::undefined::is_hole(&tree) {
+                super::undefined::observe_json(&tree, super::undefined::RequiredType::Symbol);
+            }
         } else {
             require_atom(&node).map_err(D::Error::custom)?;
         }
@@ -582,7 +602,73 @@ mod tests {
         assert_eq!(r.as_pick(), Some((Some("ETH"), None)));
     }
 
-    /// `check` substitutes through a different pass; the default's placeholders
+    /// The default root's placeholders declare their types, and the point is
+    /// **coercion** on the one path that had no other way to ask for it.
+    ///
+    /// `--params SYMBOL=123` is parsed as a *number* by `params::scalar`, and a
+    /// numeric ticker then fails deserialization into the `symbol:` slot.
+    /// Spelling the root out longhand with `type: string` has always been the
+    /// documented fix; a document that never wrote a `root:` at all could not
+    /// reach it. Declaring on the tree fugazi splices in closes that.
+    #[test]
+    fn the_default_root_coerces_a_numeric_ticker() {
+        let doc = super::super::input::parse_value("long:\n  enter: !value true\n").expect("parse");
+        let doc = apply_default(doc, StrategyKind::Single);
+        let params = std::collections::HashMap::from([
+            ("SYMBOL".to_string(), serde_json::json!(123)),
+            ("FREQ".to_string(), serde_json::json!("1d")),
+        ]);
+        let resolved = super::super::params::substitute(doc, &params).expect("coerces");
+        let spec: crate::spec::SingleStrategySpec =
+            serde_json::from_value(resolved).expect("parses with a stringified ticker");
+        assert_eq!(
+            spec.root.sole_symbol("single-asset").expect("names one"),
+            "123"
+        );
+    }
+
+    /// The cadence half of the same declaration: a typo is refused at *load*,
+    /// naming the parameter, instead of four layers down at the build.
+    #[test]
+    fn the_default_root_names_the_parameter_for_a_bad_cadence() {
+        let doc = super::super::input::parse_value("long:\n  enter: !value true\n").expect("parse");
+        let doc = apply_default(doc, StrategyKind::Single);
+        let params = std::collections::HashMap::from([
+            ("SYMBOL".to_string(), serde_json::json!("BTC")),
+            ("FREQ".to_string(), serde_json::json!("1hh")),
+        ]);
+        let err = super::super::params::substitute(doc, &params).expect_err("`1hh` has no unit");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parameter `FREQ`") && msg.contains("is not a bar cadence"),
+            "unexpected: {msg}"
+        );
+    }
+
+    /// A `null` default passes any declaration untouched.
+    ///
+    /// `null` is not a value of any type — it is how a body spells *resolves to
+    /// absent*, which is exactly what the default `root:` means by it ("take
+    /// the sole series from the input"). Coercing it made `default: null` and
+    /// `type:` mutually exclusive, which broke every `root:`-less document the
+    /// moment the default tree declared its types.
+    #[test]
+    fn a_null_default_is_not_coerced_against_the_declaration() {
+        for ty in ["symbol", "frequency", "integer", "bool"] {
+            let doc = super::super::input::parse_value(&format!(
+                "root: BTC\nlong:\n  enter: !gt\n    \
+                 lhs: !sma {{ period: !param {{ key: P, default: null, type: {ty} }} }}\n    \
+                 rhs: !value 0\n"
+            ))
+            .expect("parse");
+            assert!(
+                super::super::params::substitute(doc, &std::collections::HashMap::new()).is_ok(),
+                "`default: null` with `type: {ty}` must resolve to absent, not be coerced"
+            );
+        }
+    }
+
+    /// `check` substitutes through a different pass; the default's placeholders    /// `check` substitutes through a different pass; the default's placeholders
     /// carry a `default:`, so they resolve there too rather than becoming holes
     /// that would make every `root:`-less document look under-specified.
     #[test]

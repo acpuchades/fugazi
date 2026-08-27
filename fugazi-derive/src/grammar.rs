@@ -282,7 +282,7 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
     let grammar_ty = grammar_type(&ty_str);
     let is_scalar = matches!(
         grammar_ty,
-        "uint" | "positive_uint" | "number" | "str" | "bool"
+        "uint" | "positive_uint" | "number" | "str" | "symbol" | "frequency" | "bool"
     );
 
     let default_kind = serde_default(&field.attrs)?;
@@ -394,6 +394,15 @@ fn grammar_type(ty_str: &str) -> &'static str {
         "uint"
     } else if inner == "Real" || inner == "f64" {
         "number"
+    } else if inner == "SymbolName" {
+        // A `String` that names an asset. Distinct from `str` so a form built
+        // over the grammar can offer an instrument picker — and so `check`'s
+        // hole types can say `symbol` where they used to say `string`.
+        "symbol"
+    } else if inner == "FreqToken" {
+        // A `String` that names a bar cadence (`1m` / `4h` / `1d`). `!pick`'s
+        // `stream:` stays `str` on purpose: it promises nothing.
+        "frequency"
     } else if inner == "String" || inner == "str" {
         "str"
     } else if inner == "bool" {

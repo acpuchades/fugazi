@@ -2807,9 +2807,9 @@ def test_check_spec_types_each_placeholder_from_where_it_sits():
     """
     assert ta.check_spec(UNBOUND).param_types == {
         "FAST": "number",
-        "FREQ": "string",
+        "FREQ": "frequency",
         "SLOW": "number",
-        "SYMBOL": "string",
+        "SYMBOL": "symbol",
     }
 
 
@@ -2860,7 +2860,7 @@ def test_check_spec_refuses_a_placeholder_its_positions_contradict():
     the one placeholder defect that is decidable with no values at all: no
     single value is both a ticker and a period, so the document can never run
     whatever the caller eventually passes."""
-    with pytest.raises(ta.SpecError, match="`X` is used as number and as string"):
+    with pytest.raises(ta.SpecError, match="`X` is used as number and as symbol"):
         ta.check_spec(
             "root: !pick { symbol: !param X }\n"
             "long:\n  enter: !gt { lhs: !sma { period: !param X }, rhs: !value 0 }\n"
@@ -2927,21 +2927,21 @@ def test_check_spec_leaves_nothing_behind_between_calls():
         ta.check_spec(
             "root: !pick { symbol: !param LEAKED }\nlong:\n  enter: !nope {}\n"
         )
-    assert ta.check_spec(doc).param_types == {"KEPT": "string"}
+    assert ta.check_spec(doc).param_types == {"KEPT": "symbol"}
 
     # ...and the same after one that succeeded and built.
     ta.check_spec(
         "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: 5 }, rhs: !value 0 }\n"
     )
-    assert ta.check_spec(doc).param_types == {"KEPT": "string"}
+    assert ta.check_spec(doc).param_types == {"KEPT": "symbol"}
 
 
 def test_check_spec_binds_the_values_it_is_given():
     """`params=` is not all-or-nothing: a bound placeholder is substituted and
     type-checked exactly as `load_spec` does it, and only the rest stay holes."""
     assert ta.check_spec(UNBOUND, params={"FAST": 3, "SLOW": 8}).param_types == {
-        "FREQ": "string",
-        "SYMBOL": "string",
+        "FREQ": "frequency",
+        "SYMBOL": "symbol",
     }
     with pytest.raises(ta.SpecError):
         ta.check_spec(UNBOUND, params={"FAST": "not a period"})
@@ -2963,3 +2963,108 @@ def test_check_spec_refuses_imports_when_told_to():
     rather than merely narrowing it."""
     with pytest.raises(ta.SpecError, match="!import is disabled"):
         ta.check_spec("root: BTC\nlong:\n  enter: !import other.yml\n", imports=False)
+
+
+def test_check_spec_types_a_symbol_slot_as_a_symbol_and_a_freq_as_a_frequency():
+    """The two placeholders of the default `root:` sit side by side in `!pick`,
+    are both `String` slots, and want opposite things from a caller. Typing them
+    both `string` was the answer that made downstream guess from the parameter's
+    *name*.
+
+    They are refined types now — `SymbolName` / `FreqToken` — so the demand
+    comes off the parse with no declaration anywhere. `stream:` stays `string`
+    because it genuinely promises nothing, which is the same format contract the
+    two spellings already had."""
+    check = ta.check_spec(
+        "root: !pick { symbol: !param SYMBOL, freq: !param FREQ }\n"
+        "long: { enter: !value true }\n"
+    )
+    assert check.param_types == {"SYMBOL": "symbol", "FREQ": "frequency"}
+
+    opaque = ta.check_spec(
+        "root: BTC\nlong:\n  enter: !gt\n"
+        "    lhs: !close { source: !pick { symbol: !param S, stream: !param ST } }\n"
+        "    rhs: !value 0\n"
+    )
+    assert opaque.param_types == {"S": "symbol", "ST": "string"}
+
+
+def test_a_refinement_agrees_with_what_it_refines_but_not_with_its_sibling():
+    """`symbol` and `frequency` refine `string`, so neither contradicts it — one
+    value satisfies both, and the finer one is what to ask a caller for. Two
+    different refinements do contradict: no string is a ticker *and* a cadence.
+    """
+    both = ta.check_spec(
+        "root: !pick { symbol: !param X }\nlong:\n  enter: !gt\n"
+        "    lhs: !close { source: !pick { stream: !param X } }\n    rhs: !value 0\n"
+    )
+    (hole,) = both.holes
+    assert hole.required_type == "symbol"
+    assert hole.used == ["string", "symbol"], (
+        "the coarse demand is recorded, not reported"
+    )
+    assert hole.demanded == ["symbol"]
+
+    with pytest.raises(ta.SpecError, match="used as symbol and as frequency"):
+        ta.check_spec(
+            "root: !pick { symbol: !param X, freq: !param X }\nlong: { enter: !value true }\n"
+        )
+
+
+def test_a_coarser_type_declaration_still_fits_a_refined_slot():
+    """`type: string` on a `!pick { symbol: }` has been the documented way to
+    keep a numeric ticker a string since before the refined types existed. It
+    must not have become a contradiction."""
+    check = ta.check_spec(
+        "root: !pick { symbol: !param { key: X, type: string } }\nlong: { enter: !value true }\n"
+    )
+    (hole,) = check.holes
+    assert hole.declared == "string" and hole.demanded == ["symbol"]
+
+    with pytest.raises(
+        ta.SpecError, match="declared `symbol` but used where a frequency"
+    ):
+        ta.check_spec(
+            "root: !pick { freq: !param { key: X, type: symbol } }\nlong: { enter: !value true }\n"
+        )
+
+
+def test_the_implicit_root_coerces_a_numeric_ticker_and_checks_the_cadence():
+    """The default `root:` declares its own placeholders' types, which buys
+    coercion on the one path that could not ask for it: a document that never
+    wrote a `root:` had no placeholder body to hang `type:` on."""
+    doc = "long:\n  enter: !value true\n"
+    spec = ta.load_spec(doc, params={"SYMBOL": 123}, kind="single")
+    assert spec.kind == "single", "a numeric ticker is stringified, not rejected"
+
+    with pytest.raises(ta.SpecError, match="`FREQ`.*is not a bar cadence"):
+        ta.load_spec(doc, params={"SYMBOL": "BTC", "FREQ": "1hh"}, kind="single")
+
+    # And unset still resolves to the sole-series root rather than being coerced.
+    assert ta.load_spec(doc, kind="single").kind == "single"
+
+
+def test_spec_grammar_reports_the_refined_string_types():
+    """The same types reach a caller that builds a form over the grammar rather
+    than over a checked document — the field's Rust type is the single source,
+    so the two surfaces cannot disagree about what a slot wants."""
+    grammar = ta.spec_grammar()
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("name") == "pick" and "forms" in node:
+                found.append(node)
+            else:
+                for value in node.values():
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(grammar)
+    (pick,) = found
+    types = {f["name"]: f["type"] for f in pick["forms"][0]["fields"]}
+    assert types["symbol"] == "symbol"
+    assert types["freq"] == "frequency"
+    assert types["stream"] == "str", "an opaque id promises nothing and says so"

@@ -295,7 +295,18 @@ pub(crate) struct Placeholder<'a> {
 
 impl Placeholder<'_> {
     /// Put a resolved value through the declaration, if there is one.
+    ///
+    /// `null` passes untouched whatever the declaration says. It is not a value
+    /// of any type and never was — it is how a body spells *resolves to
+    /// absent*, which is what an `Option` slot wants and what the default
+    /// `root:` uses to mean "take the sole series from the input". Coercing it
+    /// would make `default: null` and `type:` mutually exclusive, and a
+    /// placeholder that is optional **and** typed when supplied is an ordinary
+    /// thing to want.
     pub fn apply(&self, value: Value) -> Result<Value> {
+        if value.is_null() {
+            return Ok(value);
+        }
         match self.ty {
             None => Ok(value),
             Some(ty) => ty

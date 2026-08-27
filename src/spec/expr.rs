@@ -15,7 +15,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use fugazi_derive::SpecGrammar;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // Field / calendar / current-bar / current-time leaves are referenced through
 // their full `crate::indicators::` paths inside the `NodeSpec::build`
@@ -770,6 +770,74 @@ pub struct MatchCase {
 /// - A bare YAML tag — `!close`
 /// - A tagged map — `!close { source: !pick { symbol: BTC } }`
 ///
+/// A `String` field that names an **asset**, not arbitrary text.
+///
+/// Three jobs, all of them the type's, which is the point of it being a type
+/// rather than a note in the doc comment:
+///
+/// 1. `spec_grammar()` reports the field as `symbol` instead of `str`, so a
+///    tool building a form over the grammar can offer an instrument picker.
+/// 2. Under `fugazi check` a placeholder in this slot is demanded as
+///    [`RequiredType::Symbol`](crate::spec::undefined::RequiredType::Symbol)
+///    rather than `Str` — which is how a bare `!param SYMBOL`, with no default
+///    to read a type off and no declaration, gets typed at all.
+/// 3. `type: symbol` on a placeholder is checked against it.
+///
+/// It does **not** validate. Symbol shape is venue-specific (`BTCUSDT`,
+/// `BTC-USD`, `ES=F`, `BRK.B`), so there is no alphabet to check against — and
+/// the one check that would be sound, rejecting the empty string, belongs with
+/// the build that would otherwise read nothing on every bar. See
+/// [`FreqToken`], which does have an alphabet and still leaves the check where
+/// it canonicalises.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SymbolName(pub String);
+
+/// A `String` field that names a **bar cadence** — the `N<unit>` alphabet
+/// `--frequency` uses (`1m` / `4h` / `1d` / `1w` / `1M`).
+///
+/// The twin of [`SymbolName`], and the reason one refined string type was not
+/// enough: `!pick`'s `symbol:` and `freq:` are both `String` slots, they sit
+/// side by side in the default `root:`, and a caller asked for "a string" for
+/// both learns nothing about either.
+///
+/// Deliberately **not** worn by `!pick`'s `stream:`, which promises nothing and
+/// is taken verbatim. That asymmetry was already the documented contract
+/// between the two spellings; it is now visible in the types.
+///
+/// Like `SymbolName` it does not validate — `resolve_stream` does, at build,
+/// because it *canonicalises* there (`1H` and `1h` name one stream) and a check
+/// that does not produce the canonical token would be a second copy of the
+/// alphabet.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FreqToken(pub String);
+
+macro_rules! refined_string {
+    ($($ty:ident),* $(,)?) => {$(
+        impl std::ops::Deref for $ty {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+        impl From<String> for $ty {
+            fn from(s: String) -> Self {
+                Self(s)
+            }
+        }
+        impl From<&str> for $ty {
+            fn from(s: &str) -> Self {
+                Self(s.to_string())
+            }
+        }
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    )*};
+}
+refined_string!(SymbolName, FreqToken);
+
 /// The bare-word / bare-tag forms use the implicit `Pick` root; the tagged
 /// map form threads the given atom source through the leaf. The custom
 /// [`TryFrom<serde_norway::Value>`] impl below normalises the string and
@@ -854,11 +922,11 @@ pub enum NodeSpec {
     Pick {
         /// Asset to project from the snapshot; defaults to the blessed series.
         #[serde(default)]
-        symbol: Option<String>,
+        symbol: Option<SymbolName>,
         /// Bar cadence for a cross-frequency snapshot (e.g. `1h`, `1d`).
         /// **Validated** — see [`stream`](Self::Pick::stream).
         #[serde(default)]
-        freq: Option<String>,
+        freq: Option<FreqToken>,
         /// Which series of `symbol` to read, when it carries more than one.
         ///
         /// Two spellings, and the difference is a *format contract*:
@@ -2529,9 +2597,10 @@ enum NodeSpecRaw {
     /// disambiguates via `!pick { symbol: BTC, freq: 1h }`.
     Pick {
         #[serde(default)]
-        symbol: Option<String>,
+        symbol: Option<SymbolName>,
         #[serde(default)]
-        freq: Option<String>,
+        freq: Option<FreqToken>,
+        /// Verbatim, so a plain `String` — see [`FreqToken`].
         #[serde(default)]
         stream: Option<String>,
     },

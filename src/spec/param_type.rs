@@ -53,6 +53,22 @@ pub enum ParamType {
     /// `type: string` — text. A number or bool is *stringified* rather than
     /// rejected, so `--params SYM=123` reaches a `symbol:` slot as `"123"`.
     String,
+    /// `type: symbol` — an asset name. Coerces exactly as
+    /// [`String`](Self::String) does; what it adds is the *claim*, which
+    /// [`SymbolName`](crate::spec::expr::SymbolName)-typed slots check against
+    /// and a form built over the grammar can act on.
+    ///
+    /// No alphabet, deliberately: symbol shape is venue-specific (`BTCUSDT`,
+    /// `BTC-USD`, `ES=F`, `BRK.B`), so there is nothing sound to validate.
+    Symbol,
+    /// `type: frequency` — a bar cadence token, checked against the same
+    /// `N<unit>` alphabet `--frequency` uses. `FREQ=1hh` fails at *load*,
+    /// naming the parameter, instead of four layers down at the build.
+    ///
+    /// The same argument that justifies [`Integer`](Self::Integer): both are a
+    /// `RequiredType` a position could not have told apart on its own, and both
+    /// reject values the coarser type accepts.
+    Frequency,
 }
 
 impl ParamType {
@@ -62,6 +78,8 @@ impl ParamType {
         ParamType::Numeric,
         ParamType::Bool,
         ParamType::Integer,
+        ParamType::Symbol,
+        ParamType::Frequency,
     ];
 
     /// The name written in YAML, and the one printed back at the user.
@@ -71,6 +89,8 @@ impl ParamType {
             ParamType::Integer => "integer",
             ParamType::Numeric => "numeric",
             ParamType::String => "string",
+            ParamType::Symbol => "symbol",
+            ParamType::Frequency => "frequency",
         }
     }
 
@@ -88,6 +108,12 @@ impl ParamType {
             ParamType::Bool => RequiredType::Bool,
             ParamType::Integer | ParamType::Numeric => RequiredType::Number,
             ParamType::String => RequiredType::Str,
+            // The refined string types map to their own demand, not to `Str`.
+            // That is what lets a declaration and a slot check each other:
+            // `type: symbol` in a `freq:` slot is a contradiction, and
+            // `type: string` in either is not — see `RequiredType::refines`.
+            ParamType::Symbol => RequiredType::Symbol,
+            ParamType::Frequency => RequiredType::Frequency,
         }
     }
 
@@ -102,6 +128,10 @@ impl ParamType {
             ParamType::Integer => coerce_integer(value),
             ParamType::Numeric => coerce_numeric(value),
             ParamType::String => coerce_string(value),
+            // A symbol is a string with a claim attached and no alphabet to
+            // check it against, so the coercion is the string one exactly.
+            ParamType::Symbol => coerce_string(value),
+            ParamType::Frequency => coerce_frequency(value),
         }
     }
 }
@@ -126,6 +156,27 @@ fn shown(value: &Value) -> String {
         // one still closes them.
         Value::String(s) => format!("{:?}", clipped(s.clone(), 40)),
         other => clipped(other.to_string(), 44),
+    }
+}
+
+/// A cadence token, checked against the alphabet `--frequency` uses.
+///
+/// Stringified first, like [`coerce_string`], so `--params FREQ=1` reaches the
+/// check as `"1"` and is rejected for the missing unit rather than for being a
+/// number. The value is left **as written**: canonicalisation belongs to
+/// `resolve_stream`, which is where the canonical token is what the loader
+/// tagged the series with, so producing a second one here could only disagree.
+fn coerce_frequency(value: Value) -> Result<Value, String> {
+    let text = coerce_string(value)?;
+    let Value::String(token) = &text else {
+        return Ok(text);
+    };
+    match <crate::types::Frequency as std::str::FromStr>::from_str(token) {
+        Ok(_) => Ok(text),
+        Err(e) => Err(format!(
+            "is declared `frequency`, but {} is not a bar cadence ({e})",
+            shown(&text)
+        )),
     }
 }
 

@@ -127,14 +127,19 @@ def test_the_single_shape_publishes_its_default_root():
     A consumer that renders "defaults to …" reads this rather than hardcoding
     the expansion. It is the pre-substitution value — the two `!param`
     placeholders are what the loader splices, and an unset one drops its key.
+
+    Both declare a `type:`, and that is part of the published contract rather
+    than an implementation detail: it is what stringifies `SYMBOL=123` into a
+    numeric ticker and what refuses `FREQ=1hh` at load, on the one path that has
+    no placeholder body of its own to hang a declaration on.
     """
     schema = ta.spec_document_json_schema()
     single = schema["$defs"]["single"]
     assert "root" not in single["required"]
     assert single["properties"]["root"]["default"] == {
         "pick": {
-            "symbol": {"param": {"key": "SYMBOL", "default": None}},
-            "freq": {"param": {"key": "FREQ", "default": None}},
+            "symbol": {"param": {"key": "SYMBOL", "default": None, "type": "symbol"}},
+            "freq": {"param": {"key": "FREQ", "default": None, "type": "frequency"}},
         }
     }
 

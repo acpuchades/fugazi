@@ -1977,7 +1977,19 @@ long:
 | `numeric` | a finite number, or a string that parses as one | `K="2.5"` from a quoted YAML params file becomes `2.5` |
 | `integer` | a whole number, however spelled — `3`, `3.0`, `"3"` | `3.5` is refused |
 | `bool` | `true` / `false`, quoted or not | a number is refused |
+| `symbol` | anything scalar, stringified | `string` with the *claim* that it names an asset. No alphabet — ticker shape is venue-specific (`BTCUSDT`, `BTC-USD`, `ES=F`, `BRK.B`) |
+| `frequency` | a bar cadence token — the same `N<unit>` alphabet `--frequency` uses | `1hh` is refused at load, naming the parameter, instead of at the build |
 | *(omitted / `null`)* | anything | the heuristics stand — the pre-existing behaviour |
+
+`symbol` and `frequency` are **refinements** of `string`: every symbol is a
+string, so declaring one where the other is expected is not a conflict, and
+`type: string` on a `!pick { symbol: }` keeps working exactly as it did. Two
+different refinements *do* conflict — no string is both a ticker and a cadence.
+
+You rarely need to write either. `!pick`'s `symbol:` and `freq:` slots carry
+those types themselves, so a bare `!param SYM` in one is already reported as
+`<symbol>`; the declaration is for narrowing a slot the grammar leaves open, or
+for saying it where no slot does.
 
 The rules:
 
@@ -1985,6 +1997,11 @@ The rules:
   `!import`'s inline `params:`, or from the placeholder's own `default:`. An
   author who writes `{ type: integer, default: 3.5 }` hears about it on the run
   that uses the fallback, which is the run where nothing else would notice.
+- `default: null` is the one value no declaration is applied to. It is not a
+  value of any type — it is how a body spells *resolves to absent*, which an
+  optional slot wants and which the implicit `root:` uses to mean "take the sole
+  series from the input". So a placeholder can be optional **and** typed when
+  supplied.
 - A value that can't be coerced is a **load error naming the parameter**,
   instead of a serde type error pointing at whichever node was parsed first:
 

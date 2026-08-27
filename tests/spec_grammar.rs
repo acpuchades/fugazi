@@ -123,6 +123,11 @@ fn every_tag_is_well_formed() {
         "positive_uint",
         "number",
         "str",
+        // The two refinements of `str`. A field wears one by being typed
+        // `SymbolName` / `FreqToken` rather than `String` — so this list grows
+        // only when a *type* does, which is the guard doing its job.
+        "symbol",
+        "frequency",
         "bool",
         "strategy",
         "match_cases",
