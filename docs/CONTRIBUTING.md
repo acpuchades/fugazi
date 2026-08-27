@@ -50,6 +50,39 @@ FAST=1 scripts/ci-local.sh       # skip the matrix + wheel rebuild (inner loop o
 `tests/ci_mirror.rs` fails if the script stops matching the workflow, so a new
 CI step has to land in both.
 
+### A faster local build
+
+`cargo test -p fugazi` links **58 integration-test binaries** plus the lib, the
+`fugazi` bin and the doctest unit. Linking is single-threaded per binary, and on
+a warm tree it costs more than running the tests does — so the inner loop is
+bounded by the linker, not by the test bodies.
+
+Two knobs, split by whether the answer is a property of the crate or of your
+machine. The crate half is committed: `[profile.dev]` in `Cargo.toml` builds the
+workspace with `debug = "line-tables-only"` and dependencies with no debuginfo
+at all, so a panic backtrace still resolves to `file:line` while the linker
+writes a fraction of the DWARF. Nothing to set up.
+
+The machine half is not committed, because the linker a checkout can use is a
+fact about the machine and CI's runners have no `mold`. Create
+`.cargo/config.toml` yourself — it is gitignored:
+
+```toml
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+Needs `mold` on `PATH` and a `cc` that accepts a named `-fuse-ld=` (GCC 12.1+,
+clang 12+); `lld` works the same way if that is what you have. Delete the file
+if neither is installed — the build is correct without it, only slower. Because
+it changes no output, it cannot make a local run disagree with CI, which is the
+one thing local build tuning must not do.
+
+Note that `cargo test` runs test *targets* one binary at a time; only the tests
+*inside* a binary share threads. With 58 of them that serialisation is real, and
+`cargo-nextest` is the tool that removes it — it is not wired into the gate here,
+so reach for it in your own loop rather than expecting `ci-local.sh` to use it.
+
 ### Formatting
 
 `cargo fmt --all` (Rust) and `ruff format` (Python — `python/` *and* `tools/`,

@@ -294,6 +294,27 @@ codegen-units = 1
 lto = "thin"
 codegen-units = 1
 
+# `cargo test` links **58 integration-test binaries** plus the lib, the bins and
+# the doctest unit, and each one carries whatever debuginfo this profile asks
+# for. That link step, not codegen, is what a touch-one-file-and-retest loop
+# spends its time on, and full DWARF is the bulk of what the linker has to
+# write. `line-tables-only` keeps the part that is actually read — a panic
+# backtrace still resolves to `file:line`, which is how a failing assert gets
+# located — and drops the type and variable descriptions only a debugger steps
+# through. Reach for `debug = true` again if you are attaching one.
+#
+# `[profile.test]` inherits from `dev`, so this covers the test binaries too;
+# it is deliberately not spelled out twice.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies get none at all. `"*"` matches every non-workspace-member
+# dependency, and the tree here is not small — `reqwest` + `tokio` + `zip` +
+# `csv` under `sources`, `statrs` unconditionally. Nobody single-steps into
+# them, and each test binary was linking a copy of their debuginfo.
+[profile.dev.package."*"]
+debug = false
+
 # The Python bindings live in their own workspace member (`python/`), which is
 # the only crate that pulls in PyO3 — see that crate's README for build
 # instructions.

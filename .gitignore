@@ -4,6 +4,17 @@
 
 /target
 
+# Per-machine build tuning, and *only* that. The linker a checkout uses is a
+# fact about the machine, not about the crate: this repo's local config points
+# rustc at `mold` to cut the 58-test-binary link step, and CI's runners have no
+# mold to point at. Committing it would break every job in `ci.yml` and every
+# clone without it, for a setting that cannot change a test's outcome — so it
+# stays local. `Cargo.toml`'s `[profile.dev]` carries the part that *is*
+# portable (trimmed debuginfo) and is committed.
+#
+# To set one up: see docs/CONTRIBUTING.md, "A faster local build".
+/.cargo/config.toml
+
 # pixi's solved environments. `pixi.toml` and `pixi.lock` ARE committed — the
 # lock is the point (see the header in pixi.toml); only the materialised envs
 # under .pixi/ are disposable.
