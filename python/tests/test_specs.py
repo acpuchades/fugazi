@@ -2760,3 +2760,206 @@ def test_a_long_run_can_be_interrupted():
         f"run of the same series takes {uninterrupted:.2f}s — the drive did not "
         "stop early, so the signal check is not reaching it"
     )
+
+
+# ---------------------------------------------------------------------------
+# check_spec: validating a document nobody has bound values for yet
+# ---------------------------------------------------------------------------
+
+# Every placeholder defaultless, including the two the 0.81 default `root:`
+# spells out. This is what an authoring tool has in hand at the moment a
+# strategy is saved, and `load_spec` refuses it — correctly, since it is about
+# to hand back something runnable.
+UNBOUND = """
+root: !pick { symbol: !param SYMBOL, freq: !param FREQ }
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+"""
+
+
+def test_check_spec_validates_a_document_with_nothing_bound():
+    """The case the binding exists for.
+
+    A strategy is written once and parameterised per run, so at the moment it is
+    stored its knobs have no values — and `load_spec(text, params={})` refuses
+    exactly that, which is every strategy whose author wrote a knob at all. This
+    pins both halves: the refusal is still there for the path that returns
+    something runnable, and `check_spec` accepts the same document.
+    """
+    with pytest.raises(ta.SpecError, match="`FAST` is not set"):
+        ta.load_spec(UNBOUND, params={})
+
+    check = ta.check_spec(UNBOUND)
+    assert check.kind == "single"
+    assert [h.name for h in check.holes] == ["FAST", "FREQ", "SLOW", "SYMBOL"]
+
+
+def test_check_spec_types_each_placeholder_from_where_it_sits():
+    """The half worth more than the verdict.
+
+    A required placeholder has no default to read a type off, which is why a
+    caller doing this itself ends up guessing from the parameter's *name*.
+    `check_spec` answers it from the parse — the slot the placeholder actually
+    sits in — so `SYMBOL` is a string because `!pick`'s `symbol:` is, and `FAST`
+    is a number because `!sma`'s `period:` is.
+    """
+    assert ta.check_spec(UNBOUND).param_types == {
+        "FAST": "number",
+        "FREQ": "string",
+        "SLOW": "number",
+        "SYMBOL": "string",
+    }
+
+
+def test_check_spec_reports_a_declared_type_over_an_inferred_one():
+    """A `type:` declaration outranks the parse: the author said what the value
+    is, and `integer` is sharper than the `number` any position could demand."""
+    doc = """
+    root: !pick { symbol: !param { key: SYM, type: string } }
+    long:
+      enter: !gt
+        lhs: !sma { period: !param { key: FAST, type: integer } }
+        rhs: !value 0
+    """
+    check = ta.check_spec(doc)
+    assert check.param_types == {"FAST": "integer", "SYM": "string"}
+    fast = next(h for h in check.holes if h.name == "FAST")
+    assert fast.declared == "integer"
+    # The declaration is finer than the demand, and both are visible.
+    assert fast.demanded == ["number"]
+    assert fast.origin == "param"
+
+
+def test_check_spec_does_not_relax_anything_but_the_missing_values():
+    """The one thing a check must not become is "validation off"."""
+    for name, bad in [
+        ("unknown tag", "root: BTC\nlong:\n  enter: !nope { period: !param P }\n"),
+        (
+            "misspelled field",
+            "root: BTC\nlong:\n  enter: !gt { lhs: !sma { perioD: !param P }, rhs: !value 0 }\n",
+        ),
+        (
+            "a Real where a Bool is required",
+            "root: BTC\nlong:\n  enter: !sma { period: !param P }\n",
+        ),
+        (
+            "a portfolio weight nothing would ever read",
+            "children:\n  - name: a\n    strategy: { root: BTC, long: { enter: !value true } }\n"
+            "weights: !equity\n",
+        ),
+    ]:
+        with pytest.raises(ta.SpecError):
+            ta.check_spec(bad)
+            pytest.fail(f"{name} was accepted")
+
+
+def test_check_spec_refuses_a_placeholder_its_positions_contradict():
+    """A check that only counted placeholders could not catch this, and it is
+    the one placeholder defect that is decidable with no values at all: no
+    single value is both a ticker and a period, so the document can never run
+    whatever the caller eventually passes."""
+    with pytest.raises(ta.SpecError, match="`X` is used as number and as string"):
+        ta.check_spec(
+            "root: !pick { symbol: !param X }\n"
+            "long:\n  enter: !gt { lhs: !sma { period: !param X }, rhs: !value 0 }\n"
+        )
+
+
+def test_check_spec_builds_a_document_that_is_fully_determined():
+    """`built` is not a weaker verdict on the parse — it says whether the
+    *extra* check ran. It catches what a typed parse structurally cannot (a leaf
+    with no asset to read in a shape holding more than one), so it runs whenever
+    nothing is left undetermined, and is skipped where building would report a
+    document error for a document whose only gap is an input nobody supplied."""
+    determined = (
+        "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: 20 }, rhs: !value 0 }\n"
+    )
+    check = ta.check_spec(determined)
+    assert check.built and check.holes == []
+
+    for name, text in [
+        ("a root left to the input", determined.replace("root: BTC\n", "")),
+        (
+            "an overlay column only real data supplies",
+            "root: BTC\nlong:\n  enter: !gt { lhs: !get { key: funding }, rhs: !value 0 }\n",
+        ),
+        (
+            "a placeholder standing for a whole expression",
+            "root: BTC\nlong:\n  enter: !gt { lhs: !param SIG, rhs: !value 0 }\n",
+        ),
+    ]:
+        assert not ta.check_spec(text, kind="single").built, name
+
+    # The build is also where a pair sized on a price-reading leaf with no
+    # `source:` is caught — the case `check`'s build was added for.
+    with pytest.raises(ta.SpecError):
+        ta.check_spec(
+            "left: BTC\nright: ETH\nlong_spread:\n"
+            "  enter: !gt { lhs: !close { source: !pick { symbol: BTC } }, rhs: !value 0.0 }\n"
+            "sizing: !vol_target { target: 0.2, window: 30, bars_per_year: 365 }\n"
+        )
+
+
+def test_check_spec_handles_a_placeholder_inside_a_deferred_template():
+    """A basket's `score:` is not reached by the typed parse — it is held as a
+    raw tree and re-parsed per symbol at build time. A placeholder inside one is
+    the case that breaks if check mode stops covering the build, and baskets are
+    exactly what a parameterised authoring surface produces."""
+    check = ta.check_spec(
+        "universe: !any_of [BTC, ETH]\n"
+        "selection: !top_bottom { longs: 1, shorts: 0 }\n"
+        "score: !sma { period: !param LOOK }\nsizing: !value 1.0\n"
+    )
+    assert check.kind == "basket"
+    assert check.param_types == {"LOOK": "number"}
+    assert check.built
+
+
+def test_check_spec_leaves_nothing_behind_between_calls():
+    """The observation ledger is a thread-local the parse appends to. A check
+    that raised must not hand its placeholders to the next one — which is how a
+    caller validating in a loop (or a pool worker reused across requests) would
+    see them."""
+    doc = "root: !pick { symbol: !param KEPT }\nlong:\n  enter: !value true\n"
+    with pytest.raises(ta.SpecError):
+        ta.check_spec(
+            "root: !pick { symbol: !param LEAKED }\nlong:\n  enter: !nope {}\n"
+        )
+    assert ta.check_spec(doc).param_types == {"KEPT": "string"}
+
+    # ...and the same after one that succeeded and built.
+    ta.check_spec(
+        "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: 5 }, rhs: !value 0 }\n"
+    )
+    assert ta.check_spec(doc).param_types == {"KEPT": "string"}
+
+
+def test_check_spec_binds_the_values_it_is_given():
+    """`params=` is not all-or-nothing: a bound placeholder is substituted and
+    type-checked exactly as `load_spec` does it, and only the rest stay holes."""
+    assert ta.check_spec(UNBOUND, params={"FAST": 3, "SLOW": 8}).param_types == {
+        "FREQ": "string",
+        "SYMBOL": "string",
+    }
+    with pytest.raises(ta.SpecError):
+        ta.check_spec(UNBOUND, params={"FAST": "not a period"})
+
+
+def test_check_spec_reports_the_series_a_document_reads():
+    """Same walk, and same meaning, as `StrategySpec.reads`: with no data in
+    hand a check cannot say these are present, only that they are required."""
+    check = ta.check_spec(
+        "root: BTC\nlong:\n  enter: !gt\n"
+        "    lhs: !close { source: !pick { symbol: ETH } }\n    rhs: !value 0\n"
+    )
+    assert check.reads == ["ETH"]
+
+
+def test_check_spec_refuses_imports_when_told_to():
+    """`base_dir` / `imports` / `import_root` mean what they mean on
+    `load_spec`, including `imports=False` removing filesystem access outright
+    rather than merely narrowing it."""
+    with pytest.raises(ta.SpecError, match="!import is disabled"):
+        ta.check_spec("root: BTC\nlong:\n  enter: !import other.yml\n", imports=False)

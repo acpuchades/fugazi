@@ -1517,10 +1517,16 @@ impl PySpecCheck {
 /// whose two placeholders are both defaultless.
 ///
 /// ```python
-/// >>> check = ta.check_spec("long:\n  enter: !gt\n    lhs: !sma { period: !param FAST }\n    rhs: !value 0\n")
-/// >>> check.param_types
+/// >>> doc = """
+/// ... root: !pick { symbol: !param SYMBOL, freq: !param FREQ }
+/// ... long:
+/// ...   enter: !gt
+/// ...     lhs: !sma { period: !param FAST }
+/// ...     rhs: !value 0
+/// ... """
+/// >>> ta.check_spec(doc).param_types
 /// {'FAST': 'number', 'FREQ': 'string', 'SYMBOL': 'string'}
-/// >>> check.built
+/// >>> ta.check_spec(doc).built            # a root left to the input is not built
 /// False
 /// ```
 ///

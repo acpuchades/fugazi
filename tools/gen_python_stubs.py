@@ -167,6 +167,7 @@ RETURNS = {
     },
     # --- spec / data --------------------------------------------------------
     "load_spec": "StrategySpec",
+    "check_spec": "SpecCheck",
     "optimize": "Sweep | WalkForwardResult | PanelWalkForwardResult",
     "evaluate_report": "dict[str, Any]",
     "fetch": "Any",
@@ -226,6 +227,19 @@ MEMBER_RETURNS = {
     ("OverlayInfo", "get_str"): "str | None",
     ("OverlayInfo", "values"): "list[float | bool | str | None]",
     ("SharedMultiIndicator", "names"): "list[str]",
+    # `check_spec`'s two records. The type labels are the crate's own
+    # (`number` / `string` / `bool` / `list` / `table` / `expression`, and the
+    # four `type:` declarations), so they stay `str` rather than a Literal that
+    # would have to be resynchronised every time the grammar grows one.
+    ("SpecCheck", "holes"): "list[SpecHole]",
+    ("SpecCheck", "param_types"): "dict[str, str | None]",
+    ("SpecCheck", "built"): "bool",
+    ("SpecHole", "name"): "str",
+    ("SpecHole", "origin"): "str",
+    ("SpecHole", "declared"): "str | None",
+    ("SpecHole", "demanded"): "list[str]",
+    ("SpecHole", "used"): "list[str]",
+    ("SpecHole", "required_type"): "str | None",
     ("StrategySpec", "run"): "RunReport",
     ("StrategySpec", "run_resumable"): "tuple[RunReport, str]",
     ("StrategySpec", "warm_up"): "str",

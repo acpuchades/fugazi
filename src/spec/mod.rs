@@ -53,6 +53,11 @@ pub mod param_type;
 pub mod params;
 pub mod undefined;
 
+// Shape-only validation on top of those passes: the hole-aware parse that backs
+// `fugazi check strategy` and Python's `ta.check_spec`. One copy, so the two
+// surfaces cannot drift on what `check` accepts, refuses, or reports.
+pub mod check;
+
 // Calendar / windowing primitives (`Frequency`, `AssetClass`, `WindowSpec`,
 // `WalkForwardSpec`, `parse_time_to_millis`, `detect_frequency_from_atoms`).
 pub mod calendar;
@@ -195,6 +200,7 @@ pub fn load_value_refusing_imports(text: &str, label: &str) -> anyhow::Result<se
 }
 
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
+pub use check::{CheckedSpec, check_value};
 pub use expr::NodeSpec;
 pub use expr::Root;
 pub use expr::StrOperand;

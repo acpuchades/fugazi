@@ -45,8 +45,6 @@ pub(crate) use fugazi::spec::params;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -991,28 +989,11 @@ fn print_error(err: &anyhow::Error) {
     }
 }
 
-/// Cash the `check` build is seeded with. `check` never drives the strategy, so
-/// the figure only has to be positive and unremarkable — nothing reads it.
-const DEFAULT_CHECK_CASH: fugazi::Real = 100_000.0;
-
 /// The `!import` confinement boundary: `--import-root` if given, else `base`
 /// (the strategy document's own directory) — the historical default of
 /// confining a document to its own directory.
 fn import_root(explicit: &Option<PathBuf>, base: &Path) -> PathBuf {
     explicit.clone().unwrap_or_else(|| base.to_path_buf())
-}
-
-/// Whether the document mentions `!tag` anywhere. The loader represents a YAML
-/// tag as a single-key map, so this is a plain structural walk — no grammar
-/// knowledge, and nothing to keep in sync when a tag is added.
-fn mentions_tag(value: &serde_json::Value, tag: &str) -> bool {
-    match value {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .any(|(k, v)| k.trim_start_matches('!') == tag || mentions_tag(v, tag)),
-        serde_json::Value::Array(items) => items.iter().any(|v| mentions_tag(v, tag)),
-        _ => false,
-    }
 }
 
 fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
@@ -1032,40 +1013,19 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // (see `spec::undefined`).
     let value = spec::load_value_pre_params(&text, &base, &root, &label)
         .with_context(|| parse_error_hint(&args.strategy))?;
-    // Fill in the shape's defaulted keys (the single-asset `root:`) before
-    // substitution, so `check` validates the same tree `run` will build. The
-    // policy is `spec::root::apply_default`'s; this only says which shape.
-    let value = spec::root::apply_default(value, args.strategy.kind);
-    // The site count is discarded: the report below counts distinct placeholder
-    // *names* instead, which is what the user has to supply values for.
-    let (value, _n_hole_sites) = params::substitute_for_check(value, &param_table)
-        .with_context(|| parse_error_hint(&args.strategy))?;
     let params_base = params_label(&param_table);
 
-    // `!get` is the one leaf whose *build* consults the overlay schema, and
-    // `check` has no data to derive one from — so a document using it cannot be
-    // built here without inventing columns and failing on every real one. Note
-    // it now, while the tree is still in hand.
-    let reads_overlay = mentions_tag(&value, "get");
-    // Which series the document reads through an explicit `!pick`. `check` has
-    // no data, so it cannot say whether they are *present* — but it can say
-    // they are *required*, which is the half that turns "why did this never
-    // trade?" into "I forgot to pass BTCUSDT". See `spec::reads`.
-    let picked = spec::reads::picked_symbols(&value);
+    // Everything `check` actually decides — the default-`root:` splice, the
+    // hole-aware substitution, the typed parse, the contradiction check and the
+    // conditional build — is `spec::check`, shared with Python's `ta.check_spec`
+    // so the two surfaces cannot drift on what they accept. What is left here is
+    // this command's *report*.
+    let checked = spec::check::check_value(value, args.strategy.kind, &param_table)
+        .with_context(|| parse_error_hint(&args.strategy))?;
+    let observations = &checked.holes;
 
-    // Deserialize under the hole-aware guard. `from_json_value` moves the tree
-    // into the `serde_norway::Value` shape the bridges buffer through.
-    let _guard = spec::undefined::check_mode();
-    let parse_err = || parse_error_hint(&args.strategy);
-
-    // Each arm parses its shape and reports back `(description, detail)`; the
-    // placeholder-type checks and the printing are common, and must run *after*
-    // the parse, since that is what populates the observations.
-    let (description, detail, parsed) = match args.strategy.kind {
-        StrategyKind::Single => {
-            let strategy: spec::StrategyRef = spec::undefined::from_json_value(value)
-                .map_err(anyhow::Error::new)
-                .with_context(parse_err)?;
+    let (description, detail) = match &checked.spec {
+        spec::StrategySpec::Single(strategy) => {
             // `root {}` rather than `symbol {}`: the field is an expression
             // now, and a root that cannot name one instrument is exactly what
             // `check` exists to report — so surface the analyser's message
@@ -1083,7 +1043,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 // that one really is under-specified: the placeholder line
                 // above is what tells the user about it, and claiming the input
                 // will supply it would be wrong.
-                Err(_) if is_sole_atom_root(strategy.root()) => {
+                Err(_) if spec::check::is_sole_atom_root(strategy.root()) => {
                     "root from a single-series --series (no SYMBOL param)".to_string()
                 }
                 // A root still holding an unset `!param`. The placeholder line
@@ -1092,16 +1052,9 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 Err(_) if strategy.root().has_hole() => "root pending a --params value".to_string(),
                 Err(e) => format!("root {e}"),
             };
-            (
-                "parse and validate a strategy spec",
-                detail,
-                spec::StrategySpec::Single(Box::new(strategy)),
-            )
+            ("parse and validate a strategy spec", detail)
         }
-        StrategyKind::Pairs => {
-            let parsed: spec::PairsStrategySpec = spec::undefined::from_json_value(value)
-                .map_err(anyhow::Error::new)
-                .with_context(parse_err)?;
+        spec::StrategySpec::Pairs(parsed) => {
             let detail = match (
                 parsed.left.sole_symbol("pairs"),
                 parsed.right.sole_symbol("pairs"),
@@ -1109,36 +1062,16 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 (Ok(l), Ok(r)) => format!("pair {l} / {r}"),
                 (Err(e), _) | (_, Err(e)) => format!("pair {e}"),
             };
-            (
-                "parse and validate a pairs strategy spec",
-                detail,
-                spec::StrategySpec::Pairs(Box::new(parsed)),
-            )
+            ("parse and validate a pairs strategy spec", detail)
         }
-        StrategyKind::Basket => {
-            // Basket parses eagerly: the top-level enum + templates. Under the
-            // check-mode guard each template *body* typed-parses too (with its
-            // `!arg`s held as holes), so an unknown tag or misspelled field
-            // inside `score:` / `sizing:` is caught here rather than at the
-            // first run that reaches a symbol.
-            let parsed: spec::BasketStrategySpec = spec::undefined::from_json_value(value)
-                .map_err(anyhow::Error::new)
-                .with_context(parse_err)?;
-            let detail = format!("selection {:?}", parsed.selection);
-            (
-                "parse and validate a basket strategy spec",
-                detail,
-                spec::StrategySpec::Basket(Box::new(parsed)),
-            )
-        }
-        StrategyKind::Multi => {
-            // Multi-asset parses eagerly like basket, template bodies included.
-            let spec: spec::MultiAssetStrategySpec = spec::undefined::from_json_value(value)
-                .map_err(anyhow::Error::new)
-                .with_context(parse_err)?;
+        spec::StrategySpec::Basket(parsed) => (
+            "parse and validate a basket strategy spec",
+            format!("selection {:?}", parsed.selection),
+        ),
+        spec::StrategySpec::Multi(parsed) => {
             let sides: Vec<&str> = [
-                spec.long.as_ref().map(|_| "long"),
-                spec.short.as_ref().map(|_| "short"),
+                parsed.long.as_ref().map(|_| "long"),
+                parsed.short.as_ref().map(|_| "short"),
             ]
             .into_iter()
             .flatten()
@@ -1148,76 +1081,16 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             } else {
                 sides.join(" + ")
             };
-            (
-                "parse and validate a multi-asset strategy spec",
-                sides,
-                spec::StrategySpec::Multi(Box::new(spec)),
-            )
+            ("parse and validate a multi-asset strategy spec", sides)
         }
-        StrategyKind::Portfolio => {
-            // Portfolio parses eagerly at the top level (children, weights);
-            // each child's own spec typed-parses too, and every template body
-            // under a child validates the same way it would standalone.
-            let spec: spec::PortfolioSpec = spec::undefined::from_json_value(value)
-                .map_err(anyhow::Error::new)
-                .with_context(parse_err)?;
-            let n = spec.children.len();
-            let detail = format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" });
+        spec::StrategySpec::Portfolio(parsed) => {
+            let n = parsed.children.len();
             (
                 "parse and validate a portfolio strategy spec",
-                detail,
-                spec::StrategySpec::Portfolio(Box::new(spec)),
+                format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" }),
             )
         }
     };
-
-    // The typed parse above resolved every unset `!param` through a hole, and
-    // each hole recorded the type its position demanded. A name required to be
-    // two different types can never be satisfied by any `--params` value, so
-    // that is a hard error; the rest is reported so the user knows what each
-    // placeholder has to look like.
-    let observations = spec::undefined::take_observations();
-    reject_contradictory_params(&observations).with_context(parse_err)?;
-
-    // `check` validates shape, not values, and stops short of a build for two
-    // good reasons: an unresolved `!param` is a *hole* with no value to build
-    // from, and `!get` needs an overlay schema only real data can supply. When
-    // neither applies the document is fully determined, and building it is the
-    // one check that catches an error the typed parse structurally cannot — a
-    // leaf with no asset to read in a shape that holds more than one (see
-    // `spec::expr::Root`), which used to surface as a panic mid-run.
-    let holes = observations
-        .iter()
-        .any(|h| h.origin == spec::undefined::UndefinedOrigin::Undefined);
-    // Second "nothing to build from" case: a placeholder standing in for a
-    // whole *expression* (or a `!value` literal). A scalar hole answers its
-    // field with a typed zero and the build proceeds on it; an expression hole
-    // has no node to stand in for — picking one would either invent a type the
-    // value has not chosen yet, or fail the build on a document whose only gap
-    // is a `--params` value.
-    let expr_holes = observations
-        .iter()
-        .any(|h| h.used.contains(&spec::undefined::RequiredType::Expr));
-    // Third "needs data" case, alongside a hole and an overlay read: a
-    // single-asset root left as the sole-atom selector. `try_build` demands a
-    // symbol to route orders through, and the `--series` frame is what supplies
-    // it — so building here would report a document the run will accept.
-    //
-    // Same for a root left as an unset `!param`. Every other placeholder
-    // answers a hole with a typed zero the build can proceed on; a root cannot
-    // — there is no symbol to route orders through — so building would report a
-    // *document* error for a document whose only gap is a value nobody passed.
-    let root_from_data = match &parsed {
-        spec::StrategySpec::Single(s) => is_sole_atom_root(s.root()) || s.root().has_hole(),
-        _ => false,
-    };
-    if !holes && !expr_holes && !reads_overlay && !root_from_data {
-        let schema = Arc::new(fugazi::Schema::default());
-        parsed
-            .try_build(DEFAULT_CHECK_CASH, &schema, None)
-            .map_err(spec::backtest::build_error)
-            .with_context(|| format!("building {}", args.strategy.label()))?;
-    }
 
     if !args.quiet {
         // Count distinct placeholder *names*, not substitution sites: one name
@@ -1229,15 +1102,16 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             .count();
         let params_label =
             params_label_with_holes(&params_base, observations.len() - n_undefined, n_undefined);
-        let params_label = match param_types_label(&observations) {
+        let params_label = match param_types_label(observations) {
             Some(types) => format!("{params_label}\n  {types}"),
             None => params_label,
         };
         // Minus whatever this shape already trades: a pairs document naming its
         // own two legs reads nothing extra, and a basket's `!pick` targets come
         // out of the traded universe by construction.
-        let traded = parsed.universe(&[]);
-        let reads: Vec<&str> = picked
+        let traded = checked.spec.universe(&[]);
+        let reads: Vec<&str> = checked
+            .reads
             .iter()
             .map(String::as_str)
             .filter(|s| !traded.iter().any(|t| t.as_ref() == *s))
@@ -1279,17 +1153,6 @@ fn print_check_report(
             8,
         );
     }
-}
-
-/// Is this root the sole-atom selector — `!pick {}`, naming no symbol?
-///
-/// The one root `check` treats as *pending* rather than broken, because a
-/// single-series `--series` frame resolves it (see
-/// [`seed_sole_symbol`]). Deliberately `as_pick`-shaped: a root that is a
-/// nested expression, or an unresolved `!param` hole, also names no symbol, and
-/// neither of those is something the input will fill in.
-fn is_sole_atom_root(root: &spec::RootSpec) -> bool {
-    matches!(root.as_pick(), Some((None, _)))
 }
 
 fn check_costs(args: CheckCostsArgs) -> Result<()> {
@@ -1903,59 +1766,6 @@ fn param_types_label(observations: &[spec::undefined::HoleTypes]) -> Option<Stri
             })
             .collect::<Vec<_>>()
             .join("\n  "),
-    )
-}
-
-/// Reject a `!param` required to be two different types — in two places, or in
-/// one place that disagrees with the `type:` the placeholder declared.
-///
-/// This is decidable without any data and is always a real defect: no single
-/// `--params NAME=…` value can satisfy both positions, so the document cannot
-/// run whatever the user supplies. Catching it here is the whole point of
-/// inferring hole types rather than just counting them — and of letting an
-/// author declare one, which turns the same check into a statement about a
-/// single position rather than a tie between two.
-fn reject_contradictory_params(observations: &[spec::undefined::HoleTypes]) -> anyhow::Result<()> {
-    use spec::undefined::UndefinedOrigin;
-    let bad: Vec<String> = observations
-        .iter()
-        // Only named placeholders can contradict: an `!undefined` is keyed by
-        // its own document path, so it is one position and cannot be two types.
-        .filter(|hole| hole.origin == UndefinedOrigin::Param)
-        .filter_map(|hole| {
-            // `Expr` is not a *demand*: it says the placeholder stands where a
-            // whole expression goes, and every scalar a user can pass is one.
-            // So it agrees with any other observation of the same name —
-            // `FAST` used as a period and as `rhs:` is one number, not a
-            // contradiction — and only the typed observations are counted here.
-            let demanded = hole.demanded();
-            let name = &hole.name;
-            // A declared `type:` is a claim about the value, so a position
-            // demanding something else is the same defect as two positions
-            // demanding different things — caught one step earlier, and
-            // attributable to the declaration rather than to a tie between two
-            // slots.
-            if let Some(declared) = hole.declared
-                && let Some(clash) = demanded.iter().find(|t| **t != declared.required())
-            {
-                return Some(format!(
-                    "`{name}` is declared `{}` but used where a {} is required",
-                    declared.label(),
-                    clash.label()
-                ));
-            }
-            let types: Vec<&str> = demanded.iter().map(|t| t.label()).collect();
-            (types.len() > 1).then(|| format!("`{name}` is used as {}", types.join(" and as ")))
-        })
-        .collect();
-    if bad.is_empty() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "contradictory placeholder types: {}. No single `--params` value can satisfy the \
-         document as written — correct the declaration, or use a separate placeholder name \
-         per position.",
-        bad.join("; ")
     )
 }
 

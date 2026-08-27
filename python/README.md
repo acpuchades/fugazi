@@ -1202,6 +1202,112 @@ snap.push("BTC", ta.Atom(bar, time=0))   # ← without this, the gate never fire
 
 `spec.reads` is `[]` for the ordinary document that only reads what it trades.
 
+#### Validating a document before anyone has values for it — `check_spec`
+
+`load_spec` refuses a `!param` that has no `default:` and no value in `params=`:
+
+```python
+try:
+    ta.load_spec("root: !pick { symbol: !param SYMBOL }\nlong: { enter: !value true }\n")
+except ta.SpecError as e:
+    print(e)   # parameter `SYMBOL` is not set (pass `--params SYMBOL=…` or add a `default`)
+```
+
+That is right for `load_spec`, which is about to hand back something you can
+`.run()`. It is wrong for the other thing you do with a document: **store it**.
+A strategy is written once and parameterised per run, so at the moment it is
+saved its knobs have no values — and a knob with no default is the normal way to
+say "the caller supplies this". An authoring tool that validates on submit has
+nothing to bind, so every such strategy fails to validate. So does the
+[default `root:`](https://github.com/acpuchades/fugazi/blob/main/docs/STRATEGIES.md)
+spelled out longhand, `!pick { symbol: !param SYMBOL, freq: !param FREQ }`, which
+is two defaultless placeholders.
+
+`ta.check_spec(text)` is that pass — the same one `fugazi check strategy` runs.
+An unset placeholder becomes a *hole* the typed parse fills with a value of
+whatever type its slot demands, and the document validates around it:
+
+```python
+doc = """
+root: !pick { symbol: !param SYMBOL, freq: !param FREQ }
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+"""
+check = ta.check_spec(doc)                # no params= — nothing to bind yet
+assert check.kind == "single"
+assert check.param_types == {
+    "FAST": "number", "FREQ": "string", "SLOW": "number", "SYMBOL": "string",
+}
+```
+
+**What it does not relax.** Only the requirement that a placeholder have a
+value. An unknown tag, a misspelled field, a slot handed the wrong type, a
+malformed `!pick`, a `!portfolio_book` outside a portfolio, a portfolio whose
+`weights:` could never be read — every one of those still raises, on the same
+document, exactly as it does through `load_spec`. It adds two checks `load_spec`
+cannot make, because by the time `load_spec` has resolved a placeholder its type
+is no longer a question:
+
+- **A placeholder its positions contradict.** `!param X` used as both a `symbol:`
+  and a `period:` can never be satisfied by any value, so it is a document
+  error rather than a pending input.
+- **A build**, when nothing is left undetermined — see `check.built` below.
+
+An unset placeholder is filled with a typed zero to let the parse proceed, so a
+check says nothing about a document's *values*: not that a period is sensible,
+not that a symbol exists. It says the document is well-formed, and what it still
+needs.
+
+**The hole types are the point.** A required placeholder has no default to read a
+type off, which is exactly the case where a caller doing this itself has nothing
+left but the parameter's *name* to guess from. `check_spec` answers it from the
+parse — the slot the placeholder actually sits in — so `SYMBOL` is a string
+because `!pick`'s `symbol:` is. `check.param_types` is the `{name: type}` form;
+`check.holes` is the full record:
+
+```python
+hole, = ta.check_spec(
+    "root: !pick { symbol: !param { key: SYM, type: string } }\n"
+    "long: { enter: !value true }\n"
+).holes
+hole.name          # 'SYM'
+hole.origin        # 'param'  (or 'undefined' for an author-written !undefined,
+                   #           which is keyed by document path, not by a name)
+hole.declared      # 'string' — the placeholder's own `type:`, if it carried one
+hole.demanded      # ['string'] — what the document's positions require
+hole.required_type # 'string' — the one to show a user: declared, else demanded
+```
+
+`declared` is the finer of the two where both exist (`integer` and `numeric` are
+one demand as far as a position is concerned, but they reject different values).
+`demanded` holds at most one entry for a `!param` — two would be the
+contradiction above — and is empty when the placeholder stands where a whole
+*expression* goes and nothing narrowed it, in which case `required_type` reads
+`'expression'`.
+
+`check.built` says whether the document was **built** as well as parsed. The
+build catches the one class of error a typed parse structurally cannot — a leaf
+with no asset to read in a shape that holds more than one — so it runs whenever
+the document is fully determined, and is skipped where building would report a
+*document* error for a document whose only gap is an input nobody supplied: an
+`!undefined`, a placeholder standing in for a whole expression, a `!get` (whose
+build needs an overlay schema only real data supplies), or a single-asset `root:`
+left to the input. `False` is not a weaker verdict on the parse; everything the
+parse decides was decided either way.
+
+`params=` is not all-or-nothing — a bound placeholder is substituted and
+type-checked normally, and only the rest stay holes. `base_dir`, `imports` and
+`import_root` mean exactly what they mean on `load_spec`, `imports=False`
+included. `check.reads` is the same `!pick` walk as `spec.reads`.
+
+`check_spec` deliberately does **not** give you back a `StrategySpec`. A checked
+document parses with every unset placeholder standing as a typed zero — `period`
+1, `symbol` `""` — so a spec handed back from here would `.run()`, and silently
+backtest a strategy nobody wrote. Loading a document you intend to run is
+`load_spec`, with real values.
+
 Pass `windowed=N` to `.evaluate(...)` for the same windowed/rolling reductions
 `run -w N` writes to `metrics.csv`/`rolling.csv`: the returned dict gains
 `windowed` (non-overlapping N-bar spans — independent, for cross-window
