@@ -49,6 +49,7 @@ pub mod convert;
 pub mod dyn_indicator;
 pub mod imports;
 pub mod input;
+pub mod param_type;
 pub mod params;
 pub mod undefined;
 
@@ -206,6 +207,7 @@ pub use multi_asset::DynMultiAssetStrategy;
 pub use multi_asset::MultiAssetStrategySpec;
 pub use pairs::DynPairsStrategy;
 pub use pairs::PairsStrategySpec;
+pub use param_type::ParamType;
 pub use portfolio::DynPortfolio;
 pub use portfolio::{PortfolioChildSpec, PortfolioChildStrategy, PortfolioSpec};
 pub use preset::{StrategyPreset, StrategyRef};

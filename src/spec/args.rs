@@ -16,11 +16,18 @@
 //! !pick { symbol: !arg SYM }                        # bare-string shorthand
 //! !pick { symbol: !arg { key: SYM } }               # required — driver must supply
 //! !pick { symbol: !arg { key: SYM, default: BTC } } # optional with fallback
+//! !pick { symbol: !arg { key: SYM, type: string } } # declared type, checked on bind
 //! ```
+//!
+//! The optional `type:` ([`ParamType`](crate::spec::ParamType)) is read by the
+//! same `Placeholder` parse `!param` uses, so the two bodies cannot drift. It bites at *build* time here rather than
+//! load time — that is when a driver binds the name — and a `CHILD_INDEX`
+//! declared `string` is a portfolio weight template that says what it means
+//! instead of indexing by a stringified integer.
 
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 
 /// Rewrite every `arg` placeholder in `value` to its resolved literal from
@@ -92,28 +99,21 @@ pub fn substitute_for_check(value: Value) -> Value {
     }
 }
 
-/// Resolve a single placeholder body — its `{ key, default }` object or
+/// Resolve a single placeholder body — its `{ key, default, type }` object or
 /// bare key name — against the supplied `args`.
 fn resolve(body: &Value, args: &HashMap<String, Value>) -> Result<Value> {
-    let (key, default) = match body {
-        Value::String(name) => (name.as_str(), None),
-        Value::Object(o) => {
-            let key = o
-                .get("key")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("`arg` needs a string `key`"))?;
-            (key, o.get("default"))
-        }
-        _ => bail!("`arg` expects a key name or a `{{ key: NAME }}` object"),
-    };
-
-    if let Some(value) = args.get(key) {
-        Ok(value.clone())
-    } else if let Some(default) = default {
-        Ok(default.clone())
+    let p = crate::spec::params::placeholder_of("arg", body)?;
+    if let Some(value) = args.get(p.key) {
+        p.apply(value.clone())
+    } else if let Some(default) = p.default {
+        // Declared types check the `default:` too — an author who contradicts
+        // their own declaration should hear it on the build that uses the
+        // fallback, not on the one that doesn't.
+        p.apply(default.clone())
     } else {
         bail!(
-            "argument `{key}` was not supplied by the driver (add a `default:` to make it optional)"
+            "argument `{key}` was not supplied by the driver (add a `default:` to make it optional)",
+            key = p.key
         )
     }
 }
@@ -188,6 +188,67 @@ mod tests {
         let input = json!({"arg": "SYM", "other": 1});
         let out = substitute(input, &args(&[("SYM", json!("BTC"))])).unwrap();
         assert_eq!(out, json!({"arg": "SYM", "other": 1}));
+    }
+
+    #[test]
+    fn a_declared_type_coerces_what_the_driver_bound() {
+        // A portfolio weight template binds `CHILD_INDEX` as a number; a slot
+        // that wants the name of the child wants it as text.
+        let input = json!({"arg": {"key": "CHILD_INDEX", "type": "string"}});
+        let out = substitute(input, &args(&[("CHILD_INDEX", json!(2))])).unwrap();
+        assert_eq!(out, json!("2"));
+    }
+
+    #[test]
+    fn a_declared_type_refuses_a_binding_it_cannot_be_calling_it_an_argument() {
+        // The noun matters: a driver supplies this, so telling the user to pass
+        // a different `--params` value would send them to the wrong knob.
+        let input = json!({"arg": {"key": "N", "type": "integer"}});
+        let err = substitute(input, &args(&[("N", json!(2.5))]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("argument `N`"), "{err}");
+        assert!(err.contains("not a whole number"), "{err}");
+    }
+
+    #[test]
+    fn a_declaration_checks_the_default_too() {
+        let input = json!({"arg": {"key": "N", "type": "integer", "default": 2.5}});
+        let err = substitute(input, &HashMap::new()).unwrap_err().to_string();
+        assert!(err.contains("not a whole number"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_type_leaves_the_binding_exactly_as_the_driver_gave_it() {
+        let input = json!({"arg": {"key": "CHILD_INDEX"}});
+        let out = substitute(input, &args(&[("CHILD_INDEX", json!(2))])).unwrap();
+        assert_eq!(out, json!(2));
+    }
+
+    #[test]
+    fn the_body_key_set_is_the_one_param_uses() {
+        // `!arg` reads its body through `params::placeholder_of`, so the typo
+        // guard and the `type:` vocabulary can't drift between the two tags.
+        let err = substitute(
+            json!({"arg": {"key": "SYM", "typ": "string"}}),
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`arg` `SYM` has an unknown key `typ`"),
+            "{err}"
+        );
+        let err = substitute(
+            json!({"arg": {"key": "SYM", "type": "str"}}),
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`arg` `SYM` has an unknown `type: str`"),
+            "{err}"
+        );
     }
 
     #[test]

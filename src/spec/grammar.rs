@@ -784,10 +784,11 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             host_affecting: false,
         }
     }
-    // The `{ key, default }` body `!param` and `!arg` share verbatim —
+    // The `{ key, default, type }` body `!param` and `!arg` share verbatim —
     // `spec/args.rs` says so in as many words ("the `!arg` grammar mirrors
-    // `!param`"), and both are read by the same two-arm match on a string or an
-    // object with a string `key`.
+    // `!param`"), and both go through the one `params::placeholder_of` parse,
+    // which is what keeps the claim true. The key set is **closed**: an unknown
+    // one is an error, so a `typ:` can't silently mean "untyped".
     const PLACEHOLDER_BODY: &[(&str, &str, bool, &str)] = &[
         (
             "key",
@@ -803,7 +804,22 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             "The value to fall back to when the name is unset. Any value tree, \
              not just a scalar. Omitting it makes the placeholder **required**: \
              an unset one is an error at load (`fugazi check` holds it as a \
-             typed hole instead).",
+             typed hole instead). Checked against `type:` like any supplied \
+             value.",
+        ),
+        (
+            "type",
+            "str",
+            false,
+            "The value's declared type — `string`, `numeric`, `integer` or \
+             `bool`. The resolved value is coerced to it (`--params SYM=123` \
+             reaches a `symbol:` slot as the string `\"123\"`) or refused \
+             naming the placeholder (`--params FAST=3.5` under `integer`). \
+             Omitted — or written `type: null` — the value keeps whatever type \
+             the `--params` / YAML parse heuristics gave it, which is how every \
+             placeholder behaved before this key existed. Under `fugazi check` a \
+             declaration is what the unresolved placeholder reports as needing, \
+             and a position demanding a different type is a hard error.",
         ),
     ];
     vec![

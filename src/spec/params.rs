@@ -16,7 +16,12 @@
 //! period: !param { key: FAST }                # required — must be passed
 //! period: !param { key: SLOW, default: 8 }    # optional — falls back to 8
 //! root: !param SYM                             # bare-string shorthand for { key: SYM }
+//! period: !param { key: FAST, type: integer }  # declared — coerced and checked here
 //! ```
+//!
+//! The optional `type:` ([`ParamType`]) is what turns "whatever the value
+//! happened to parse as" into something the load pass can check and correct;
+//! omitted or `null`, the heuristics stand. See [`crate::spec::param_type`].
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -25,6 +30,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
 use crate::spec::input::{self, Source};
+use crate::spec::param_type::{ParamType, parse_declaration};
 
 /// One term of a `--params` spec: set a single value, or load a mapping file.
 #[derive(Debug, Clone)]
@@ -215,15 +221,15 @@ pub fn substitute_partial(value: Value, params: &HashMap<String, Value>) -> Resu
             // Otherwise leave the whole `{param: …}` node in place —
             // the outer pass gets to decide (via `--params`, a
             // `default`, or an error).
-            let key: Option<String> = match &map["param"] {
-                Value::String(name) => Some(name.clone()),
-                Value::Object(o) => o.get("key").and_then(Value::as_str).map(str::to_string),
-                _ => None,
+            //
+            // A malformed body is *also* left in place: this pass has no
+            // mandate to report one, and the outer pass — which sees every
+            // placeholder, not just the inline-overridden ones — does.
+            let Ok(p) = placeholder(&map["param"]) else {
+                return Ok(Value::Object(map));
             };
-            if let Some(key) = key
-                && let Some(value) = params.get(&key)
-            {
-                return Ok(value.clone());
+            if let Some(value) = params.get(p.key) {
+                return p.apply(value.clone());
             }
             Ok(Value::Object(map))
         }
@@ -243,33 +249,116 @@ pub fn substitute_partial(value: Value, params: &HashMap<String, Value>) -> Resu
     }
 }
 
-/// Resolve a single placeholder body (its `{ key, default }` object or bare key
-/// name) against the supplied params.
+/// Resolve a single placeholder body (its `{ key, default, type }` object or
+/// bare key name) against the supplied params.
 fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
-    let (key, default) = placeholder_parts(body)?;
-    if let Some(value) = params.get(key) {
-        Ok(value.clone())
-    } else if let Some(default) = default {
-        Ok(default.clone())
+    let p = placeholder(body)?;
+    if let Some(value) = params.get(p.key) {
+        p.apply(value.clone())
+    } else if let Some(default) = p.default {
+        // The `default:` is checked against the declaration too. An author who
+        // writes `{ type: integer, default: 3.5 }` has contradicted themselves,
+        // and the run that never passes the param is exactly the one where
+        // nothing else would catch it.
+        p.apply(default.clone())
     } else {
-        bail!("parameter `{key}` is not set (pass `--params {key}=…` or add a `default`)")
+        bail!(
+            "parameter `{key}` is not set (pass `--params {key}=…` or add a `default`)",
+            key = p.key
+        )
     }
 }
 
-/// Extract a placeholder body's `(key, default)` — the shared parse of the
-/// `{ key, default }` object and bare-string forms. Errors on a malformed body
-/// (no string `key`); an unset-but-well-formed key is not an error here.
-fn placeholder_parts(body: &Value) -> Result<(&str, Option<&Value>)> {
+/// A parsed placeholder body — the shared read of the `{ key, default, type }`
+/// object and the bare-string form.
+///
+/// One type for both tags: `spec/args.rs` says the `!arg` grammar mirrors
+/// `!param`, and this is where that claim is *enforced* rather than restated.
+/// The only difference is which word the messages use, which
+/// [`tag`](Self::tag) carries.
+///
+/// Errors on a malformed body (no string `key`, an unrecognized `type:`, a key
+/// that isn't one of the three); an unset-but-well-formed key is not an error
+/// here.
+pub(crate) struct Placeholder<'a> {
+    /// `"param"` or `"arg"` — the tag this body was written under, so a message
+    /// names the thing the author actually typed.
+    pub tag: &'static str,
+    /// The `--params` name (or driver binding) this stands for.
+    pub key: &'a str,
+    /// What an unset name falls back to, when the body carries one.
+    pub default: Option<&'a Value>,
+    /// The declared type, when the body carries one. `None` is *apply the
+    /// heuristics* — see [`crate::spec::param_type`].
+    pub ty: Option<ParamType>,
+}
+
+impl Placeholder<'_> {
+    /// Put a resolved value through the declaration, if there is one.
+    pub fn apply(&self, value: Value) -> Result<Value> {
+        match self.ty {
+            None => Ok(value),
+            Some(ty) => ty
+                .coerce(value)
+                .map_err(|why| anyhow!("{} `{}` {why}", self.noun(), self.key)),
+        }
+    }
+
+    /// What the user calls this thing: a `--params` value is a *parameter*, a
+    /// driver binding an *argument*.
+    fn noun(&self) -> &'static str {
+        if self.tag == "arg" {
+            "argument"
+        } else {
+            "parameter"
+        }
+    }
+}
+
+/// The keys a `{ … }` placeholder body may carry. Closed, because the whole
+/// value of a `type:` declaration is that it does something — a body that
+/// tolerated `typ:` would silently ignore the very thing it was written for.
+/// The same guard `deny_unknown_fields` gives every typed spec node; this body
+/// is hand-parsed, so it has to state it.
+const BODY_KEYS: [&str; 3] = ["key", "default", "type"];
+
+/// Parse a `!param` body — [`placeholder_of`] with the tag this module owns.
+pub(crate) fn placeholder(body: &Value) -> Result<Placeholder<'_>> {
+    placeholder_of("param", body)
+}
+
+/// Parse a placeholder body written under `tag` (`"param"` or `"arg"`), which
+/// is used only to word the messages. `spec::args` calls this for `!arg`, so
+/// the two tags cannot grow different key sets or different type vocabularies.
+pub(crate) fn placeholder_of<'a>(tag: &'static str, body: &'a Value) -> Result<Placeholder<'a>> {
     match body {
-        Value::String(name) => Ok((name.as_str(), None)),
+        Value::String(name) => Ok(Placeholder {
+            tag,
+            key: name.as_str(),
+            default: None,
+            ty: None,
+        }),
         Value::Object(o) => {
             let key = o
                 .get("key")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("`param` needs a string `key`"))?;
-            Ok((key, o.get("default")))
+                .ok_or_else(|| anyhow!("`{tag}` needs a string `key`"))?;
+            if let Some(unknown) = o.keys().find(|k| !BODY_KEYS.contains(&k.as_str())) {
+                bail!(
+                    "`{tag}` `{key}` has an unknown key `{unknown}` — a placeholder body takes \
+                     `key`, `default` and `type`"
+                );
+            }
+            let ty =
+                parse_declaration(o.get("type")).map_err(|why| anyhow!("`{tag}` `{key}` {why}"))?;
+            Ok(Placeholder {
+                tag,
+                key,
+                default: o.get("default"),
+                ty,
+            })
         }
-        _ => bail!("`param` expects a key name or a `{{ key: NAME }}` object"),
+        _ => bail!("`{tag}` expects a key name or a `{{ key: NAME }}` object"),
     }
 }
 
@@ -305,12 +394,23 @@ fn substitute_for_check_inner(
             Ok(crate::spec::undefined::undefined_sentinel(&path.join(".")))
         }
         Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
-            let (key, default) = placeholder_parts(&map["param"])?;
-            if params.contains_key(key) || default.is_some() {
+            let p = placeholder(&map["param"])?;
+            if params.contains_key(p.key) || p.default.is_some() {
                 resolve(&map["param"], params)
             } else {
                 *holes += 1;
-                Ok(crate::spec::undefined::sentinel(key))
+                // A hole has no value to coerce, so a declaration on it is a
+                // *claim* instead: log it, so the report can say what the
+                // missing `--params` value has to be and a position demanding
+                // something else can be refused.
+                if let Some(ty) = p.ty {
+                    crate::spec::undefined::declare(
+                        crate::spec::undefined::UndefinedOrigin::Param,
+                        p.key,
+                        ty,
+                    );
+                }
+                Ok(crate::spec::undefined::sentinel(p.key))
             }
         }
         Value::Object(map) => {
@@ -511,11 +611,12 @@ mod tests {
         let seen = crate::spec::undefined::take_observations();
         assert_eq!(
             seen,
-            vec![(
-                crate::spec::undefined::UndefinedOrigin::Param,
-                "SIGNAL".to_string(),
-                vec![crate::spec::undefined::RequiredType::Expr],
-            )]
+            vec![crate::spec::undefined::HoleTypes {
+                origin: crate::spec::undefined::UndefinedOrigin::Param,
+                name: "SIGNAL".to_string(),
+                declared: None,
+                used: vec![crate::spec::undefined::RequiredType::Expr],
+            }]
         );
     }
 
@@ -540,7 +641,7 @@ long:
         assert_eq!(holes, 1);
         let seen = crate::spec::undefined::take_observations();
         assert_eq!(seen.len(), 1, "{seen:?}");
-        assert_eq!(seen[0].1, "LEVEL");
+        assert_eq!(seen[0].name, "LEVEL");
     }
 
     #[test]
@@ -571,6 +672,128 @@ long:
         )
         .unwrap_err();
         assert!(err.to_string().contains("needs a string"), "{err}");
+    }
+
+    // --- explicit `type:` declarations --------------------------------
+
+    #[test]
+    fn a_declared_string_keeps_a_numeric_ticker_a_string() {
+        // The heuristic reads `SYM=123` as a number, and `symbol:` is a
+        // `String` — so without the declaration this document does not parse.
+        let out = sub("root: !param { key: SYM, type: string }", &["SYM=123"]).unwrap();
+        assert_eq!(out.get("root"), Some(&Value::from("123")));
+    }
+
+    #[test]
+    fn a_declared_integer_refuses_a_fraction_naming_the_parameter() {
+        let err = sub("period: !param { key: FAST, type: integer }", &["FAST=3.5"]).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("parameter `FAST`"), "{err}");
+        assert!(err.contains("not a whole number"), "{err}");
+    }
+
+    #[test]
+    fn a_declaration_checks_the_default_too() {
+        // Nothing else would: the run that never passes `FAST` is exactly the
+        // one where the fallback is used.
+        let err = sub(
+            "period: !param { key: FAST, type: integer, default: 3.5 }",
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a whole number"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_or_null_type_leaves_the_heuristics_alone() {
+        // The whole compatibility claim, pinned: two spellings of "no
+        // declaration", and a value that a declaration would have changed.
+        for doc in [
+            "root: !param { key: SYM }",
+            "root: !param { key: SYM, type: null }",
+        ] {
+            let out = sub(doc, &["SYM=123"]).unwrap();
+            assert_eq!(out.get("root"), Some(&Value::from(123)), "{doc}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_body_key_is_an_error_not_a_shrug() {
+        // Without this, `typ:` means "untyped" — the exact opposite of what was
+        // written, and silently.
+        let err = sub("period: !param { key: FAST, typ: integer }", &["FAST=3"]).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("unknown key `typ`"), "{err}");
+        assert!(err.contains("`key`, `default` and `type`"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_type_name_names_the_placeholder() {
+        let err = sub("period: !param { key: FAST, type: int }", &["FAST=3"]).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("`param` `FAST`"), "{err}");
+        assert!(err.contains("`integer`"), "{err}");
+    }
+
+    #[test]
+    fn check_reports_the_declared_type_of_an_unset_placeholder() {
+        let _ = crate::spec::undefined::take_observations();
+        // `period:` demands a number either way; the *declaration* is what says
+        // it has to be a whole one, and that is what the report should print.
+        let (_spec, holes) = check(
+            "root: BTC
+long:
+  enter: !gt
+    lhs: !sma { period: !param { key: FAST, type: integer } }
+    rhs: !value 0
+",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(holes, 1);
+        let seen = crate::spec::undefined::take_observations();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].name, "FAST");
+        assert_eq!(seen[0].declared, Some(crate::spec::ParamType::Integer));
+        assert_eq!(
+            seen[0].used,
+            vec![crate::spec::undefined::RequiredType::Number]
+        );
+    }
+
+    #[test]
+    fn check_records_no_declaration_for_a_placeholder_it_resolved() {
+        // A resolved placeholder has a real value and its declaration has
+        // already done its work by coercing it — there is nothing left to
+        // report, and reporting it would count a hole that isn't one.
+        let _ = crate::spec::undefined::take_observations();
+        let (_spec, holes) = check(
+            "root: !param { key: SYM, type: string }
+long: { enter: !value true }",
+            &["SYM=123"],
+        )
+        .unwrap();
+        assert_eq!(holes, 0);
+        assert!(crate::spec::undefined::take_observations().is_empty());
+    }
+
+    #[test]
+    fn substitute_partial_applies_the_declaration_it_resolves() {
+        // `!import`'s inline `params:` path — the coercion has to happen there
+        // too, or an imported fragment types differently than a top-level one.
+        let input = json!({"root": {"param": {"key": "SYM", "type": "string"}}});
+        let table = HashMap::from([("SYM".to_string(), json!(123))]);
+        let out = substitute_partial(input, &table).unwrap();
+        assert_eq!(out["root"], json!("123"));
+    }
+
+    #[test]
+    fn substitute_partial_leaves_an_unresolved_declared_placeholder_intact() {
+        // Including its `type:` — the outer pass is what resolves it, and it
+        // needs the declaration to still be there.
+        let input = json!({"root": {"param": {"key": "SYM", "type": "string"}}});
+        let out = substitute_partial(input.clone(), &HashMap::new()).unwrap();
+        assert_eq!(out, input);
     }
 
     #[test]

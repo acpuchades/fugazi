@@ -433,10 +433,18 @@ Within that constraint it is as strict as it can be. It catches:
 
 - **Contradictory placeholders.** A `!param` required to be a number in one
   position and a string in another can't be satisfied by any `--params` value,
-  so it is rejected outright.
+  so it is rejected outright. A declared `type:` counts as one of the two
+  positions, so a `type: string` placeholder sitting at a `period:` is rejected
+  the same way, naming the declaration:
 
-And it reports each unresolved placeholder's **inferred type**, so you know what
-every `--params` value has to look like before running anything:
+  ```
+  error: contradictory placeholder types: `FAST` is declared `string` but used
+  where a number is required.
+  ```
+
+And it reports each unresolved placeholder's type — **declared** when the
+placeholder carries a `type:`, **inferred** otherwise — so you know what every
+`--params` value has to look like before running anything:
 
 ```
 params  (defaults) (4 unset placeholders)
@@ -448,7 +456,9 @@ needs --params SYMBOL=<string>
 
 The `<…>` is the *shape of the value that goes there* — inferred from the field
 the placeholder lands in, since a `period` wants a number and a `symbol` wants a
-string.
+string. A declaration outranks the inference and is printed verbatim, which is
+strictly sharper: a `period:` can only ever demand `<number>`, while
+`type: integer` says `<integer>`.
 
 A placeholder standing in for a **whole expression** (`enter: !param SIGNAL`, or
 a `!match` pattern) has no field type to infer — nothing demanded one — and
@@ -1744,6 +1754,21 @@ long:
 makes the param optional; without one, a missing value is an error. Substitution
 happens over the untyped YAML/JSON tree before the strategy is typed, so a
 param can stand in for a number, a string, or any other field.
+
+A placeholder may also **declare its type**, which is what decides how the
+`NAME=value` heuristic above is read:
+
+```yaml
+root: !pick { symbol: !param { key: SYM, type: string } }   # SYM=700 stays "700"
+period: !param { key: FAST, type: integer }                 # FAST=3.5 is refused here
+```
+
+`string` · `numeric` · `integer` · `bool`. The resolved value (or the `default`,
+when that is what is used) is coerced to the declared type, or refused naming
+the parameter. Omitted — or written `type: null` — nothing changes: the value
+keeps whatever the scalar heuristic gave it, which is how every placeholder
+behaved before this key existed. See
+[Declaring a placeholder's type](STRATEGIES.md#declaring-a-placeholders-type).
 
 Two names are **ambient**: a single-asset document that omits `root:` gets
 `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` spliced

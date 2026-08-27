@@ -1026,8 +1026,8 @@ impl PyStrategySpec {
 /// ```
 ///
 /// **`forms` — a tag is a *set* of spellings, not one.** `!param NAME` and
-/// `!param {key, default}` are the same tag written two ways, and only the
-/// second can carry a default; `!changed <node>` and `!changed {source: <node>}`
+/// `!param {key, default, type}` are the same tag written two ways, and only
+/// the second can carry a default or a declared type; `!changed <node>` and `!changed {source: <node>}`
 /// likewise. `forms[0]` is canonical — emit that. If you *accept* documents
 /// (validate, complete, scaffold), iterate all of `forms`: eight tags have more
 /// than one, and reading only the first is how a generator ends up unable to

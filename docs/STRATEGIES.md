@@ -631,7 +631,12 @@ symbol at build), so they compose freely inside one tree:
 
 - `!arg SYM` — bare-string shorthand;
 - `!arg { key: SYM }` — the same, explicit;
-- `!arg { key: SYM, default: BTC }` — with a fallback.
+- `!arg { key: SYM, default: BTC }` — with a fallback;
+- `!arg { key: SYM, type: string }` — with a
+  [declared type](#declaring-a-placeholders-type), checked when the driver binds
+  the name rather than at load (that is when the value exists). The build-time
+  probe every template goes through means a declaration the binding can't
+  satisfy still fails at start-up, not on the first bar that quotes a symbol.
 
 `SYM` is the only argument the basket driver supplies.
 
@@ -1877,8 +1882,13 @@ long:
 
 - `!param { key: NAME }` — **required**; a missing value is an error.
 - `!param { key: NAME, default: V }` — **optional**; falls back to `V`.
+- `!param { key: NAME, type: T }` — with a
+  [declared type](#declaring-a-placeholders-type).
 - `!param NAME` — bare-string shorthand for `!param { key: NAME }`.
 - Map form: `{ param: { key: NAME, default: V } }`.
+
+`key`, `default` and `type` are the only keys a placeholder body takes; an
+unknown one is an error rather than being ignored.
 
 Placeholders are substituted on the untyped document *before* it is typed, so a
 param can stand in anywhere — including where a number is required.
@@ -1899,6 +1909,59 @@ fugazi run @strategy.params.yml \
 basket document uses to stamp the current symbol into its per-symbol score and
 sizing chains. The two resolve in different passes — `!param` once at load, `!arg`
 once per symbol at build — so one tree can carry both.
+
+### Declaring a placeholder's type
+
+A `--params NAME=value` term is parsed leniently: JSON if it parses, a bare
+string otherwise. That guess is usually right and occasionally load-bearing in
+the wrong direction — `SYM=700` is a **number**, so a document routing on
+`symbol: !param SYM` fails with `invalid type: integer 700, expected a string`
+from wherever the typed parse happened to reach first. In the other direction
+`FAST=3.5` sails through the load pass and dies inside serde at some `!sma`.
+
+`type:` is the author's answer. It is optional; omitted, or written
+`type: null`, nothing changes.
+
+```yaml
+root: !pick { symbol: !param { key: SYM, type: string } }
+long:
+  enter: !crosses_above
+    lhs: !sma { source: close, period: !param { key: FAST, type: integer } }
+    rhs: !sma { source: close, period: !param { key: SLOW, type: integer, default: 8 } }
+```
+
+| `type:` | Accepts | Notes |
+| --- | --- | --- |
+| `string` | anything scalar | a number or bool is **stringified** — this is what turns `SYM=700` back into the ticker `"700"` |
+| `numeric` | a finite number, or a string that parses as one | `K="2.5"` from a quoted YAML params file becomes `2.5` |
+| `integer` | a whole number, however spelled — `3`, `3.0`, `"3"` | `3.5` is refused |
+| `bool` | `true` / `false`, quoted or not | a number is refused |
+| *(omitted / `null`)* | anything | the heuristics stand — the pre-existing behaviour |
+
+The rules:
+
+- The **resolved** value is coerced, whether it came from `--params`, from an
+  `!import`'s inline `params:`, or from the placeholder's own `default:`. An
+  author who writes `{ type: integer, default: 3.5 }` hears about it on the run
+  that uses the fallback, which is the run where nothing else would notice.
+- A value that can't be coerced is a **load error naming the parameter**,
+  instead of a serde type error pointing at whichever node was parsed first:
+
+  ```
+  error: parameter `FAST` is declared `integer`, but 3.5 is not a whole number
+  ```
+
+- Under `fugazi check` the declaration is what an unset placeholder **reports**
+  (`needs --params FAST=<integer>`, sharper than the `<number>` a `period:`
+  could infer), and a position demanding a different type is refused as a
+  [contradiction](CLI.md#check-strategy).
+- There is deliberately no `list` or `table`. A placeholder standing for a whole
+  subtree (`--params @sizings/atr.yml`) is a tree substitution, and what
+  validates it is the typed parse it feeds.
+
+The same key works on [`!arg`](#arg-sym--the-per-symbol-placeholder), where —
+`!arg` being resolved per build rather than once at load — it is checked when
+the driver binds the name.
 
 ## Reusing signals — YAML anchors
 

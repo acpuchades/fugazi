@@ -172,6 +172,16 @@ thread_local! {
     /// [`take_observations`].
     static PARAM_USES: std::cell::RefCell<Vec<(UndefinedOrigin, String, RequiredType)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Every `type:` a hole's placeholder *declared*, recorded by the
+    /// substitution pass rather than by the parse. Drained by the same
+    /// [`take_observations`] call, so the two ledgers can never be read out of
+    /// step. A name declared twice keeps the first declaration — the second is
+    /// caught as a redeclaration by the substitution pass, which is the layer
+    /// that can point at the offending node.
+    static PARAM_DECLS: std::cell::RefCell<
+        std::collections::BTreeMap<(UndefinedOrigin, String), crate::spec::ParamType>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 /// The placeholder name of a hole node, whatever its origin — the `!arg` one
@@ -204,16 +214,70 @@ fn observe(value: &Yaml, ty: RequiredType) {
     }
 }
 
-/// Drain the recorded placeholder type observations, collapsed to one entry per
-/// `!param` name with the distinct types it was required to have (sorted).
+/// Record the `type:` a placeholder declared, so a `check` report can print it
+/// and a contradiction against it can be refused.
 ///
-/// A name mapping to more than one type is a genuine contradiction: no single
-/// `--params` value can satisfy both positions, so the document can never run
-/// whatever the user supplies.
-pub fn take_observations() -> Vec<(UndefinedOrigin, String, Vec<RequiredType>)> {
+/// Called by the substitution passes ([`params::substitute_for_check`]) at the
+/// moment they decide a placeholder stays a hole — a *resolved* placeholder has
+/// a real value, and its declaration has already done its work by coercing it.
+///
+/// [`params::substitute_for_check`]: crate::spec::params::substitute_for_check
+pub fn declare(origin: UndefinedOrigin, name: &str, ty: crate::spec::ParamType) {
+    PARAM_DECLS.with(|d| {
+        d.borrow_mut()
+            .entry((origin, name.to_string()))
+            .or_insert(ty);
+    });
+}
+
+/// One placeholder's type story, as `fugazi check` sees it: what the author
+/// declared (if anything) and what the document's positions demanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoleTypes {
+    /// Whether this is a named `--params` placeholder or an `!undefined`
+    /// located by its document path.
+    pub origin: UndefinedOrigin,
+    /// The `--params` key, or the document path for an `!undefined`.
+    pub name: String,
+    /// The placeholder's own `type:`, when it carried one.
+    pub declared: Option<crate::spec::ParamType>,
+    /// Every distinct type the typed parse required of it, sorted.
+    pub used: Vec<RequiredType>,
+}
+
+impl HoleTypes {
+    /// The types a *position* actually demanded — [`RequiredType::Expr`]
+    /// dropped, because it is not a demand: it says the hole stands where a
+    /// whole expression goes, and every scalar a user can pass is one.
+    pub fn demanded(&self) -> Vec<RequiredType> {
+        self.used
+            .iter()
+            .copied()
+            .filter(|t| *t != RequiredType::Expr)
+            .collect()
+    }
+}
+
+/// Drain the recorded placeholder types — the declarations the substitution
+/// pass logged and the demands the typed parse observed — collapsed to one
+/// entry per `!param` name.
+///
+/// A name mapping to more than one demanded type is a genuine contradiction: no
+/// single `--params` value can satisfy both positions, so the document can
+/// never run whatever the user supplies. So is a declaration the demands
+/// disagree with; the caller
+/// ([`reject_contradictory_params`](../../fugazi/cli/index.html)) decides how to
+/// say so.
+pub fn take_observations() -> Vec<HoleTypes> {
     let raw = PARAM_USES.with(|u| std::mem::take(&mut *u.borrow_mut()));
+    let mut declared = PARAM_DECLS.with(|d| std::mem::take(&mut *d.borrow_mut()));
     let mut by_name: std::collections::BTreeMap<(UndefinedOrigin, String), Vec<RequiredType>> =
         std::collections::BTreeMap::new();
+    // A declared placeholder is reportable even if nothing demanded a type of
+    // it — the declaration *is* what the user has to satisfy.
+    for key in declared.keys() {
+        by_name.entry(key.clone()).or_default();
+    }
     for (origin, name, ty) in raw {
         let seen = by_name.entry((origin, name)).or_default();
         if !seen.contains(&ty) {
@@ -225,7 +289,12 @@ pub fn take_observations() -> Vec<(UndefinedOrigin, String, Vec<RequiredType>)> 
     }
     by_name
         .into_iter()
-        .map(|((origin, name), types)| (origin, name, types))
+        .map(|(key, used)| HoleTypes {
+            declared: declared.remove(&key),
+            origin: key.0,
+            name: key.1,
+            used,
+        })
         .collect()
 }
 
@@ -869,6 +938,6 @@ mod tests {
         parse_probe::<Leaf>(json).unwrap();
         let seen = take_observations();
         assert_eq!(seen.len(), 1, "{seen:?}");
-        assert_eq!(seen[0].1, "PERIOD");
+        assert_eq!(seen[0].name, "PERIOD");
     }
 }

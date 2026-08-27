@@ -1116,7 +1116,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // `spec::expr::Root`), which used to surface as a panic mid-run.
     let holes = observations
         .iter()
-        .any(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined);
+        .any(|h| h.origin == spec::undefined::UndefinedOrigin::Undefined);
     // Second "nothing to build from" case: a placeholder standing in for a
     // whole *expression* (or a `!value` literal). A scalar hole answers its
     // field with a typed zero and the build proceeds on it; an expression hole
@@ -1125,7 +1125,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // is a `--params` value.
     let expr_holes = observations
         .iter()
-        .any(|(_, _, types)| types.contains(&spec::undefined::RequiredType::Expr));
+        .any(|h| h.used.contains(&spec::undefined::RequiredType::Expr));
     // Third "needs data" case, alongside a hole and an overlay read: a
     // single-asset root left as the sole-atom selector. `try_build` demands a
     // symbol to route orders through, and the `--series` frame is what supplies
@@ -1153,7 +1153,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         // type line below lists it once.
         let n_undefined = observations
             .iter()
-            .filter(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined)
+            .filter(|h| h.origin == spec::undefined::UndefinedOrigin::Undefined)
             .count();
         let params_label =
             params_label_with_holes(&params_base, observations.len() - n_undefined, n_undefined);
@@ -1784,20 +1784,15 @@ fn params_label_with_holes(base: &str, n_params: usize, n_undefined: usize) -> S
     }
 }
 
-/// The inferred type of each unresolved `!param`, e.g. `PERIOD: number`.
+/// The type of each unresolved `!param`, e.g. `PERIOD: number`.
 ///
-/// `check` cannot know a placeholder's *value*, but the typed parse reveals its
-/// *type*: serde asks for a `usize` at `period:`, a `String` at `symbol:`, and
-/// the hole records which. Reporting that turns "3 unset placeholders" into
-/// something a user can act on — it says exactly what each `--params` value has
-/// to look like.
-fn param_types_label(
-    observations: &[(
-        spec::undefined::UndefinedOrigin,
-        String,
-        Vec<spec::undefined::RequiredType>,
-    )],
-) -> Option<String> {
+/// `check` cannot know a placeholder's *value*, but it can always name its
+/// *type*. Two ways, in that order: the placeholder's own `type:` declaration
+/// when it carries one, and otherwise the typed parse — serde asks for a
+/// `usize` at `period:`, a `String` at `symbol:`, and the hole records which.
+/// Reporting that turns "3 unset placeholders" into something a user can act on
+/// — it says exactly what each `--params` value has to look like.
+fn param_types_label(observations: &[spec::undefined::HoleTypes]) -> Option<String> {
     use spec::undefined::UndefinedOrigin;
     if observations.is_empty() {
         return None;
@@ -1805,23 +1800,24 @@ fn param_types_label(
     Some(
         observations
             .iter()
-            .map(|(origin, name, types)| {
+            .map(|hole| {
+                // A declared `type:` outranks every inference: the author said
+                // what the value is, and `integer` is a sharper thing to print
+                // than the `number` a position could ever demand.
+                let declared = hole.declared.map(|t| t.label());
                 // `expression` is what a hole says when nothing demanded a type
                 // of it. Once another position does, that is the shape to
                 // print: `<number>` tells the user what to pass; the
                 // `<number|expression>` it would otherwise read as does not.
-                let known: Vec<&str> = types
-                    .iter()
-                    .filter(|t| **t != spec::undefined::RequiredType::Expr)
-                    .map(|t| t.label())
-                    .collect();
-                let types: Vec<&str> = if known.is_empty() {
-                    types.iter().map(|t| t.label()).collect()
-                } else {
-                    known
+                let known: Vec<&str> = hole.demanded().iter().map(|t| t.label()).collect();
+                let types: Vec<&str> = match declared {
+                    Some(label) => vec![label],
+                    None if known.is_empty() => hole.used.iter().map(|t| t.label()).collect(),
+                    None => known,
                 };
                 let types = types.join("|");
-                match origin {
+                let name = &hole.name;
+                match hole.origin {
                     // Spelled as the flag the user would actually type, so the
                     // type is unambiguous: `<number>` is the shape of the value
                     // that goes there, not a category being asserted about it.
@@ -1835,46 +1831,55 @@ fn param_types_label(
     )
 }
 
-/// Reject a `!param` required to be two different types in two places.
+/// Reject a `!param` required to be two different types — in two places, or in
+/// one place that disagrees with the `type:` the placeholder declared.
 ///
 /// This is decidable without any data and is always a real defect: no single
 /// `--params NAME=…` value can satisfy both positions, so the document cannot
 /// run whatever the user supplies. Catching it here is the whole point of
-/// inferring hole types rather than just counting them.
-fn reject_contradictory_params(
-    observations: &[(
-        spec::undefined::UndefinedOrigin,
-        String,
-        Vec<spec::undefined::RequiredType>,
-    )],
-) -> anyhow::Result<()> {
+/// inferring hole types rather than just counting them — and of letting an
+/// author declare one, which turns the same check into a statement about a
+/// single position rather than a tie between two.
+fn reject_contradictory_params(observations: &[spec::undefined::HoleTypes]) -> anyhow::Result<()> {
     use spec::undefined::UndefinedOrigin;
     let bad: Vec<String> = observations
         .iter()
         // Only named placeholders can contradict: an `!undefined` is keyed by
         // its own document path, so it is one position and cannot be two types.
-        // `Expr` is not a *demand*: it says the placeholder stands where a
-        // whole expression goes, and every scalar a user can pass is one. So it
-        // agrees with any other observation of the same name — `FAST` used as a
-        // period and as `rhs:` is one number, not a contradiction — and only
-        // the typed observations are counted here.
-        .map(|(origin, name, types)| {
-            let types: Vec<&str> = types
-                .iter()
-                .filter(|t| **t != spec::undefined::RequiredType::Expr)
-                .map(|t| t.label())
-                .collect();
-            (origin, name, types)
+        .filter(|hole| hole.origin == UndefinedOrigin::Param)
+        .filter_map(|hole| {
+            // `Expr` is not a *demand*: it says the placeholder stands where a
+            // whole expression goes, and every scalar a user can pass is one.
+            // So it agrees with any other observation of the same name —
+            // `FAST` used as a period and as `rhs:` is one number, not a
+            // contradiction — and only the typed observations are counted here.
+            let demanded = hole.demanded();
+            let name = &hole.name;
+            // A declared `type:` is a claim about the value, so a position
+            // demanding something else is the same defect as two positions
+            // demanding different things — caught one step earlier, and
+            // attributable to the declaration rather than to a tie between two
+            // slots.
+            if let Some(declared) = hole.declared
+                && let Some(clash) = demanded.iter().find(|t| **t != declared.required())
+            {
+                return Some(format!(
+                    "`{name}` is declared `{}` but used where a {} is required",
+                    declared.label(),
+                    clash.label()
+                ));
+            }
+            let types: Vec<&str> = demanded.iter().map(|t| t.label()).collect();
+            (types.len() > 1).then(|| format!("`{name}` is used as {}", types.join(" and as ")))
         })
-        .filter(|(origin, _, types)| **origin == UndefinedOrigin::Param && types.len() > 1)
-        .map(|(_, name, types)| format!("`{name}` is used as {}", types.join(" and as ")))
         .collect();
     if bad.is_empty() {
         return Ok(());
     }
     anyhow::bail!(
-        "contradictory placeholder types: {}. No single `--params` value can satisfy \
-         both positions — use a separate placeholder name for each.",
+        "contradictory placeholder types: {}. No single `--params` value can satisfy the \
+         document as written — correct the declaration, or use a separate placeholder name \
+         per position.",
         bad.join("; ")
     )
 }

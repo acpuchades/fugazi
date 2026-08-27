@@ -1411,6 +1411,18 @@ Consequences worth stating outright:
   aborted the process instead of reporting anything. Object form `!import { path, params: {...} }`
   resolves the imported subtree's `!param` against the inline table first (via
   `params::substitute_partial`).
+- **`param_type.rs`** — the optional `type:` a `!param` / `!arg` body carries:
+  `ParamType::{String, Numeric, Integer, Bool}`, `parse_declaration` (absent or `null`
+  ⇒ `None` ⇒ *the heuristics*, which is what every pre-existing placeholder gets), and
+  `coerce`. Both tags read their body through the one `params::placeholder_of(tag, body)`
+  parse, whose key set is **closed** — `key` / `default` / `type` — since a body that
+  tolerated `typ:` would make a declaration silently mean nothing. The declaration is
+  applied to whatever the placeholder resolves to, the `default:` included; it is what
+  a `--params SYM=700` needs to reach a `symbol:` slot as `"700"` rather than as the
+  number the term grammar read. Under `check` an *unresolved* declared placeholder has
+  no value to coerce, so the declaration is logged instead (`undefined::declare` →
+  `HoleTypes::declared`) and becomes both what the report prints and what
+  `reject_contradictory_params` measures a position's demand against.
 - **`typecheck.rs`** — static input/output type checking of `NodeSpec` trees, run from
   `NodeSpec::try_from` **only in check mode**. `output_type(&NodeSpec) -> Option<PayloadType>`
   (`None` = undecidable ⇒ *skip*, never *invalid*) and `children()`. Both matches
@@ -1421,7 +1433,8 @@ Consequences worth stating outright:
 - **`undefined.rs`** — type-directed *undefined-value* deserialization for `fugazi
   check strategy`. Three sentinel kinds share one `UndefinedDeserializer`:
   `UNSET_PARAM_KEY`, `UNSET_ARG_KEY`, `UNDEFINED_KEY`. Records per-`!param` the type its
-  position demanded. `check` validates a spec's **shape**, never building or driving it.
+  position demanded *and* the `type:` it declared, drained together as `HoleTypes`.
+  `check` validates a spec's **shape**, never building or driving it.
   Gated by a thread-local `check_mode()` RAII guard.
 - **`params.rs`, `args.rs`, `convert.rs`, `list.rs`, `completions.rs`, `pool.rs`,
   `style.rs`** — auxiliary. `params::substitute` and `args::substitute` share a walker,
