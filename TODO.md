@@ -1182,3 +1182,58 @@ What would change it: the Python surface growing past test-harness scale, or a
 concrete bug that a specific rule set would have caught. Then it lands as its own
 commit with its own baseline, the way the formatter did — not as a line added to
 this file.
+
+### Parallelising the local gate was measured and reverted; `pytest` is the target
+
+`scripts/ci-local.sh` runs serially, and stays that way. It was rewritten to run
+`fmt` and `version-sync` first, then `rust`, `features` and the Python build
+concurrently, then `pytest`; the whole thing was measured on 16 cores and thrown
+away. Numbers, so nobody has to re-derive them:
+
+| | serial | parallel |
+|---|---|---|
+| warm tree | 1:53.7 | 1:30.2 |
+| dirty tree (two feature commits) | 5:56.9 of work | 4:11.5 |
+
+**Why it went back.** Twenty-three seconds on a warm tree cost 232 lines, 2.4 GB
+of duplicate target directories, and the live output — three concurrent cargo
+runs interleaved are unreadable, so each stream had to be buffered to a file and
+printed whole when it finished. It also saturates all 16 cores, which is bad
+manners on a machine shared with the work you are actually trying to do. The
+dirty-tree win is the real one and dirty runs are the rare ones.
+
+**Concurrency has to be bought with `CARGO_TARGET_DIR`, if it is ever bought
+again.** Cargo holds an exclusive lock on a build directory for the whole
+invocation, so simply backgrounding the jobs against one `target/` yields
+`Blocking waiting for file lock on build directory` and a serial run with extra
+steps. Each stream needs its own directory; the duplication is ~1.2 GB apiece and
+is only the third-party dependency graph, because every feature-matrix row and
+the bindings resolve to a different feature set than the `rust` job and never
+shared `fugazi` artifacts anyway.
+
+**`pytest` cannot run beside a compiler.** The two interrupt tests in
+`python/tests/test_specs.py` calibrate an uninterrupted duration and then fire
+`SIGINT` at a quarter of it, so they need the load *steady*, not merely low.
+Beside three cargo streams that start and stop, the calibration runs slow and the
+measured run runs fast, and the interrupt lands after the work has finished: both
+failed that way on the first parallel run, and both pass standalone at a load
+average of 16. Any future attempt needs a barrier before `pytest`, which costs
+~9% of the wall clock the parallelism could otherwise have saved.
+
+**What is actually worth attacking.** `pytest` is **1:12 of the 1:53** — 64% of a
+warm run, and everything else put together is the other third. Nothing structural
+about the gate matters next to that one number, which is why the timings are now
+printed slowest-first at the end of every run. `pytest-xdist` (`-n auto`) is the
+obvious answer and is deliberately not taken: it is not installed, the suite has
+never been run under it, and the two interrupt tests above are exactly the shape
+that breaks when tests share a worker pool. What would change it: someone running
+the suite under `-n auto` enough times to show it is stable, landing it as its own
+commit with the dependency added to `ci.yml`'s install list, the venv list in the
+script, and `python/pyproject.toml`'s `test` extra together.
+
+The one subtraction that was kept is the feature matrix's `cargo check` rows. The
+first is contained in the second — clippy is the front-end plus lints, `-D
+warnings` makes it strictly stricter, and the two share their dependency
+artifacts — so seven of the fourteen invocations were a second analysis of the
+library carrying no signal. Dropped from `ci.yml` as well, since each matrix job
+ran both sequentially on one runner.

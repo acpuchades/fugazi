@@ -42,7 +42,7 @@ rustdoc lints (only under `RUSTDOCFLAGS=-D warnings`), clippy over `python/src`
 compiles in no other job). Run it before you push.
 
 ```sh
-scripts/ci-local.sh              # all five jobs, ~25 checks
+scripts/ci-local.sh              # all five jobs, ~19 checks
 scripts/ci-local.sh rust         # one job: fmt | rust | version-sync | features | python
 FAST=1 scripts/ci-local.sh       # skip the matrix + wheel rebuild (inner loop only)
 ```

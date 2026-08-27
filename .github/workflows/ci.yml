@@ -78,7 +78,7 @@ jobs:
       # `#[cfg(test)]` inside `src/live/` — the HMAC signature vector, the JWT
       # structure, the PEM parsing, the contracts-to-units grid, the bounded
       # logs and fill cursors — was dead here. The feature matrix below only
-      # `cargo check`s them, and a check that never runs an assertion is
+      # *compiles* them, and a check that never runs an assertion is
       # indistinguishable from a passing one.
       #
       # `--lib` as well as the three integration targets, because those unit
@@ -181,8 +181,16 @@ jobs:
   # is only one point in the space. Cargo.toml documents each of these as a
   # supported standalone configuration; without this job that claim is
   # unchecked, and `live` — which nothing else compiles — could rot silently.
-  # `cargo check` rather than `cargo test`: this guards *compilation* under each
+  # `cargo clippy` rather than `cargo test`: this guards *compilation* under each
   # gate, and the behaviour is covered by the default-feature job above.
+  #
+  # Clippy alone, where each row used to run `cargo check` and *then* `cargo
+  # clippy` over the same feature set. The first is contained in the second:
+  # clippy is the compiler front-end plus lints, so it reports every error
+  # `check` reports, and `-- -D warnings` makes it strictly stricter. Both run on
+  # the same runner against the same target directory and share their dependency
+  # artifacts, so the `check` step bought nothing but a second analysis of the
+  # library — fourteen invocations carrying seven configurations' worth of signal.
   #
   # Restricted rows check `--lib` rather than `--all-targets`, because the
   # integration tests in `tests/` reach for `fugazi::spec` unconditionally —
@@ -219,8 +227,6 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: cargo check -p fugazi ${{ matrix.features }} ${{ matrix.targets || '--lib' }}
       - name: Clippy
         run: cargo clippy -p fugazi ${{ matrix.features }} ${{ matrix.targets || '--lib' }} -- -D warnings
 

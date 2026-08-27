@@ -25,19 +25,44 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 failures=()
+timings=()
+
+# Milliseconds since the epoch. The digit filter is not decoration:
+# `EPOCHREALTIME` is *locale*-formatted — `1787853266,005106` under a comma
+# locale such as `es_ES.UTF-8` — and bash arithmetic reads that comma as the C
+# comma operator, silently yielding the microseconds alone.
+now_ms() { local t=${EPOCHREALTIME//[!0-9]/}; printf '%s' "$((${t:-0} / 1000))"; }
+dur() { printf '%d:%02d.%03d' $(($1 / 60000)) $(($1 / 1000 % 60)) $(($1 % 1000)); }
+
 run() { # run <label> <cmd...>
     local label="$1"
     shift
     printf '\n\033[1m== %s ==\033[0m\n%s\n' "$label" "$*"
+    local t0 ms
+    t0=$(now_ms)
     if "$@"; then
-        printf '\033[32mok\033[0m — %s\n' "$label"
+        ms=$(($(now_ms) - t0))
+        printf '\033[32mok\033[0m — %s (%s)\n' "$label" "$(dur "$ms")"
     else
-        printf '\033[31mFAILED\033[0m — %s\n' "$label"
+        ms=$(($(now_ms) - t0))
+        printf '\033[31mFAILED\033[0m — %s (%s)\n' "$label" "$(dur "$ms")"
         failures+=("$label")
     fi
+    timings+=("$ms	$label")
 }
 
 job="${1:-all}"
+# Every block below is `[[ $job == all || $job == <name> ]]`, so a typo used to
+# match nothing, run nothing, and report `all checks passed` — the one verdict a
+# gate must never reach by doing no work.
+case $job in
+    all | fmt | rust | version-sync | features | python) ;;
+    *)
+        printf 'unknown job %s — expected one of: fmt rust version-sync features python\n' \
+            "$job" >&2
+        exit 2
+        ;;
+esac
 
 # --- fmt: rustfmt + ruff -----------------------------------------------------
 # Cheapest job in the file and the one most likely to be what's red, so it runs
@@ -151,39 +176,32 @@ if [[ $job == all || $job == version-sync ]]; then
 fi
 
 # --- features ----------------------------------------------------------------
-# Restricted rows check `--lib`: the integration tests reach for `fugazi::spec`
+# Clippy only. Each row used to run a `check` and then a `clippy` over the same
+# feature set, and the first is contained in the second: clippy is the compiler
+# front-end plus lints, so it reports every error a check reports, and
+# `-D warnings` makes it strictly stricter. The two share their dependency
+# artifacts, so the check row bought nothing but a second analysis of the
+# library — fourteen invocations for seven configurations' worth of signal.
+#
+# Restricted rows lint `--lib`: the integration tests reach for `fugazi::spec`
 # unconditionally. `--all-features` is the row that covers every target.
 # Spelled out rather than looped over a variable: a loop hides the actual
 # command behind `$features`, which is where drift goes unnoticed. These lines
 # are the workflow's matrix expanded, and `tests/ci_mirror.rs` compares them
 # literally.
 if [[ $job == all || $job == features ]] && [[ -z ${FAST:-} ]]; then
-    run "features (default off) / Check" \
-        cargo check -p fugazi --no-default-features --lib
     run "features (default off) / Clippy" \
         cargo clippy -p fugazi --no-default-features --lib -- -D warnings
-    run "features (runtime) / Check" \
-        cargo check -p fugazi --no-default-features --features runtime --lib
     run "features (runtime) / Clippy" \
         cargo clippy -p fugazi --no-default-features --features runtime --lib -- -D warnings
-    run "features (sources) / Check" \
-        cargo check -p fugazi --no-default-features --features sources --lib
     run "features (sources) / Clippy" \
         cargo clippy -p fugazi --no-default-features --features sources --lib -- -D warnings
-    run "features (parallel) / Check" \
-        cargo check -p fugazi --no-default-features --features parallel --lib
     run "features (parallel) / Clippy" \
         cargo clippy -p fugazi --no-default-features --features parallel --lib -- -D warnings
-    run "features (spec) / Check" \
-        cargo check -p fugazi --no-default-features --features spec --lib
     run "features (spec) / Clippy" \
         cargo clippy -p fugazi --no-default-features --features spec --lib -- -D warnings
-    run "features (live) / Check" \
-        cargo check -p fugazi --no-default-features --features live --lib
     run "features (live) / Clippy" \
         cargo clippy -p fugazi --no-default-features --features live --lib -- -D warnings
-    run "features (all) / Check" \
-        cargo check -p fugazi --all-features --all-targets
     run "features (all) / Clippy" \
         cargo clippy -p fugazi --all-features --all-targets -- -D warnings
 fi
@@ -224,6 +242,16 @@ if [[ $job == all || $job == python ]]; then
 fi
 
 # --- verdict -----------------------------------------------------------------
+# Slowest-first, with the total. The shape of the gate is worth knowing: on a warm
+# tree `python / pytest` alone is ~64% of it, and everything else put together is
+# the other third. See TODO *Repo hygiene*.
+total=0
+for t in "${timings[@]}"; do total=$((total + ${t%%$'\t'*})); done
+printf '\n\033[1m== timings (slowest first) ==\033[0m\n'
+printf '%s\n' "${timings[@]}" | sort -rn |
+    while IFS=$'\t' read -r ms label; do printf '  %10s  %s\n' "$(dur "$ms")" "$label"; done
+printf '  %10s  \033[1mtotal\033[0m\n' "$(dur "$total")"
+
 printf '\n'
 if ((${#failures[@]})); then
     printf '\033[31m%d check(s) failed:\033[0m\n' "${#failures[@]}"

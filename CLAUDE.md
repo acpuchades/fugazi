@@ -44,7 +44,7 @@ else, and each has already broken a green local tree.
 | rustdoc lints (`redundant_explicit_links`, doc-comment reattachment) | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fugazi` |
 | `python/src` — ~11k lines every other clippy scopes past with `-p fugazi` | `cargo clippy -p fugazi-python --all-targets -- -D warnings` |
 | the live wallets — `live` is off by default, so a plain `cargo test` runs *none* of `tests/live_*.rs` or `src/live/`'s unit tests | `cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_kraken --test live_portfolio` |
-| the feature matrix — the `--no-default-features` configurations compile in no other job | `cargo check/clippy -p fugazi --no-default-features --features <f> --lib` |
+| the feature matrix — the `--no-default-features` configurations compile in no other job | `cargo clippy -p fugazi --no-default-features --features <f> --lib -- -D warnings` |
 
 `scripts/ci-local.sh [fmt|rust|version-sync|features|python]` runs one job; `FAST=1`
 skips the feature matrix and the wheel rebuild for an inner loop — not enough before a
