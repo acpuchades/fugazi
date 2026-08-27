@@ -253,15 +253,28 @@ pub struct SummaryRow {
 /// used to be.
 pub struct EvalContext<'a> {
     pub cash: Real,
+    /// How far a fractional `sizing:` deploys, as a multiple of equity —
+    /// `1.0` (face value) unless the caller says otherwise, and handed straight
+    /// to [`PaperWallet::with_leverage`].
+    ///
+    /// The knob that makes an **unedited** document trade levered: it multiplies
+    /// what the sizing rule asks for, which a ceiling structurally cannot do.
+    /// Raising it raises `max_gross` with it unless that was pinned separately.
+    pub leverage: Real,
     /// The most gross notional the run's account may hold, as a multiple of
-    /// equity — `1.0` (unlevered) unless the caller says otherwise, and handed
-    /// straight to [`PaperWallet::with_max_gross`].
+    /// equity, or `None` to take [`leverage`](Self::leverage) — handed straight
+    /// to [`PaperWallet::with_max_gross`].
     ///
     /// Part of the *account*, like `cash`, rather than of the strategy: it
     /// bounds what any document can carry rather than changing what one asks
     /// for. A `sizing:` above it is fitted to it and the gap recorded on
     /// [`Order::requested_units`](crate::Order::requested_units).
-    pub max_gross: Real,
+    ///
+    /// `None` rather than `1.0` because the two knobs have to move together by
+    /// default — a `--leverage 3` run whose ceiling stayed at `1.0` would size
+    /// 3x and then fit every fill straight back to 1x, which is the one
+    /// combination nobody means.
+    pub max_gross: Option<Real>,
     /// Annualized interest charged on a **negative** cash balance —
     /// [`PaperWallet::with_margin_rate`]. `0.0` charges nothing, which is the
     /// only honest default: a rate is a fact about a broker, not about a run.
@@ -314,15 +327,18 @@ pub struct EvalContext<'a> {
 }
 
 impl EvalContext<'_> {
-    /// The [`PaperWallet`] this run trades: seeded with `cash`, capped at
-    /// `max_gross`, and primed with `per_symbol_costs`.
+    /// The [`PaperWallet`] this run trades: seeded with `cash`, deploying at
+    /// `leverage`, capped at `max_gross`, and primed with `per_symbol_costs`.
     ///
     /// One place, so the priced run and its zero-cost twin cannot end up on
     /// differently-configured accounts.
     pub fn account(&self, per_symbol_costs: &[(String, TradingCosts)]) -> PaperWallet<Symbol> {
         let mut wallet = PaperWallet::new(self.cash)
-            .with_max_gross(self.max_gross)
+            .with_leverage(self.leverage)
             .with_margin_rate(self.margin_rate);
+        if let Some(cap) = self.max_gross {
+            wallet = wallet.with_max_gross(cap);
+        }
         // Only when the cadence resolved. A time-denominated carry model charges
         // nothing without it — see `with_bar_year_fraction` — which the CLI
         // warns about rather than papering over with an assumed year length.

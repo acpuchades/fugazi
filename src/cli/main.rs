@@ -246,13 +246,34 @@ struct RunArgs {
 
     /// Most gross notional the account may hold, as a multiple of equity.
     ///
-    /// `1` — the default — is an unlevered book: no fill may leave
-    /// `sum(|position| * price)` above equity. It is the one bound both sides
-    /// share, since a short credits cash and so is never limited by it. Raise it
-    /// to model a margined account; a `sizing:` above the cap is scaled to it,
-    /// and `fills.csv` records what was asked for beside what traded.
-    #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
-    max_gross: f64,
+    /// Defaults to `--leverage`, so raising deployment raises the ceiling with
+    /// it and you only pass this to hold the two apart. No fill may leave
+    /// `sum(|position| * price)` above `X * equity`. It is the one bound both
+    /// sides share, since a short credits cash and so is never limited by it. A
+    /// `sizing:` above the cap is scaled to it, and `fills.csv` records what was
+    /// asked for beside what traded.
+    ///
+    /// `--leverage 3 --max-gross 5` deploys 3x but tolerates a book drifting to
+    /// 5x on marks before refusing to add to it.
+    #[arg(long = "max-gross", value_name = "X")]
+    max_gross: Option<f64>,
+
+    /// How far a fractional `sizing:` deploys, as a multiple of equity.
+    ///
+    /// `1` — the default — takes the document at face value: `sizing: 1.0`
+    /// targets 1x equity. **This is the knob that trades an unedited document
+    /// levered.** `--leverage 3` makes the same `sizing: 1.0` target 3x equity,
+    /// and raises `--max-gross` to match so the request is not simply fitted
+    /// back down.
+    ///
+    /// It multiplies what the rule asks for, which is what `--max-gross` alone
+    /// could never do: a ceiling can only stop a request, never enlarge one. It
+    /// scales *every* fractional sizing, a risk-denominated one included — a
+    /// `!vol_target` document at `--leverage 3` holds three times its target
+    /// vol. If you want the target left alone and only the truncation lifted,
+    /// raise `--max-gross` on its own instead.
+    #[arg(long = "leverage", value_name = "X", default_value_t = 1.0)]
+    leverage: f64,
 
     /// Annualized interest charged on a negative cash balance, as a decimal
     /// (`0.06` is 6% a year). Default `0` — nothing is charged.
@@ -657,9 +678,15 @@ struct OptimizeArgs {
     cash: f64,
 
     /// Most gross notional each backtest's account may hold, as a multiple of
-    /// equity. Same meaning as `run --max-gross`, applied to every grid point.
-    #[arg(long = "max-gross", value_name = "X", default_value_t = 1.0)]
-    max_gross: f64,
+    /// equity. Same meaning as `run --max-gross`, applied to every grid point;
+    /// defaults to `--leverage`.
+    #[arg(long = "max-gross", value_name = "X")]
+    max_gross: Option<f64>,
+
+    /// How far a fractional `sizing:` deploys, as a multiple of equity. Same
+    /// meaning as `run --leverage`, applied to every grid point.
+    #[arg(long = "leverage", value_name = "X", default_value_t = 1.0)]
+    leverage: f64,
 
     /// Annualized interest on a negative cash balance. Same meaning as
     /// `run --margin-rate`, applied to every grid point.
@@ -1531,6 +1558,7 @@ fn run(args: RunArgs) -> Result<()> {
     let opts = run::RunOptions {
         cash: args.cash,
         max_gross: args.max_gross,
+        leverage: args.leverage,
         margin_rate: args.margin_rate,
         maintenance_margin: args.maintenance_margin,
         out_dir: &args.output_dir,
@@ -1714,6 +1742,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let opts = optimize::OptimizeOptions {
         cash: args.cash,
         max_gross: args.max_gross,
+        leverage: args.leverage,
         margin_rate: args.margin_rate,
         maintenance_margin: args.maintenance_margin,
         strategy_kind: args.strategy.kind,

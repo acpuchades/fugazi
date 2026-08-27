@@ -773,12 +773,26 @@ pair it will also serve. Empty means "does not say", never "nothing quotes this"
 that is per-symbol, because venues configure it that way. It is **reporting, not
 control**: nothing here sets a venue's leverage.
 
-A `PaperWallet` answers the cap it enforces — `max_gross`, `1.0` by default:
+A `PaperWallet` carries two leverage numbers, and they answer two questions:
 
 ```python
-wallet = ta.PaperWallet(10_000.0, max_gross=3.0)
-wallet.leverage("BTC-USDT-SWAP")   # 3.0
+wallet = ta.PaperWallet(10_000.0, leverage=3.0)
+wallet.deployment                  # 3.0 — what a fractional Size is multiplied by
+wallet.leverage("BTC-USDT-SWAP")   # 3.0 — the ceiling, defaulted to the deployment
+
+# Pinned apart when you mean them apart: deploy 3x, tolerate 5x on marks.
+ta.PaperWallet(10_000.0, leverage=3.0, max_gross=5.0).leverage("BTC")  # 5.0
 ```
+
+`leverage=` is the one that makes an **unedited** strategy trade levered:
+`value_frac(1.0)` at `leverage=3.0` targets 3x equity. `max_gross` cannot do
+that — a ceiling only ever *stops* a request, so on its own it leaves any
+document whose sizing never exceeds `1.0` completely unchanged. It scales both
+fractional sizings and neither absolute one (`Size.units`, `Size.position_frac`):
+a named unit count is a specific intent. It scales a risk-denominated rule too,
+so a vol-target strategy at `leverage=3.0` holds three times its target vol —
+leave it at `1.0` and raise `max_gross` if you want the target untouched and
+only its clipping lifted.
 
 **That cap is the one bound both sides of the book share.** A buy is limited by
 the cash it spends; a short *credits* cash, so cash alone never bounds one. Until

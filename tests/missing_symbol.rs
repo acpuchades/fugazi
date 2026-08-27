@@ -86,7 +86,8 @@ fn doc(sym: &str) -> String {
 fn ctx(costs: &CostConfig) -> EvalContext<'_> {
     EvalContext {
         cash: 10_000.0,
-        max_gross: 1.0,
+        max_gross: None,
+        leverage: 1.0,
         margin_rate: 0.0,
         maintenance_margin: None,
         bars_per_year: 365.0,

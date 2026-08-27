@@ -520,3 +520,131 @@ fn a_request_that_lands_exactly_on_the_ceiling_fills_whole() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `--leverage` — the knob that changes what a document asks for
+// ---------------------------------------------------------------------------
+//
+// `--max-gross` is a ceiling, and a ceiling can only ever *stop* a request. So
+// on its own it leaves the commonest document shape — a constant `sizing:` at
+// or below 1 — completely insensitive to leverage, which is the opposite of
+// what a leverage knob is for. `--leverage` is the other half: it multiplies
+// what the sizing rule resolves to, and raises the ceiling with it so the
+// result is not simply fitted straight back down.
+
+/// The headline: same document, same bars, no edit — three times the book.
+#[test]
+fn leverage_deploys_an_unedited_document() {
+    let one = run("lev_dep_1", "long", "1.0", &["--quiet"]);
+    let three = run("lev_dep_3", "long", "1.0", &["--quiet", "--leverage", "3"]);
+
+    assert!(
+        (one.gross_over_equity() - 1.0).abs() < 1e-9,
+        "unlevered carried {:.2}x",
+        one.gross_over_equity(),
+    );
+    assert!(
+        (three.gross_over_equity() - 3.0).abs() < 1e-9,
+        "--leverage 3 carried {:.2}x",
+        three.gross_over_equity(),
+    );
+    // Nothing was fitted: the cap followed the deployment, so the request
+    // arrived whole rather than being scaled back to the old ceiling.
+    let (units, requested) = three.fill();
+    assert_eq!(units, requested, "the raised request was fitted back down");
+    assert!(
+        !three.out.stdout.contains("scaled down"),
+        "raising leverage should not produce a scale-down:\n{}",
+        three.out.stdout,
+    );
+}
+
+/// The default is inert. `--leverage 1` is not merely close to an unflagged
+/// run, it is the same run — exact equality, because the multiply is by one and
+/// the ceiling resolves to the same number it always did.
+#[test]
+fn the_default_leverage_changes_nothing() {
+    let bare = run("lev_def_bare", "long", "0.75", &["--quiet"]);
+    let explicit = run("lev_def_1", "long", "0.75", &["--quiet", "--leverage", "1"]);
+    assert_eq!(
+        explicit.out.read("fills.csv"),
+        bare.out.read("fills.csv"),
+        "`--leverage 1` moved the fills",
+    );
+    assert_eq!(
+        explicit.out.read("returns.csv"),
+        bare.out.read("returns.csv"),
+        "`--leverage 1` moved the equity curve",
+    );
+}
+
+/// The two knobs are different questions, and a document that already asks for
+/// more than 1x shows the difference. Lifting the *ceiling* stops truncating
+/// what the rule wanted; raising *leverage* changes what it wants.
+///
+/// Measured on the vol-target fixture (1,200 bars, 20% target): the ceiling
+/// alone took realized vol from 12.4% to 15.8% — toward the target it was being
+/// clipped below — at Sharpe 0.74. `--leverage 3` took it to 35.5%, which is
+/// three times the risk the document asked for, and that is the honest reading
+/// of asking for 3x leverage. Pairing both (`--leverage 3 --max-gross 10`) is
+/// the clean scaling: vol 44.3% against 15.8%, and the **same** Sharpe, 0.74.
+#[test]
+fn the_ceiling_and_the_deployment_are_different_questions() {
+    // A calm series, so a vol target asks for well above 1x throughout.
+    let mut csv = String::from("symbol;freq;time;open;high;low;close;volume\n");
+    let mut px = 100.0_f64;
+    for d in 0..120 {
+        let step = if d % 2 == 0 { 0.002 } else { -0.002 };
+        let day = 1 + d % 28;
+        let month = 1 + (d / 28) % 12;
+        let year = 2024 + d / 336;
+        csv += &format!(
+            "S;1d;{year}-{month:02}-{day:02}T00:00:00Z;{px:.6};{:.6};{:.6};{:.6};1000\n",
+            px * 1.0001,
+            px * 0.9999,
+            px * (1.0 + step),
+        );
+        px *= 1.0 + step;
+    }
+    let doc = "\
+root: S
+long:
+  enter: !gt { lhs: !close, rhs: 0 }
+sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 365 }
+";
+    let (_, spec) = scratch_file("lev_two_knobs.yml", doc);
+    let (_, series) = scratch_file("lev_two_knobs.csv", &csv);
+    let at = |dir: &str, extra: &[&str]| {
+        let mut args = vec!["--crypto", "-f", "1d", "-c", "10000", "--quiet"];
+        args.extend_from_slice(extra);
+        Cmd::new("run")
+            .arg(&spec)
+            .series(&series)
+            .args(&args)
+            .costs("none")
+            .output_dir(dir)
+            .ok()
+    };
+    let asked = |out: &Outcome| -> f64 {
+        let row = &out.rows("fills.csv")[0];
+        row.split(',').nth(4).expect("requested").parse().unwrap()
+    };
+
+    let ceiling = at("lev_knob_cap", &["--max-gross", "3"]);
+    let deployed = at("lev_knob_lev", &["--leverage", "3"]);
+
+    // A ceiling does not change the ask...
+    let base = at("lev_knob_base", &[]);
+    assert_eq!(
+        asked(&ceiling),
+        asked(&base),
+        "--max-gross changed what the document asked for",
+    );
+    // ...and leverage does, by exactly its multiple.
+    assert!(
+        (asked(&deployed) - 3.0 * asked(&base)).abs() < 1e-6,
+        "--leverage 3 asked for {} against {}",
+        asked(&deployed),
+        asked(&base),
+    );
+}

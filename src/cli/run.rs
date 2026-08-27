@@ -70,10 +70,15 @@ pub struct RunOptions<'a> {
     /// Initial cash for the paper wallet.
     pub cash: Real,
     /// Most gross notional the account may hold, as a multiple of equity
-    /// (`--max-gross`; `1.0` is unlevered). Handed to the run's
-    /// [`PaperWallet`](fugazi::PaperWallet) via
+    /// (`--max-gross`), or `None` to take [`leverage`](Self::leverage). Handed
+    /// to the run's [`PaperWallet`](fugazi::PaperWallet) via
     /// [`EvalContext::max_gross`](fugazi::spec::backtest::EvalContext).
-    pub max_gross: Real,
+    pub max_gross: Option<Real>,
+    /// How far a fractional `sizing:` deploys, as a multiple of equity
+    /// (`--leverage`; `1.0` takes the document at face value). Handed to the
+    /// run's wallet via
+    /// [`EvalContext::leverage`](fugazi::spec::backtest::EvalContext).
+    pub leverage: Real,
     /// Annualized interest on a negative cash balance (`--margin-rate`).
     pub margin_rate: Real,
     /// Maintenance-margin ratio, or `None` for no margin call
@@ -1116,6 +1121,7 @@ fn eval_context<'a>(
     Ok(EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        leverage: opts.leverage,
         margin_rate: opts.margin_rate,
         maintenance_margin: opts.maintenance_margin,
         bars_per_year,

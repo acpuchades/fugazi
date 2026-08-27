@@ -285,11 +285,17 @@ pub struct PaperWallet<Sym> {
     /// pricing path reads it, because simulated money has no venue to check it
     /// against.
     quote_ccy: Option<String>,
-    /// The most gross notional this account may hold, as a multiple of equity.
-    /// `1.0` — the default — is an unlevered book. See
+    /// What a fractional [`Size`] is multiplied by before it is fitted — the
+    /// account's **deployment** multiple. `1.0` — the default — sizes against
+    /// equity, exactly as the sizing rule spells it. See
+    /// [`with_leverage`](Self::with_leverage).
+    leverage: Real,
+    /// The most gross notional this account may hold, as a multiple of equity,
+    /// or `None` to take [`leverage`](Self::leverage) — so raising deployment
+    /// raises the ceiling with it unless the caller pinned one. See
     /// [`with_max_gross`](Self::with_max_gross); unlike `quote_ccy` this one is
     /// enforced on every fill.
-    max_gross: Real,
+    max_gross: Option<Real>,
     /// What fraction of a year one bar spans, on the **calendar**. `None` until
     /// the caller says; a time-denominated [`CarryModel`] charges nothing
     /// without it rather than inventing a year length. See
@@ -350,7 +356,8 @@ impl<Sym> PaperWallet<Sym> {
             costs,
             per_symbol_costs: SymMap::default(),
             quote_ccy: None,
-            max_gross: 1.0,
+            leverage: 1.0,
+            max_gross: None,
             bar_year_fraction: None,
             last_bar_time: None,
             pending_bar_time: None,
@@ -372,6 +379,76 @@ impl<Sym> PaperWallet<Sym> {
     pub fn with_quote_ccy(mut self, ccy: impl Into<String>) -> Self {
         self.quote_ccy = Some(ccy.into());
         self
+    }
+
+    /// How much of the account a fractional [`Size`] deploys, as a multiple of
+    /// equity. Defaults to `1.0` — the sizing rule is taken at face value.
+    ///
+    /// **This is the knob that makes an unedited document trade levered.** A
+    /// [`ValueFraction`](Size::ValueFraction) is denominated in equity and stays
+    /// that way (see [`Size`]); this multiplies the resolved magnitude on the
+    /// way out, so `value_frac(1.0)` at `with_leverage(3.0)` targets 3x equity.
+    /// The document keeps saying "all of my allocation" and the account decides
+    /// how large an allocation is — which is the thing
+    /// [`with_max_gross`](Self::with_max_gross) alone could not express, because
+    /// a ceiling can only ever *stop* a request, never enlarge one.
+    ///
+    /// **It also lifts the ceiling with it.** `max_gross` defaults to this
+    /// number rather than to `1.0`, so `with_leverage(3.0)` deploys 3x *and*
+    /// permits 3x, in one call and in either order. Pin the two apart only when
+    /// you mean them apart — `with_leverage(3.0).with_max_gross(5.0)` deploys 3x
+    /// but tolerates a book drifting to 5x on marks before refusing to add to
+    /// it.
+    ///
+    /// # What it multiplies, and what it does not
+    ///
+    /// The two **fractional** sizings only — [`ValueFraction`](Size::ValueFraction)
+    /// and [`FundsFraction`](Size::FundsFraction). An explicit
+    /// [`Units`](Size::Units) count is a specific intent and is never rescaled,
+    /// for the same reason it is never *fitted*: the caller named a number of
+    /// units and meant it. A [`PositionFraction`](Size::PositionFraction) is a
+    /// fraction of a position that is already whatever size it is.
+    ///
+    /// # The one that bites
+    ///
+    /// This scales **every** fractional sizing, including a risk-denominated
+    /// one. `!vol_target` means "hold this much realized vol", and at
+    /// `with_leverage(3.0)` it holds three times that much — measured on a
+    /// 1,200-bar fixture, a 20% vol target realized 35.5% and drew down 55%
+    /// against 15.8% and 25% at the ceiling alone. That is not a bug here the
+    /// way it would have been in a redefinition of `value_frac`: a caller who
+    /// asks for 3x leverage has asked for 3x risk, and the sizing rule is
+    /// entitled to be scaled by it. But a vol target is one of the few rules
+    /// people expect to be *invariant*, so if that is what you want, leave this
+    /// at `1.0` and raise [`with_max_gross`](Self::with_max_gross) instead —
+    /// that lifts the ceiling the rule was being truncated by without touching
+    /// what it asks for.
+    ///
+    /// Like the cost models and the cap, this is *configuration*: it is not
+    /// carried in [`snapshot_state`](Self::snapshot_state), so a resumed run
+    /// takes the leverage of the wallet the caller constructed.
+    ///
+    /// # Panics
+    ///
+    /// If `leverage` is not finite and strictly positive.
+    pub fn with_leverage(mut self, leverage: Real) -> Self {
+        assert!(
+            leverage > 0.0 && leverage.is_finite(),
+            "leverage must be finite and > 0, got {leverage}"
+        );
+        self.leverage = leverage;
+        self
+    }
+
+    /// The deployment multiple this wallet applies to fractional sizings. See
+    /// [`with_leverage`](Self::with_leverage).
+    ///
+    /// Distinct from [`max_gross`](Self::max_gross), which is the *ceiling*;
+    /// distinct again from [`Wallet::leverage`], which answers the ceiling
+    /// because that is the question a venue is being asked ("how much may this
+    /// account hold?").
+    pub fn deployment(&self) -> Real {
+        self.leverage
     }
 
     /// The most gross notional this wallet may hold, as a multiple of equity:
@@ -452,14 +529,14 @@ impl<Sym> PaperWallet<Sym> {
             max_gross > 0.0 && max_gross.is_finite(),
             "max_gross must be finite and > 0, got {max_gross}"
         );
-        self.max_gross = max_gross;
+        self.max_gross = Some(max_gross);
         self
     }
 
     /// The gross-exposure multiple this wallet enforces. See
     /// [`with_max_gross`](Self::with_max_gross).
     pub fn max_gross(&self) -> Real {
-        self.max_gross
+        self.max_gross.unwrap_or(self.leverage)
     }
 
     /// What fraction of a year one bar of this run spans, on the **calendar**.
@@ -1040,7 +1117,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// Returns the notional the traded symbol is *allowed* to hold. Negative
     /// means the rest of the book has already used the whole budget.
     fn gross_budget(&self, equity_after: Real, others: Real) -> Real {
-        self.max_gross * equity_after - others
+        self.max_gross() * equity_after - others
     }
 
     /// Book a fill: drive `symbol` to `target` signed units, using
@@ -1126,7 +1203,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         //    drive cash below zero (tolerant of the epsilon rounding in an
         //    all-in `value_frac(1.0)`, whose cost equals funds when zero-cost).
         //    Above `max_gross = 1.0` the account may borrow, so this lifts.
-        if delta > 0.0 && self.max_gross <= 1.0 {
+        if delta > 0.0 && self.max_gross() <= 1.0 {
             let cost = delta * final_price + commission;
             let tolerance = cash_tolerance(self.funds);
             if cost - self.funds > tolerance {
@@ -1271,7 +1348,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             // trade at all can say why — see `Fitted`.
             let mut scale: Real = 1.0;
             let mut bound = None;
-            if delta > 0.0 && self.max_gross <= 1.0 {
+            if delta > 0.0 && self.max_gross() <= 1.0 {
                 let cost = notional + commission;
                 if cost - self.funds > cash_tolerance(self.funds) && cost > 0.0 {
                     scale = scale.min(self.funds / cost);
@@ -1414,7 +1491,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         price: Real,
     ) -> Result<(), WalletError> {
         let delta = target - current;
-        if delta > 0.0 && self.max_gross <= 1.0 {
+        if delta > 0.0 && self.max_gross() <= 1.0 {
             let cost = delta * price;
             if cost - self.funds > cash_tolerance(self.funds) {
                 return Err(WalletError::InsufficientFunds);
@@ -1495,9 +1572,13 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // has always used.
         let rest = self.rest_of_book(symbol, |s| self.bars.get(s).map_or(0.0, |c| c.close));
         let equity_at_fill = self.funds + position * fill + rest.marked;
-        let magnitude = resting
-            .size
-            .resolve(fill, position, self.funds, equity_at_fill);
+        let magnitude = resting.size.resolve_at_leverage(
+            fill,
+            position,
+            self.funds,
+            equity_at_fill,
+            self.leverage,
+        );
         let requested = resting.side.sign() * magnitude;
         // Same rule as the queued-market path: a fractional sizing means "as
         // much as fits", so fit it to cash and to the leverage cap; an explicit
@@ -1607,9 +1688,14 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // position's magnitude, and step *toward* zero. `position_frac(1.0)` —
         // what every whole-position exit passes — resolves to `|pos|` and so
         // flattens, exactly as an unsized leg used to.
+        //
+        // Leverage-scaled like any other fractional sizing, so `value_frac(f)`
+        // exits the same units it would have entered. Without that, a
+        // `set_stop(value_frac(1.0))` on a 3x book would resolve to 1x and exit
+        // a third of the position it was meant to close.
         let magnitude = leg
             .size
-            .resolve(fill, pos, self.funds, self.equity().0)
+            .resolve_at_leverage(fill, pos, self.funds, self.equity().0, self.leverage)
             .min(pos.abs());
         let target = pos - pos.signum() * magnitude;
         match self.fill_at(
@@ -1685,8 +1771,12 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// Which is the point of answering at all: a live account's leverage is set
     /// out of band and readable only from the venue, so the paper side has to
     /// be able to state its own for the two to be compared.
+    fn deployment(&self) -> Real {
+        self.leverage
+    }
+
     fn leverage(&self, _symbol: &Sym) -> Option<Real> {
-        Some(self.max_gross)
+        Some(self.max_gross())
     }
 
     /// Take this bar's carry rate for `symbol`, if a
@@ -1841,7 +1931,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             let (target, sizing, id) = match pending {
                 Pending::Target(amount, id) => (amount, None, id),
                 Pending::Sized(side, size, id) => {
-                    let magnitude = size.resolve(candle.open, position, self.funds, equity_at_open);
+                    let magnitude = size.resolve_at_leverage(
+                        candle.open,
+                        position,
+                        self.funds,
+                        equity_at_open,
+                        self.leverage,
+                    );
                     (side.sign() * magnitude, Some((side, size)), id)
                 }
             };
@@ -3188,6 +3284,125 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(w.position(&"X").amount, 0.0);
         assert!(w.take_rejections().is_empty(), "flatten was refused");
+    }
+
+    /// `with_leverage` is the knob that makes an **unedited** document trade
+    /// levered — and it lifts the ceiling with it, in either builder order.
+    #[test]
+    fn leverage_deploys_a_fractional_sizing_and_raises_the_cap_with_it() {
+        let sym = crate::types::symbol("S");
+        let bars = [(sym.clone(), bar(100.0))];
+
+        // The document is the same `value_frac(1.0)` at every leverage; only
+        // the account's number moves, and nothing is fitted.
+        for (lev, units) in [(1.0, 100.0), (2.0, 200.0), (3.0, 300.0)] {
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0).with_leverage(lev);
+            w.advance(&bars);
+            w.set(sym.clone(), Side::Buy, Size::value_frac(1.0))
+                .unwrap();
+            w.advance(&bars);
+            assert!(
+                (w.position(&sym).amount - units).abs() < 1e-9,
+                "leverage {lev} deployed {} units",
+                w.position(&sym).amount,
+            );
+            assert_eq!(w.max_gross(), lev, "the cap should follow the deployment");
+            assert!(w.take_rejections().is_empty());
+            // The blotter agrees the request was honoured whole — the ceiling
+            // moved with the deployment rather than fitting it straight back.
+            let fill = w.orders().last().expect("one fill");
+            assert!((fill.units - fill.requested_units).abs() < 1e-9);
+        }
+
+        // Pinned apart, in both builder orders, because a builder that only
+        // works one way round is a trap.
+        let a: PaperWallet<Symbol> = PaperWallet::new(1_000.0)
+            .with_leverage(3.0)
+            .with_max_gross(5.0);
+        let b: PaperWallet<Symbol> = PaperWallet::new(1_000.0)
+            .with_max_gross(5.0)
+            .with_leverage(3.0);
+        for w in [&a, &b] {
+            assert_eq!(w.deployment(), 3.0);
+            assert_eq!(w.max_gross(), 5.0);
+        }
+
+        // And `deployment` is not `leverage`: the trait method answers the
+        // *ceiling*, because that is the question a venue is being asked.
+        assert_eq!(a.leverage(&sym), Some(5.0));
+    }
+
+    /// Deployment scales the two **fractional** sizings and nothing else.
+    ///
+    /// An explicit unit count is a specific intent — the same reason it is
+    /// never fitted — and a position fraction is a share of a position that is
+    /// already whatever size it is. Scaling either would mean `units(10)` no
+    /// longer bought ten units.
+    #[test]
+    fn leverage_scales_fractions_but_never_an_explicit_count() {
+        let cases = [
+            (Size::value_frac(1.0), 100.0, 300.0),
+            (Size::funds_frac(1.0), 100.0, 300.0),
+            (Size::units(10.0), 10.0, 10.0),
+            (Size::position_frac(1.0), 42.0, 42.0),
+        ];
+        for (size, at_one, at_three) in cases {
+            let one = size.resolve_at_leverage(100.0, 42.0, 10_000.0, 10_000.0, 1.0);
+            let three = size.resolve_at_leverage(100.0, 42.0, 10_000.0, 10_000.0, 3.0);
+            assert!((one - at_one).abs() < 1e-9, "{size:?} at 1x: {one}");
+            assert!((three - at_three).abs() < 1e-9, "{size:?} at 3x: {three}");
+            // At `1.0` it is `resolve` exactly — the default costs nothing.
+            assert_eq!(one, size.resolve(100.0, 42.0, 10_000.0, 10_000.0));
+        }
+    }
+
+    /// An exit sized as a fraction scales too, or it would not be an exit.
+    ///
+    /// `set_stop(value_frac(1.0))` on a 3x book has to close the 3x book. Left
+    /// unscaled it would resolve to 1x, clamp to the position, and take a third
+    /// of it off — leaving the strategy long something it believes it closed.
+    #[test]
+    fn a_fractional_protective_leg_exits_what_leverage_entered() {
+        let sym = crate::types::symbol("S");
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0).with_leverage(3.0);
+        w.advance(&[(sym.clone(), bar(100.0))]);
+        w.set(sym.clone(), Side::Buy, Size::value_frac(1.0))
+            .unwrap();
+        w.advance(&[(sym.clone(), bar(100.0))]);
+        assert!((w.position(&sym).amount - 300.0).abs() < 1e-9);
+
+        w.set_stop(sym.clone(), Reference(95.0), Size::value_frac(1.0))
+            .unwrap();
+        // Dips through the stop and recovers to the same close, so the equity
+        // the leg sizes against is unmoved and the only variable under test is
+        // the leverage multiple.
+        w.advance(&[(sym.clone(), ohlc(100.0, 100.0, 94.0, 100.0))]);
+        assert!(
+            w.position(&sym).amount.abs() < 1e-9,
+            "the stop left {} units open",
+            w.position(&sym).amount,
+        );
+
+        // Unscaled, the same leg resolves to 1x and takes off a third: the
+        // failure this guards against, spelled out.
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0).with_leverage(3.0);
+        w.advance(&[(sym.clone(), bar(100.0))]);
+        w.set(sym.clone(), Side::Buy, Size::value_frac(1.0))
+            .unwrap();
+        w.advance(&[(sym.clone(), bar(100.0))]);
+        let unscaled = Size::value_frac(1.0)
+            .resolve(95.0, 300.0, w.funds().0, w.equity().0)
+            .min(300.0);
+        assert!(
+            (unscaled - 105.263_157_894_736_84).abs() < 1e-9,
+            "an unscaled exit would have closed {unscaled} of 300",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "leverage must be finite and > 0")]
+    fn a_non_positive_leverage_is_a_construction_error() {
+        let _: PaperWallet<&str> = PaperWallet::new(1_000.0).with_leverage(0.0);
     }
 
     /// A sizing that lands **exactly** on the ceiling must fill whole — not

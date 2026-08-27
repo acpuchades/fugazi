@@ -1836,6 +1836,60 @@ def test_one_sizing_value_means_one_exposure_on_both_sides():
         assert report.fills[0].order.requested_units == pytest.approx(50.0)
 
 
+def test_leverage_deploys_an_unedited_strategy():
+    """The knob a ceiling structurally cannot be: `max_gross` only ever *stops*
+    a request, so on its own it leaves a `sizing: 1.0` document insensitive to
+    leverage entirely. `leverage=` multiplies what the rule asks for, and lifts
+    the cap with it so the result is not fitted straight back down."""
+    bars = [
+        ta.Snapshot(
+            {
+                "S": ta.Atom(
+                    ta.Candle(100, 100, 100, 100, 1),
+                    None,
+                    1_700_000_000_000 + i * 86_400_000,
+                )
+            }
+        )
+        for i in range(4)
+    ]
+    spec = "root: S\nlong:\n  enter: !gt { lhs: !close, rhs: 0 }\nsizing: !value 1.0\n"
+
+    def carried(**kw):
+        w = ta.PaperWallet(10_000.0, **kw)
+        report = ta.load_spec(spec).run(w, bars)
+        return w, report
+
+    flat, flat_report = carried()
+    assert flat.position("S") == pytest.approx(100.0)
+    assert flat.deployment == pytest.approx(1.0)
+
+    levered, levered_report = carried(leverage=3.0)
+    assert levered.position("S") == pytest.approx(300.0), (
+        "the same document should carry 3x on a 3x account"
+    )
+    assert levered.deployment == pytest.approx(3.0)
+    # The cap followed the deployment, so nothing was fitted back down.
+    assert levered.leverage("S") == pytest.approx(3.0)
+    assert levered_report.materially_fitted is None
+    assert flat_report.materially_fitted is None
+
+    # Pinned apart when you mean them apart: deploy 3x, tolerate 5x.
+    split = ta.PaperWallet(10_000.0, leverage=3.0, max_gross=5.0)
+    assert split.deployment == pytest.approx(3.0)
+    assert split.leverage("S") == pytest.approx(5.0)
+
+    # An explicit unit count is never rescaled — the caller named units.
+    w = ta.PaperWallet(10_000.0, leverage=3.0)
+    w.update("S", 100.0)
+    w.set("S", "buy", ta.Size.units(10.0))
+    w.update("S", 100.0)
+    assert w.position("S") == pytest.approx(10.0)
+
+    with pytest.raises(ValueError, match="leverage must be finite"):
+        ta.PaperWallet(1_000.0, leverage=0.0)
+
+
 def test_leverage_is_readable_off_every_wallet():
     """`None` is "does not say", never `1x` — and a paper wallet does say,
     because the cap is a rule it enforces rather than a label it was handed."""

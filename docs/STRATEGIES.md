@@ -354,12 +354,21 @@ as a fraction of *equity*, and `sizing` is the multiplier on that fraction:
 position, and any real-valued expression makes the size dynamic.
 
 `sizing` is **not capped at `1.0`**, and `1.0` is not "all of the account". The
-number is a multiple of equity, full stop; how much of it the account will
-actually carry is the wallet's `--max-gross` (`1.0` by default, so a request
-above 1x is fitted back down to 1x and the gap recorded in `fills.csv`'s
-`requested_units`). A document wanting real leverage says `3.0` here *and* runs
-against `--max-gross 3`; the two numbers have two different owners, the same way
-`costs:` describes the venue rather than the rule.
+number is a multiple of equity, full stop. Two account-side knobs decide what
+that is worth, and they answer different questions:
+
+| Knob | Question | Effect on an unedited document |
+| --- | --- | --- |
+| `--leverage X` | how far does a fraction **deploy**? | multiplies what `sizing:` resolves to — `sizing: 1.0` targets `X`x equity |
+| `--max-gross X` | how much may the book **hold**? | none, unless the document already asked for more than the cap |
+
+`--leverage` is the one you want for "trade this strategy levered without
+editing it". `--max-gross` is a ceiling, and a ceiling can only ever *stop* a
+request — so on its own it leaves a document whose sizing never exceeds `1.0`
+completely unchanged. It defaults to `--leverage`, so you pass it separately
+only to hold the two apart (`--leverage 3 --max-gross 5`: deploy 3x, tolerate a
+book drifting to 5x on marks). A request above the cap is fitted to it and the
+gap recorded in `fills.csv`'s `requested_units`.
 
 This matters more than it looks, because most sizing expressions are not
 fractions. `!vol_target` is `target / realized_vol` and exceeds `1.0` on any
@@ -367,6 +376,23 @@ market calmer than its target — on a 1,200-bar sample it did so on 54% of bars
 peaking at 3.8. So a vol-targeted document is already sensitive to
 `--max-gross`, and leaving it at the default silently truncates the sizing rule
 into a different one.
+
+It also means the two knobs do genuinely different things to such a document,
+and you should pick deliberately. Measured on that sample, at a 20% vol target:
+
+| Run | realized vol | Sharpe | max dd | fills fitted |
+| --- | --- | --- | --- | --- |
+| default | 12.4% | 0.36 | 22.9% | 38 of 139 |
+| `--max-gross 3` | 15.8% | 0.74 | 25.0% | 0 |
+| `--leverage 3` | 35.5% | 0.38 | 55.0% | 38 of 139 |
+| `--leverage 3 --max-gross 10` | 44.3% | 0.74 | 57.9% | 0 |
+
+Read it as: lifting the **ceiling** stops clipping the rule, so realized vol
+moves *toward* the 20% it asked for. Raising **leverage** changes the rule, so
+it moves to 3x that — and the last row is the clean 3x of the second, same
+Sharpe (0.74), three times the vol. The third row's lower Sharpe is clipping:
+`--leverage 3` raised the cap to 3, but a rule already asking for 3.8x now asks
+for 11.4x, so it is truncated again.
 
 ```yaml
 root: BTC

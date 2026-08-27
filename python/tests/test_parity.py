@@ -360,6 +360,10 @@ WALLET_BOUND = {
     "margin_rate",
     "maintenance_margin",
     "carry_coverage",
+    # The deployment multiple, beside the cap it defaults to. Two numbers
+    # because they answer two questions: what a fractional sizing is multiplied
+    # by, and what the book may hold.
+    "deployment",
     # A loop over `set_costs_for`, not a mirror of Rust's `with_costs` — see the
     # method docs for why a single pre-resolved bundle cannot be built here.
     "set_costs_for_all",

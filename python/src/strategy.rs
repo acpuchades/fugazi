@@ -426,30 +426,50 @@ impl PyWallet {
     /// it is there so a simulation can carry the fact a live wallet reports from
     /// its venue instead of leaving a caller to assume dollars.
     ///
+    /// `leverage` is how far a **fractional** `Size` deploys, as a multiple of
+    /// equity — `1.0` by default, which takes the sizing rule at face value.
+    /// This is the knob that trades an unedited strategy levered:
+    /// `value_frac(1.0)` at `leverage=3.0` targets 3x equity. It multiplies what
+    /// the rule asks for, which `max_gross` structurally cannot — a ceiling only
+    /// ever stops a request. It scales *every* fractional sizing, a
+    /// risk-denominated one included, so a vol-target strategy at `leverage=3.0`
+    /// holds three times its target vol; leave it at `1.0` and raise
+    /// `max_gross` if you want the target untouched. Read back off
+    /// `.deployment`.
+    ///
     /// `max_gross` is the most gross notional the account may hold, as a
-    /// multiple of equity — `1.0`, unlevered, by default, and readable back off
-    /// `leverage(symbol)`. It is the one bound both sides of the book share: a
-    /// buy is limited by the cash it spends, but a short *credits* cash, so
-    /// without it a `sizing: 3.0` document took 1x long and 3x short under one
-    /// spec value. Set it to the leverage of the live account you are modelling
-    /// so the two curves measure the same strategy.
+    /// multiple of equity — **defaults to `leverage`**, so raising deployment
+    /// raises the ceiling with it and you only pass this to hold the two apart.
+    /// Readable back off `leverage(symbol)`. It is the one bound both sides of
+    /// the book share: a buy is limited by the cash it spends, but a short
+    /// *credits* cash, so without it a `sizing: 3.0` document took 1x long and
+    /// 3x short under one spec value.
     ///
     /// # Raises
     ///
-    /// `ValueError` if `max_gross` is not finite and strictly positive.
+    /// `ValueError` if `leverage` or `max_gross` is not finite and strictly
+    /// positive.
     #[new]
-    #[pyo3(signature = (funds, *, quote_ccy=None, max_gross=1.0, margin_rate=0.0, maintenance_margin=None, bar_freq=None))]
+    #[pyo3(signature = (funds, *, quote_ccy=None, leverage=1.0, max_gross=None, margin_rate=0.0, maintenance_margin=None, bar_freq=None))]
     pub(crate) fn new(
         funds: f64,
         quote_ccy: Option<String>,
-        max_gross: f64,
+        leverage: f64,
+        max_gross: Option<f64>,
         margin_rate: f64,
         maintenance_margin: Option<f64>,
         bar_freq: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if !(max_gross > 0.0 && max_gross.is_finite()) {
+        if !(leverage > 0.0 && leverage.is_finite()) {
             return Err(PyValueError::new_err(format!(
-                "max_gross must be finite and > 0, got {max_gross}"
+                "leverage must be finite and > 0, got {leverage}"
+            )));
+        }
+        if let Some(cap) = max_gross
+            && !(cap > 0.0 && cap.is_finite())
+        {
+            return Err(PyValueError::new_err(format!(
+                "max_gross must be finite and > 0, got {cap}"
             )));
         }
         if !(margin_rate >= 0.0 && margin_rate.is_finite()) {
@@ -465,8 +485,11 @@ impl PyWallet {
             )));
         }
         let mut inner = PaperWallet::new(funds)
-            .with_max_gross(max_gross)
+            .with_leverage(leverage)
             .with_margin_rate(margin_rate);
+        if let Some(cap) = max_gross {
+            inner = inner.with_max_gross(cap);
+        }
         if let Some(ratio) = maintenance_margin {
             inner = inner.with_maintenance_margin(ratio);
         }
@@ -588,6 +611,17 @@ impl PyWallet {
     /// to state its own for the two to be compared.
     pub(crate) fn leverage(&self, symbol: &str) -> Option<f64> {
         self.inner.leverage(&intern(symbol))
+    }
+
+    /// The deployment multiple this wallet applies to fractional sizings — the
+    /// `leverage=` it was built with.
+    ///
+    /// Distinct from `leverage(symbol)`, which reports the *ceiling*: this is
+    /// what a `value_frac` is multiplied by on the way out, and that is what
+    /// stops it. They are equal unless `max_gross` was pinned separately.
+    #[getter]
+    pub(crate) fn deployment(&self) -> f64 {
+        self.inner.deployment()
     }
 
     #[getter]

@@ -128,6 +128,15 @@ pub(super) struct PortfolioInner<Sym> {
     /// account does not say") — the same reading an empty
     /// `account_data_sources` carries before the first bar.
     pub(super) account_leverage: HashMap<Sym, Option<Real>>,
+    /// The account's deployment multiple ([`Wallet::deployment`]), cached the
+    /// same way and for the same reason: a child resolves its own `Size` inside
+    /// `LedgerWallet::set` and has no handle on the account to ask.
+    ///
+    /// Account-wide rather than per-symbol, because deployment is. `1.0` before
+    /// the first bar caches it — which is also the trait default, so a child
+    /// that somehow sized before then would size at face value rather than at
+    /// nothing.
+    pub(super) account_deployment: Real,
 }
 
 // `snapshot`/`restore` are consumed only by `Portfolio::{save_state,restore_state}`,
@@ -206,6 +215,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             account_can_short: true,
             account_data_sources: &[],
             account_leverage: HashMap::new(),
+            account_deployment: 1.0,
         }
     }
 
@@ -259,6 +269,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.account_can_short = true;
         self.account_data_sources = &[];
         self.account_leverage.clear();
+        self.account_deployment = 1.0;
     }
 
     // ---- intent recording (called from LedgerWallet) --------------------
@@ -282,11 +293,48 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         }
         let delta = target - self.ledgers[idx].position(&symbol);
         let cash = self.ledgers[idx].cash;
+        // The child-level cash rule, and it only applies on an **unlevered**
+        // account — the exact gate `PaperWallet::fit_to_account` puts on its own
+        // cash rule, for the same reason. Above 1x the account borrows, so a
+        // ledger's notional cash is *expected* to go negative and refusing on it
+        // refuses the whole point of the leverage. What bounds a levered child
+        // is the account's gross cap, applied where the intents net.
+        //
+        // Left ungated, a `sizing: 3.0` child on a `--max-gross 3` portfolio
+        // traded **nothing at all** — the refusal is a child hard-cap refusal,
+        // which by design never reaches the run report, so the run booked zero
+        // fills and zero rejections and reported a flat curve.
+        //
+        // `account_leverage` is per-symbol and `Option`; a symbol the account
+        // has not been asked about, or one it declines to answer for, reads as
+        // unlevered — the conservative direction, and the pre-existing
+        // behaviour for every account that does not say.
+        let account_cap = self
+            .account_leverage
+            .get(&symbol)
+            .copied()
+            .flatten()
+            .unwrap_or(1.0);
         if delta > 0.0 {
-            let cost = delta * price;
-            let tolerance = cash_tolerance(cash);
-            if cost - cash > tolerance {
-                return Err(self.refuse(idx, symbol, WalletError::InsufficientFunds));
+            if account_cap <= 1.0 {
+                let cost = delta * price;
+                let tolerance = cash_tolerance(cash);
+                if cost - cash > tolerance {
+                    return Err(self.refuse(idx, symbol, WalletError::InsufficientFunds));
+                }
+            } else {
+                // Levered: the ledger's cash is *meant* to go negative, so the
+                // bound that preserves sibling isolation is gross against the
+                // child's share of the book — the ledger-scale twin of the
+                // account's own `max_gross` rule. Without a bound here a child
+                // could size against the whole account rather than its slice,
+                // which is the one thing notional attribution exists to stop.
+                let equity = self.ledgers[idx].equity(|s| self.price_of(s));
+                let held = self.ledgers[idx].gross_with(&symbol, target, |s| self.price_of(s));
+                let allowed = account_cap * equity;
+                if held - allowed > cash_tolerance(held.max(equity)) {
+                    return Err(self.refuse(idx, symbol, WalletError::ExceedsMaxGross));
+                }
             }
         }
         let id = self.mint();
@@ -397,10 +445,18 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             let equity = wallet.equity().0;
             let price = self.price_of(symbol).unwrap_or(0.0);
             let submitted = if market_delta > 0.0 && amount > 0.0 && equity > 0.0 && price > 0.0 {
+                // `amount` is already an absolute unit count; the fraction is a
+                // re-spelling of it, taken only to buy the fit-don't-refuse
+                // behaviour above. So it has to be divided by whatever the
+                // account will multiply a fraction by, or the deployment gets
+                // applied twice — once when each child resolved its own sizing
+                // through its `LedgerWallet`, and again here. Measured before
+                // this divide: a 3x portfolio carried 6x.
+                let deployment = wallet.deployment();
                 wallet.set(
                     symbol.clone(),
                     Side::Buy,
-                    Size::value_frac(amount * price / equity),
+                    Size::value_frac(amount * price / equity / deployment),
                 )
             } else {
                 wallet.set_position(Units {

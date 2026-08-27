@@ -656,6 +656,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             let mut inner = self.inner.lock().expect("portfolio lock poisoned");
             inner.account_can_short = wallet.can_short();
             inner.account_data_sources = wallet.data_sources();
+            // Account-wide, so unlike the leverage cap this needs no per-symbol
+            // sweep — but it is cached here for the identical reason: a child
+            // resolves its `Size` against its own ledger and cannot reach the
+            // account to ask how far that resolution deploys.
+            inner.account_deployment = wallet.deployment();
             // Per-symbol, over the universe the portfolio has seen priced: a
             // child's handle has no way to reach the account, and the leverage
             // its notional intent actually nets onto is the account's, not a

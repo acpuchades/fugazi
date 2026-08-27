@@ -2146,3 +2146,100 @@ fn a_child_reads_the_accounts_capabilities_through_its_ledger_handle() {
     let _ = backtest::run(&mut portfolio, &mut paper, a_rising_b_flat_snapshots());
     assert_eq!(*seen.lock().unwrap(), Some((true, &[][..])));
 }
+
+/// A child resolves its own `Size` inside `LedgerWallet::set`, against its own
+/// notional book — so the account's deployment multiple has to reach it, or a
+/// levered portfolio would be the one shape that ignored `--leverage`.
+///
+/// The ledger is notional attribution and borrows nothing of its own; the
+/// borrowing happens where the intents net, on the account. So a child asking
+/// "how far does a fraction of me deploy?" gets the account's answer, exactly
+/// as it already does for `can_short` and the leverage cap.
+#[test]
+fn leverage_reaches_a_portfolio_child_through_its_ledger() {
+    let carried = |leverage: Real| -> (Real, Real) {
+        let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+            .with_initial_equity(1_000.0)
+            .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+            .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
+            .weights(EqualWeight)
+            .build();
+        let mut wallet: PaperWallet<&'static str> =
+            PaperWallet::new(1_000.0).with_leverage(leverage);
+        let _ = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+        (
+            wallet.position(&"A").amount.abs(),
+            wallet.position(&"B").amount.abs(),
+        )
+    };
+
+    let (a1, b1) = carried(1.0);
+    let (a3, b3) = carried(3.0);
+    assert!(a1 > 0.0 && b1 > 0.0, "the unlevered portfolio never traded");
+    assert!(
+        (a3 - 3.0 * a1).abs() < 1e-6,
+        "child A carried {a3} at 3x against {a1} at 1x",
+    );
+    assert!(
+        (b3 - 3.0 * b1).abs() < 1e-6,
+        "child B carried {b3} at 3x against {b1} at 1x",
+    );
+}
+
+/// A levered portfolio child used to trade **nothing**, silently.
+///
+/// `record_intent` applied a hard cash cap against the child's own notional
+/// ledger, unconditionally. Above 1x the account borrows, so that ledger's cash
+/// is *expected* to go negative — and the refusal it produced is a child
+/// hard-cap refusal, which by design never reaches the run report. A
+/// `sizing: 3.0` child on a `--max-gross 3` portfolio therefore booked zero
+/// fills, zero rejections, and reported a flat equity curve as if the strategy
+/// had simply never fired.
+#[test]
+fn a_levered_portfolio_child_is_not_refused_by_its_own_ledger_cash() {
+    // The child asks for 3x its own ledger — the `sizing: 3.0` case — so the
+    // ledger's cash rule is what decides whether it trades at all.
+    let carried = |max_gross: Real| -> (usize, Real) {
+        let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+            .with_initial_equity(1_000.0)
+            .add(
+                "a",
+                SingleAssetStrategy::<&'static str>::buy_and_hold("A").position_sizing(
+                    fugazi::indicators::Value::<Snapshot<&'static str>>::new(3.0),
+                ),
+            )
+            .build();
+        let mut wallet: PaperWallet<&'static str> =
+            PaperWallet::new(1_000.0).with_max_gross(max_gross);
+        let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+        (
+            report.fills.len(),
+            wallet.position(&"A").amount.abs() * 105.0,
+        )
+    };
+
+    // Unlevered, the child is still refused by its ledger's cash rule and
+    // trades nothing — a **known divergence** from the single-asset shape,
+    // which fits the same `sizing: 3.0` back to 1x and warns. Pinned here so
+    // the difference is a recorded decision rather than a surprise; see TODO
+    // *A portfolio child's cash rule refuses where every other shape fits*.
+    let (fills, _) = carried(1.0);
+    assert_eq!(
+        fills, 0,
+        "unlevered behaviour changed — intended, but not by this test's author",
+    );
+
+    // Levered, it must actually reach 3x. Before the fix this booked **zero**
+    // fills and zero rejections: the ledger refused the intent before the
+    // account ever saw it, and a child hard-cap refusal never reaches the run
+    // report.
+    let (fills, notional) = carried(3.0);
+    assert!(
+        fills > 0,
+        "the levered child traded nothing at all, and said nothing about it",
+    );
+    assert!(
+        (notional - 3_000.0).abs() < 1e-6,
+        "a 3x child on a 3x account carried {notional}, not 3,000",
+    );
+}

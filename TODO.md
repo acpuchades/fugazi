@@ -261,6 +261,30 @@ It is neither. Three measurements, all on a 1,200-bar three-regime fixture:
    because `3.81 × 3` overshoots a 3x cap. The current base at 3x fits **zero**.
    The re-base makes a levered account strictly worse at honouring the document.
 
+**What the rejection did leave open, and what closed it.** A ceiling can only
+ever *stop* a request, so `max_gross` alone left the commonest document shape — a
+constant `sizing:` at or below 1 — completely insensitive to leverage, which is
+the opposite of what a leverage knob is for. The gap was that one number was
+being asked to do two jobs: **bound** the book and **drive** deployment. Splitting
+them is what the re-base was groping at without naming.
+
+`PaperWallet::with_leverage` / `--leverage` (0.84.0) is the driver: it multiplies
+what a *fractional* `Size` resolves to, and defaults `max_gross` to itself so the
+raised request is not fitted straight back down. `value_frac` stays denominated
+in equity — the resolution is unchanged and only the account's own number moves,
+which is why `resolve_at_leverage` multiplies *outside* the `ValueFraction` arm
+rather than inside it. `Size::Units` and `PositionFraction` are never scaled: a
+named unit count is a specific intent, the same reason it is never fitted.
+
+The vol-target interaction does not disappear, it becomes *chosen*: at
+`--leverage 3` a 20%-target document holds 35.5% realized vol. That is the
+honest reading of asking for 3x leverage, and it is a different act from the
+re-base, which would have done the same thing to a document whose author only
+raised a ceiling. Measured on the same fixture — `--max-gross 3` alone: vol
+15.8%, Sharpe 0.74. `--leverage 3 --max-gross 10`: vol 44.3%, Sharpe **0.74**.
+Identical Sharpe at three times the vol is the signature of a correct leverage
+multiplier, and it is the check to re-run if this is ever touched.
+
 So the split stands, and it is the split the proposal itself argued for: the
 document states the rule in equity, the account states what it will carry, and
 the rule stays portable — exactly `TradingCostsConfig`'s standing. The docstring
@@ -281,6 +305,37 @@ provably a fraction of buying power — which would mean `vol_target`,
 `atr_risk`, `equity_vol_target` and `fractional_kelly` all dividing by
 `max_gross` to stay equity-denominated, i.e. four special cases to preserve one
 general rule. That trade is worse than the one it replaces.
+
+### A portfolio child's cash rule refuses where every other shape fits
+
+`PortfolioInner::record_intent` bounds a child's buy by its **own ledger's
+cash**, and refuses outright when it does not fit. Every other shape *fits*: a
+single-asset `sizing: 3.0` on an unlevered account fills at 1x, records the ask
+in `requested_units`, and warns. The portfolio child books nothing — and because
+a child hard-cap refusal is drained to the child rather than to the run report,
+nothing lands in `rejections` either. The run reports zero fills, zero
+rejections and a flat curve, indistinguishable from a strategy that never fired.
+
+The cash rule itself is right and load-bearing: it is what stops child A
+spending child B's money, which is the whole of notional attribution. What is
+wrong is the *refuse* rather than *fit*.
+
+**Fixed in 0.84.0 for the levered case only**, because that case was blocking
+`--leverage` outright: above 1x a ledger's cash is *meant* to be negative, so
+the bound there is now gross against `account_cap × ledger_equity` — the
+ledger-scale twin of the account's own `max_gross` rule, preserving sibling
+isolation at every leverage. The unlevered path is untouched and still refuses;
+`tests/portfolio.rs::a_levered_portfolio_child_is_not_refused_by_its_own_ledger_cash`
+pins that divergence deliberately, so it reads as a recorded decision rather
+than a surprise.
+
+**What would change this:** making the unlevered path fit rather than refuse.
+It is the right shape and it removes a real silent drop, but it changes existing
+unlevered portfolio results, and a ledger-level clamp is invisible in a way the
+account-level one is not — `requested_units` is stamped by the account, which
+would only ever see the already-clamped number. Doing it properly means the
+ledger recording its own ask, which is a wider change than the leverage work it
+was found under.
 
 ### `max_gross` limits what is asked for, not what is held
 

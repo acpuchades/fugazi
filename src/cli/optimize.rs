@@ -47,8 +47,11 @@ pub use fugazi::spec::optimize::{
 pub struct OptimizeOptions<'a> {
     pub cash: Real,
     /// Most gross notional each grid point's account may hold, as a multiple of
-    /// equity (`--max-gross`; `1.0` is unlevered).
-    pub max_gross: Real,
+    /// equity (`--max-gross`), or `None` to take [`leverage`](Self::leverage).
+    pub max_gross: Option<Real>,
+    /// How far a fractional `sizing:` deploys, as a multiple of equity
+    /// (`--leverage`; `1.0` takes the document at face value).
+    pub leverage: Real,
     /// Annualized interest on a negative cash balance (`--margin-rate`).
     pub margin_rate: Real,
     /// Maintenance-margin ratio, or `None` for no margin call
@@ -590,6 +593,7 @@ fn run_single(
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        leverage: opts.leverage,
         margin_rate: opts.margin_rate,
         maintenance_margin: opts.maintenance_margin,
         bars_per_year,
@@ -664,6 +668,7 @@ fn run_single(
                 backtest::EvalContext {
                     cash: opts.cash,
                     max_gross: opts.max_gross,
+                    leverage: opts.leverage,
                     margin_rate: opts.margin_rate,
                     maintenance_margin: opts.maintenance_margin,
                     bars_per_year: bpy,
@@ -711,6 +716,7 @@ fn run_single(
         let keep_unstable = opts.keep_unstable;
         let cash = opts.cash;
         let max_gross = opts.max_gross;
+        let leverage = opts.leverage;
         let margin_rate = opts.margin_rate;
         let maintenance_margin = opts.maintenance_margin;
         let cost_config = opts.cost_config;
@@ -733,6 +739,7 @@ fn run_single(
         let ctx = backtest::EvalContext {
             cash,
             max_gross,
+            leverage,
             margin_rate,
             maintenance_margin,
             bars_per_year,
@@ -1107,6 +1114,7 @@ fn run_multi_symbol(
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         max_gross: opts.max_gross,
+        leverage: opts.leverage,
         margin_rate: opts.margin_rate,
         maintenance_margin: opts.maintenance_margin,
         bars_per_year,
@@ -1208,6 +1216,7 @@ fn run_multi_symbol_walkforward(
     let keep_unstable = opts.keep_unstable;
     let cash = opts.cash;
     let max_gross = opts.max_gross;
+    let leverage = opts.leverage;
     let margin_rate = opts.margin_rate;
     let maintenance_margin = opts.maintenance_margin;
     let cost_config = opts.cost_config;
@@ -1239,6 +1248,7 @@ fn run_multi_symbol_walkforward(
     let ctx = backtest::EvalContext {
         cash,
         max_gross,
+        leverage,
         margin_rate,
         maintenance_margin,
         bars_per_year,

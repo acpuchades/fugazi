@@ -141,7 +141,7 @@ pub trait Wallet<Sym> {
         let position = self.position(&symbol).amount;
         let funds = self.funds().0;
         let equity = self.equity().0;
-        let magnitude = size.resolve(price, position, funds, equity);
+        let magnitude = size.resolve_at_leverage(price, position, funds, equity, self.deployment());
         self.set_position(Units {
             symbol,
             amount: side.sign() * magnitude,
@@ -340,6 +340,31 @@ pub trait Wallet<Sym> {
     /// and takes the default.
     fn carry_coverage(&self) -> Option<(usize, usize)> {
         None
+    }
+
+    /// How much of the account a **fractional** [`Size`] deploys, as a multiple
+    /// of equity — [`PaperWallet::with_leverage`](PaperWallet::with_leverage),
+    /// `1.0` by default.
+    ///
+    /// Read by every impl that resolves a [`Size`] itself rather than handing it
+    /// down (the trait's own [`set`](Self::set), `SleeveWallet`,
+    /// `portfolio::LedgerWallet`), so `value_frac(1.0)` means the same units
+    /// whichever handle a strategy holds.
+    ///
+    /// **`1.0` is an answer, not a shrug** — the one place this family's
+    /// "default means *does not say*" rule does not apply, and deliberately:
+    /// there is no coherent "does not say" for a multiplier that has to be
+    /// applied before a fill can be sized at all. An account that has never
+    /// heard of leverage deploys sizing at face value, which is what `1.0` is.
+    /// Contrast [`leverage`](Self::leverage), which reports a *ceiling* and
+    /// really can decline to answer.
+    ///
+    /// The two are separate numbers on purpose. A ceiling can only ever stop a
+    /// request; this is what enlarges one, so an unedited document can trade a
+    /// levered account. See [`Size`] for why the denomination stays in equity
+    /// either way.
+    fn deployment(&self) -> Real {
+        1.0
     }
 
     /// The leverage this account trades `symbol` at — the multiple of equity it

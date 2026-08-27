@@ -79,7 +79,13 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> SleeveWallet<Sym, W> {
     fn own_units(&self, symbol: &Sym, fallback_price: Real, size: Size) -> Real {
         let price = self.inner.price(symbol).map_or(fallback_price, |p| p.0);
         let own_position = self.inner.position(symbol).amount - self.base(symbol);
-        size.resolve(price, own_position, self.inner.funds().0, self.equity().0)
+        size.resolve_at_leverage(
+            price,
+            own_position,
+            self.inner.funds().0,
+            self.equity().0,
+            self.inner.deployment(),
+        )
     }
 }
 
@@ -141,6 +147,11 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     /// is the one that decides whether a fill books.)
     fn leverage(&self, symbol: &Sym) -> Option<Real> {
         self.inner.leverage(symbol)
+    }
+    /// Delegates, for `leverage`'s reason: how far a fractional sizing deploys
+    /// is a property of the account the sleeve is a view onto.
+    fn deployment(&self) -> Real {
+        self.inner.deployment()
     }
     /// Delegates: the sleeve hides part of one account's book, it does not
     /// change what that account's cost models read.

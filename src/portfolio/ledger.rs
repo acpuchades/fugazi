@@ -100,6 +100,33 @@ impl<Sym: Clone + Eq + Hash> Ledger<Sym> {
             .sum();
         self.cash + held
     }
+
+    /// Gross notional this ledger would carry with `symbol` at `target` units:
+    /// every other position marked, plus this one at the target.
+    ///
+    /// The ledger-scale twin of `PaperWallet`'s gross reading, and the bound a
+    /// **levered** child is held to — see `PortfolioInner::record_intent`.
+    /// Cash cannot be that bound above 1x, because above 1x it is meant to be
+    /// negative.
+    pub(super) fn gross_with(
+        &self,
+        symbol: &Sym,
+        target: Real,
+        price_of: impl Fn(&Sym) -> Option<Real>,
+    ) -> Real {
+        self.positions
+            .iter()
+            .map(|(held, &amount)| {
+                let units = if held == symbol { target } else { amount };
+                units.abs() * price_of(held).unwrap_or(0.0)
+            })
+            .sum::<Real>()
+            + if self.positions.contains_key(symbol) {
+                0.0
+            } else {
+                target.abs() * price_of(symbol).unwrap_or(0.0)
+            }
+    }
 }
 
 /// What a child wants its ledger position in one symbol to be, recorded by
@@ -234,6 +261,16 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
     /// where the borrowing happens. A child asking what its exposure is
     /// ultimately bounded by should get that number, not a `None` from a handle
     /// that margins nothing.
+    /// The account's, for [`leverage`](Self::leverage)'s reason: a ledger
+    /// borrows nothing of its own, so how far a fraction of it deploys is
+    /// decided where the borrowing happens.
+    fn deployment(&self) -> Real {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .account_deployment
+    }
+
     fn leverage(&self, symbol: &Sym) -> Option<Real> {
         self.inner
             .lock()
@@ -259,7 +296,9 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
     fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
         // Resolve here rather than at the fill — see the module docs. The
         // reads feeding `Size::resolve` are the child's own, so a fraction
-        // means a fraction *of this child*.
+        // means a fraction *of this child*; the deployment multiple it is then
+        // scaled by is the **account's**, because that is where the borrowing
+        // that makes a fraction bigger than the ledger actually happens.
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let price = inner.price_of(&symbol).ok_or(WalletError::UnknownPrice)?;
         if price <= 0.0 {
@@ -268,7 +307,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         let ledger = &inner.ledgers[self.idx];
         let position = ledger.position(&symbol);
         let equity = ledger.equity(|s| inner.price_of(s));
-        let magnitude = size.resolve(price, position, ledger.cash, equity);
+        let magnitude = size.resolve_at_leverage(
+            price,
+            position,
+            ledger.cash,
+            equity,
+            inner.account_deployment,
+        );
         inner.record_intent(self.idx, symbol, side.sign() * magnitude)
     }
 

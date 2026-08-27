@@ -222,7 +222,19 @@ Every one of those paths goes through the same private engine, `fill_at`.
    Raising `max_gross` above `1.0` lifts the cash rule too: the account borrows,
    which is what leverage is.
 
-   **The cap bounds the result; it never re-denominates the request.** A
+   **The cap bounds the result; the deployment multiple is what moves it.**
+   `PaperWallet::with_leverage` (CLI `--leverage`) multiplies a *fractional*
+   sizing on the way out of `Size::resolve_at_leverage`, and defaults
+   `max_gross` to itself — so an unedited `sizing: 1.0` document trades 3x on a
+   `with_leverage(3.0)` account without the request being fitted straight back
+   down. It scales neither `Size::Units` nor `Size::PositionFraction`: a named
+   unit count is a specific intent, the same reason it is never fitted. Every
+   impl that resolves a `Size` itself reads it through `Wallet::deployment` —
+   the trait default, `SleeveWallet`, and `portfolio::LedgerWallet`, which
+   caches the account's answer beside `account_leverage` because a child has no
+   handle on the account to ask.
+
+   **A ceiling still never re-denominates the request.** A
    `Size::ValueFraction` is a multiple of *equity* on every account —
    `value_frac(1.0)` is 1x equity at `max_gross = 1` and 1x equity at
    `max_gross = 10` — so raising the cap cannot enlarge a request that already

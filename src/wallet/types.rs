@@ -310,6 +310,36 @@ impl Size {
             Size::PositionFraction(fraction) => fraction.abs() * position.abs(),
         }
     }
+
+    /// [`resolve`](Self::resolve), then scaled by the account's **deployment**
+    /// multiple ([`PaperWallet::with_leverage`](crate::PaperWallet::with_leverage)).
+    ///
+    /// The two **fractional** variants only. An explicit
+    /// [`Units`](Self::Units) count is never rescaled — the caller named units
+    /// and meant them, the same reason it is never fitted — and a
+    /// [`PositionFraction`](Self::PositionFraction) is a share of a position
+    /// that already is whatever size it is.
+    ///
+    /// This is where deployment and denomination stay separate. `resolve`
+    /// answers "how many units does this rule ask for, per unit of equity";
+    /// `leverage` answers "how much equity is this account willing to act on".
+    /// Multiplying here rather than inside the `ValueFraction` arm is what keeps
+    /// the rule portable: the same document resolves identically everywhere, and
+    /// only the account's own number moves.
+    pub fn resolve_at_leverage(
+        &self,
+        price: Real,
+        position: Real,
+        funds: Real,
+        equity: Real,
+        leverage: Real,
+    ) -> Real {
+        let magnitude = self.resolve(price, position, funds, equity);
+        match self {
+            Size::ValueFraction(_) | Size::FundsFraction(_) => magnitude * leverage,
+            Size::Units(_) | Size::PositionFraction(_) => magnitude,
+        }
+    }
 }
 
 /// A wallet-minted identifier for a submitted order, handed back in an [`Ack`] so
