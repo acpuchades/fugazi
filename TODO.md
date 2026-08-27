@@ -1116,6 +1116,43 @@ go to `<stem>.member_winners.csv`, written only when the members diverged.
 Full design, staging, the measured end-to-end result and the rest of the
 rejected alternatives: [docs/design/pooling.md](docs/design/pooling.md).
 
+### Downstream keeps its own panel fork — *settled by `ScoreTable`, on a condition*
+
+fugazi-web builds a pooled sweep as a fork: one `optimize()` per member over
+that member's own snapshots, reduced across members by its own `core/pooling`,
+rather than calling `optimize(panel=)`. Both sides now agree that is the right
+shape, and the entry is here so nobody re-opens it from first principles.
+
+**What settled it is `ScoreTable`, not a preference.** Until 0.87 the fork cost
+downstream the shrinkage readouts — `shrink=` is a parameter of
+`optimize(panel=)`, so a caller that pools its own way has nothing to plumb it
+into, and the only route to `λ` was collapsing the fork. Exposing the estimator
+over a caller-built matrix decoupled the two: the fork is now free of the
+readout, so neither side trades anything to keep its own panel construction.
+That is the load-bearing fact — the question stopped being live because the
+coupling went away, not because anyone won it.
+
+**Why the fork exists.** `rooted_documents` substitutes each symbol into the
+strategy's *root* and re-renders, so a single-asset strategy is poolable exactly
+as its author wrote it, with a **literal** root and no `!param` in the root
+slot. `panel_axis=` cannot supply that: it substitutes a named parameter, so it
+requires the document to have parameterized its root in the first place.
+Collapsing onto `optimize(panel=)` would therefore make a literal-root strategy
+un-poolable over instruments — a capability regression, not a refactor — and it
+would also change what a stored pooled walk-forward claims, since upstream nets
+no composite curve across members (see `MemberComposite`'s refusal).
+
+**The condition, without which this entry goes stale.** What is settled is
+keeping the fork *for as long as a literal-root strategy has to be poolable over
+instruments*. There is a live downstream discussion about making the param panel
+symbol-aware — partitioning the stream when the pooled param is the root's
+symbol slot — which would route almost every pooled sweep through a param axis,
+which is exactly the shape `panel_axis=` wants. If that lands and literal roots
+become rare enough to stop supporting, the collapse gets cheap again and this is
+worth reopening on its own merits.
+
+Settled from both sides, on that condition. Not permanently.
+
 ## Repo hygiene
 
 ### `python/uv.lock` is not enforced by anything, and `uv sync` prunes `maturin`

@@ -1324,6 +1324,283 @@ pub(crate) fn load_spec(
 }
 
 // ---------------------------------------------------------------------------
+// Shape-only validation (`check`)
+// ---------------------------------------------------------------------------
+
+/// One placeholder a checked document left unresolved, and what its type has
+/// to be.
+///
+/// This is the answer to a question an authoring tool otherwise has to guess
+/// at: a strategy is written once and parameterised per run, so at the moment
+/// it is saved a `!param` has no value — and no value is exactly what makes its
+/// type hard to know. `check_spec` reads it off the *parse* instead, from the
+/// slots the placeholder actually sits in: a `period:` demands a number, a
+/// `symbol:` a string. No inference from the name, no ladder of fallbacks.
+#[pyclass(name = "SpecHole", module = "fugazi", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PySpecHole {
+    name: String,
+    origin: &'static str,
+    declared: Option<&'static str>,
+    demanded: Vec<&'static str>,
+    used: Vec<&'static str>,
+}
+
+#[pymethods]
+impl PySpecHole {
+    /// The `params=` key for an unset `!param`, or the document path for an
+    /// author-written `!undefined` — which has no name to give.
+    #[getter]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// `"param"` or `"undefined"` — whether this is a placeholder a caller is
+    /// expected to supply a value for, or a gap the author declared.
+    #[getter]
+    pub(crate) fn origin(&self) -> &'static str {
+        self.origin
+    }
+
+    /// The placeholder's own `type:` declaration, if it carried one:
+    /// `"string"` / `"numeric"` / `"integer"` / `"bool"`.
+    ///
+    /// Sharper than anything a position can demand — `integer` and `numeric`
+    /// are one demand as far as the document is concerned, but they reject
+    /// different values, which is the point of writing one down.
+    #[getter]
+    pub(crate) fn declared(&self) -> Option<&'static str> {
+        self.declared
+    }
+
+    /// Every type a *position* required of this placeholder, sorted:
+    /// `"bool"` / `"number"` / `"string"` / `"list"` / `"table"`.
+    ///
+    /// At most one entry for a `!param` — two would mean no single value could
+    /// satisfy the document, which `check_spec` refuses outright. Empty when
+    /// the placeholder stands where a whole *expression* goes and nothing
+    /// narrowed it further.
+    #[getter]
+    pub(crate) fn demanded(&self) -> Vec<&'static str> {
+        self.demanded.clone()
+    }
+
+    /// [`demanded`](Self::demanded) plus `"expression"`, which is not a demand:
+    /// it says the placeholder stands where a whole expression goes, and every
+    /// scalar is one. Here for a caller that wants to tell "unconstrained" from
+    /// "never observed"; prefer `required_type`.
+    #[getter]
+    pub(crate) fn used(&self) -> Vec<&'static str> {
+        self.used.clone()
+    }
+
+    /// The one type to show a user, or `None` when nothing determined one.
+    ///
+    /// The declaration outranks the parse — the author said what the value is.
+    /// Otherwise the single demanded type, and failing that `"expression"` for
+    /// a placeholder standing where any scalar would do.
+    #[getter]
+    pub(crate) fn required_type(&self) -> Option<&'static str> {
+        let sole = |types: &[&'static str]| match types {
+            [one] => Some(*one),
+            _ => None,
+        };
+        self.declared
+            .or_else(|| sole(&self.demanded))
+            .or_else(|| sole(&self.used))
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "SpecHole(name={:?}, origin={:?}, required_type={:?})",
+            self.name,
+            self.origin,
+            self.required_type()
+        )
+    }
+}
+
+/// What `check_spec` learned about a document: that it is well-formed, and what
+/// it still needs before it can run.
+///
+/// Deliberately **not** a `StrategySpec`. A checked document parses with every
+/// unset placeholder standing as a typed zero — `period` 1, `symbol` `""` — so
+/// a spec handed back from here would run, and silently backtest a strategy
+/// nobody wrote. Loading a document you intend to *run* is `load_spec`, which
+/// is the path that refuses a placeholder it cannot resolve.
+#[pyclass(name = "SpecCheck", module = "fugazi", frozen)]
+pub(crate) struct PySpecCheck {
+    kind: &'static str,
+    holes: Vec<PySpecHole>,
+    reads: Vec<String>,
+    built: bool,
+}
+
+#[pymethods]
+impl PySpecCheck {
+    /// The shape the document was validated as: `single` / `pairs` / `basket` /
+    /// `multi` / `portfolio`. The detected one when `kind="auto"`.
+    #[getter]
+    pub(crate) fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// Every placeholder left unresolved, sorted by `(origin, name)`. Empty for
+    /// a document that is fully determined as written.
+    #[getter]
+    pub(crate) fn holes(&self) -> Vec<PySpecHole> {
+        self.holes.clone()
+    }
+
+    /// `{name: required_type}` over the `!param` holes only — the dict form of
+    /// the one question an authoring UI asks: what does each knob have to be?
+    ///
+    /// A value of `None` means nothing in the document narrowed it (the
+    /// placeholder stands where any expression goes). `!undefined` holes are
+    /// left out: they are keyed by document path, not by a name anyone passes a
+    /// value for — read `holes` for those.
+    #[getter]
+    pub(crate) fn param_types(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let d = pyo3::types::PyDict::new(py);
+        for hole in self.holes.iter().filter(|h| h.origin == "param") {
+            d.set_item(&hole.name, hole.required_type())?;
+        }
+        Ok(d.into_any().unbind())
+    }
+
+    /// Symbols the document names through an explicit `!pick`, sorted. Same
+    /// walk, and same meaning, as `StrategySpec.reads` — with no data in hand
+    /// `check` cannot say these are *present*, only that they are *required*.
+    #[getter]
+    pub(crate) fn reads(&self) -> Vec<String> {
+        self.reads.clone()
+    }
+
+    /// Whether the document was **built** as well as parsed.
+    ///
+    /// The build catches the one class of error a typed parse structurally
+    /// cannot — a leaf with no asset to read in a shape that holds more than
+    /// one — so it runs whenever the document is fully determined. It is
+    /// skipped, and this reads `False`, where building would report a
+    /// *document* error for a document whose only gap is an input nobody
+    /// supplied: an `!undefined`, a placeholder standing in for a whole
+    /// expression, a `!get` (whose build needs an overlay schema only real data
+    /// supplies), or a single-asset `root:` left to the input.
+    ///
+    /// `False` is not a weaker verdict on the parse — everything the parse
+    /// decides was decided either way.
+    #[getter]
+    pub(crate) fn built(&self) -> bool {
+        self.built
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "SpecCheck(kind={:?}, holes={}, built={})",
+            self.kind,
+            self.holes.len(),
+            self.built
+        )
+    }
+}
+
+/// Validate a strategy YAML document **without** binding values for its
+/// `!param` placeholders, and report what each one has to be.
+///
+/// The same pass as `fugazi check strategy`, and the counterpart to
+/// [`load_spec`] for a caller that has a document but not yet a run: an
+/// authoring tool storing a strategy, a form validating on submit, a linter.
+/// `load_spec` refuses a required `!param` with no value — correctly, since it
+/// is about to hand back something runnable — and that refusal covers every
+/// strategy whose author wrote a knob they intend to supply per run, including
+/// the default `root:` (`!pick { symbol: !param SYMBOL, freq: !param FREQ }`),
+/// whose two placeholders are both defaultless.
+///
+/// ```python
+/// >>> check = ta.check_spec("long:\n  enter: !gt\n    lhs: !sma { period: !param FAST }\n    rhs: !value 0\n")
+/// >>> check.param_types
+/// {'FAST': 'number', 'FREQ': 'string', 'SYMBOL': 'string'}
+/// >>> check.built
+/// False
+/// ```
+///
+/// ## What it does *not* relax
+///
+/// Only the requirement that a placeholder have a value. Everything else is
+/// validated exactly as `load_spec` validates it, on the same document: an
+/// unknown tag, a misspelled field, a slot handed the wrong type, a malformed
+/// `!pick`, a `!portfolio_book` outside a portfolio, a portfolio whose
+/// `weights:` could never be read. On top of that it adds two checks
+/// `load_spec` has no way to make — a placeholder whose positions contradict
+/// each other (no single value could ever satisfy the document), and, when
+/// nothing is left undetermined, a full build (see `SpecCheck.built`).
+///
+/// An unset placeholder is filled with a typed zero to let the parse proceed,
+/// so a check cannot say anything about a document's *values* — that a period
+/// is sensible, that a symbol exists. It says the document is well-formed and
+/// what it still needs.
+///
+/// `params` may bind some placeholders and not others; a bound one is
+/// substituted and type-checked normally, and only the rest become holes. The
+/// `base_dir` / `imports` / `import_root` arguments mean exactly what they mean
+/// on [`load_spec`], including `imports=False` refusing `!import` outright.
+///
+/// Raises `SpecError` for a document that is genuinely bad.
+#[pyfunction]
+#[pyo3(signature = (text, *, params = None, base_dir = None, kind = "auto", imports = true, import_root = None))]
+pub(crate) fn check_spec(
+    text: &str,
+    params: Option<&Bound<'_, PyAny>>,
+    base_dir: Option<&str>,
+    kind: &str,
+    imports: bool,
+    import_root: Option<&str>,
+) -> PyResult<PySpecCheck> {
+    use fugazi_core::spec::undefined::UndefinedOrigin;
+
+    let params = extract_params(params)?;
+    let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
+    let root = import_root.map_or_else(|| base.clone(), std::path::PathBuf::from);
+    let pre = if imports {
+        fugazi_core::spec::load_value_pre_params(text, &base, &root, "(inline)")
+    } else {
+        fugazi_core::spec::load_value_refusing_imports(text, "(inline)")
+    }
+    .map_err(|e| SpecError::new_err(format!("loading strategy: {e:#}")))?;
+    // Detected before `check_value` applies the shape's defaulted keys — a
+    // `root:`-less document is structurally indistinguishable from a `multi:`
+    // one, and splicing a default `root:` in first would decide it wrongly.
+    let kind = if kind == "auto" {
+        detect_kind(&pre)
+    } else {
+        kind
+    };
+    let checked = fugazi_core::spec::check::check_value(pre, kind_of(kind)?, &params)
+        .map_err(|e| SpecError::new_err(format!("checking strategy: {e:#}")))?;
+
+    let holes = checked
+        .holes
+        .iter()
+        .map(|h| PySpecHole {
+            name: h.name.clone(),
+            origin: match h.origin {
+                UndefinedOrigin::Param => "param",
+                UndefinedOrigin::Undefined => "undefined",
+            },
+            declared: h.declared.map(|t| t.label()),
+            demanded: h.demanded().iter().map(|t| t.label()).collect(),
+            used: h.used.iter().map(|t| t.label()).collect(),
+        })
+        .collect();
+    Ok(PySpecCheck {
+        kind: checked.spec.kind(),
+        holes,
+        reads: checked.reads,
+        built: checked.built,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Optimize
 // ---------------------------------------------------------------------------
 
@@ -1339,6 +1616,9 @@ pub(crate) struct PySweepRow {
     pub(crate) windowed_metrics: Option<Vec<SpecMetrics>>,
     // If pooled, one Metrics dict per panel member, in panel order.
     pub(crate) panel_metrics: Option<Vec<(String, SpecMetrics)>>,
+    // If pooled *and* windowed, each member's per-window documents — the
+    // replicates the shrinkage estimator actually fits on.
+    pub(crate) panel_windowed: Option<Vec<(String, Vec<SpecMetrics>)>>,
     // If pooled, `(defined, members)` per metric column — the support behind
     // each pooled mean.
     pub(crate) panel_support: Option<Vec<Option<(usize, usize)>>>,
@@ -1409,8 +1689,14 @@ impl PySweepRow {
     /// `shrink=` was passed; `None` otherwise. Same 4-tuple layout as
     /// `PanelWalkForwardResult.breadth`.
     #[getter]
-    pub(crate) fn demeaned(&self) -> Option<(Real, Real, usize, usize)> {
+    pub(crate) fn demeaned(&self) -> Option<PyDemeanedScore> {
         self.demeaned
+            .map(|(mean, std, defined, members)| PyDemeanedScore {
+                mean,
+                std,
+                defined,
+                members,
+            })
     }
 
     #[getter]
@@ -1451,6 +1737,32 @@ impl PySweepRow {
                 let d = pyo3::types::PyDict::new(py);
                 for (name, m) in members {
                     d.set_item(name, metrics_to_py(py, m)?)?;
+                }
+                Ok(d.into_any().unbind())
+            }
+        }
+    }
+
+    /// `{member: [metrics per window]}` under `panel=` **and** `windowed=` —
+    /// each member's run cut into windows.
+    ///
+    /// These are the *replicates*: the readings the shrinkage estimator fits
+    /// on, and the reason `windowed=` is what makes `disagreement` estimable in
+    /// a sweep at all. Exposed so a caller can rebuild the same `ScoreTable`
+    /// the sweep built — reproduce its fit, or extend it — rather than having
+    /// to re-measure. `None` when the sweep was not both pooled and windowed.
+    #[getter]
+    pub(crate) fn metrics_panel_windowed(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.panel_windowed {
+            None => Ok(py.None()),
+            Some(members) => {
+                let d = pyo3::types::PyDict::new(py);
+                for (name, windows) in members {
+                    let items: Vec<Py<PyAny>> = windows
+                        .iter()
+                        .map(|m| metrics_to_py(py, m))
+                        .collect::<PyResult<_>>()?;
+                    d.set_item(name, items)?;
                 }
                 Ok(d.into_any().unbind())
             }
@@ -1581,6 +1893,30 @@ impl PySweep {
     #[getter]
     pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
         PyPanelShrinkage::wrap(py, self.shrinkage)
+    }
+
+    /// Members whose pick differed from the pooled winner.
+    ///
+    /// [`member_winners`](Self::member_winners) lists **every** member,
+    /// including those that landed on the pooled winner, so an empty dict there
+    /// means "not shrunk" and never "the panel agreed". This is the derived
+    /// question, and it carries empty-means-agreed the way
+    /// `PanelFold.departed` does — so the two grains answer it the same way
+    /// rather than one of them making the caller compare dicts.
+    #[getter]
+    pub(crate) fn departed(&self) -> Vec<String> {
+        let Some(best) = self.best_idx else {
+            return Vec::new();
+        };
+        let winner = &self.rows[best];
+        Python::attach(|py| {
+            let winner_values = winner.borrow(py).axis_values.clone();
+            self.member_winners
+                .iter()
+                .filter(|(_, values)| *values != winner_values)
+                .map(|(member, _)| member.clone())
+                .collect()
+        })
     }
 
     /// Whether `shrink=` ranked this sweep — i.e. whether `rows` is ordered by
@@ -2116,6 +2452,25 @@ pub(crate) fn optimize(
             }
             _ => (None, None),
         };
+        // The replicates behind the pooled cells, when `windowed=` supplied
+        // them. Empty `windows` on every member means the sweep was pooled but
+        // not windowed, which is the unreplicated case — reported as absent
+        // rather than as a member-keyed dict of empty lists.
+        let panel_windowed = match &row.eval {
+            spec_optimize::Evaluation::Panel(ms) if ms.iter().any(|m| !m.windows.is_empty()) => {
+                Some(
+                    ms.iter()
+                        .map(|m| {
+                            (
+                                m.member.clone(),
+                                m.windows.iter().map(|w| w.metrics.clone()).collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
         let py_row = Py::new(
             py,
             PySweepRow {
@@ -2126,6 +2481,7 @@ pub(crate) fn optimize(
                 windowed_metrics,
                 panel_metrics,
                 panel_support,
+                panel_windowed,
                 smoothed: row.smoothed.and_then(|s| s.value),
                 support: row.smoothed.and_then(|s| s.support),
                 ruin_bar: row.eval.ruin_bar(),
@@ -2631,13 +2987,205 @@ pub(crate) fn run_walkforward(
 // Pooled walk-forward
 // ---------------------------------------------------------------------------
 
-/// One fold of a pooled walk-forward: the parameter set that won this fold on
-/// the **pooled** in-sample score, and the per-member documents behind it.
+/// What a panel is worth as evidence: `(effective, mean_correlation, members,
+/// pairs)`, with names.
 ///
-/// `is_range` / `oos_range` are indices into the panel's shared clock — the
-/// sorted union of every member's bar times — not into any one member's bars.
-/// That is what makes fold *k* the same span for every member of a ragged
-/// panel; see `PanelWalkForwardResult.axis_len`.
+/// Returned by both `PanelWalkForwardResult.effective_breadth` (correlation
+/// between member *returns*) and `PanelDecomposition.selection_breadth`
+/// (correlation between member *ranking surfaces*). Same quantity, same field
+/// order, two things to correlate.
+///
+/// **Still a tuple where it counts.** It iterates, indexes and compares as
+/// `(effective, mean_correlation, members, pairs)`, so
+/// `eff, rho, n, pairs = result.effective_breadth` keeps working; `.members` is
+/// simply the spelling that cannot be transposed.
+// `skip_from_py_object`: these are results, never arguments — nothing
+// accepts a PanelBreadth. The `Clone` is for returning by value.
+#[pyclass(name = "PanelBreadth", module = "fugazi", skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyPanelBreadth {
+    pub(crate) effective: Real,
+    pub(crate) mean_correlation: Real,
+    pub(crate) members: usize,
+    pub(crate) pairs: usize,
+}
+
+#[pymethods]
+impl PyPanelBreadth {
+    /// How many *independent* members the panel is worth —
+    /// `members / (1 + (members - 1) * mean_correlation)`.
+    #[getter]
+    pub(crate) fn effective(&self) -> Real {
+        self.effective
+    }
+
+    /// Mean pairwise correlation over the pairs that could be measured.
+    /// Negative values are reported but floored at zero inside `effective`.
+    #[getter]
+    pub(crate) fn mean_correlation(&self) -> Real {
+        self.mean_correlation
+    }
+
+    /// Members with enough data to be correlated against anything — the `M` in
+    /// the formula, not the panel's declared size.
+    #[getter]
+    pub(crate) fn members(&self) -> usize {
+        self.members
+    }
+
+    /// Pairs actually measured.
+    #[getter]
+    pub(crate) fn pairs(&self) -> usize {
+        self.pairs
+    }
+
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.as_tuple(py)?.try_iter()?.into_any().unbind())
+    }
+
+    pub(crate) fn __len__(&self) -> usize {
+        4
+    }
+
+    pub(crate) fn __getitem__(
+        &self,
+        py: Python<'_>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        // Through the object protocol, not `PyTuple::get_item`: that takes a
+        // `usize`, which would silently drop negative indices and slices — two
+        // things a caller reasonably expects of something that destructures.
+        Ok(self.as_tuple(py)?.as_any().get_item(index)?.unbind())
+    }
+
+    pub(crate) fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        self.as_tuple(py)?.eq(other)
+    }
+
+    pub(crate) fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        self.as_tuple(py)?.hash()
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "PanelBreadth(effective={:.4}, mean_correlation={:.4}, members={}, pairs={})",
+            self.effective, self.mean_correlation, self.members, self.pairs,
+        )
+    }
+}
+
+impl PyPanelBreadth {
+    fn as_tuple<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        use pyo3::IntoPyObject;
+        (
+            self.effective,
+            self.mean_correlation,
+            self.members,
+            self.pairs,
+        )
+            .into_pyobject(py)
+    }
+
+    pub(crate) fn from_breadth(b: fugazi_core::spec::panel::Breadth) -> Self {
+        Self {
+            effective: b.effective,
+            mean_correlation: b.mean_correlation,
+            members: b.members,
+            pairs: b.pairs,
+        }
+    }
+}
+
+/// A row's cross-member score with the member level removed:
+/// `(mean, std, defined, members)`, with names.
+///
+/// `defined` and `members` are the coverage behind `mean` — a mean over 2 of 30
+/// members and one over 30 of 30 are not the same evidence, and positionally
+/// they render as "2 of 30" and "30 of 2" with equal plausibility. That is what
+/// the names are for.
+///
+/// **Still a tuple where it counts** — it iterates, indexes and compares as
+/// `(mean, std, defined, members)`.
+// `skip_from_py_object`: these are results, never arguments — nothing
+// accepts a DemeanedScore. The `Clone` is for returning by value.
+#[pyclass(name = "DemeanedScore", module = "fugazi", skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyDemeanedScore {
+    pub(crate) mean: Real,
+    pub(crate) std: Real,
+    pub(crate) defined: usize,
+    pub(crate) members: usize,
+}
+
+#[pymethods]
+impl PyDemeanedScore {
+    /// Cross-member mean of the demeaned cells — the key `shrink=` ranks on.
+    #[getter]
+    pub(crate) fn mean(&self) -> Real {
+        self.mean
+    }
+
+    /// Population standard deviation across those same members.
+    #[getter]
+    pub(crate) fn std(&self) -> Real {
+        self.std
+    }
+
+    /// Members that **reported** a value for this row.
+    #[getter]
+    pub(crate) fn defined(&self) -> usize {
+        self.defined
+    }
+
+    /// Members in the panel. `defined <= members` always; the gap is members
+    /// that ran but could not compute the metric.
+    #[getter]
+    pub(crate) fn members(&self) -> usize {
+        self.members
+    }
+
+    pub(crate) fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.as_tuple(py)?.try_iter()?.into_any().unbind())
+    }
+
+    pub(crate) fn __len__(&self) -> usize {
+        4
+    }
+
+    pub(crate) fn __getitem__(
+        &self,
+        py: Python<'_>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        // Through the object protocol, not `PyTuple::get_item`: that takes a
+        // `usize`, which would silently drop negative indices and slices — two
+        // things a caller reasonably expects of something that destructures.
+        Ok(self.as_tuple(py)?.as_any().get_item(index)?.unbind())
+    }
+
+    pub(crate) fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        self.as_tuple(py)?.eq(other)
+    }
+
+    pub(crate) fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        self.as_tuple(py)?.hash()
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "DemeanedScore(mean={:.4}, std={:.4}, defined={}, members={})",
+            self.mean, self.std, self.defined, self.members,
+        )
+    }
+}
+
+impl PyDemeanedScore {
+    fn as_tuple<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        use pyo3::IntoPyObject;
+        (self.mean, self.std, self.defined, self.members).into_pyobject(py)
+    }
+}
+
 /// A row × member table of scores — the estimator's input, for callers that
 /// pool a panel themselves.
 ///
@@ -2894,9 +3442,9 @@ impl PyPanelDecomposition {
     /// `None` alongside a `None` `shrunk` — with no surface there is nothing to
     /// correlate.
     #[getter]
-    pub(crate) fn selection_breadth(&self) -> Option<(Real, Real, usize, usize)> {
+    pub(crate) fn selection_breadth(&self) -> Option<PyPanelBreadth> {
         fugazi_core::spec::panel::selection_breadth(&self.fit, &self.table)
-            .map(|b| (b.effective, b.mean_correlation, b.members, b.pairs))
+            .map(PyPanelBreadth::from_breadth)
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -3092,6 +3640,13 @@ impl PyPanelShrinkage {
     }
 }
 
+/// One fold of a pooled walk-forward: the parameter set that won this fold on
+/// the **pooled** in-sample score, and the per-member documents behind it.
+///
+/// `is_range` / `oos_range` are indices into the panel's shared clock — the
+/// sorted union of every member's bar times — not into any one member's bars.
+/// That is what makes fold *k* the same span for every member of a ragged
+/// panel; see `PanelWalkForwardResult.axis_len`.
 #[pyclass(name = "PanelFold", module = "fugazi")]
 pub(crate) struct PyPanelFold {
     pub(crate) fold: usize,
@@ -3403,8 +3958,15 @@ impl PyPanelWalkForwardResult {
     /// an interval, or go and find less correlated members — is a decision the
     /// caller has the context to make and this crate does not.
     #[getter]
-    pub(crate) fn effective_breadth(&self) -> Option<(Real, Real, usize, usize)> {
-        self.breadth
+    pub(crate) fn effective_breadth(&self) -> Option<PyPanelBreadth> {
+        self.breadth.map(
+            |(effective, mean_correlation, members, pairs)| PyPanelBreadth {
+                effective,
+                mean_correlation,
+                members,
+                pairs,
+            },
+        )
     }
 
     /// Members that departed from the pooled winner at least once, and in how

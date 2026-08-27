@@ -1677,6 +1677,22 @@ for fold in result.folds:
 went its own way in every fold" and "everyone drifted once" can produce the same
 mean and mean very different things.
 
+**Per-fold and run-wide `disagreement` will differ, and that is not a bug.**
+Expect the per-fold numbers to read *lower* — 0.275 / 0.0 / 0.0 against 0.815
+run-wide is an ordinary spread, not a contradiction.
+
+Each fold estimates from sub-spans of its own in-sample window, which is what
+keeps it lookahead-free: a component estimated over every fold and applied
+inside fold 1 would let fold 10's data pick fold 1's winner. But a metric
+measured over a short sub-span is itself noisy, that noise lands in the
+denominator, and `disagreement` comes out conservative as a result.
+`result.shrinkage` uses whole folds as replicates, so it is better powered — and
+is a description of the run after the fact, never something a fold selected on.
+
+A low per-fold reading beside a high run-wide one is the fold saying it cannot
+yet separate disagreement from noise on its own evidence. If you render both,
+label which is which; `docs/CLI.md` carries the longer version.
+
 #### Pooling it yourself: `ScoreTable`
 
 `shrink=` is a parameter of `optimize(panel=…)`. If you reduce across members
@@ -1740,8 +1756,11 @@ Three more things to know before using it:
   members, `shrink=` *models* it — and applying both pays for the same
   disagreement twice.
 - **It hands back one parameter set per member**, in `sweep.member_winners` —
-  `{member: {axis: value}}`, empty when every member chose the same point (which
-  is complete pooling, and `sweep.best` already says what that point was).
+  `{member: {axis: value}}`. It always lists **every** member, including the
+  ones that landed on the pooled winner, so an empty dict means the sweep was
+  not shrunk and *never* that the panel agreed. For "did anyone depart", read
+  `sweep.departed` (or `fold.departed`, or `result.departures`) — those do carry
+  empty-means-agreed, and an empty one is a result rather than an absence.
   `sweep.independent_searches` reports how many independent searches over the
   grid those selections amounted to: `1.0` when the members agree, up to the
   member count when they share nothing. That is the factor the deflated Sharpe's

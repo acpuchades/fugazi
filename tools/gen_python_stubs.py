@@ -240,7 +240,7 @@ MEMBER_RETURNS = {
     ("Sweep", "shrunk"): "bool",
     # `(mean, std, defined, members)` of the member-demeaned score — the same
     # 4-tuple layout as `PanelWalkForwardResult.breadth`.
-    ("SweepRow", "demeaned"): "tuple[float, float, int, int] | None",
+    ("SweepRow", "demeaned"): "DemeanedScore | None",
     ("PanelFold", "shrinkage"): "PanelShrinkage | None",
     ("PanelFold", "member_winners"): "dict[str, dict[str, Any]]",
     ("PanelFold", "departed"): "list[str]",
@@ -281,8 +281,20 @@ MEMBER_RETURNS = {
     ("PanelDecomposition", "row_effects"): "list[float | None]",
     ("PanelDecomposition", "member_effects"): "list[float | None]",
     ("PanelDecomposition", "grand_mean"): "float",
-    # `(effective, mean_correlation, members, pairs)`.
-    ("PanelDecomposition", "selection_breadth"): "tuple[float, float, int, int] | None",
+    ("PanelDecomposition", "selection_breadth"): "PanelBreadth | None",
+    # Named records that still iterate/index/compare as their 4-tuple — see
+    # `test_breadth_and_demeaned_are_named_but_still_tuples`.
+    ("PanelBreadth", "effective"): "float",
+    ("PanelBreadth", "mean_correlation"): "float",
+    ("PanelBreadth", "members"): "int",
+    ("PanelBreadth", "pairs"): "int",
+    ("DemeanedScore", "mean"): "float",
+    ("DemeanedScore", "std"): "float",
+    ("DemeanedScore", "defined"): "int",
+    ("DemeanedScore", "members"): "int",
+    ("Sweep", "departed"): "list[str]",
+    # `{member: [metrics per window]}` — the estimator's replicates.
+    ("SweepRow", "metrics_panel_windowed"): "dict[str, list[dict[str, Any]]] | None",
     ("WalkForwardResult", "folds"): "list[WalkForwardFold]",
     ("RunReport", "fills"): "list[Fill]",
     ("RunReport", "rejections"): "list[Rejected]",

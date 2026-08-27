@@ -92,8 +92,8 @@ use crate::constructors::{
 use crate::classes::{_rebuild_schema, _rebuild_snapshot};
 use crate::sources::{fetch, tickers};
 use crate::spec::{
-    load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
-    spec_json_schema, spec_tags,
+    check_spec, load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema,
+    spec_grammar, spec_json_schema, spec_tags,
 };
 use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
 use crate::strategy::{
@@ -156,7 +156,11 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPanelShrinkage>()?;
     m.add_class::<PyPanelDecomposition>()?;
     m.add_class::<PyScoreTable>()?;
+    m.add_class::<PyPanelBreadth>()?;
+    m.add_class::<PyDemeanedScore>()?;
     m.add_class::<PyMemberComposite>()?;
+    m.add_class::<PySpecCheck>()?;
+    m.add_class::<PySpecHole>()?;
 
     // `fugazi.Wallet` — an ABC with the three concrete wallets registered as
     // virtual subclasses, so `isinstance(w, ta.Wallet)` works. See there.
@@ -298,6 +302,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         fetch,
         tickers,
         load_spec,
+        check_spec,
         optimize,
         slot_demand,
         slot_demands,

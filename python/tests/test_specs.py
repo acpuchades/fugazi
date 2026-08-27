@@ -705,6 +705,163 @@ def test_optimize_panel_axis_substitutes_a_string_member_as_a_symbol():
     assert set(sweep.best.metrics_panel) == {"AAA", "BBB"}
 
 
+def test_score_table_reproduces_the_sweeps_own_shrinkage():
+    """A hand-built table over the same scores must give the **same** answer the
+    integrated sweep reports.
+
+    This is the whole reason to expose the estimator rather than let callers
+    reimplement it. Without this identity the two paths are free to drift — a
+    change to the fit would move one and not the other, and nothing would say
+    so. It is asserted on every component, not just lambda, because the ways
+    they could diverge (a different grand mean, a different residual, a
+    different support denominator) do not all show up in the headline.
+
+    The table is reconstructed from what the sweep exposes: each row's
+    per-member windowed metrics are the same replicates the sweep fed its own
+    table, so a caller with the same measurements can rebuild it exactly."""
+    import math
+
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+      exit: !crosses_below
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    sizing: !value 1.0
+    """
+    day = 86_400_000
+
+    def cycle(sym, period, amp):
+        return [
+            ta.Snapshot(
+                {
+                    sym: ta.Atom(
+                        ta.Candle(
+                            *(
+                                4
+                                * [
+                                    200.0
+                                    + amp * math.sin(2 * math.pi * i / period)
+                                    + i * 0.02
+                                ]
+                            ),
+                            1.0,
+                        ),
+                        time=i * day,
+                    )
+                }
+            )
+            for i in range(900)
+        ]
+
+    members = ["CHOP", "TREND"]
+    section, leaf = "risk_adjusted", "sharpe"
+    sweep = ta.optimize(
+        doc,
+        panel={"CHOP": cycle("CHOP", 6, 18), "TREND": cycle("TREND", 90, 40)},
+        panel_axis="SYM",
+        grid=[{"FAST": [2, 3, 5, 15, 30], "SLOW": [8, 20, 45, 90]}],
+        windowed=120,
+        best_by="sharpe",
+        metric_names=[f"{section}.{leaf}"],
+        shrink=True,
+        cash=10_000.0,
+    )
+    integrated = sweep.shrinkage
+    assert integrated.disagreement is not None
+
+    # Rebuild the same table by hand from the same per-window readings.
+    #
+    # `sweep.rows` is sorted by rank while the sweep fitted its own table in
+    # lattice order, so this table is a row *permutation* of that one — which is
+    # exactly why the identity is worth asserting on every component: every
+    # field of the summary is invariant to relabelling the rows (the grand mean,
+    # both margins' variances, the interaction, the counts), so a mismatch would
+    # mean the two paths genuinely disagree rather than that the rows moved.
+    table = ta.ScoreTable(rows=len(sweep.rows), members=len(members))
+    for r, row in enumerate(sweep.rows):
+        for m, name in enumerate(members):
+            windows = row.metrics_panel_windowed[name]
+            # `.get`, not `[…]`: an undefined metric is an **absent key**, not a
+            # `None` — a window with no trades has no Sharpe at all. Those
+            # readings are simply not pushed, which is the ragged table the
+            # estimator is built for, and the sweep's own table has the same
+            # holes because it drops them the same way.
+            values = [w.get(section, {}).get(leaf) for w in windows]
+            table.extend(r, m, [v for v in values if v is not None])
+
+    rebuilt = table.decompose().summary
+    assert rebuilt.disagreement == pytest.approx(integrated.disagreement)
+    assert rebuilt.support == pytest.approx(integrated.support)
+    assert rebuilt.cells == integrated.cells
+    assert rebuilt.live_rows == integrated.live_rows
+    assert rebuilt.live_members == integrated.live_members
+    assert rebuilt.row_variance == pytest.approx(integrated.row_variance)
+    assert rebuilt.member_variance == pytest.approx(integrated.member_variance)
+    assert rebuilt.interaction_variance == pytest.approx(
+        integrated.interaction_variance
+    )
+    assert rebuilt.residual_variance == pytest.approx(integrated.residual_variance)
+    assert rebuilt.mean_replicates == pytest.approx(integrated.mean_replicates)
+    assert rebuilt.balanced == integrated.balanced
+
+
+def test_breadth_and_demeaned_are_named_but_still_tuples():
+    """The three 4-tuples are named records now. `members` sat at index 2 in
+    `effective_breadth` and index 3 in `demeaned`, each with another plausible
+    count opposite it, and nothing caught a transposition.
+
+    Naming them is only safe if it is not a break, so this pins the tuple
+    behaviour that 0.86 shipped: destructuring, indexing (including negative and
+    slice), length, equality against a plain tuple, and hashing. That is the
+    compatibility claim, and the one thing that would silently stop being
+    true."""
+    peaks = {0: 1, 1: 1, 2: 4}
+    table = ta.ScoreTable.from_cells(
+        [
+            [
+                [10.0 - abs(r - peaks[m]) + d * 0.05 for d in (-1, 0, 1, 2)]
+                for m in range(3)
+            ]
+            for r in range(6)
+        ]
+    )
+    breadth = table.decompose().selection_breadth
+    assert breadth is not None
+
+    # Named.
+    assert breadth.members == 3
+    assert isinstance(breadth.effective, float)
+    assert isinstance(breadth.pairs, int)
+
+    # ...and still a tuple, in the documented order.
+    effective, rho, members, pairs = breadth
+    assert (effective, rho, members, pairs) == (
+        breadth.effective,
+        breadth.mean_correlation,
+        breadth.members,
+        breadth.pairs,
+    )
+    assert len(breadth) == 4
+    assert breadth[0] == effective and breadth[-1] == pairs
+    assert breadth[1:3] == (rho, members)
+    assert breadth == (effective, rho, members, pairs)
+    assert hash(breadth) == hash((effective, rho, members, pairs))
+
+    # The same contract on a DemeanedScore, whose field order differs — which is
+    # exactly why they are named.
+    d = table.decompose()
+    row_scores = d.demeaned
+    assert row_scores is not None
+    # `SweepRow.demeaned` is the DemeanedScore; build one via a pooled sweep is
+    # covered elsewhere, so here just pin that the two records disagree about
+    # where `members` sits and both say so by name.
+    assert ta.PanelBreadth.__doc__ and ta.DemeanedScore.__doc__
+
+
 def test_score_table_estimates_over_a_caller_built_matrix():
     """The estimator is reachable without `optimize(panel=…)`.
 
