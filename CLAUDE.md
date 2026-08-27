@@ -1,52 +1,36 @@
 # CLAUDE.md
 
-Guidance for Claude Code in this repo. This file is the **invariants, conventions,
-and quick-reference** — the load-bearing summary read every session. The depth
-lives elsewhere; reach for it on demand:
+Guidance for Claude Code in this repo: the **invariants, conventions, and
+quick-reference**, read every session. Depth lives elsewhere — reach for it on demand,
+and put new depth there rather than here.
 
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the full subsystem internals
-  (indicator taxonomy, every strategy shape, wallet, run resuming, Monte Carlo,
-  the spec/optimize kernel, Python parity). When a section below says "see
-  ARCHITECTURE", that's where the detail moved.
-- **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** — the *procedure*. Adding an
-  indicator / signal / operator / metric / provider? It lists every place each
-  change has to touch, in order, and which are compiler- or test-enforced.
-- **[docs/TESTING.md](docs/TESTING.md)** — the test suite's *map*: the five layers
-  and what each is for, where a given change's test goes, the shared
-  `tests/common/` harness, how the drift guards are built, and the
-  skip-vs-fail fixture policy (`FUGAZI_REQUIRE_FIXTURES=1`). Read it before
-  adding a test file or a test helper.
-- **[docs/TRADING.md](docs/TRADING.md)** — the *execution path*, end to end: bar →
-  submission → queue/rest → fill → the three books that record it → closed trade.
-  The ordering rules and their rationale (why nothing fills on the bar that caused
-  it, why fills precede `update`), plus the caveats each step carries.
-- **[docs/STRATEGIES.md](docs/STRATEGIES.md)** (YAML spec) · **[docs/CLI.md](docs/CLI.md)**
-  · **[docs/COSTS.md](docs/COSTS.md)** · **[docs/METRICS.md](docs/METRICS.md)** ·
-  **[docs/PYTHON.md](docs/PYTHON.md)** — user-facing surface docs.
-- **[TODO.md](TODO.md)** — a *decision log*, not a backlog. An entry records a
-  judgment already made and what would change it. Don't burn it down; do read it
-  before re-litigating something it already settled.
+| Doc | What it is |
+|---|---|
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Subsystem internals: indicator taxonomy, every strategy shape, wallet, run resuming, Monte Carlo, the spec/optimize kernel, Python parity. "See ARCHITECTURE" below means here. |
+| [CONTRIBUTING](docs/CONTRIBUTING.md) | The *procedure*. Adding an indicator / signal / operator / metric / provider / live wallet: every place the change has to touch, in order, and which are compiler- or test-enforced. |
+| [TESTING](docs/TESTING.md) | The suite's *map*: the five layers, where a given change's test goes, the `tests/common/` harness, how the drift guards are built, the skip-vs-fail fixture policy. Read before adding a test file or helper. |
+| [TRADING](docs/TRADING.md) | The *execution path*, end to end: bar → submission → queue/rest → fill → the three books → closed trade. The ordering rules and why (nothing fills on the bar that caused it; fills precede `update`). |
+| [STRATEGIES](docs/STRATEGIES.md) · [CLI](docs/CLI.md) · [COSTS](docs/COSTS.md) · [METRICS](docs/METRICS.md) · [PYTHON](docs/PYTHON.md) | User-facing surface docs. |
+| [PERFORMANCE](docs/PERFORMANCE.md) | Measured history, phase by phase — what was tried, what it cost, what was reverted. |
+| [TODO](TODO.md) | A *decision log*, not a backlog: a judgment already made and what would change it. Read it before re-litigating; don't burn it down. |
 
 ## What this is
 
 `fugazi` is a Rust library (edition 2024) of **incremental** technical-analysis
 primitives. Every primitive owns its state and advances one sample at a time via
-`update()` in ~O(1) — same code for live streaming and batch backtesting.
-
-Three composable layers: **indicators** (numeric sources), **signals**
+`update()` in ~O(1) — same code for live streaming and batch backtesting. Three
+composable layers: **indicators** (numeric sources), **signals**
 (`Indicator<Output = bool>`), **strategies** (decision layer trading into a wallet).
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for each.
 
-**Dependencies.** Unconditional: `serde`+`serde_json` (with the **`float_roundtrip`**
-feature — load-bearing for run resuming; without it a restored f64 seed drifts 1 ULP
-and the resumed equity curve diverges), `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR), and the
-internal **`fugazi-derive`** proc-macro crate (`#[derive(SaveState)]`). Default-on
-features: **`sources`** (remote providers), **`runtime`** (type-erasure vocabulary in
-`fugazi::runtime`), **`cli`** (binary; implies both, plus `montecarlo`). Off by default:
-**`montecarlo`** (the resampling significance layer — the crate's only source of
-randomness, so it gates `rand` + `rand_chacha`; `cli` turns it on so the `run
---montecarlo` flag always exists, runtime-gated). New unconditional deps are judgment
-calls — reach for closed-form first.
+**Dependencies.** Unconditional: `serde` + `serde_json` (with **`float_roundtrip`** —
+load-bearing for run resuming; without it a restored f64 seed drifts 1 ULP and the
+resumed equity curve diverges), `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR), and the internal
+**`fugazi-derive`** (`#[derive(SaveState)]`). Everything else is a feature:
+`default = sources + cli`, and `cli → spec + sources + montecarlo`, `spec → runtime +
+parallel`. Off unless asked for: **`live`** (venue wallets) and, on its own,
+**`montecarlo`** (the crate's only source of randomness — it gates `rand` +
+`rand_chacha`, and `cli` turns it on so `run --montecarlo` always exists,
+runtime-gated). New unconditional deps are judgment calls — reach for closed-form first.
 
 ## Commands
 
@@ -62,51 +46,29 @@ else, and each has already broken a green local tree.
 | the live wallets — `live` is off by default, so a plain `cargo test` runs *none* of `tests/live_*.rs` or `src/live/`'s unit tests | `cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_kraken --test live_portfolio` |
 | the feature matrix — the `--no-default-features` configurations compile in no other job | `cargo check/clippy -p fugazi --no-default-features --features <f> --lib` |
 
-`scripts/ci-local.sh [fmt|rust|version-sync|features|python]` runs one job;
-`FAST=1` skips the feature matrix and the wheel rebuild for an inner loop — not
-enough before a push. **`tests/ci_mirror.rs` fails if the script and the workflow
-drift**, so adding a CI step means adding it to the script too.
+`scripts/ci-local.sh [fmt|rust|version-sync|features|python]` runs one job; `FAST=1`
+skips the feature matrix and the wheel rebuild for an inner loop — not enough before a
+push. **`tests/ci_mirror.rs` fails if the script and the workflow drift**, so adding a
+CI step means adding it to the script too. It also pins the three-way `ruff` version
+constant (workflow / script / hook).
 
-**Formatting is gated.** `cargo fmt --all` + `ruff format` (both **at their
-defaults** — no `rustfmt.toml`, and `ruff.toml` only writes ruff's own defaults
-down; the alternatives were measured, see TODO.md *Repo hygiene*). CI's
-`Formatting` job checks both; `scripts/ci-local.sh fmt` is the local form.
-`scripts/hooks/pre-commit` formats staged files and re-stages them — install it
-once per clone with `git config core.hooksPath scripts/hooks`. It only rewrites
-files that are *fully* staged; a partially staged one is checked, never
-rewritten. The ruff pin (`ruff>=0.15,<0.16`) is repeated in the workflow, the
-script and the hook, and `ci_mirror.rs` asserts the three agree — its output is
-stable within a minor series and not across.
+**Formatting is gated** — `cargo fmt --all` + `ruff format`, both **at their defaults**
+(the alternatives were measured; see TODO *Repo hygiene*). Install the hook once per
+clone: `git config core.hooksPath scripts/hooks`. It rewrites only *fully* staged files;
+a partially staged one is checked, never rewritten.
 
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
-  clean); Format: `cargo fmt --all` + `ruff format`; Docs: `cargo doc --open`
-- `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the **four** cross-validation suites
-  **fail** instead of skipping when their generated fixture is missing or stale. One
-  per layer, because no reference library spans two: `talib_validation` (indicators /
-  TA-Lib), `metrics_validation` (equity-curve metrics / empyrical), `wallet_validation`
-  (`PaperWallet` execution / vectorbt), `trade_metrics_validation` (trade-level metrics /
-  backtesting.py). Every fixture is committed under `tests/data/` (`.gitignore` carries
-  an explicit note not to re-ignore `talib_expected.csv`), and CI's Rust job sets this —
-  so a stale fixture fails rather than silently comparing nothing.
-  **`tests/metrics_coverage.rs` covers the hole the switch cannot**: a *new metric* with
-  no reference value isn't a stale fixture, so nothing else goes red for it. That guard
-  walks `metrics::flatten` and demands a reference value or a written exemption; it reads
-  key sets only, needs no reference library, and never skips. See
-  [docs/TESTING.md](docs/TESTING.md).
-- **Regenerating: `pixi run gen`** (or `gen-talib` / `gen-metrics` / `gen-wallet` /
-  `gen-trades` individually; `gen-returns` and `gen-bars` rebuild the *inputs* and are
-  rare). `pixi.toml` + the committed `pixi.lock` are the *tooling* env only — the four
-  reference libraries, used by nothing in `cargo build`/`cargo test`/CI. The lock is
-  load-bearing: it holds `numpy < 2` because empyrical calls the removed `np.NINF`, and
-  it is what makes a regenerated fixture's `git diff` attributable to your change rather
-  than to a BLAS kernel. `pixi run -e bench bench` for the three-tier benchmark.
-- **Where fugazi and a reference disagree, the divergence is asserted, not absorbed.**
-  Five of backtesting.py's headline stats answer a different question from the fugazi
-  field sharing their name (`Profit Factor` sums ReturnPct not PnL; `Avg. Trade [%]` is
-  geometric; `Exposure Time` counts entry *and* exit bar; two durations round or include
-  the recovery bar). `tools/gen_trade_metrics_fixtures.py` documents each and asserts the
-  relationship still holds, so a library that changes convention fails the generator
-  instead of quietly re-baselining the fixture.
+  clean); Docs: `cargo doc --open`
+- `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — the four cross-validation suites (TA-Lib /
+  empyrical / vectorbt / backtesting.py, one per layer) **fail** instead of skipping on a
+  missing or stale fixture. CI's Rust job sets it. **A skip is indistinguishable from a
+  pass** — that, the `metrics_coverage` guard that catches what the switch can't, and the
+  divergences asserted in the generators are all in [docs/TESTING.md](docs/TESTING.md).
+- **Regenerating: `pixi run gen`** (`gen-talib` / `gen-metrics` / `gen-wallet` /
+  `gen-trades` individually). `pixi.toml` + the committed `pixi.lock` are the *tooling*
+  env only, and the lock is load-bearing: it pins `numpy < 2` (empyrical calls the
+  removed `np.NINF`) and makes a regenerated fixture's `git diff` attributable to your
+  change rather than a BLAS kernel. `pixi run -e bench bench` for the benchmark.
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
@@ -120,18 +82,12 @@ stable within a minor series and not across.
    it (CI installs via `maturin` + `pip`, not `uv`), so it drifts silently — it sat at
    `0.42.0` through nine releases. One line; keep it honest.
 
-Then **`cargo check --workspace`** (updates `Cargo.lock`), commit the manifests + README
-+ Lock, tag `vX.Y.Z`, push. Then **publish a GitHub Release** for that tag (`gh release
-create vX.Y.Z --generate-notes`) — the release-publish event is what triggers the
-publish workflow; pushing the tag alone does not. `python/README.md` has no version
-string. The `fugazi-derive` version and the root's dependency pin on it must match, or
-`cargo` errors.
-
-**Not `cargo build --workspace`** — it links the pyo3 cdylib, which needs a Python
-interpreter and fails locally with a wall of `ld:` output that looks like a broken
-release but isn't (`maturin develop` links it properly). `check` refreshes the lock just
-the same and type-checks *both* crates, so it verifies strictly more of what a bump can
-break.
+This list is the **single copy** — CONTRIBUTING's *Release a version* points here rather
+than repeating it, and CI's `version-sync` job checks it. Then `cargo check --workspace`
+(**not** `build --workspace`: it links the pyo3 cdylib and dies in `ld:` output that
+reads like a broken release), commit, tag, and follow
+[CONTRIBUTING *Release a version*](docs/CONTRIBUTING.md#release-a-version) — publishing
+the GitHub Release, not pushing the tag, is what triggers the publish workflow.
 
 ## Design invariants
 
@@ -150,169 +106,107 @@ builders. Use the internal cores (`EmaState`/`WilderState`, `WindowStats`/
 
 ### Adding an operator
 
-A `*Op` type impl'ing the relevant trait (`BinaryOp`/`UnaryOp`/`LookbackOp`/`ExtremeOp`/
-`CumulativeOp`) plus a type alias — **never a macro**. Arithmetic/boolean/lookback are
-zero-sized `Default`
-markers; comparisons carry a `Tolerance { abs, rel }` (band = `max(abs, rel·max|operand|)`, default `(1e-12, 1e-9)` — **relative, because operand scale is unbounded**; the execution-side quantity epsilons live in `src/wallet/types.rs`). `Combine` feeds the *same* input to both sides
-(requires `Input: Clone`; use `lhs`/`rhs` naming), holds op by value; `Unary`/`Lookback`/
-`Extreme`/`Cumulative`
-hold a zero-sized op as `PhantomData<fn() -> Op>`. `Change` is a **bidirectional** toggle
-detector; directional events come from pairing it with a comparison.
-**One marker may wear several hats** — `AddOp` is binary `+` and the `CumSum` fold;
+A `*Op` type impl'ing the relevant trait (`BinaryOp` / `UnaryOp` / `LookbackOp` /
+`ExtremeOp` / `CumulativeOp`) plus a type alias — **never a macro**. Arithmetic, boolean
+and lookback ops are zero-sized `Default` markers; comparisons carry a
+`Tolerance { abs, rel }`, band `max(abs, rel·max|operand|)`, default `(1e-12, 1e-9)` —
+**relative, because operand scale is unbounded**. (The execution-side *quantity* epsilons
+are separate, in `src/wallet/types.rs`.) `Combine` feeds the *same* input to both sides
+(needs `Input: Clone`; name them `lhs`/`rhs`) and holds its op by value;
+`Unary`/`Lookback`/`Extreme`/`Cumulative` hold a zero-sized one as
+`PhantomData<fn() -> Op>`. `Change` is a **bidirectional** toggle detector — directional
+events come from pairing it with a comparison.
+
+**One marker may wear several hats.** `AddOp` is binary `+` *and* the `CumSum` fold;
 `MaxOp`/`MinOp` are the pairwise, rolling *and* cumulative extremes. Reach for that
 before adding a near-duplicate op type.
 
 ### Blessed series — what a `source:`-omitted leaf reads
 
-Two stacked defaults on any atom leaf; don't conflate them.
+Two stacked defaults on any atom leaf; don't conflate them. **Per-tag**
+(`expr.rs`'s `default_source` / `default_bar_source` / `default_high` / `default_low`)
+is which *sub-expression* a wrapper defaults to — `!sma` → `!close`, `!atr` →
+`!current`. The **blessed series** is which *asset* the leaf you bottom out at
+projects out of the bar's `Snapshot`: an explicit `root: Root<'_>` parameter on
+`NodeSpec::try_build`, `None` meaning `Pick::new()` (sole-atom, panics on 2+).
 
-1. **Per-tag** (`src/spec/expr.rs`, `default_source` / `default_bar_source` /
-   `default_high` / `default_low`): which *sub-expression* a wrapper defaults to —
-   `!ema`/`!sma`/`!rsi` → `!close`, `!atr`/`!obv`/`!adx` → `!current`, `!donchian` →
-   `!high`/`!low`.
-2. **Blessed series**: once you bottom out at a leaf (`!close`, `!high`, `!current`,
-   `!get`, …), which *asset* it projects out of the bar's `Snapshot`.
+Four rules that bite. The mechanism, the per-context table of who blesses what, and
+`root:`'s default splice are in
+[ARCHITECTURE *Blessed series*](docs/ARCHITECTURE.md#blessed-series--the-root-a-source-omitted-leaf-reads-srcspecrootrs).
 
-The blessed series is an explicit `root: Root<'_>` **parameter** on
-`NodeSpec::try_build`, wrapping an `Option<&RootSpec>` and consumed by `root_source` /
-`build_pick`. A root that is *exactly* a selector (`RootSpec::as_pick`) installs
-`Pick::rooted(sel)` directly; a richer one is built as the expression it is, with
-`Root::sole()` as **its** root — which is what terminates the recursion. `None` →
-`Pick::new()` (sole-atom, panics on 2+). The ~142 match arms never mention it — they fan
-out through the `atom_src` / `atom_src_any` closures.
-
-**The `as_pick` fast path is correctness, not just cost.** Only `Pick::rooted` has the
-*match, else sole-atom unpack* fallback; `!pick`'s own build arm yields the strict
-`Pick::matching`. Any tag that drives a sub-chain over **untagged** synthesized bars —
-`!resample` feeding its `inner:`, the `Vec<Candle>` / `Vec<Atom>` drivers — reads `None`
-on every bar without it, and reports a silent zero-fill backtest.
-
-**`root:` is optional on the single-asset shape**, and its default is spliced into the
-*untyped* tree by `spec::root::apply_default` — `!pick { symbol: !param SYMBOL, freq:
-!param FREQ }`, each placeholder carrying `default: null` so an unset one **drops its
-key** (`RootSpec::desugar` retains non-nulls) rather than erroring. Two consequences:
-the splice must happen **before** `params::substitute`, so it lives in the loaders that
-already know the shape (`spec::load_document`, `cli::main`'s `check` arm,
-`cli::optimize`'s `base_value`, Python's `load_loaded_spec`) and never in `load_value`;
-and a `root:`-less document is structurally a `multi:` one, so `python`'s
-`detect_kind("auto")` reads it as `multi`. Neither param set → `RootSpec::sole()`
-(`!pick {}`), which reads the right bars but names no traded symbol — `cli::main`'s
-`seed_sole_symbol` fills `SYMBOL` from a one-symbol `--series` frame, and `check` reports
-the pending resolution instead of building. The shape rule lives **only** in
-`apply_default`, which takes a `StrategyKind`; every caller passes the kind it already
-holds. The published default is `root::default_tree()`, surfaced on the document JSON
-schema as the `single` shape's `root` `default` (pinned by `tests/spec_json_schema.rs`) —
-that schema's root is an **`anyOf`**, not a `oneOf`, since a `root:`-less document is
-structurally both a `single` and a `multi`.
-
-**Who blesses what:**
-
-| Context | root |
-|---|---|
-| `SingleStrategySpec::build` | `Some(&self.root)` — the document's `root:` expression, or the `!param SYMBOL`/`FREQ` default when it omitted one |
-| `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(RootSpec::for_symbol(sym))` via `leg_root` |
-| overlay column, per `(symbol, freq)` series | `Some(group key)` via `cli::overlay::group_root` |
-| `PortfolioSpec` `weights:`, single-asset child | `Some(child.root())` |
-| `PairsStrategySpec` | `None` — two legs, neither privileged |
-| portfolio/basket/multi `rebalance_on:`, portfolio `weights:` on non-single children | `None` — gate spans everything |
-| `!sharpe` & co.'s `strategy:` subtree | `None` — the embedded strategy blesses itself |
-
-Consequences: **`!arg SYM` is optional, not required** in basket/multi templates (`score:
-!rsi { period: 14 }` and the fully-spelled `!pick { symbol: !arg SYM }` build the same
-chain; the explicit form is the only way to read a *different* symbol per leg).
-**Blessing scopes the *default*, never the reachable set** — any shape may `!pick` any
-symbol in the input, traded or not (a regime gate on BTC inside an ETH document). The
-runners carry `traded ∪ !pick`-named and nothing else; a named symbol absent from the
-input is a hard error, since `Pick::matching` would otherwise read `None` on every bar
-and the run would report a plausible zero-fill backtest. See `spec::reads`.
-**`pick_any_root` ignores the root** (calendar leaves read only `atom.time`, shared by
-every entry). **`Pick::rooted` falls back through `sole_atom_or_none`, not
-`sole_atom_or_panic`** — in a rooted context a 2+ snapshot is ordinary (the blessed leg is absent this bar), so it
-reads `None`; the panicking spelling there would abort on every basket with a listing
-gap. The three `sole_atom_or_*` spellings differ **only** in how 2+ is answered (panic /
-`None` / `Err(count)`); there is deliberately no bare `sole_atom` left to bind by
-accident.
+- **The `RootSpec::as_pick` fast path is correctness, not cost.** Only
+  `Pick::rooted` has the *match, else sole-atom unpack* fallback, so any tag driving a
+  sub-chain over **untagged** synthesized bars (`!resample`'s `inner:`, the
+  `Vec<Candle>` / `Vec<Atom>` drivers) reads `None` on every bar without it — and
+  reports a plausible zero-fill backtest rather than failing.
+- **Blessing scopes the *default*, never the reachable set.** Any shape may `!pick` any
+  symbol in the input, traded or not; the runners carry `traded ∪ !pick`-named and
+  nothing else. A named symbol the input lacks is a **hard error**, for the same
+  zero-fill reason. See `spec::reads`.
+- **`!arg SYM` is optional in basket/multi templates** — the bare and fully-spelled
+  forms build the same chain; the explicit one is only for reading a *different* symbol.
+- **`Pick::rooted` falls back through `sole_atom_or_none`, not `_or_panic`** — a 2+
+  snapshot in a rooted context means "the blessed leg is absent this bar". The three
+  `sole_atom_or_*` spellings differ **only** in how 2+ is answered (panic / `None` /
+  `Err(count)`); there is deliberately no bare `sole_atom` to bind by accident.
 
 ### One handle per shape
 
-Five document shapes (single / pairs / basket / multi / portfolio). Two types collapse
-what used to be five-of-everything (`src/spec/runnable.rs`):
+Five document shapes (single / pairs / basket / multi / portfolio), two types
+(`src/spec/runnable.rs`) where there used to be five of everything:
+**`RunnableStrategy`**, the object-safe trait every `Dyn*Strategy` implements, and
+**`StrategySpec`**, the sum over the five spec types with one `try_build` /
+`try_build_priced` / `universe` / `kind`. **`RunnableStrategyExt`** is the
+wallet-generic half, split out only because generic methods would cost the trait its
+object safety — `drive_resumable_with` / `warm_up_over` run a spec against an account
+you supply, and share one body with `drive`.
 
-- **`RunnableStrategy`** — object-safe trait over every built strategy: `Strategy<Input =
-  Snapshot<String>, Symbol = String>` plus `stable_bars()` / `warm_up_bars()` /
-  `drive()`. Every `Dyn*Strategy` implements it.
-- **`StrategySpec`** — the sum over the five spec types, with one `try_build` /
-  `try_build_priced` / `universe` / `kind`.
-
-**There is no per-shape difference left in the driver** — a portfolio is an ordinary
+**There is no per-shape difference left in the driver.** A portfolio is an ordinary
 strategy that trades the wallet it is handed, so no shape overrides `drive` /
-`drive_resumable` and anything that looks shape-specific in a driver is a smell.
-(`try_build_priced` is not one either — costs ride on the wallet, so three of its five
-params are `_`-prefixed and its body is `self.try_build(cash, schema, None)` for all
-five.) **Adding a sixth shape** = a `StrategySpec` variant + a `RunnableStrategy` impl +
-an arm in `optimize::build_any_spec` and Python's `spec_from_value`. Not ten new
-functions.
+`drive_resumable`, and anything shape-specific in a driver is a smell.
+**Adding a sixth shape** = a `StrategySpec` variant + a `RunnableStrategy` impl + an arm
+in `optimize::build_any_spec` and Python's `spec_from_value`. Not ten new functions.
 
-- **`RunnableStrategyExt`** — the wallet-generic half, blanket-impl'd over every
-  `RunnableStrategy` (`?Sized` included, so it works on the `Box<dyn …>` `try_build`
-  returns). `drive_resumable_with(snaps, wallet, resume, flatten)` and
-  `warm_up_over(snaps, wallet, resume)` are how a spec runs against an account you
-  supply — a primed `PaperWallet`, or a live `OkxWallet` / `CoinbaseWallet`. It is a
-  separate trait purely because generic methods would cost `RunnableStrategy` its
-  object safety; both spellings share one body, `runnable::drive_over`.
-
-One asymmetry: basket and multi build per-symbol chains **lazily**, so `stable_bars()`
-only reads true after one snapshot has gone through — hence the `needs_probe_feed` flag in
-the walk-forward probes. The eager shapes must *not* be fed a probe snapshot (a pairs leaf
-that didn't name its asset would trip the sole-atom guard). **Restoring is the exception
-to the laziness**: `restore_state` builds every symbol in the blob up front, because
-`backtest::run` routes fills through `on_fill` *before* `update`, so a resumed run's
-first-bar fill would otherwise land on the shared `Book` with no `Position` yet built to
-receive it — and a symbol that doesn't quote during a chunk would have its state dropped
-at that chunk's save rather than carried.
+One asymmetry to know about: basket and multi build per-symbol chains **lazily**, so
+`stable_bars()` only reads true after a snapshot has gone through (hence
+`needs_probe_feed` in the walk-forward probes), and the eager shapes must *not* be fed a
+probe snapshot. **Restoring is the exception** — `restore_state` builds every symbol in
+the blob up front, because fills route through `on_fill` *before* `update`. See
+ARCHITECTURE *Run resuming*.
 
 ### Build errors are values
 
-A spec that parses but can't be *built* — an unknown `!get` column, a malformed `!pick {
-freq }` (or a `!pick` naming both `freq:` and `stream:`), a slot handed the wrong type, `!portfolio_book` outside a portfolio, a `!value
-<list>` outside a weight template, a **non-constant portfolio `weights:` with no
-`rebalance_on:`** (nothing would ever read it — `!never` is the named opt-out) — is bad
-**input**, not a broken invariant. Report it, never abort.
+A spec that parses but can't be *built* — an unknown `!get` column, a malformed `!pick
+{ freq }` (or one naming both `freq:` and `stream:`), a slot handed the wrong type,
+`!portfolio_book` outside a portfolio, a `!value <list>` outside a weight template, a
+**non-constant portfolio `weights:` with no `rebalance_on:`** (nothing would ever read
+it — `!never` is the named opt-out) — is bad **input**, not a broken invariant. Report
+it, never abort.
 
 - **`NodeSpec::try_build`** (and each shape's `*Spec::try_build`) return `Result<_,
   String>`. `build` remains as an unwrapping shim; prefer `try_build` in new code.
-- **The error carries a `!tag > ` breadcrumb** — each recursion level prepends its own
-  tag, so a failure four levels down arrives as `!and > !gt > !sma > !get > <message>`
-  and `diagnostics::split_trail` renders the path on its own `at:` line. **Messages must
-  not repeat their own tag.**
-- **A type mismatch is attributed to the child that produced the wrong type**, not the
-  slot that rejected it (`AsReal::try_new` errors are wrapped with the *child's* tag).
-- `runtime::try_chain` / `As::<Out>::try_new` are the fallible twins of `chain` /
-  `As::new`. **`Adapter::update`'s type-mismatch panic stays** — unreachable once
+  `runtime::try_chain` / `As::<Out>::try_new` are the fallible twins of `chain` /
+  `As::new`; **`Adapter::update`'s type-mismatch panic stays**, unreachable once
   construction is checked.
+- **The error carries a `!tag > ` breadcrumb** — each level prepends its own tag, so a
+  failure four levels down arrives as `!and > !gt > !sma > !get > <message>`.
+  **Messages must not repeat their own tag.**
+- **A type mismatch is attributed to the child that produced the wrong type**, not the
+  slot that rejected it.
+- **Driver-level validation**: `spec::backtest::validated(|| spec.try_build(..))` builds
+  once up front, so the run machinery never sees a bad spec.
 
 **Where a panic legitimately remains:** the per-symbol factories in `BasketStrategy` /
-`MultiAssetStrategy` build chains lazily inside `update` — no error path to return through.
-Each template is therefore **probed once at build time** against `PROBE_SYMBOL`
-(`spec::basket::probe_template`, `spec::multi_asset::probe_signal`/`probe_expr`). A
-template that builds for the probe builds for every symbol. **If you add a per-symbol slot,
-add it to the probe.**
+`MultiAssetStrategy` build chains lazily inside `update`, with no error path to return
+through. Each template is therefore **probed once at build time** against `PROBE_SYMBOL`
+— one that builds for the probe builds for every symbol. **Add a per-symbol slot, add it
+to the probe.**
 
-**A template defers its value, not its shape.** One step earlier than that probe,
-`SpecTemplate`'s `Deserialize` typed-parses a copy of the deferred body at **load**, with
-every `!arg` held as an `undefined` hole — so a typo inside a basket's `score:`, a
-multi-asset side's `enter:`, or a portfolio's `weights:` is a parse error like any other,
-for `check`, `run`, the Rust `*Spec::from_text_*` constructors and Python's `load_spec`
-alike. Preprocessing a tree before wrapping it? Use `SpecTemplate::checked`, not
-`from_tree` (which skips the probe — right only for a tree derived from an
-already-validated template). A probe error that names a hole sentinel is **skipped, not
-reported**: `!value !arg CHILD_GROUP` is a legitimate portfolio weight, and `!value`'s
-hand-rolled `TryFrom` has no type demand to answer a hole with (`undefined::parse_probe`).
-
-**Driver-level validation.** `spec::backtest::validated(|| spec.try_build(..))` builds once
-up front so the run machinery (which still goes through the infallible shim) never sees a
-bad spec. The CLI runners and every optimize row call it; `build_error(e)` is the `anyhow`
-adapter.
+**A template defers its value, not its shape.** One step earlier, `SpecTemplate`
+typed-parses a copy of the deferred body at **load** with every `!arg` held as an
+`undefined` hole, so a typo inside a basket's `score:` or a portfolio's `weights:` is an
+ordinary parse error for every consumer of the loader. Preprocessing a tree first? Use
+`SpecTemplate::checked`, **not** `from_tree`, which skips the probe.
 
 ### Safe defaults, opt-in overrides
 
@@ -343,12 +237,9 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
   match exactly (plus `unstable_bars()` when smoothing recursively). Add new indicators to
   `tests/warm_up.rs`.
 - **Writing a new indicator? Read *Writing one that is fast without trying* in
-  [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** before the first line of `update`. Eight
-  rules, each one a mistake that shipped and cost 25–60% of an indicator: never allocate in
-  `update`, reuse a core rather than writing a fifth window, ask a core for a shared
-  intermediate once, take the narrowest input domain, `num::max_finite` over `f64::max`,
-  reduce window scans on `LANES` accumulators, don't reach for `.shared()`, and keep
-  `value()` (storing the output is free — measured at +1.1%).
+  [CONTRIBUTING](docs/CONTRIBUTING.md) before the first line of `update`** — eight rules,
+  each one a mistake that shipped and cost 25–60% of an indicator. The one to carry in
+  your head: never allocate in `update`.
 - Comparison/edge is **`None` until** every source is warmed; `And`/`Or` are `None` until
   both ready — so an edge coincident with warm-up isn't detected (no spurious first-bar
   trade).
@@ -361,116 +252,124 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
   behind a `SubstrateFactory` + `PortfolioWallet` view. See ARCHITECTURE for why each died.
 - The crate has **one** quantile convention (`stats::quantile_of_sorted`, R type-7). Don't
   add a second.
-- **Parity discipline.** When a Rust API is added/extended/renamed, mirror it in
-  `python/src/` **in the same PR** (`lib.rs` is just module wiring — the code is in
-  `constructors.rs` / `classes.rs` / `strategy.rs` / `metrics.rs` / `spec.rs` /
-  `sources.rs` / `macros.rs`). Two tests catch the common cases; the `Wallet`
-  trait and the per-tag ledger are hand-maintained (`python/tests/test_parity.py`). See the
-  Python section of ARCHITECTURE.
+- **Parity discipline.** A Rust API added / extended / renamed is mirrored in
+  `python/src/` **in the same PR**. Two tests catch the common cases; the `Wallet` trait
+  and the per-tag ledger are hand-maintained (`python/tests/test_parity.py`). See
+  ARCHITECTURE *Parity discipline*.
 - **Touched the Python surface? Regenerate the stubs** — `python
-  tools/gen_python_stubs.py`, then commit `python/fugazi/*.pyi`.
-  `python/tests/test_stubs.py` regenerates and diffs, so a stale stub fails the
-  suite; a *new* binding the generator can't type fails the generator itself until
-  it's classified in `RETURNS` / `MEMBER_RETURNS` / `MEMBER_RULES`. Two rules that
-  bite silently otherwise: a new pyclass needs `module = "fugazi"` (without it it
-  reports `builtins` and cannot be pickled), and a defaulted parameter that is
-  *configuration* rather than a domain value goes after a `*` — see
-  `test_configuration_arguments_are_keyword_only`.
+  tools/gen_python_stubs.py`, then commit `python/fugazi/*.pyi`
+  (`python/tests/test_stubs.py` regenerates and diffs). Two rules that bite silently:
+  a new pyclass needs `module = "fugazi"` (without it it reports `builtins` and cannot
+  be pickled), and a defaulted parameter that is *configuration* rather than a domain
+  value goes after a `*`.
 
 ## Existing helpers — grep before writing new code
 
-If you're about to write a private helper whose name looks like something here, grep first.
+About to write a private helper whose name looks like something here? Grep first.
+The rationale behind each lives in the item's own doc comment, or in
+[ARCHITECTURE](docs/ARCHITECTURE.md); this table is the index.
+
+### Indicators and cores
 
 | Concern | Reuse | Location |
 |---|---|---|
-| Integration-test harness (bars, snapshot streams, temp paths, running the binary, a `wiremock` server) | `mod common;` + `common::{bars,cli,net,fixtures}` — each `tests/*.rs` is its own crate, so this is included, not imported. See [docs/TESTING.md](docs/TESTING.md) | `tests/common/` |
-| Bracket-split `SYMBOL[FREQ]:` / full scope | `calendar::parse_scope_parts(text)` / `parse_scope(text)` | `src/spec/calendar.rs` |
-| Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/spec/calendar.rs` |
-| Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |
-| Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...)` | `src/spec/calendar.rs` |
-| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_bars, warm_up_bars}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
-| Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::run_iteration_resumable`; `backtest::flatten_open_positions` (`--flatten`). See ARCHITECTURE *Run resuming* | `src/spec/runnable.rs`, `src/spec/backtest.rs`, `src/backtest.rs` |
-| Run a spec against a **caller-supplied** wallet (primed paper, or a live venue) | `RunnableStrategyExt::drive_resumable_with`; shared body `runnable::drive_over`. Python: `StrategySpec.run` / `.run_resumable` take any of the three wallet pyclasses via `over_any_wallet!` | `src/spec/runnable.rs`, `python/src/{strategy,spec}.rs` |
-| Warm indicators over a pause gap without trading | `backtest::warm_up` (`run` with the `trade` step gated); `RunnableStrategyExt::warm_up_over`; Python `StrategySpec.warm_up` → state JSON, no report | `src/backtest.rs`, `src/spec/runnable.rs` |
-| Close every open position **now**, through the cost pipeline | `Wallet::flatten` (default = cancel + `close` + `poll_fills`; `PaperWallet` overrides it synchronously via `fill_at`, since its queued moves would never settle) | `src/wallet/{mod,paper}.rs` |
-| Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]`/`#[state(window)]`/`#[state(config)]`/`#[state(core)]` + two `impl Indicator` forwarding lines. **Config is checked, not replayed** — a period or tolerance that disagrees with the rebuilt destination is an `Err`, since resuming continues *the same* strategy; snapshot shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet/paper.rs` |
-| Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
-| Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
-| How much of a multi-symbol universe ever shares a snapshot | `cli::overlap::{measure, measure_universe, warn_if_fragmented}` → `Overlap<K>` (`is_fragmented()` / `summary()`). Wired into `get`'s result block, `run`'s inputs block, and `optimize` before the sweep. Measures **observed co-occurrence**, never per-symbol stamp signatures — DST alone splits those. Joining on the trading *date* is rejected, permanently: it manufactures cross-timezone lookahead (see TODO) | `src/cli/overlap.rs` |
-| Which bar cadence a run/optimize targets, and whether the input agrees | `cli::cadence::{Census, Series, Finding, apply, warn}` → `Resolution`. `main::load_frame` calls it right after `DataFrame::from_series`, before anything reads the frame. **Ambiguity is refused, disagreement is warned**: a symbol carrying 2+ cadences, a `-f` naming an absent one, or untagged rows beside 2+ labelled ones are errors; a mixed-cadence universe or a label that disagrees with the timestamp spacing are stderr warnings (ungated by `--quiet`, like `overlap`). Cadence precedence everywhere: `-f/--frequency` → the document's **`root:`** (`RootSpec::declared_freq`) → the `freq` **column** (`DataFrame::declared_frequency`) → `detect_frequency_from_atoms` | `src/cli/cadence.rs` |
-| Two cadences of one symbol in one `--series` frame | `DataFrame` keys rows by **`(symbol, freq, IndexKey)`** — the `index` column when there is one (ordering numerically), the `time` column otherwise (ordering as an opaque label); `frequencies_of` / `cadence_groups` / `retain_cadence`. The `freq` cell is the key verbatim — never case-folded (`1M` month vs `1m` minute). A row with no `freq` adopts its symbol's **sole declared** cadence in a pre-pass, so an untagged overlay CSV still joins onto a `get`-written price file *and* `--series` order still decides column clashes. `atoms()` refuses a symbol with 2+ cadences rather than interleaving them | `src/cli/data.rs` |
-| Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `BinanceVision` (spot *and* USDⓈ-M futures), `Okx`, `Kraken`, `Coinbase`, `Yahoo`, `CoinGecko`; the CLI adds `file:` on top (`cli::csv_source`). `schema()` = fixed overlay schema when known before the fetch (`Coinbase` has none — OHLCV only) | `src/sources/mod.rs` |
-| Provider schemas | `*::*_schema()` (`OnceLock`); the CLI's one registry is `cli::get::KNOWN_PROVIDERS` | `src/sources/{binance,binance_vision,yahoo,coingecko,okx,kraken}.rs`, `src/cli/get.rs` |
-| Bucket an irregular sample stream onto a cadence | `sources::floor_to_bucket(ms, interval)` — Monday weeks, 1st-of-month months, epoch modulo otherwise | `src/sources/mod.rs` |
-| Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
-| Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` via `build_overlay`). `compute_snapshots` is the multi-symbol path | `src/spec/overlay.rs`, `python/src/constructors.rs`, `src/cli/overlay.rs` |
-| A document's evaluation root, and what it names without building | `spec::root::RootSpec` — `node()` (build) · `tree()` (analyse) · `named_symbols()` / `sole_symbol(shape)` / `declared_freq()` / `as_pick()` · `for_symbol` / `for_series` to derive one. Keeps both forms because `NodeSpec` is `Deserialize`-only, so a typed walk would be a second ~142-arm table | `src/spec/root.rs` |
-| Blessed series of an overlay group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::basket::leg_root(sym)` / `spec::multi_asset::leg_root(sym)` — all three now return a `RootSpec` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
-| Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` and each shape's `*Spec::try_build` — `Err(String)` with the `!tag > ` breadcrumb. `spec::backtest::build_error(e)` renders as `anyhow`; `spec::backtest::validated(...)` is the discard-value form | `src/spec/expr.rs`, `src/spec/backtest.rs` |
-| Overlay build that errors instead of aborting | `spec::overlay::build_overlay(spec, schema, root) -> Result<..>` | `src/spec/overlay.rs` |
-| CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
-| Which series a document **reads but does not trade** (every `!pick { symbol }`) | `spec::reads::{picked_symbols, picked_symbols_of}` — a structural walk of the *loaded document*, not of `NodeSpec`: `!pick` is the only tag naming an asset, so a new tag can't silently fall out of it. Skips the `TRADED_KEYS` (`root`/`left`/`right`), since a root **is** a `!pick` now and a traded series is not a read. Joined in by `cli::run::{read_only_series, attach_read_series}` (**left** join — a read series never adds bars); threaded as `RunOptions::reads`, probed per subgrid in `optimize::probe_reads` | `src/spec/reads.rs`, `src/cli/{run,optimize}.rs` |
-| Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
-| Scope symbol `\:` escape (`BTC/USDT:USDT` vs. the `SYMBOL[FREQ]:` prefix) | `calendar::{unescape_symbol, escape_symbol, is_escaped, looks_like_body}` — only **scope** grammars need it; `get` spec heads take the symbol verbatim | `src/spec/calendar.rs`, `src/cli/overlay.rs`, `src/spec/costs/spec.rs` |
-| Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
-| A document's free-form `meta:` (open schema, never interpreted) | `spec::meta::Meta` + a `meta` field on every document type; read via `StrategySpec::meta()` / `StrategyRef::meta()` / `CostConfig::meta()`; Python `StrategySpec.meta`. **Don't relax `deny_unknown_fields` instead** — the typo guard is the point. Overlay column files are deliberately excluded (every key there is a column name); see TODO | `src/spec/meta.rs` |
-| Load whole strategy doc | `spec::load_document(text, &params, base, root, label, kind)` — `load_value` is the same pipeline without the `root::apply_default` splice; `*StrategySpec::from_text_with_params_in` | `src/spec/mod.rs` |
-| Load-time `!param` / `!import` substitution | `params::substitute` / `imports::resolve(value, base, root)` — `base` is the importing file's directory, `root` the confinement boundary the two were decoupled into (`--import-root`) | `src/spec/{params,imports}.rs` |
-| Dir relative `!import` resolves against, and the boundary it may not escape | `input::Source::base_dir()`; the confinement root defaults to it and is widened by `--import-root` | `src/spec/input.rs`, `src/spec/imports.rs` |
-| Build-time `!arg` substitution | `args::substitute(value, &args)` | `src/spec/args.rs` |
-| Defer spec subtree until args ready | `SpecTemplate<T>` + `.build(&args)`; `SpecTemplate::checked(tree)` wraps a preprocessed tree *and* probes it (every load typed-parses a copy with args held undefined) | `src/spec/template.rs`, `src/spec/args.rs` |
-| Static type check of an expression tree (`check` only) | `typecheck::{output_type, check_immediate}` — `None` output type means *skip*, never *invalid* | `src/spec/typecheck.rs` |
-| Every YAML spelling a tag accepts (not just the canonical one) | `GrammarTag::forms` (canonical first; `canonical()` for the one to *emit*) + `GrammarForm::{shape, fields, payload, scope}`. Eight tags take more than one — `!param`/`!arg`/`!import` bare-vs-braced, `!equal_weight` bare-vs-`<N>`, and `!changed`/`!became_true`/`!became_false`/`!unstable` bare-vs-`source:`. An alternate the variant can't express is **declared** with `#[grammar(alt = "unary_source")]`, never hand-written into a second table | `src/spec/grammar.rs`, `fugazi-derive/src/grammar.rs` |
-| What a tag requires a given slot to *produce*, without a tree in hand | `typecheck::{slot_demand, slot_demands}` (`None` = not a free-expression slot · `Some(&[])` = passthrough · else the admitted set). Surfaced on the descriptor as `GrammarField::node_output` / `GrammarForm::payload_output`, on every form. Backed by prototypes synthesised per tag — **don't hand-write a second demand table** | `src/spec/typecheck.rs`, `src/spec/grammar.rs` |
-| Constant leaf: number or string | `!value 70` / `!value bull` | `src/spec/expr.rs` |
+| Real recurrence for internal smoothing | `EmaState` / `WilderState` | `src/indicators/smoothing.rs` |
+| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>` — fixed rings, deliberately not on `Ring`. Want mean *and* dispersion? `mean_and_stddev` / `mean_and_variance`, not both calls. **Never reintroduce the `E[X²] − E[X]²` shortcut** | `src/indicators/stats.rs` |
+| Any fixed-capacity window (push, evict oldest, iterate oldest-first) | `stats::Ring<T>` — restores via `stats::LoadWindow` (`#[state(window)]`). **Not a `VecDeque`** — see PERFORMANCE *Phase 13* | `src/indicators/stats.rs` |
+| Every second-order reading of a paired window, from one scan | `WindowCovariance::moments()` → `Moments` — **ask the core once**, never two accessors | `src/indicators/stats.rs` |
+| Rolling quantile / rank-in-window | `WindowQuantile` backing `Percentile` / `PercentileRank` | `src/indicators/{stats,percentile}.rs` |
+| Pointwise transform of one source (`abs`/`sign`/`sqrt`/`tanh`/`sigmoid`) | `Unary<S, Op>` + `UnaryOp` — **no bespoke struct for a new one** | `src/indicators/ops.rs` |
+| Unbounded running fold (`cum_sum`/`cum_max`/`cum_min`) | `Cumulative<S, Op>` + `CumulativeOp`, folding the **existing** `AddOp`/`MaxOp`/`MinOp` | `src/indicators/ops.rs` |
+| Pairwise (two sources, one bar) extremum or power | `Max`/`Min`/`Pow` = `Combine<L, R, Op>`; `.clamp` is `Min` of `Max`. **Not** `RollingMax` | `src/indicators/ops.rs` |
+| Rolling two-source statistic (correlation / covariance / beta) | `PairStat<L, R, Op>` + `PairStatOp` over `WindowCovariance`; aliases `Correlation` / `Covariance` / `Beta` | `src/indicators/pairwise.rs` |
+| Rolling regression against time (slope / intercept / value / r²) | `LinReg<S>` + `component_accessors!` (`period >= 2`) | `src/indicators/linreg.rs` |
+| Bars since an event | `BarsSince`; `BarsSinceHigh`/`BarsSinceLow` (O(1) via `WindowExtreme::since()`) | `src/indicators/bars_since.rs` |
 | Three-source ternary | `IfElse::new(cond, t, f)` / `.if_else(t, f)` | `src/indicators/if_else.rs` |
 | Multi-output accessor bodies | `component_accessors!` macro | `src/indicators/component.rs` |
-| Real recurrence for internal smoothing | `EmaState` / `WilderState` | `src/indicators/smoothing.rs` |
-| Any fixed-capacity window (push, evict oldest, iterate oldest-first) | `stats::Ring<T>` — the generic ring. Serializes as a bare oldest-first array (the old `VecDeque` shape, so run-state files still load) and has **no `Deserialize`**: the array carries no capacity, so restoring goes through `stats::LoadWindow` via the `#[state(window)]` derive role, which sizes from the destination. Don't reach for a `VecDeque` — see PERFORMANCE *Phase 13* | `src/indicators/stats.rs` |
-| Pointwise transform of one source (`abs`, `sign`, `sqrt`, `tanh`, `sigmoid`) | `Unary<S, Op>` + `UnaryOp` — stateless, `Option` return so an out-of-domain sample reads `None`. Don't add a bespoke struct for a new one | `src/indicators/ops.rs` |
-| Unbounded running fold (`cum_sum`, `cum_max`, `cum_min`) | `Cumulative<S, Op>` + `CumulativeOp` — folds with the **existing** `AddOp`/`MaxOp`/`MinOp` markers, so a new accumulator is usually zero new types. `x / x.cum_max() - 1` is the drawdown of any series | `src/indicators/ops.rs` |
-| Pairwise (two sources, one bar) extremum or power | `Max`/`Min`/`Pow` = `Combine<L, R, Op>`; `.clamp(lo, hi)` is `Min` of `Max`. **Not** `RollingMax`, which is one source over a window | `src/indicators/ops.rs` |
-| Rolling two-source statistic (correlation / covariance / beta) | `PairStat<L, R, Op>` + `PairStatOp` over `WindowCovariance`; aliases `Correlation`/`Covariance`/`Beta`. Each reads one field of a single `moments()` pass — **ask the core once**, never two accessors | `src/indicators/pairwise.rs` |
-| Rolling regression against time (slope / intercept / fitted value / r²) | `LinReg<S>` + `component_accessors!` — one `WindowCovariance` fed the bar index as its `x` leg. `period >= 2` | `src/indicators/linreg.rs` |
-| Every second-order reading of a paired window, from one scan | `WindowCovariance::moments()` → `Moments` (`correlation` / `slope_y_on_x` / `slope_x_on_y` / `r_squared`). `r_squared` is `cov²/(varₓ·var_y)` **direct**, not `correlation()²` — squaring undoes the sqrt | `src/indicators/stats.rs` |
-| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>` — **both fixed rings**, not `VecDeque`s, and deliberately **not** built on `Ring` (each needs an access pattern it lacks: one contiguous full-window run, and monotonic push/pop at both ends). **Dispersion reads scan the window** (O(period), on four accumulators; `LANES`); the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` digits and was wrong at crypto price scale — don't reintroduce it. Want the mean *and* the dispersion? `mean_and_stddev` / `mean_and_variance`, not both calls | `src/indicators/stats.rs` |
-| Rolling quantile / rank-in-window | `WindowQuantile` backing `Percentile` / `PercentileRank` | `src/indicators/stats.rs`, `src/indicators/percentile.rs` |
-| The crate's **one** quantile convention (R type-7) | `stats::quantile_of_sorted(sorted, p)` — don't add a second | `src/indicators/stats.rs` |
-| Bars since an event | `BarsSince` (bool source), `BarsSinceHigh`/`BarsSinceLow` (O(1) over `WindowExtreme::since()`) | `src/indicators/bars_since.rs` |
-| Position tracking inside strategy | `SingleAssetStrategy::position()`; `BasketStrategy::position(&sym)` | `src/indicators/position.rs`, `src/strategies/*.rs` |
-| Sizing recipes | `indicators::sizing::{equal_weight, vol_target, vol_target_of, atr_risk, atr_risk_of, drawdown_throttle, equity_vol_target, fractional_kelly}` (`*_of` variants take a caller-supplied atom source for the basket per-leg case) | `src/indicators/sizing.rs` |
-| Cross-sectional rank → `Side` | Trait `strategies::selection::Selection<Sym>`, re-exported as `strategies::basket::Selection`; composable built-ins `TopBottom<S>`/`Threshold<S>`/`Quantile<S>` (`::new` roots on `Everything`, `::of(inner, ...)` re-roots), `DynSelection` erases an inner; free functions `top_bottom`/`threshold`/`quantile`; `BasketStrategy::selection(impl)` installs any impl or closure | `src/strategies/selection.rs` (re-exported from `basket.rs`) |
-| Declared basket universe (strict vs. lax) | `BasketStrategy::{all_of, any_of, universe}`; trait `strategies::universe::Universe` (re-exported from `basket`) with impls `Floating`/`AllOf<Sym>`/`AnyOf<Sym>`; YAML `universe: !all_of [...] \| !any_of [...]` | `src/strategies/universe.rs`, `src/spec/basket.rs` |
-| Strategy-lifetime equity/trade tracking | `SingleAssetStrategy::book()`/`PairsStrategy::book()`/`BasketStrategy::book()` + `BookField` accessors | `src/indicators/book.rs`, `src/strategies/*.rs` |
-| Composite Strategy over N heterogeneous children netted onto one account | `Portfolio::builder().add(name, strategy).weights(policy).rebalance_on(signal).build()`, then `backtest::run(&mut portfolio, &mut wallet, snapshots)` (any `Wallet`), or `portfolio.run(snapshots)`. Per-child reads: `sub_equity(i)` / `sub_position(i, sym)` / `assert_books_balance(&wallet)` | `src/portfolio/mod.rs`, `src/portfolio/netting.rs` |
-| Portfolio YAML surface | `PortfolioSpec` (`children`, `weights: Option<SpecTemplate<NodeSpec>>`, `rebalance_on`) + `PortfolioChildSpec` + `PortfolioChildStrategy`; `portfolio:` prefix; driven through `backtest::{measured_report_any, evaluate_any, evaluate_windowed_any, run_iteration_any}`; runner `run::run_portfolio` | `src/spec/portfolio.rs`, `src/cli/{run,optimize,main}.rs` |
-| The account a portfolio trades (paper or live) | the wallet passed to `backtest::run(&mut portfolio, &mut wallet, snaps)` — any `Wallet<Sym>`. Must be the portfolio's **alone** | `src/portfolio/mod.rs` |
-| Per-child notional book + the handle a child trades | `portfolio::ledger::{Ledger, LedgerWallet}`; netting/attribution in `portfolio::netting::PortfolioInner::{net_and_submit, attribute_fill, book_crosses, book}`; `Portfolio::assert_books_balance(&wallet)` | `src/portfolio/ledger.rs`, `src/portfolio/netting.rs` |
-| Portfolio weight policies | `portfolio::policy::{WeightPolicy, Fixed, EqualWeight, ChildSample}` | `src/portfolio/policy.rs` |
-| Portfolio adaptive weighting (per-child indicator) | `PortfolioBuilder::weight_shares(Vec<Box<dyn Indicator<Input=Snapshot<Sym>, Output=Real>>>)`; YAML `weights:` is a bare `SpecTemplate<NodeSpec>` instantiated per-child with `!arg SYM`/`!arg CHILD_NAME`/`!arg CHILD_INDEX`. Book source explicit on each node | `src/portfolio/mod.rs`, `src/spec/portfolio.rs` |
-| Sugar tag rewrites (all lower to `!value` at load) | portfolio `weights:` — `rewrite_weights_sugar` (`!fixed [...]` → `!value [...]`, `!equal_weight` → `!value 1.0`); sizing `!equal_weight <N>` — `rewrite_sugar_tags` → `!value <1/N>` | `src/spec/portfolio.rs`, `src/spec/expr.rs` |
-| Per-child indexing of a list literal in weight expressions | `NodeSpec::Value(ValueLit::List(Vec<Real>))`; `PortfolioSpec::build` runs `rewrite_value_list_by_index` per child | `src/spec/expr.rs`, `src/spec/portfolio.rs` |
-| Aggregate portfolio Book | `Portfolio::book()` (marked via `Book::mark_equity` from `Σ sub.equity()` each `update`; passed as the `portfolio_book` build arg) | `src/portfolio/mod.rs`, `src/indicators/book.rs`, `src/spec/portfolio.rs` |
-| Select which book a book-reading node reads | `source:` field — `!strategy_book` (default) or `!portfolio_book` (aggregate; build error elsewhere). Both build-time source-selectors; resolution via `resolve_book_source` inside `NodeSpec::build` | `src/spec/expr.rs` |
-| Book field leaves (composable) | `!equity`, `!equity_peak`, `!drawdown`, `!return_per_bar`, `!trade_pnl`, `!trade_return` — each takes optional `source:` (default `!strategy_book`) | `src/spec/expr.rs` |
-| Externally-mark a `Book`'s equity | `Book::mark_equity(value)` — updates equity + peak + per-bar return; leaves cash/legs/trade tracking untouched | `src/indicators/book.rs` |
-| Portfolio two-phase rebalance | `Portfolio::builder().rebalance_on(signal)` — cash phase (`PortfolioInner::rebalance_ledgers_to`) then position phase (`LedgerWallet::set_position`) | `src/portfolio/mod.rs::rebalance_now`, `src/portfolio/netting.rs` |
-| Pluggable position-phase policy | `portfolio::rebalance::PositionRebalancer<Sym>` trait; built-ins `Proportional` (default) / `LargestFirst`; install via `PortfolioBuilder::position_rebalancer(...)` | `src/portfolio/rebalance.rs`, `src/portfolio/mod.rs` |
-| Ask whether an account can hold a short | `Wallet::can_short()` — default `true`; `false` on spot (`CoinbaseWallet`, `KrakenWallet`); wrappers delegate (`SleeveWallet` → inner, `LedgerWallet` → the account, cached in `PortfolioInner::account_can_short`). Informs, never enforces | `src/wallet/mod.rs`, `src/live/{coinbase,kraken}.rs`, `src/portfolio/{mod,ledger,netting}.rs` |
-| Ask which providers quote what an account trades | `Wallet::data_sources()` → `&'static [&'static str]`, provider names as a `fugazi get` spec spells them — default `&[]` = **"does not say"**; `["okx"]` on `OkxWallet` (swap instIds, *not* the spot pair), `["coinbase"]` on `CoinbaseWallet`, `["kraken"]` on `KrakenWallet`, empty on `PaperWallet`. Wrappers delegate — `SleeveWallet` → inner, and `LedgerWallet` → the account (cached in `PortfolioInner::account_data_sources`; the `&'static` answer crosses the mutex, which is why this one delegates where `quote_ccy` can't). Introspection, never fetching: a wallet still has no view of the market | `src/wallet/{mod,sleeve}.rs`, `src/live/{okx,coinbase,kraken}.rs`, `src/portfolio/{mod,ledger,netting}.rs` |
-| Ask whether the carry leg actually charged | `Wallet::carry_coverage() -> Option<(wanted, got)>` — bars that wanted a rate vs. bars that got one, so a `!funding` column that is absent or full of holes is reported rather than read as "carry was nil". `PaperWallet::carry_coverage()` is the concrete figure; `RunReport::carry_coverage` carries it out of a run | `src/wallet/{mod,paper}.rs`, `src/backtest.rs` |
-| Ask what currency an account counts in | `Wallet::quote_ccy()` — default `None` = **"does not say"**, not "no currency"; `"USDT"` on `OkxWallet` (static: the swap's margin leg), the configured leg on `CoinbaseWallet`, `None` on `PaperWallet` unless `with_quote_ccy`. `SleeveWallet` delegates; `LedgerWallet` deliberately does **not** (`Option<&str>` can't leave the portfolio mutex — ask the account). Informs, never converts: fugazi does no FX, so a run is sound only if one numeraire holds throughout. Caveat: OKX's `equity` is `totalEq`, OKX's own **USD** valuation, not this | `src/wallet/{mod,paper,sleeve}.rs`, `src/live/{okx,coinbase}.rs`, `src/portfolio/ledger.rs` |
+| Sizing recipes | `indicators::sizing::{equal_weight, vol_target, atr_risk, drawdown_throttle, equity_vol_target, fractional_kelly}` (`*_of` variants take a caller-supplied atom source, for the basket per-leg case) | `src/indicators/sizing.rs` |
+| Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source\|skip\|window\|config\|core)]` + two forwarding lines. **Config is checked, not replayed**; snapshot shared handles via `Position::snapshot` / `Book::snapshot_state` / `PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet/paper.rs` |
+
+### Strategies, wallet, portfolio
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Position / book tracking inside a strategy | `SingleAssetStrategy::{position, book}`; `BasketStrategy::{position(&sym), book}`; `PairsStrategy::book` + `BookField` accessors | `src/indicators/{position,book}.rs`, `src/strategies/` |
+| Cross-sectional rank → `Side` | `strategies::selection::{Selection, TopBottom, Threshold, Quantile, Everything, DynSelection}` (`::new` roots on `Everything`, `::of` re-roots); `BasketStrategy::selection(impl)` takes any impl or closure | `src/strategies/selection.rs`, re-exported from `basket.rs` |
+| Declared basket universe (strict vs. lax) | `strategies::universe::{Universe, Floating, AllOf, AnyOf}`; `BasketStrategy::{all_of, any_of, universe}`; YAML `universe: !all_of \| !any_of` | `src/strategies/universe.rs`, `src/spec/basket.rs` |
+| Composite strategy over N heterogeneous children on one account | `Portfolio::builder().add(name, s).weights(policy).rebalance_on(sig).build()`, then `backtest::run` (any `Wallet`) or `portfolio.run(snaps)`. Reads: `sub_equity(i)` / `sub_position(i, sym)` / `assert_books_balance(&wallet)`. The account must be the portfolio's **alone** | `src/portfolio/{mod,netting}.rs` |
+| Per-child notional book + the handle a child trades | `portfolio::ledger::{Ledger, LedgerWallet}`; `PortfolioInner::{net_and_submit, attribute_fill, book_crosses, book}` | `src/portfolio/{ledger,netting}.rs` |
+| Portfolio weight policies / adaptive weighting | `portfolio::policy::{WeightPolicy, Fixed, EqualWeight, ChildSample}`; `PortfolioBuilder::weight_shares(...)` — YAML `weights:` is one `SpecTemplate<NodeSpec>` instantiated per child with `!arg SYM`/`CHILD_NAME`/`CHILD_INDEX` | `src/portfolio/{mod,policy}.rs`, `src/spec/portfolio.rs` |
+| Portfolio two-phase rebalance, and the position-phase policy | `PortfolioBuilder::{rebalance_on, position_rebalancer}`; `rebalance::PositionRebalancer` with `Proportional` (default) / `LargestFirst` | `src/portfolio/{mod,netting,rebalance}.rs` |
+| Aggregate portfolio `Book`; mark a `Book` from outside | `Portfolio::book()`; `Book::mark_equity(v)` (equity + peak + per-bar return only) | `src/portfolio/mod.rs`, `src/indicators/book.rs` |
+| Close every open position **now**, through the cost pipeline | `Wallet::flatten` (`PaperWallet` overrides it synchronously — its queued moves would never settle) | `src/wallet/{mod,paper}.rs` |
+| Ask an account what it is | `Wallet::{can_short, quote_ccy, data_sources, carry_coverage}` — all **inform, never enforce**, and a default answer means *"does not say"*. `RunReport::carry_coverage` carries the last out of a run. `SleeveWallet` delegates; `LedgerWallet` delegates only what can cross the portfolio mutex | `src/wallet/{mod,paper,sleeve}.rs`, `src/live/*.rs`, `src/portfolio/{mod,ledger,netting}.rs` |
 | Clone a `TradingCosts` bundle | `TradingCosts::clone()` (every model impls `clone_box`) | `src/costs/mod.rs` |
-| Partial `!param` pass | `params::substitute_partial(value, &table)` — used by `imports::resolve` for `!import`'s inline `params:` | `src/spec/params.rs` |
-| Resolve metric name once, reuse | `MetricKey::from_name(name, sample)` + `.resolve(&metrics)` | `src/spec/metrics.rs` |
-| Erase an indicator, **keeping its domain in the type** | `runtime::{erase, Chain<In, Out>, DynIndicator, any, AnyChain}` + the `RealChain`/`BoolChain`/… aliases. A `Chain` *is* an `Indicator`, so it drops straight into any `::new` source slot. **Prefer this** — the payload vocabulary below costs +13.7 ns/sample per expression level, this one +2.5 (`cargo bench -p fugazi --bench erasure`; docs/PERFORMANCE.md *Phase 6*) | `src/runtime/chain.rs` |
-| Erase an indicator so it **describes its own** input/output types at run time | `runtime::{wrap, wrap_sync, unstable_wrap, PayloadIndicator, PayloadValue, AsReal/AsBool/AsCandle/AsAtom/AsStr, chain}` — being retired; the spec layer still uses it. Only reach for it when a builder must hold a heterogeneous collection whose members differ in *input* domain | `src/runtime/mod.rs` |
-| Full-run backtest → `Metrics`; slice a report | `backtest::{evaluate_any, evaluate_windowed_any, run_iteration_any}`, all taking `&EvalContext`; `metrics::report_slice`. **There are no per-shape twins** — one `_any` family covers all five | `src/spec/backtest.rs`, `src/spec/metrics.rs` |
-| Resolved-once run inputs; per-symbol cost bundles; report → metrics | **`EvalContext`** + `.costs_for_one(sym)` / `.costs_for(syms)` / `.reduce(&report)` / `.reduce_windowed(&report, n)` | `src/spec/backtest.rs` |
-| Whole-run report for any spec shape | `backtest::measured_report_any(&StrategySpec, ..)` — `evaluate_any` / `evaluate_windowed_any` are thin `ctx.reduce(...)` wrappers | `src/spec/backtest.rs` |
+
+### Running a spec
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Built-strategy readiness + whole-run report, any shape | `DynSingleStrategy::{stable_bars, warm_up_bars}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/{strategy,backtest}.rs` |
+| Full-run backtest → `Metrics`; slice a report | `backtest::{evaluate_any, evaluate_windowed_any, run_iteration_any}` + `metrics::report_slice`. **No per-shape twins** — one `_any` family covers all five | `src/spec/{backtest,metrics}.rs` |
+| Resolved-once run inputs; per-symbol costs; report → metrics | `EvalContext` + `.costs_for_one(sym)` / `.costs_for(syms)` / `.reduce(&report)` / `.reduce_windowed(&report, n)` | `src/spec/backtest.rs` |
+| Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::{run_iteration_resumable, flatten_open_positions}`. See ARCHITECTURE *Run resuming* | `src/spec/{runnable,backtest}.rs`, `src/backtest.rs` |
+| Run a spec against a **caller-supplied** wallet (primed paper, or a live venue) | `RunnableStrategyExt::drive_resumable_with`; shared body `runnable::drive_over`. Python: `StrategySpec.run` / `.run_resumable` via `over_any_wallet!` | `src/spec/runnable.rs`, `python/src/{strategy,spec}.rs` |
+| Warm indicators over a pause gap without trading | `backtest::warm_up`; `RunnableStrategyExt::warm_up_over`; Python `StrategySpec.warm_up` → state JSON, no report | `src/backtest.rs`, `src/spec/runnable.rs` |
 | Returns / trades / drawdown segments from a report | `metrics::{per_bar_returns, reconstruct_trades, drawdown_segments}` | `src/metrics.rs` |
-| Seeded resampling (IID / moving-block / stationary bootstrap) | `montecarlo::{ResampleScheme, resample_indices, resample_slice, rng_from_seed, percentile, std_dev}` — pure, `rand`-only, behind `montecarlo` | `src/montecarlo.rs` |
-| Monte Carlo CIs + empirical-null p-values over a run | `spec::montecarlo::{McConfig, run_montecarlo, McOutcome}`; runs in the backtest layer via `EvalContext::mc` → `attach_montecarlo`; CLI `run::emit_montecarlo` is IO-only | `src/spec/montecarlo.rs`, `src/spec/backtest.rs`, `src/cli/run.rs` |
+| Resolve a metric name once, reuse | `MetricKey::from_name(name, sample)` + `.resolve(&metrics)` | `src/spec/metrics.rs` |
+| Seeded resampling; MC CIs + empirical-null p-values | `montecarlo::{ResampleScheme, resample_indices, resample_slice, rng_from_seed, percentile, std_dev}`; `spec::montecarlo::{McConfig, run_montecarlo, McOutcome}` via `EvalContext::mc` | `src/montecarlo.rs`, `src/spec/montecarlo.rs` |
+
+### Spec loading and the grammar
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Load whole strategy doc | `spec::load_document(text, &params, base, root, label, kind)` — `load_value` is the same pipeline without the `root::apply_default` splice; `*StrategySpec::from_text_with_params_in` | `src/spec/mod.rs` |
+| Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
+| Load-time `!param` / `!import` substitution | `params::substitute`; `imports::resolve(value, base, root)` — `base` is `input::Source::base_dir()`, the importing file's directory; `root` is the confinement boundary (`--import-root`) it was decoupled from. Partial pass: `params::substitute_partial` | `src/spec/{params,imports,input}.rs` |
+| Build-time `!arg` substitution; defer a subtree until args are ready | `args::substitute(value, &args)`; `SpecTemplate<T>` + `.build(&args)`. Preprocessed a tree first? `SpecTemplate::checked`, **not** `from_tree` (which skips the probe) | `src/spec/{args,template}.rs` |
+| Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` / each `*Spec::try_build` → `Err(String)` with the `!tag > ` breadcrumb; `spec::backtest::{build_error, validated}` | `src/spec/{expr,backtest}.rs` |
+| Static type check of an expression tree (`check` only) | `typecheck::{output_type, check_immediate}` — a `None` output type means *skip*, never *invalid* | `src/spec/typecheck.rs` |
+| What a tag requires a given slot to produce, without a tree | `typecheck::{slot_demand, slot_demands}`, surfaced as `GrammarField::node_output`. Backed by per-tag prototypes — **don't hand-write a second demand table** | `src/spec/{typecheck,grammar}.rs` |
+| Every YAML spelling a tag accepts, not just the canonical one | `GrammarTag::forms` (canonical first) + `GrammarForm::{shape, fields, payload, scope}`. An alternate the variant can't express is **declared** via `#[grammar(alt = …)]`, never a second table | `src/spec/grammar.rs`, `fugazi-derive/src/grammar.rs` |
+| A document's evaluation root, and what it names without building | `spec::root::RootSpec` — `node()` (build) · `tree()` (analyse) · `named_symbols()` / `sole_symbol(shape)` / `declared_freq()` / `as_pick()` · `for_symbol` / `for_series` | `src/spec/root.rs` |
+| Blessed series of an overlay group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::{basket,multi_asset}::leg_root(sym)` — all three return a `RootSpec` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
+| Which series a document **reads but does not trade** | `spec::reads::{picked_symbols, picked_symbols_of}` — a structural walk of the loaded document; joined in by `cli::run::{read_only_series, attach_read_series}` (**left** join), threaded as `RunOptions::reads` | `src/spec/reads.rs`, `src/cli/{run,optimize}.rs` |
+| A document's free-form `meta:` | `spec::meta::Meta` on every document type; `StrategySpec::meta()` / `StrategyRef::meta()` / `CostConfig::meta()`. **Don't relax `deny_unknown_fields` instead** — the typo guard is the point | `src/spec/meta.rs` |
+| Constant leaf: number or string | `!value 70` / `!value bull` | `src/spec/expr.rs` |
+| Book field leaves, and which book they read | `!equity` / `!equity_peak` / `!drawdown` / `!return_per_bar` / `!trade_pnl` / `!trade_return`, each with optional `source:` — `!strategy_book` (default) or `!portfolio_book`; resolved by `resolve_book_source` | `src/spec/expr.rs` |
+| Sugar tag rewrites (all lower to `!value` at load) | `rewrite_weights_sugar` (`!fixed` / `!equal_weight`); `rewrite_sugar_tags` (`!equal_weight <N>` → `!value <1/N>`); `rewrite_value_list_by_index` per child | `src/spec/{portfolio,expr}.rs` |
+| Portfolio YAML surface | `PortfolioSpec` (`children`, `weights`, `rebalance_on`) + `PortfolioChildSpec` / `PortfolioChildStrategy`; runner `run::run_portfolio` | `src/spec/portfolio.rs`, `src/cli/{run,optimize,main}.rs` |
+| Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}`; the fallible build is `build_overlay(spec, schema, root)`. Python `ta.compute_overlays`, CLI `-x` | `src/spec/overlay.rs`, `src/cli/overlay.rs`, `python/src/constructors.rs` |
+
+### CLI, data and providers
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Interval token / `Frequency` / time-column ms; auto-detect cadence | `calendar::{parse_interval, parse_time_to_millis, detect_frequency_from_atoms}`; `Frequency::from_str`; `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
+| Bracket-split `SYMBOL[FREQ]:` / full scope, and its `\:` escape | `calendar::{parse_scope_parts, parse_scope, unescape_symbol, escape_symbol, is_escaped, looks_like_body}` — only **scope** grammars need the escape; `get` spec heads take the symbol verbatim | `src/spec/calendar.rs`, `src/cli/overlay.rs`, `src/spec/costs/spec.rs` |
+| Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...)` | `src/spec/calendar.rs` |
+| Which cadence a run targets, and whether the input agrees | `cli::cadence::{Census, Series, Finding, apply, warn}` → `Resolution`, called from `main::load_frame` right after `DataFrame::from_series`. **Ambiguity is refused, disagreement is warned.** Precedence: `-f` → the document's `root:` → the `freq` column → detection | `src/cli/cadence.rs` |
+| Two cadences of one symbol in one `--series` frame | `DataFrame` keys rows by **`(symbol, freq, IndexKey)`** (`index` column ordering numerically, else `time` as an opaque label); `frequencies_of` / `cadence_groups` / `retain_cadence`. The `freq` cell is verbatim, never case-folded (`1M` vs `1m`) | `src/cli/data.rs` |
+| Join an overlay CSV onto a price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
+| How much of a multi-symbol universe ever shares a snapshot | `cli::overlap::{measure, measure_universe, warn_if_fragmented}` → `Overlap<K>` (`is_fragmented()` / `summary()`). Measures **observed co-occurrence**, never per-symbol stamp signatures. Joining on the trading *date* is rejected permanently — it manufactures cross-timezone lookahead (see TODO) | `src/cli/overlap.rs` |
+| CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
+| Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
+| Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `BinanceVision` (spot *and* USDⓈ-M futures), `Okx`, `Kraken`, `Coinbase`, `Yahoo`, `CoinGecko`; the CLI adds `file:`. `schema()` = the fixed overlay schema when known before the fetch | `src/sources/mod.rs`, `src/cli/csv_source.rs` |
+| Provider schemas, and the CLI's one provider registry | `*::*_schema()` (`OnceLock`); `cli::get::KNOWN_PROVIDERS` | `src/sources/*.rs`, `src/cli/get.rs` |
+| Shared overlay schema of an atom stream; bucket an irregular stream | `sources::schema_of(&atoms)`; `sources::floor_to_bucket(ms, interval)` — Monday weeks, 1st-of-month months, epoch modulo otherwise | `src/sources/mod.rs` |
+
+### Type erasure and Python
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Erase an indicator, **keeping its domain in the type** | `runtime::{erase, Chain<In, Out>, DynIndicator, any, AnyChain}` + the `RealChain`/`BoolChain`/… aliases. A `Chain` *is* an `Indicator`. **Prefer this** — +2.5 ns/sample per level against the payload vocabulary's +13.7 (PERFORMANCE *Phase 6*) | `src/runtime/chain.rs` |
+| Erase an indicator so it **describes its own** types at run time | `runtime::{wrap, wrap_sync, unstable_wrap, PayloadIndicator, PayloadValue, AsReal/AsBool/AsCandle/AsAtom/AsStr, chain, try_chain}` — being retired; the spec layer still uses it. Only for a heterogeneous collection differing in *input* domain | `src/runtime/mod.rs` |
 | Python: read an overlay column, optionally from another series | `get(schema, key, source=None)` / `get_real` / `get_bool` / `get_str` — `source=pick(sym)` re-roots | `python/src/constructors.rs` |
-| Python: domain-preserving wrap / combine / bool build | `map_source!`, `combine_sources!`/`sources_to_signal!`/`combine_signals!`/`combine_multi!`, `source_to_signal!` | `python/src/macros.rs` (the per-shape `src_period!`/`bar_period!` builders are in `constructors.rs`) |
-| Python: register metric on `fugazi.metrics` | Add to `reg!(...)` in `register_metrics_module` | `python/src/metrics.rs` |
+| Python: domain-preserving wrap / combine / bool build | `map_source!`, `combine_sources!` / `sources_to_signal!` / `combine_signals!` / `combine_multi!`, `source_to_signal!` (the per-shape `src_period!` / `bar_period!` builders are in `constructors.rs`) | `python/src/macros.rs` |
+| Python: register a metric on `fugazi.metrics` | Add to `reg!(...)` in `register_metrics_module` | `python/src/metrics.rs` |
+
+### Tests
+
+| Concern | Reuse | Location |
+|---|---|---|
+| Integration-test harness (bars, snapshot streams, temp paths, running the binary, a `wiremock` server, the live-venue conformance suite) | `mod common;` + `common::{bars,cli,net,fixtures,live}` — each `tests/*.rs` is its own crate, so this is *included*, not imported. See [docs/TESTING.md](docs/TESTING.md) | `tests/common/` |

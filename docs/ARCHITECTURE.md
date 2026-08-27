@@ -129,7 +129,8 @@ only for synthetic atoms. Daily+ bars at 00:00 UTC. YAML: bare `!year`/…/`!tim
 every entry in a bar's snapshot shares `atom.time`, so picking any one is stable,
 and the sole-atom-panic `Pick` behavior would break multi-symbol contexts. Price
 leaves (`!close`/`!high`/…) resolve through the **blessed root** instead (see
-*Blessed series* in CLAUDE.md) because they *do* depend on which asset. An explicit
+[Blessed series](#blessed-series--the-root-a-source-omitted-leaf-reads-srcspecrootrs))
+because they *do* depend on which asset. An explicit
 `source: !pick { symbol: ... }` is honored on any calendar accessor.
 
 ### `Unstable<S>` (`indicators/unstable.rs`)
@@ -1217,14 +1218,16 @@ styling. `src/cli/` is the binary crate on top, adding clap arg parsing, `--seri
 CSV loading, `fugazi get`, progress banners, and CSV/YAML output writers.
 
 **In `src/spec/`** (library, `spec` feature): `mod.rs`, `expr.rs`, `strategy.rs`,
-`pairs.rs`, `basket.rs`, `multi_asset.rs`, `portfolio.rs`, `preset.rs`, `trailing.rs`,
-`template.rs`, `imports.rs`, `params.rs`, `undefined.rs`, `args.rs`, `convert.rs`,
-`input.rs`, `dyn_indicator.rs`, `calendar.rs`, `costs/`, `backtest.rs`, `metrics.rs`,
-`optimize.rs`, `pool.rs`, `runnable.rs`, `overlay.rs`, `montecarlo.rs`, `typecheck.rs`.
+`pairs.rs`, `basket.rs`, `multi_asset.rs`, `portfolio.rs`, `preset.rs`, `shape.rs`,
+`trailing.rs`, `template.rs`, `imports.rs`, `params.rs`, `param_type.rs`,
+`undefined.rs`, `args.rs`, `convert.rs`, `input.rs`, `root.rs`, `reads.rs`, `meta.rs`,
+`grammar.rs`, `dyn_indicator.rs`, `calendar.rs`, `costs/`, `backtest.rs`, `metrics.rs`,
+`optimize.rs`, `panel.rs`, `pool.rs`, `runnable.rs`, `overlay.rs`, `montecarlo.rs`,
+`typecheck.rs`.
 
 **In `src/cli/`** (binary): `main.rs`, `run.rs`, `optimize.rs` (thin UI wrapper on the
-kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
-`completions.rs`, `style.rs`, `glob.rs`.
+kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `cadence.rs`, `overlap.rs`,
+`daterange.rs`, `list.rs`, `grammar.rs`, `completions.rs`, `style.rs`, `glob.rs`.
 
 ### CLI layout by concern
 
@@ -1245,6 +1248,77 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   **One pipeline**: `run_candles` handles every provider, because `Atom::candle` is
   optional and the writer omits the OHLCV block when no row has a bar. `get --params`
   resolves `!param` inside `-x/--overlay`.
+
+### Blessed series — the root a `source:`-omitted leaf reads (`src/spec/root.rs`)
+
+Two stacked defaults sit on any atom leaf; don't conflate them.
+
+1. **Per-tag** (`expr.rs`: `default_source` / `default_bar_source` / `default_high` /
+   `default_low`) — which *sub-expression* a wrapper defaults to. `!ema`/`!sma`/`!rsi`
+   → `!close`, `!atr`/`!obv`/`!adx` → `!current`, `!donchian` → `!high`/`!low`.
+2. **Blessed series** — once you bottom out at a leaf (`!close`, `!high`, `!current`,
+   `!get`, …), which *asset* it projects out of the bar's `Snapshot`.
+
+The blessed series is an explicit `root: Root<'_>` **parameter** on
+`NodeSpec::try_build`, wrapping an `Option<&RootSpec>` and consumed by `root_source` /
+`build_pick`. A root that is *exactly* a selector (`RootSpec::as_pick`) installs
+`Pick::rooted(sel)` directly; a richer one is built as the expression it is, with
+`Root::sole()` as **its** root — which is what terminates the recursion. `None` →
+`Pick::new()` (sole-atom, panics on 2+). The ~142 match arms never mention it: they fan
+out through the `atom_src` / `atom_src_any` closures.
+
+**The `as_pick` fast path is correctness, not just cost.** Only `Pick::rooted` has the
+*match, else sole-atom unpack* fallback; `!pick`'s own build arm yields the strict
+`Pick::matching`. Any tag that drives a sub-chain over **untagged** synthesized bars —
+`!resample` feeding its `inner:`, the `Vec<Candle>` / `Vec<Atom>` drivers — reads `None`
+on every bar without it, and reports a silent zero-fill backtest.
+
+**Who blesses what:**
+
+| Context | root |
+|---|---|
+| `SingleStrategySpec::build` | `Some(&self.root)` — the document's `root:`, or the `!param SYMBOL`/`FREQ` default when it omitted one |
+| `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(RootSpec::for_symbol(sym))` via `leg_root` |
+| overlay column, per `(symbol, freq)` series | `Some(group key)` via `cli::overlay::group_root` |
+| `PortfolioSpec` `weights:`, single-asset child | `Some(child.root())` |
+| `PairsStrategySpec` | `None` — two legs, neither privileged |
+| portfolio/basket/multi `rebalance_on:`, portfolio `weights:` on non-single children | `None` — the gate spans everything |
+| `!sharpe` & co.'s `strategy:` subtree | `None` — the embedded strategy blesses itself |
+
+**`root:` is optional on the single-asset shape**, and its default is spliced into the
+*untyped* tree by `spec::root::apply_default` — `!pick { symbol: !param SYMBOL, freq:
+!param FREQ }`, each placeholder carrying `default: null` so an unset one **drops its
+key** (`RootSpec::desugar` retains non-nulls) rather than erroring. Two consequences:
+the splice must happen **before** `params::substitute`, so it lives in the loaders that
+already know the shape (`spec::load_document`, `cli::main`'s `check` arm,
+`cli::optimize`'s `base_value`, Python's `load_loaded_spec`) and never in `load_value`;
+and a `root:`-less document is structurally a `multi:` one, so Python's
+`detect_kind("auto")` reads it as `multi`. Neither param set → `RootSpec::sole()`
+(`!pick {}`), which reads the right bars but names no traded symbol — `cli::main`'s
+`seed_sole_symbol` fills `SYMBOL` from a one-symbol `--series` frame, and `check` reports
+the pending resolution instead of building. The shape rule lives **only** in
+`apply_default`, which takes a `StrategyKind`; every caller passes the kind it already
+holds. The published default is `root::default_tree()`, surfaced on the document JSON
+schema as the `single` shape's `root` `default` (pinned by `tests/spec_json_schema.rs`).
+
+Consequences worth stating outright:
+
+- **`!arg SYM` is optional, not required** in basket/multi templates. `score: !rsi
+  { period: 14 }` and the fully-spelled `!pick { symbol: !arg SYM }` build the same
+  chain; the explicit form is the only way to read a *different* symbol per leg.
+- **Blessing scopes the *default*, never the reachable set.** Any shape may `!pick` any
+  symbol in the input, traded or not (a regime gate on BTC inside an ETH document). The
+  runners carry `traded ∪ !pick`-named and nothing else; a named symbol absent from the
+  input is a hard error, since `Pick::matching` would otherwise read `None` every bar and
+  the run would report a plausible zero-fill backtest. See `spec::reads`.
+- **`pick_any_root` ignores the root** — calendar leaves read only `atom.time`, which
+  every entry shares.
+- **`Pick::rooted` falls back through `sole_atom_or_none`, not `sole_atom_or_panic`.**
+  In a rooted context a 2+ snapshot is ordinary (the blessed leg is absent this bar), so
+  it reads `None`; the panicking spelling would abort on every basket with a listing gap.
+  The three `sole_atom_or_*` spellings differ **only** in how 2+ is answered (panic /
+  `None` / `Err(count)`), and there is deliberately no bare `sole_atom` left to bind by
+  accident.
 
 ### `src/spec/` — YAML mirror of the composition API
 
