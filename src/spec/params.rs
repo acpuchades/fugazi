@@ -497,6 +497,52 @@ mod tests {
         );
     }
 
+    /// A placeholder standing in for a whole *expression* is the one position
+    /// serde never asks a type of — the node parse is hand-rolled. It used to
+    /// become a `!value 0.0` constant, so a Bool slot rejected it on type and a
+    /// Real slot accepted it while recording nothing.
+    #[test]
+    fn check_validates_around_a_param_standing_for_an_expression() {
+        let _ = crate::spec::undefined::take_observations();
+        // `enter:` demands a Bool; the hole must not claim to be a Real.
+        let (_spec, holes) = check("root: BTC\nlong: { enter: !param SIGNAL }", &[]).unwrap();
+        assert_eq!(holes, 1);
+        // And the report has to know the placeholder exists at all.
+        let seen = crate::spec::undefined::take_observations();
+        assert_eq!(
+            seen,
+            vec![(
+                crate::spec::undefined::UndefinedOrigin::Param,
+                "SIGNAL".to_string(),
+                vec![crate::spec::undefined::RequiredType::Expr],
+            )]
+        );
+    }
+
+    /// The same for a `!value` literal slot (`!match`'s `when:`), the other
+    /// hand-rolled parse — which reported the internal sentinel key at the user.
+    #[test]
+    fn check_validates_around_a_param_in_a_literal_slot() {
+        let _ = crate::spec::undefined::take_observations();
+        let yaml = "\
+root: BTC
+long:
+  enter: !gt
+    lhs: !match
+      on: !close
+      cases:
+        - when: !param LEVEL
+          value: !value 1
+      default: !value 0
+    rhs: !value 0
+";
+        let (_spec, holes) = check(yaml, &[]).unwrap();
+        assert_eq!(holes, 1);
+        let seen = crate::spec::undefined::take_observations();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].1, "LEVEL");
+    }
+
     #[test]
     fn check_still_prefers_a_supplied_value_or_default() {
         let (spec, holes) = check(

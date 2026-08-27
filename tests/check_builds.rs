@@ -93,6 +93,89 @@ sizing: !value 1.0
     assert!(out.stdout.contains("ok"), "{}", out.stdout);
 }
 
+/// A `!match` pattern is a `!value` literal, not a node — the other hand-rolled
+/// parse, which used to leak the internal hole sentinel into its error message.
+const MATCH_PARAM_PATTERN: &str = "\
+long:
+  enter: !gt
+    lhs: !match
+      on: !close
+      cases:
+        - when: !param LEVEL
+          value: !value 1
+      default: !value 0
+    rhs: !value 0
+";
+
+/// A `!param` standing in for a *whole expression* is a missing value like any
+/// other — `check` must validate around it, name it, and leave the demand for
+/// `run`.
+///
+/// Regression: an expression-slot hole used to parse as a `!value 0.0`
+/// constant, which claims a type the placeholder has not chosen yet. In a Bool
+/// slot the type check then rejected the document — "`!value` produces Real,
+/// but a Bool-valued expression is required here" — a document error for a
+/// document whose only gap was a `--params` value. In a Real slot it parsed,
+/// but the hole was recorded nowhere (this parse is hand-rolled, so nothing
+/// answered a `deserialize_*` call at it), so `check` reported no placeholder
+/// at all and the run failed on a value the report never asked for.
+#[test]
+fn check_validates_around_a_param_standing_for_a_whole_expression() {
+    for (name, doc, param) in [
+        // Bool slot: `enter:` demands a signal.
+        ("bool", "long:\n  enter: !param SIGNAL\n", "SIGNAL"),
+        // Real slot: parses either way, but has to be *reported*.
+        (
+            "real",
+            "long:\n  enter: !gt { lhs: !close, rhs: !param LEVEL }\n",
+            "LEVEL",
+        ),
+        ("literal", MATCH_PARAM_PATTERN, "LEVEL"),
+    ] {
+        let (_, spec) = scratch_file(
+            &format!("expr_param_{name}.yml"),
+            &format!("root: BTCUSDT\n{doc}"),
+        );
+        let out = Cmd::new("check").arg("strategy").arg(&spec).ok();
+        assert!(
+            out.stdout.contains("1 unset placeholder"),
+            "{name}: the placeholder must be counted: {}",
+            out.stdout
+        );
+        assert!(
+            out.stdout
+                .contains(&format!("--params {param}=<expression>")),
+            "{name}: and named, with the shape it needs: {}",
+            out.stdout
+        );
+    }
+}
+
+/// The same document *run* still errors: `check` validates around a hole, but
+/// nothing runs on one.
+#[test]
+fn an_expression_param_still_fails_a_run() {
+    let (_s, series) = scratch_file(
+        "expr_param.csv",
+        "time,symbol,open,high,low,close,volume\n         2024-01-01T00:00:00Z,BTCUSDT,100,101,99,100,1000\n         2024-01-02T00:00:00Z,BTCUSDT,100,102,99,101,1000\n",
+    );
+    let (_d, doc) = scratch_file(
+        "expr_param_run.yml",
+        "root: BTCUSDT\nlong:\n  enter: !param SIGNAL\n",
+    );
+    let out = Cmd::new("run")
+        .arg(&doc)
+        .series(&series)
+        .args(&["--crypto", "--quiet"])
+        .output_dir("check_builds_expr_param")
+        .fails();
+    assert!(
+        out.stderr.contains("parameter `SIGNAL` is not set"),
+        "{}",
+        out.stderr
+    );
+}
+
 /// `!get` resolves against an overlay schema that only real `--series` data
 /// carries. `check` has none, so building would reject every legitimate
 /// overlay column as unknown.

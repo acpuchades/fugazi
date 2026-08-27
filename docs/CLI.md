@@ -448,6 +448,25 @@ The `<…>` is the *shape of the value that goes there* — inferred from the fi
 the placeholder lands in, since a `period` wants a number and a `symbol` wants a
 string.
 
+A placeholder standing in for a **whole expression** (`enter: !param SIGNAL`, or
+a `!match` pattern) has no field type to infer — nothing demanded one — and
+reports `<expression>`:
+
+```
+params  (defaults) (1 unset placeholder)
+needs --params SIGNAL=<expression>
+```
+
+Anything that parses as a spec node satisfies it, a bare scalar included, so it
+is *not* a second type for the contradiction rule above: a name used as a
+`period` and as an `rhs:` is one number, not a conflict. `check` also skips its
+build for such a document — there is no node to build from until the value
+arrives — and `run` still refuses it:
+
+```
+error: parameter `SIGNAL` is not set (pass `--params SIGNAL=…` or add a `default`)
+```
+
 ##### `!undefined` — a deliberate gap
 
 `!undefined` is the same mechanism made explicit: write it anywhere a value goes

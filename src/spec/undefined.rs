@@ -143,6 +143,14 @@ pub enum RequiredType {
     Str,
     List,
     Table,
+    /// A whole *expression* — the hole stands in for a spec node (or a `!value`
+    /// literal), which is parsed by a hand-rolled `TryFrom` rather than by
+    /// serde, so no `deserialize_*` call named a type here.
+    ///
+    /// Any scalar a user can pass is a valid expression (a bare `20` is a
+    /// constant source), so this one never *contradicts* another observation of
+    /// the same name — see `reject_contradictory_params`.
+    Expr,
 }
 
 impl RequiredType {
@@ -153,6 +161,7 @@ impl RequiredType {
             RequiredType::Str => "string",
             RequiredType::List => "list",
             RequiredType::Table => "table",
+            RequiredType::Expr => "expression",
         }
     }
 }
@@ -163,6 +172,29 @@ thread_local! {
     /// [`take_observations`].
     static PARAM_USES: std::cell::RefCell<Vec<(UndefinedOrigin, String, RequiredType)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The placeholder name of a hole node, whatever its origin — the `!arg` one
+/// included, which the *report* leaves out (a driver supplies it) but which a parse
+/// still has to stand in for.
+pub fn hole_name(value: &Yaml) -> Option<&str> {
+    undefined_name(value)
+}
+
+/// Record a [`RequiredType`] for a hole a **hand-rolled** parse swallowed.
+///
+/// The derived path observes as it answers `deserialize_*`; the
+/// `TryFrom<serde_norway::Value>` parses ([`NodeSpec`] and [`ValueLit`]) are
+/// handed a raw tree with no type demand to answer, so they have to say so
+/// themselves — the same gap [`observe_json`] fills for [`RootSpec`], and for
+/// the same reason: a hole nobody observes is a `--params` value the report
+/// never asks for.
+///
+/// [`NodeSpec`]: crate::spec::NodeSpec
+/// [`ValueLit`]: crate::spec::expr::ValueLit
+/// [`RootSpec`]: crate::spec::root::RootSpec
+pub fn observe_hole(value: &Yaml, ty: RequiredType) {
+    observe(value, ty);
 }
 
 fn observe(value: &Yaml, ty: RequiredType) {

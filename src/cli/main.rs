@@ -1116,6 +1116,15 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let holes = observations
         .iter()
         .any(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined);
+    // Second "nothing to build from" case: a placeholder standing in for a
+    // whole *expression* (or a `!value` literal). A scalar hole answers its
+    // field with a typed zero and the build proceeds on it; an expression hole
+    // has no node to stand in for — picking one would either invent a type the
+    // value has not chosen yet, or fail the build on a document whose only gap
+    // is a `--params` value.
+    let expr_holes = observations
+        .iter()
+        .any(|(_, _, types)| types.contains(&spec::undefined::RequiredType::Expr));
     // Third "needs data" case, alongside a hole and an overlay read: a
     // single-asset root left as the sole-atom selector. `try_build` demands a
     // symbol to route orders through, and the `--series` frame is what supplies
@@ -1129,7 +1138,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         spec::StrategySpec::Single(s) => is_sole_atom_root(s.root()) || s.root().has_hole(),
         _ => false,
     };
-    if !holes && !reads_overlay && !root_from_data {
+    if !holes && !expr_holes && !reads_overlay && !root_from_data {
         let schema = Arc::new(fugazi::Schema::default());
         parsed
             .try_build(DEFAULT_CHECK_CASH, &schema, None)
@@ -1796,7 +1805,20 @@ fn param_types_label(
         observations
             .iter()
             .map(|(origin, name, types)| {
-                let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
+                // `expression` is what a hole says when nothing demanded a type
+                // of it. Once another position does, that is the shape to
+                // print: `<number>` tells the user what to pass; the
+                // `<number|expression>` it would otherwise read as does not.
+                let known: Vec<&str> = types
+                    .iter()
+                    .filter(|t| **t != spec::undefined::RequiredType::Expr)
+                    .map(|t| t.label())
+                    .collect();
+                let types: Vec<&str> = if known.is_empty() {
+                    types.iter().map(|t| t.label()).collect()
+                } else {
+                    known
+                };
                 let types = types.join("|");
                 match origin {
                     // Spelled as the flag the user would actually type, so the
@@ -1830,11 +1852,21 @@ fn reject_contradictory_params(
         .iter()
         // Only named placeholders can contradict: an `!undefined` is keyed by
         // its own document path, so it is one position and cannot be two types.
-        .filter(|(origin, _, types)| *origin == UndefinedOrigin::Param && types.len() > 1)
-        .map(|(_, name, types)| {
-            let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
-            format!("`{name}` is used as {}", types.join(" and as "))
+        // `Expr` is not a *demand*: it says the placeholder stands where a
+        // whole expression goes, and every scalar a user can pass is one. So it
+        // agrees with any other observation of the same name — `FAST` used as a
+        // period and as `rhs:` is one number, not a contradiction — and only
+        // the typed observations are counted here.
+        .map(|(origin, name, types)| {
+            let types: Vec<&str> = types
+                .iter()
+                .filter(|t| **t != spec::undefined::RequiredType::Expr)
+                .map(|t| t.label())
+                .collect();
+            (origin, name, types)
         })
+        .filter(|(origin, _, types)| **origin == UndefinedOrigin::Param && types.len() > 1)
+        .map(|(_, name, types)| format!("`{name}` is used as {}", types.join(" and as ")))
         .collect();
     if bad.is_empty() {
         return Ok(());

@@ -108,6 +108,13 @@ pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
         // reaches it; outside a portfolio weight template it is invalid, which
         // `build` reports. Nothing useful to say about its type here.
         Value(ValueLit::List(_)) => None,
+        // A `check`-mode hole: a placeholder nobody has supplied a value for.
+        // Undecidable *by construction* — the value decides the type — so it is
+        // admitted in every slot. Claiming one (it used to parse as a Real
+        // constant) rejected `enter: !param SIGNAL` for producing a Real where
+        // a Bool is required, which is a complaint about a missing value
+        // dressed up as a document error.
+        Value(ValueLit::Hole(_)) => None,
         // Build-time source selectors, not values. `build` panics if one is
         // used as an expression; that is its diagnostic to give, not ours.
         StrategyBook | PortfolioBook => None,

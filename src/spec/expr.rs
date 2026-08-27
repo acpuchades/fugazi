@@ -659,12 +659,34 @@ pub enum ValueLit {
     /// in the build args; if it isn't, [`NodeSpec::build`] panics because
     /// a list literal has no defined output outside per-child context.
     List(Vec<Real>),
+    /// A `check`-mode **hole** standing in for a literal nobody supplied — an
+    /// unset required `!param`, an unbound `!arg`, or an `!undefined`. Carries
+    /// the placeholder's name for the report only.
+    ///
+    /// Its [`output_type`](crate::spec::typecheck::output_type) is `None`, so
+    /// it is admitted wherever a Bool, Real or Str source is demanded: a hole
+    /// is a value nobody has chosen yet, and picking a type for it would fail
+    /// documents whose only gap is a `--params` value. Only
+    /// [`substitute_for_check`](crate::spec::params::substitute_for_check) and
+    /// its `!arg` twin ever produce the sentinel this parses from, so a `run`
+    /// or `optimize` parse cannot construct one.
+    Hole(String),
 }
 
 impl TryFrom<serde_norway::Value> for ValueLit {
     type Error = String;
 
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        // A hole, before anything else: this parse is hand-rolled, so serde
+        // never asked the hole for a type and it arrives as the raw sentinel
+        // mapping. Reporting it as a malformed `!value` would name the internal
+        // sentinel key at the user; standing in for it is what `check` does
+        // everywhere else. See `crate::spec::undefined`.
+        if let Some(name) = crate::spec::undefined::hole_name(&v) {
+            let name = name.to_string();
+            crate::spec::undefined::observe_hole(&v, crate::spec::undefined::RequiredType::Expr);
+            return Ok(ValueLit::Hole(name));
+        }
         match v {
             serde_norway::Value::Number(n) => n
                 .as_f64()
@@ -2100,7 +2122,7 @@ pub enum NodeSpec {
     /// A bucket closes on the first candle that takes it *at or past* the
     /// threshold and the overshoot is not carried, so precision is bounded by
     /// how fine the base candles are.
-    #[grammar(kind = "operator")]
+    #[grammar(kind = "operator", since = "0.78")]
     VolumeBars {
         /// Traded quantity that fills one bar.
         threshold: Real,
@@ -2121,7 +2143,7 @@ pub enum NodeSpec {
     /// A bucket closes on the first candle that takes it *at or past* the
     /// threshold and the overshoot is not carried, so precision is bounded by
     /// how fine the base candles are.
-    #[grammar(kind = "operator")]
+    #[grammar(kind = "operator", since = "0.78")]
     DollarBars {
         /// Traded notional that fills one bar.
         threshold: Real,
@@ -3945,10 +3967,19 @@ impl NodeSpec {
 
         // A `check`-mode hole standing in for a whole expression (a `!param`
         // that resolves to an entire source). Only present under `check`, so
-        // this never matches in a real run. A constant `0.0` is a valid
-        // Real-typed source, enough for the surrounding shape to validate.
-        if crate::spec::undefined::is_undefined(&v) {
-            return Ok(NodeSpec::Value(ValueLit::Real(0.0)));
+        // this never matches in a real run.
+        //
+        // It becomes `ValueLit::Hole`, not a constant: a typed constant claims
+        // an output type the placeholder does not have, and `typecheck` would
+        // then reject `enter: !param SIGNAL` for producing a Real where a Bool
+        // is required — a document error for a document whose only gap is a
+        // value nobody passed. Observing it here is the other half: this parse
+        // is hand-rolled, so nothing else records that the placeholder needs a
+        // value at all.
+        if let Some(name) = crate::spec::undefined::hole_name(&v) {
+            let name = name.to_string();
+            crate::spec::undefined::observe_hole(&v, crate::spec::undefined::RequiredType::Expr);
+            return Ok(NodeSpec::Value(ValueLit::Hole(name)));
         }
 
         // Unit-variant tags: their content stays as `Value::Null` because
@@ -4395,11 +4426,25 @@ fn build_match(
         );
     }
 
+    // A `check` hole has no pattern to dispatch on, and no type to make the
+    // other cases agree with. `check` skips the build of a document holding
+    // one, so this is the belt to that braces — reported, never a panic.
+    if let Some((i, name)) = cases.iter().enumerate().find_map(|(i, c)| match &c.when {
+        ValueLit::Hole(name) => Some((i, name)),
+        _ => None,
+    }) {
+        return Err(format!(
+            "case {i} `when:` is the placeholder `{name}`, which has no value \
+             yet — pass `--params {name}=…`"
+        ));
+    }
+
     // Sniff the pattern type once — every case must agree, else the
     // library-level `Match<S, T, K>` can't be given a single `K`.
     let is_str = match &cases[0].when {
         ValueLit::Str(_) => true,
         ValueLit::Real(_) => false,
+        ValueLit::Hole(_) => unreachable!("rejected above"),
         ValueLit::Bool(_) => {
             return Err("case 0 `when:` is a bool — a match dispatches on a number \
                         or a string, not a boolean"
@@ -4734,6 +4779,13 @@ impl NodeSpec {
                 any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(*b))
             }
             Value(ValueLit::Str(s)) => any(ValueStr::<Snapshot<Symbol>>::new(s.as_str())),
+            Value(ValueLit::Hole(name)) => {
+                return Err(format!(
+                    "`{name}` has no value — a placeholder is something \
+                     `fugazi check` validates *around*, so nothing builds from \
+                     it. Pass `--params {name}=…`."
+                ));
+            }
             Value(ValueLit::List(_)) => {
                 return Err("a list literal is only meaningful in a \
                             portfolio weight-share template — the per-child \
