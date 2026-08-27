@@ -1626,7 +1626,58 @@ lambda = interaction variance / (interaction variance + noise)
 At `lambda = 0` the members share an optimum and every member picks the pooled
 winner; at `lambda = 1` they are separate problems and each picks its own.
 
-Three things to know before using it:
+#### Reading the result
+
+`lambda` is spelled **`disagreement`** on the Python side, because `lambda` is a
+keyword and `sweep.shrinkage.lambda` would be a `SyntaxError`. The CSV column
+and the prose keep the symbol; only the attribute differs.
+
+```py
+s = sweep.shrinkage                 # a PanelShrinkage, or None if not pooled
+s.disagreement                      # lambda in 0..=1, or None (see below)
+s.parameter_matters                 # did the grid move this metric at all?
+s.verdict                           # the one-line reading, caveat folded in
+s.support, s.cells                  # how much of the table backs it
+s.residual_variance                 # None on an unreplicated table
+sweep.shrunk                        # were the rows ranked on the demeaned score?
+sweep.best.demeaned                 # (mean, std, defined, members) of that score
+```
+
+`disagreement` being `None` is **not** zero. It means the table carried no
+within-cell replication, so disagreement and noise are the same sum of squares
+and no split exists — a different statement from "the members agree perfectly".
+Everything else stays defined and reported. `verdict` says so in words, which is
+why it is the safe thing to print:
+
+```py
+sweep = ta.optimize(..., panel=..., best_by="sharpe")          # no windowed=
+assert sweep.shrinkage.disagreement is None
+assert sweep.shrinkage.verdict == "not estimable without replication"
+```
+
+Read `parameter_matters` *with* `disagreement`, never instead of it: a high
+`lambda` on a grid that barely moves the metric means the members disagree about
+which of several equivalent parameter sets is marginally best, which is not the
+finding it looks like. `verdict` folds that caveat in, and `repr()` shows both —
+so printing either one cannot mislead.
+
+Under `walkforward=`, the same reading is available per fold and for the run:
+
+```py
+result.shrinkage            # run-wide, folds as replicates — better powered,
+                            # but a description, never what a fold selected on
+result.departures           # {member: folds} it departed in, most-frequent first
+for fold in result.folds:
+    fold.shrinkage          # this fold's own lambda, from its own in-sample data
+    fold.member_winners     # {member: {axis: value}} — each member's own pick
+    fold.departed           # members that differed from the pooled winner here
+```
+
+`result.departures` is the reading a run-level `lambda` flattens: "one member
+went its own way in every fold" and "everyone drifted once" can produce the same
+mean and mean very different things.
+
+Three more things to know before using it:
 
 - **It needs replication, and says so when it has none.** With one measurement
   per member, disagreement and noise are the same quantity, so `lambda` is

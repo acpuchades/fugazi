@@ -705,6 +705,108 @@ def test_optimize_panel_axis_substitutes_a_string_member_as_a_symbol():
     assert set(sweep.best.metrics_panel) == {"AAA", "BBB"}
 
 
+def test_optimize_shrinkage_is_readable_and_none_is_not_zero():
+    """`shrink=` used to be write-only from Python: the flag was accepted, it
+    silently reordered the ranking, and nothing it computed was reachable. The
+    whole observable effect of a shrunk sweep was *the ranking changed, for
+    reasons nothing could display*.
+
+    Both states are asserted here, because the distinction is the one that can
+    mislead: `disagreement` is a **number** when `windowed=` supplies the
+    replication, and **`None`** without it — never `0.0`. On an unreplicated
+    table disagreement and noise are the same sum of squares, so no split
+    exists; reading that as "the members agree perfectly" would invert the
+    finding."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+      exit: !crosses_below
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    sizing: !value 1.0
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(240)]
+    kwargs = dict(
+        panel={
+            "AAA": _snaps_single("AAA", rising),
+            "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+        },
+        panel_axis="SYM",
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        cash=1000.0,
+        best_by="returns.total_pct",
+    )
+
+    # Replicated: lambda is a number, and everything around it is readable.
+    replicated = ta.optimize(doc, windowed=60, **kwargs)
+    s = replicated.shrinkage
+    assert s is not None, "a pooled sweep must expose its decomposition"
+    assert isinstance(s.disagreement, float), s.disagreement
+    assert 0.0 <= s.disagreement <= 1.0, s.disagreement
+    assert isinstance(s.parameter_matters, bool)
+    assert isinstance(s.verdict, str) and s.verdict
+    assert s.cells > 0 and 0.0 <= s.support <= 1.0
+    assert s.residual_variance is not None, "replicated tables identify the residual"
+    # The demeaned ranking key is reachable per row, as a 4-tuple.
+    mean, std, defined, members = replicated.best.demeaned
+    assert defined <= members == 2
+    assert isinstance(mean, float) and isinstance(std, float)
+
+    # Unreplicated: None, and emphatically not 0.0.
+    plain = ta.optimize(doc, **kwargs)
+    assert plain.shrinkage is not None, "the other components are still defined"
+    assert plain.shrinkage.disagreement is None, (
+        "without replication there is no lambda to report — 0.0 would read as "
+        "'the members agree perfectly', which is the opposite finding"
+    )
+    assert plain.shrinkage.disagreement != 0.0
+    assert plain.shrinkage.residual_variance is None
+    assert plain.shrinkage.verdict == "not estimable without replication"
+    # ...while the components that do not depend on separating the two survive.
+    assert plain.shrinkage.cells > 0
+    assert isinstance(plain.shrinkage.interaction_variance, float)
+
+    # `shrunk` says which of the two orderings you are holding.
+    assert ta.optimize(doc, windowed=60, shrink=True, **kwargs).shrunk is True
+    assert replicated.shrunk is False
+
+
+def test_panel_shrinkage_repr_cannot_show_lambda_without_its_caveat():
+    """`parameter_matters` comes with `disagreement`, not optionally: a high
+    lambda on a grid that barely moves the metric is not the finding it looks
+    like. `verdict` folds the caveat in and `repr()` shows both, so neither can
+    be printed alone and mislead."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(240)]
+    sweep = ta.optimize(
+        doc,
+        panel={
+            "AAA": _snaps_single("AAA", rising),
+            "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+        },
+        panel_axis="SYM",
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        windowed=60,
+        cash=1000.0,
+        best_by="returns.total_pct",
+    )
+    text = repr(sweep.shrinkage)
+    assert "disagreement=" in text
+    assert "parameter_matters=" in text
+    assert "verdict=" in text
+    # And `lambda` is not reachable under its keyword spelling, by construction.
+    assert not hasattr(sweep.shrinkage, "lambda")
+
+
 def test_optimize_panel_composes_with_windowed_and_shrink():
     """`panel=` and `windowed=` used to be refused as a pair, which left
     `shrink=` unable to estimate anything in a sweep: with one measurement per

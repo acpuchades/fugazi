@@ -236,6 +236,32 @@ MEMBER_RETURNS = {
     ("Sweep", "member_winners"): "dict[str, dict[str, Any]]",
     # How many independent searches over the grid those selections amounted to.
     ("Sweep", "independent_searches"): "float | None",
+    ("Sweep", "shrinkage"): "PanelShrinkage | None",
+    ("Sweep", "shrunk"): "bool",
+    # `(mean, std, defined, members)` of the member-demeaned score — the same
+    # 4-tuple layout as `PanelWalkForwardResult.breadth`.
+    ("SweepRow", "demeaned"): "tuple[float, float, int, int] | None",
+    ("PanelFold", "shrinkage"): "PanelShrinkage | None",
+    ("PanelFold", "member_winners"): "dict[str, dict[str, Any]]",
+    ("PanelFold", "departed"): "list[str]",
+    ("PanelWalkForwardResult", "shrinkage"): "PanelShrinkage | None",
+    # `{member: folds}`, most-frequent first.
+    ("PanelWalkForwardResult", "departures"): "dict[str, int]",
+    # `lambda` is a Python keyword, so the quantity is spelled out rather than
+    # escaped — see `PanelShrinkage.disagreement`.
+    ("PanelShrinkage", "disagreement"): "float | None",
+    ("PanelShrinkage", "parameter_matters"): "bool",
+    ("PanelShrinkage", "verdict"): "str",
+    ("PanelShrinkage", "support"): "float",
+    ("PanelShrinkage", "cells"): "int",
+    ("PanelShrinkage", "live_rows"): "int",
+    ("PanelShrinkage", "live_members"): "int",
+    ("PanelShrinkage", "row_variance"): "float",
+    ("PanelShrinkage", "member_variance"): "float",
+    ("PanelShrinkage", "interaction_variance"): "float",
+    ("PanelShrinkage", "residual_variance"): "float | None",
+    ("PanelShrinkage", "mean_replicates"): "float",
+    ("PanelShrinkage", "balanced"): "bool",
     ("WalkForwardResult", "folds"): "list[WalkForwardFold]",
     ("RunReport", "fills"): "list[Fill]",
     ("RunReport", "rejections"): "list[Rejected]",

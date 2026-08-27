@@ -1348,6 +1348,8 @@ pub(crate) struct PySweepRow {
     pub(crate) support: Option<Real>,
     // The bar this row's account was ruined on, if it was.
     pub(crate) ruin_bar: Option<usize>,
+    // (mean, std, defined, members) of this row's member-demeaned score.
+    pub(crate) demeaned: Option<(Real, Real, usize, usize)>,
 }
 
 #[pymethods]
@@ -1390,6 +1392,25 @@ impl PySweepRow {
     #[getter]
     pub(crate) fn support(&self) -> Option<Real> {
         self.support
+    }
+
+    /// This row's cross-member score with the **member level removed**, as
+    /// `(mean, std, defined, members)` — the key `shrink=` ranks on.
+    ///
+    /// The raw pooled mean conflates "this parameter set is unstable across
+    /// members" with "these instruments have different achievable Sharpe". The
+    /// second is identical for every row, so it cannot separate them, yet it
+    /// still inflates the spread — and unequally, since rows differ in which
+    /// members they are defined on. Comparing this ordering against the raw one
+    /// is how you see whether a pooled ranking was resting on the panel's
+    /// composition.
+    ///
+    /// Present for any pooled sweep whose table could be fitted, whether or not
+    /// `shrink=` was passed; `None` otherwise. Same 4-tuple layout as
+    /// `PanelWalkForwardResult.breadth`.
+    #[getter]
+    pub(crate) fn demeaned(&self) -> Option<(Real, Real, usize, usize)> {
+        self.demeaned
     }
 
     #[getter]
@@ -1512,6 +1533,10 @@ pub(crate) struct PySweep {
     // selections amounted to — the factor the deflated Sharpe's trial count was
     // scaled by.
     pub(crate) independent_searches: Option<Real>,
+    // The sweep's two-way decomposition, for any pooled sweep.
+    pub(crate) shrinkage: Option<fugazi_core::spec::shrinkage::Summary>,
+    // Whether the rows are ordered by the member-demeaned score.
+    pub(crate) shrunk: bool,
 }
 
 #[pymethods]
@@ -1543,18 +1568,30 @@ impl PySweep {
     /// says what that point was.
     #[getter]
     pub(crate) fn member_winners(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
-        let out = pyo3::types::PyDict::new(py);
-        for (member, values) in &self.member_winners {
-            let d = pyo3::types::PyDict::new(py);
-            for (name, v) in self.columns.iter().zip(values) {
-                match v {
-                    Some(val) => d.set_item(name, json_to_py(py, val)?)?,
-                    None => d.set_item(name, py.None())?,
-                }
-            }
-            out.set_item(member, d)?;
-        }
-        Ok(out.into())
+        winners_to_py(py, &self.columns, &self.member_winners)
+    }
+
+    /// The sweep's [`PanelShrinkage`] — how much of the spread between members
+    /// is real disagreement, and whether the parameter moves the metric at all.
+    ///
+    /// Reported for **any** pooled sweep, not only a shrunk one: it is the
+    /// number that says whether aggregating the members was the right thing to
+    /// do, which a caller wants before deciding to pass `shrink=`. `None` when
+    /// the sweep was not pooled, or the score table was too sparse to fit.
+    #[getter]
+    pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
+        PyPanelShrinkage::wrap(py, self.shrinkage)
+    }
+
+    /// Whether `shrink=` ranked this sweep — i.e. whether `rows` is ordered by
+    /// the member-demeaned score rather than the raw pooled reduction.
+    ///
+    /// Worth reading back rather than remembering what you passed: it is the
+    /// difference between two orderings of the same rows, and nothing else in
+    /// the result says which one you are looking at.
+    #[getter]
+    pub(crate) fn shrunk(&self) -> bool {
+        self.shrunk
     }
 
     /// Under `shrink=`, how many *independent* searches over the grid the
@@ -2092,6 +2129,7 @@ pub(crate) fn optimize(
                 smoothed: row.smoothed.and_then(|s| s.value),
                 support: row.smoothed.and_then(|s| s.support),
                 ruin_bar: row.eval.ruin_bar(),
+                demeaned: row.demeaned.map(|p| (p.mean, p.std, p.defined, p.members)),
             },
         )?;
         row_objs.push(py_row);
@@ -2115,6 +2153,8 @@ pub(crate) fn optimize(
                 .map(|w| (w.member.clone(), w.values.clone()))
                 .collect(),
             independent_searches: sweep.selection.map(|b| b.effective),
+            shrinkage: sweep.shrinkage,
+            shrunk: sweep.shrunk,
         },
     )?;
     Ok(py_sweep.into_any())
@@ -2598,6 +2638,173 @@ pub(crate) fn run_walkforward(
 /// sorted union of every member's bar times — not into any one member's bars.
 /// That is what makes fold *k* the same span for every member of a ragged
 /// panel; see `PanelWalkForwardResult.axis_len`.
+/// How much of the spread between panel members is real disagreement rather
+/// than backtest noise — the reading `shrink=` acts on.
+///
+/// A pooled sweep ranks one parameter set across every member. That is the
+/// right thing to do only when the members *share* an optimum; when they do
+/// not, the pooled winner is a compromise that can be worse on every member
+/// than that member's own answer. This is the number that says which case you
+/// are in.
+///
+/// The headline is [`disagreement`](Self::disagreement) — written `λ` in the
+/// docs and the CSVs, and spelled out here because `lambda` is a Python
+/// keyword and `sweep.shrinkage.lambda` would be a `SyntaxError`.
+#[pyclass(name = "PanelShrinkage", module = "fugazi")]
+pub(crate) struct PyPanelShrinkage {
+    pub(crate) inner: fugazi_core::spec::shrinkage::Summary,
+}
+
+#[pymethods]
+impl PyPanelShrinkage {
+    /// `λ` in `0..=1`: the share of the spread between members that is genuine
+    /// disagreement about the optimum rather than estimation noise.
+    ///
+    /// `0.0` — the members agree; pooling is buying variance reduction.
+    /// `1.0` — they are separate problems; the pooled winner suits nobody.
+    ///
+    /// **`None` is not zero.** It means the table carried no within-cell
+    /// replication, so disagreement and noise are literally the same sum of
+    /// squares and no split exists to report — a different statement from "the
+    /// members agree perfectly". Pass `windowed=` in a sweep to supply the
+    /// replication; under `walkforward=` each fold splits its own in-sample
+    /// window and needs no extra argument. Every other component below is
+    /// still defined and still reported.
+    #[getter]
+    pub(crate) fn disagreement(&self) -> Option<Real> {
+        self.inner.lambda
+    }
+
+    /// Whether the swept parameter moves this metric at all.
+    ///
+    /// Read it *with* [`disagreement`](Self::disagreement), never instead of
+    /// it. `λ` compares disagreement against noise and says nothing about
+    /// whether there was a signal to disagree over: on a grid that barely moves
+    /// the metric, a high `λ` means the members disagree about which of several
+    /// equivalent parameter sets is marginally best, which is not the finding
+    /// it looks like. [`verdict`](Self::verdict) folds this in so the prose
+    /// cannot be read without it.
+    #[getter]
+    pub(crate) fn parameter_matters(&self) -> bool {
+        self.inner.parameter_matters()
+    }
+
+    /// The one-line reading, caveat included.
+    ///
+    /// Carries the same words the CLI prints, and appends the
+    /// grid-barely-moves-this-metric warning when
+    /// [`parameter_matters`](Self::parameter_matters) is false — so a caller
+    /// who reports only this cannot report a misleading `λ`.
+    #[getter]
+    pub(crate) fn verdict(&self) -> String {
+        let base = fugazi_core::spec::shrinkage::verdict(self.inner.lambda);
+        if self.inner.lambda.is_some() && !self.inner.parameter_matters() {
+            format!("{base} — but the grid barely moves this metric")
+        } else {
+            base.to_string()
+        }
+    }
+
+    /// Replicated cells over populated cells, in `0..=1` — how much of the
+    /// table actually backs `disagreement`. A `λ` resting on three cells of
+    /// ninety and one resting on all ninety are not the same evidence.
+    #[getter]
+    pub(crate) fn support(&self) -> Real {
+        self.inner.support
+    }
+
+    /// Populated `(row, member)` cells the fit rests on.
+    #[getter]
+    pub(crate) fn cells(&self) -> usize {
+        self.inner.cells
+    }
+
+    /// Grid rows with at least one populated cell.
+    #[getter]
+    pub(crate) fn live_rows(&self) -> usize {
+        self.inner.live_rows
+    }
+
+    /// Members with at least one populated cell.
+    #[getter]
+    pub(crate) fn live_members(&self) -> usize {
+        self.inner.live_members
+    }
+
+    /// Variance of the shared parameter effect — how much the parameter moves
+    /// the metric at all, before any member-specific structure.
+    #[getter]
+    pub(crate) fn row_variance(&self) -> Real {
+        self.inner.row_variance
+    }
+
+    /// Variance of the per-member level. This is the nuisance term: identical
+    /// for every row, so it carries no ranking information, which is why
+    /// `shrink=` ranks on the member-demeaned score instead.
+    #[getter]
+    pub(crate) fn member_variance(&self) -> Real {
+        self.inner.member_variance
+    }
+
+    /// `τ²_γ` — the parameter × member interaction, bias-corrected for the
+    /// sampling noise its cell means carry and floored at zero.
+    #[getter]
+    pub(crate) fn interaction_variance(&self) -> Real {
+        self.inner.interaction_variance
+    }
+
+    /// `σ²_ε` — pooled within-cell variance, or `None` on an unreplicated
+    /// table where it cannot be told apart from the interaction.
+    #[getter]
+    pub(crate) fn residual_variance(&self) -> Option<Real> {
+        self.inner.residual_variance
+    }
+
+    /// Harmonic mean replicate count over the replicated cells.
+    #[getter]
+    pub(crate) fn mean_replicates(&self) -> Real {
+        self.inner.mean_replicates
+    }
+
+    /// Whether every live `(row, member)` pair was populated. An unbalanced
+    /// table is fitted all the same, but its components are method-of-moments
+    /// rather than exact.
+    #[getter]
+    pub(crate) fn balanced(&self) -> bool {
+        self.inner.balanced
+    }
+
+    /// Both halves of the reading in one line, so a bare `print()` cannot show
+    /// `λ` without its caveat.
+    pub(crate) fn __repr__(&self) -> String {
+        let lambda = self
+            .inner
+            .lambda
+            .map_or_else(|| "None".to_string(), |l| format!("{l:.3}"));
+        format!(
+            "PanelShrinkage(disagreement={lambda}, support={:.2}, cells={}, \
+             parameter_matters={}, verdict={:?})",
+            self.inner.support,
+            self.inner.cells,
+            if self.inner.parameter_matters() {
+                "True"
+            } else {
+                "False"
+            },
+            self.verdict(),
+        )
+    }
+}
+
+impl PyPanelShrinkage {
+    fn wrap(
+        py: Python<'_>,
+        summary: Option<fugazi_core::spec::shrinkage::Summary>,
+    ) -> PyResult<Option<Py<Self>>> {
+        summary.map(|inner| Py::new(py, Self { inner })).transpose()
+    }
+}
+
 #[pyclass(name = "PanelFold", module = "fugazi")]
 pub(crate) struct PyPanelFold {
     pub(crate) fold: usize,
@@ -2609,6 +2816,14 @@ pub(crate) struct PyPanelFold {
     pub(crate) oos_members: Vec<(String, SpecMetrics)>,
     pub(crate) is_smoothed: Option<Real>,
     pub(crate) is_support: Option<Real>,
+    /// Under `shrink=`, this fold's own decomposition — estimated from
+    /// sub-spans of *this fold's* in-sample window, so it rests only on data
+    /// the fold could see.
+    pub(crate) shrinkage: Option<fugazi_core::spec::shrinkage::Summary>,
+    /// Under `shrink=`, `(member, axis values)` for each member's own pick.
+    pub(crate) member_winners: Vec<(String, Vec<Option<JsonValue>>)>,
+    /// Members whose pick differed from the pooled winner in this fold.
+    pub(crate) departed: Vec<String>,
 }
 
 #[pymethods]
@@ -2674,6 +2889,42 @@ impl PyPanelFold {
     pub(crate) fn is_support(&self) -> Option<Real> {
         self.is_support
     }
+
+    /// Under `shrink=`, this fold's own [`PanelShrinkage`] — or `None` when the
+    /// sweep was not shrunk, or the fold's in-sample window was too short to
+    /// split into replicates.
+    ///
+    /// Per fold rather than once for the run, because a panel that agreed early
+    /// and split later is a different story from one that never agreed, and a
+    /// single number tells neither.
+    #[getter]
+    pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
+        PyPanelShrinkage::wrap(py, self.shrinkage)
+    }
+
+    /// Under `shrink=`, each member's own parameters for this fold as
+    /// `{member: {axis: value}}` — the same shape as
+    /// [`values`](Self::values), which is the pooled winner they are being
+    /// compared against.
+    ///
+    /// Empty when the sweep was not shrunk. At `disagreement == 0` every entry
+    /// equals `values`, which is complete pooling spelled out.
+    #[getter]
+    pub(crate) fn member_winners(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        winners_to_py(py, &self.axis_columns, &self.member_winners)
+    }
+
+    /// Members whose pick differed from the pooled winner in this fold.
+    ///
+    /// The useful half of [`member_winners`](Self::member_winners) when you
+    /// only want to know *whether* the panel split and who split: "one member
+    /// went its own way" and "every member did" are different findings that a
+    /// mean `λ` renders identically.
+    #[getter]
+    pub(crate) fn departed(&self) -> Vec<String> {
+        self.departed.clone()
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "PanelFold(fold={}, is={:?}, oos={:?}, members={}/{})",
@@ -2684,6 +2935,31 @@ impl PyPanelFold {
             self.is_members.len(),
         )
     }
+}
+
+/// `{member: {axis: value}}` from per-member axis rows sparse across `columns`.
+///
+/// Shared by `Sweep.member_winners` and `PanelFold.member_winners` so the two
+/// cannot drift into different shapes for the same idea — and shaped as a dict
+/// of dicts rather than a list of records to match `PanelFold.values`, which is
+/// the pooled winner a caller compares these against.
+fn winners_to_py(
+    py: Python<'_>,
+    columns: &[String],
+    winners: &[(String, Vec<Option<JsonValue>>)],
+) -> PyResult<Py<pyo3::types::PyDict>> {
+    let out = pyo3::types::PyDict::new(py);
+    for (member, values) in winners {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in columns.iter().zip(values) {
+            match v {
+                Some(val) => d.set_item(name, json_to_py(py, val)?)?,
+                None => d.set_item(name, py.None())?,
+            }
+        }
+        out.set_item(member, d)?;
+    }
+    Ok(out.into())
 }
 
 fn members_to_py(py: Python<'_>, members: &[(String, SpecMetrics)]) -> PyResult<Py<PyAny>> {
@@ -2764,6 +3040,11 @@ pub(crate) struct PyPanelWalkForwardResult {
     /// of any row, so recomputing it per access would re-correlate every pair
     /// to arrive at the same number.
     pub(crate) breadth: Option<(Real, Real, usize, usize)>,
+    /// `(member, fold count)` for every member that departed at least once,
+    /// most-frequent first — the order `PanelWalkForward::departures` sorts in.
+    pub(crate) departures: Vec<(String, usize)>,
+    /// The run-wide decomposition, folds as replicates.
+    pub(crate) shrinkage: Option<fugazi_core::spec::shrinkage::Summary>,
 }
 
 #[pymethods]
@@ -2837,6 +3118,40 @@ impl PyPanelWalkForwardResult {
     #[getter]
     pub(crate) fn effective_breadth(&self) -> Option<(Real, Real, usize, usize)> {
         self.breadth
+    }
+
+    /// Members that departed from the pooled winner at least once, and in how
+    /// many folds — `{member: folds}`, most-frequent first.
+    ///
+    /// Empty when the run was not shrunk, and **also** when the panel agreed
+    /// throughout. That second case is a real result, not an absence: complete
+    /// pooling was already each member's own answer.
+    ///
+    /// This is the reading a run-level `λ` flattens. "One member went its own
+    /// way in every fold" and "everyone drifted once" can produce the same mean
+    /// disagreement and mean very different things.
+    #[getter]
+    pub(crate) fn departures(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (member, folds) in &self.departures {
+            d.set_item(member, folds)?;
+        }
+        Ok(d.into())
+    }
+
+    /// The panel's `λ` over the **whole run**, with folds as the replicate axis.
+    ///
+    /// Free, so reported without `shrink=`: every fold already measures every
+    /// `(row, member)` in-sample to rank the grid.
+    ///
+    /// Deliberately *not* what any fold selected on — a component estimated
+    /// over every fold and applied inside fold 1 would let fold 10's data pick
+    /// fold 1's winner. Use `PanelFold.shrinkage` for the lookahead-free
+    /// per-fold estimate each fold acted on; this one describes the run after
+    /// the fact and is better powered.
+    #[getter]
+    pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
+        PyPanelShrinkage::wrap(py, self.shrinkage)
     }
 
     #[getter]
@@ -3061,6 +3376,18 @@ pub(crate) fn run_panel_walkforward(
                 oos_members: to_pairs(&row.oos_members),
                 is_smoothed: row.is_smoothed.and_then(|s| s.value),
                 is_support: row.is_smoothed.and_then(|s| s.support),
+                shrinkage: row.shrinkage,
+                member_winners: row
+                    .member_winners
+                    .iter()
+                    .map(|w| (w.member.clone(), w.values.clone()))
+                    .collect(),
+                departed: row
+                    .member_winners
+                    .iter()
+                    .filter(|w| w.departed)
+                    .map(|w| w.member.clone())
+                    .collect(),
             },
         )?);
     }
@@ -3096,6 +3423,8 @@ pub(crate) fn run_panel_walkforward(
             breadth: result
                 .effective_breadth()
                 .map(|b| (b.effective, b.mean_correlation, b.members, b.pairs)),
+            departures: result.departures(),
+            shrinkage: result.run_shrinkage,
         },
     )?;
     Ok(py_result.into_any())
