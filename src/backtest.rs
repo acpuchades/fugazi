@@ -119,6 +119,43 @@ pub struct RunReport<Sym> {
     pub carry_coverage: Option<(usize, usize)>,
 }
 
+impl<Sym> RunReport<Sym> {
+    /// How many fills traded **materially** less than the strategy asked for,
+    /// and the worst ratio among them — or `None` on a run where every fill got
+    /// what it wanted.
+    ///
+    /// The third member of the "the equity curve above may not describe what it
+    /// looks like it describes" family, beside
+    /// [`rejections`](Self::rejections) and
+    /// [`carry_coverage`](Self::carry_coverage), and the one that was missing.
+    /// A refusal lands in `rejections`; a *fitted* fill is not a refusal — the
+    /// trade happened — so it landed nowhere, and a `sizing:` the account could
+    /// not carry was indistinguishable in the blotter from a signal that simply
+    /// sized smaller. Every metric downstream then described the size that
+    /// traded rather than the size that was requested.
+    ///
+    /// The gap has always been on the fill as
+    /// [`requested_units`](crate::wallet::Order::requested_units); what was
+    /// missing was a way to find it without comparing two fields on every fill
+    /// of every run. `Some((n, worst))` means *go look*: `n` fills were cut,
+    /// the worst to `worst` of its request.
+    ///
+    /// Materiality is [`MATERIALLY_FITTED`](crate::wallet::MATERIALLY_FITTED),
+    /// not "anything below `1.0`" — a costed all-in sheds a sliver every time,
+    /// and reporting that would make the signal useless.
+    pub fn materially_fitted(&self) -> Option<(usize, Real)> {
+        let mut n = 0usize;
+        let mut worst = Real::INFINITY;
+        for fill in &self.fills {
+            if fill.order.is_materially_fitted() {
+                n += 1;
+                worst = worst.min(fill.order.fill_ratio());
+            }
+        }
+        (n > 0).then_some((n, worst))
+    }
+}
+
 /// Drive `strategy` over `snapshots`, executing against `wallet`, and return
 /// the [`RunReport`].
 ///
@@ -509,6 +546,76 @@ mod rejection_tests {
         let snaps: Vec<Snapshot<&'static str>> = vec![Snapshot::single("X", Atom::new(bar(100.0)))];
         let report = run(&mut Idle, &mut wallet, snaps);
         assert!(report.rejections.is_empty());
+        assert_eq!(report.materially_fitted(), None, "nothing traded at all");
+    }
+
+    /// A fill the wallet *fitted* is not a refusal, so it never reached
+    /// `rejections` — and for a `sizing:` the account could not carry, that
+    /// made a 3x request executing at 1x indistinguishable in the blotter from
+    /// a signal that simply sized smaller.
+    #[test]
+    fn a_fitted_fill_is_reported_without_being_a_rejection() {
+        /// Asks for `frac` times equity while flat, then holds — so the run
+        /// books exactly one fill and the assertions are about that fill.
+        struct AllIn {
+            frac: Real,
+        }
+        impl Strategy for AllIn {
+            type Input = Snapshot<&'static str>;
+            type Symbol = &'static str;
+            fn update(&mut self, _snap: Snapshot<&'static str>) {}
+            fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+                if wallet.position(&"X").amount == 0.0 {
+                    let _ = wallet.set("X", Side::Buy, Size::value_frac(self.frac));
+                }
+            }
+            fn reset(&mut self) {}
+        }
+        let snaps = || -> Vec<Snapshot<&'static str>> {
+            [100.0, 100.0, 100.0]
+                .iter()
+                .map(|&p| Snapshot::single("X", Atom::new(bar(p))))
+                .collect()
+        };
+
+        // 3x equity on an unlevered account fills at a third of the request.
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let report = run(&mut AllIn { frac: 3.0 }, &mut wallet, snaps());
+        assert!(
+            report.rejections.is_empty(),
+            "a fitted fill is not a refusal",
+        );
+        let (n, worst) = report
+            .materially_fitted()
+            .expect("a 3x request on a 1x account is material");
+        assert_eq!(n, 1);
+        assert!((worst - 1.0 / 3.0).abs() < 1e-9, "worst ratio {worst}");
+
+        // The same account carrying the same document at a ceiling that fits it
+        // reports nothing — the signal is the gap, not the leverage.
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0).with_max_gross(3.0);
+        let report = run(&mut AllIn { frac: 3.0 }, &mut wallet, snaps());
+        assert_eq!(report.materially_fitted(), None, "3x on a 3x account fits");
+
+        // And an ordinary all-in is *not* material: it sheds only what
+        // commission needs, which is what the threshold exists to ignore.
+        let costs = crate::costs::TradingCosts::new(
+            Box::new(crate::costs::PercentageCommission::new(0.001)), // 10 bps
+            Box::new(crate::costs::NoSpread),
+            Box::new(crate::costs::NoSlippage),
+        );
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::with_costs(10_000.0, costs);
+        let report = run(&mut AllIn { frac: 1.0 }, &mut wallet, snaps());
+        assert_eq!(report.fills.len(), 1, "the all-in filled");
+        assert!(
+            report.fills[0].order.fill_ratio() < 1.0,
+            "a costed all-in always sheds a sliver",
+        );
+        assert_eq!(
+            report.materially_fitted(),
+            None,
+            "...and that sliver is not worth reporting",
+        );
     }
 }
 

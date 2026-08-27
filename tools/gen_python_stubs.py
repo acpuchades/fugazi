@@ -197,6 +197,9 @@ MEMBER_RETURNS = {
     # A wallet counts as it charges, so it always has a figure; a `RunReport`
     # may have been built by hand, and `None` there is "does not say".
     ("RunReport", "carry_coverage"): "tuple[int, int] | None",
+    # `(count, worst_ratio)` over the materially-fitted fills, or `None` when
+    # every fill got what it asked for.
+    ("RunReport", "materially_fitted"): "tuple[int, float] | None",
     ("MultiIndicator", "update"): "dict[str, float] | None",
     ("MultiIndicator", "value"): "dict[str, float] | None",
     ("MultiIndicator", "feed"): FED,
@@ -405,6 +408,7 @@ MEMBER_RULES = {
     "units": "float",
     "requested_units": "float",
     "fill_ratio": "float",
+    "is_materially_fitted": "bool",
     "side": "str",
     "id": "int",
     "bar": "int",
@@ -504,6 +508,7 @@ from typing import Any, Protocol
 __version__: str
 DEFAULT_TOLERANCE_ABS: float
 DEFAULT_TOLERANCE_REL: float
+MATERIALLY_FITTED: float
 
 class FugaziError(ValueError): ...
 class SpecError(FugaziError): ...

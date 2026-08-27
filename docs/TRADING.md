@@ -222,12 +222,34 @@ Every one of those paths goes through the same private engine, `fill_at`.
    Raising `max_gross` above `1.0` lifts the cash rule too: the account borrows,
    which is what leverage is.
 
+   **The cap bounds the result; it never re-denominates the request.** A
+   `Size::ValueFraction` is a multiple of *equity* on every account —
+   `value_frac(1.0)` is 1x equity at `max_gross = 1` and 1x equity at
+   `max_gross = 10` — so raising the cap cannot enlarge a request that already
+   fits, only stop truncating one that does not. Sizing is what the rule wants;
+   leverage is what the account will carry. Re-basing the fraction on
+   `max_gross × equity` so that `1.0` always meant "fully deployed" is inert at
+   the default and therefore looks free, but it would multiply every
+   *risk-denominated* sizing rule by the account's leverage: `!vol_target` means
+   "hold this much realized vol", and scaling that by `max_gross` does not scale
+   a risk target, it removes one. Measured on a levered wallet, the re-base took
+   a 20%-target document to 35.5% realized vol and a 55% max drawdown (from
+   15.8% and 25%) — while *still* clipping 38 of 139 fills, because a multiplier
+   of 3.8 overshoots a 3x cap either way.
+
    **Only a fill that raises the position's magnitude is bound.** An exit, a
    protective leg and `flatten` are exempt outright, so an account carried over
    its limit by a mark can always trade its way back.
 5. Move cash and the position, push to the blotter, return the `Order` — carrying
    `requested_units` beside `units`, so a magnitude that was fitted to either
    rule is visible rather than reported as if it were what was asked for.
+   `Order::is_materially_fitted` applies the crate-wide `MATERIALLY_FITTED`
+   threshold (99%, above the sliver a commission always costs an all-in), and
+   `RunReport::materially_fitted` reduces a whole run to `(count, worst ratio)`.
+   That sits beside `rejections` and `carry_coverage` for the same reason both
+   do: a fitted fill is **not** a refusal — the trade happened — so it reaches
+   `rejections` never, and a `sizing:` the account could not carry would
+   otherwise be indistinguishable from a signal that sized smaller.
 
    **A fit that collapses to *no trade* is booked as a rejection instead.** There
    is no order to hang `requested_units` on, so without that the leg simply

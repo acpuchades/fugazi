@@ -401,6 +401,29 @@ impl<Sym> PaperWallet<Sym> {
     /// the same split [`InsufficientFunds`](WalletError::InsufficientFunds)
     /// already draws.
     ///
+    /// **It is a ceiling on the result, never a re-denomination of the
+    /// request.** A [`Size::ValueFraction`] means the same multiple of equity
+    /// on every account — `value_frac(1.0)` is 1x equity here and 1x equity on
+    /// a 10x wallet — and raising this number does not enlarge what a document
+    /// asks for, it only stops truncating it. So a document reaching for real
+    /// leverage says so in its own `sizing:`, and the account says how much of
+    /// that it is willing to carry. The two are separate on purpose; see
+    /// [`Size`] for why folding one into the other would break
+    /// [`vol_target`](crate::indicators::sizing::vol_target).
+    ///
+    /// The consequence worth stating plainly: **a document whose sizing never
+    /// exceeds `1.0` is insensitive to this knob.** That is not most documents.
+    /// Every recipe in [`sizing`](crate::indicators::sizing) is unbounded above
+    /// — measured on a 1,200-bar three-regime fixture,
+    /// [`vol_target`](crate::indicators::sizing::vol_target) at a 20% target
+    /// exceeded `1.0` on 54% of bars (median 1.07, max 3.81) and
+    /// [`atr_risk`](crate::indicators::sizing::atr_risk) at 2%/2×ATR on 33%
+    /// (max 1.96). At the default `1.0` that run had 38 of 139 fills fitted,
+    /// the worst to 33.5% of its request, and realized 12.4% vol against its
+    /// 20% target. Raising the cap to `3.0` fitted **none** of them and
+    /// realized 15.8%. A vol target is only a vol target on an account that can
+    /// hold it.
+    ///
     /// **Exits are exempt.** No fill that leaves the position's magnitude at or
     /// below where it started is ever refused, so an account carried over its
     /// limit by a mark can always trade its way back — and
@@ -3165,6 +3188,119 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(w.position(&"X").amount, 0.0);
         assert!(w.take_rejections().is_empty(), "flatten was refused");
+    }
+
+    /// A sizing that lands **exactly** on the ceiling must fill whole — not
+    /// shaved by a ULP, and not refused for being one over.
+    ///
+    /// The two sides of the inequality are computed differently (`fraction *
+    /// equity / price` on the way in, `|target| * fill_price` on the way out),
+    /// so they disagree in the last bits, and this project has shipped four
+    /// bugs where a float difference either side of a threshold changed which
+    /// trade happened. Swept over deliberately unfriendly capital, price and
+    /// ceiling values, long-only and long+short: the measured worst case is
+    /// **1.6 ULPs, on the overshooting side**, absorbed with ~13 orders of
+    /// magnitude to spare by `gross_tolerance`, which is relative for exactly
+    /// this reason. Nothing is refused anywhere in the sweep.
+    #[test]
+    fn a_sizing_that_lands_on_the_ceiling_is_neither_shaved_nor_refused() {
+        let a = crate::types::symbol("A");
+        let b = crate::types::symbol("B");
+        // Values chosen to make the two computations disagree: a capital with
+        // no exact binary form, a sub-cent price, a huge one, and a repeating
+        // ceiling.
+        for cap in [10_000.0, 10_000.03, 7_919.170_000_000_1, 1e5 / 3.0] {
+            for px in [100.0, 137.77, 0.000_012_345_6, 61_803.398_874_989_5] {
+                for g in [1.0, 1.5, 2.0, 3.0, 10.0] {
+                    // Long only, all of it in one leg.
+                    let mut w: PaperWallet<Symbol> = PaperWallet::new(cap).with_max_gross(g);
+                    let bars = [(a.clone(), bar(px))];
+                    w.advance(&bars);
+                    w.set(a.clone(), Side::Buy, Size::value_frac(g)).unwrap();
+                    w.advance(&bars);
+                    let held = w.position(&a).amount.abs() * px;
+                    let budget = g * w.equity().0;
+                    let ulps = (held - budget).abs() / (budget * Real::EPSILON);
+                    assert!(
+                        ulps <= 8.0,
+                        "long cap={cap} px={px} g={g}: held {held:e} vs budget {budget:e} \
+                         ({ulps} ULPs)",
+                    );
+                    assert!(
+                        w.take_rejections().is_empty(),
+                        "long cap={cap} px={px} g={g}: refused a request that lands on the cap",
+                    );
+
+                    // Split across a long and a short: the bound is `Σ|pos|`,
+                    // so half each has to reach the same ceiling.
+                    let mut w: PaperWallet<Symbol> = PaperWallet::new(cap).with_max_gross(g);
+                    let bars = [(a.clone(), bar(px)), (b.clone(), bar(px))];
+                    w.advance(&bars);
+                    w.set(a.clone(), Side::Buy, Size::value_frac(0.5 * g))
+                        .unwrap();
+                    w.set(b.clone(), Side::Sell, Size::value_frac(0.5 * g))
+                        .unwrap();
+                    w.advance(&bars);
+                    let held = (w.position(&a).amount.abs() + w.position(&b).amount.abs()) * px;
+                    let budget = g * w.equity().0;
+                    let ulps = (held - budget).abs() / (budget * Real::EPSILON);
+                    assert!(
+                        ulps <= 8.0,
+                        "long/short cap={cap} px={px} g={g}: held {held:e} vs budget \
+                         {budget:e} ({ulps} ULPs)",
+                    );
+                    assert!(
+                        w.take_rejections().is_empty(),
+                        "long/short cap={cap} px={px} g={g}: refused a request on the cap",
+                    );
+                }
+            }
+        }
+    }
+
+    /// `funds_frac` sizes against **cash**, and a levered book's cash is
+    /// negative — so it degenerates to zero the moment gross passes equity.
+    ///
+    /// Pinned rather than left to fall out of `funds.max(0.0)`, because the
+    /// zero is silent: it produces no trade, no rejection and no fill, and a
+    /// document that switched to leverage would simply stop sizing. The
+    /// docstring on `Size::FundsFraction` states these numbers; this is what
+    /// keeps the two from drifting.
+    #[test]
+    fn funds_frac_degenerates_to_zero_on_a_levered_book() {
+        let sym = crate::types::symbol("S");
+        let bars = [(sym.clone(), bar(100.0))];
+        // (max_gross, deployed fraction of the budget) -> expected cash
+        for (g, deployed, cash) in [
+            (1.0, 0.0, 10_000.0),
+            (1.0, 0.5, 5_000.0),
+            (1.0, 1.0, 0.0),
+            (3.0, 0.5, -5_000.0),
+            (3.0, 1.0, -20_000.0),
+        ] {
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0).with_max_gross(g);
+            w.advance(&bars);
+            if deployed > 0.0 {
+                w.set(sym.clone(), Side::Buy, Size::value_frac(deployed * g))
+                    .unwrap();
+                w.advance(&bars);
+            }
+            let (funds, equity) = (w.funds().0, w.equity().0);
+            assert!(
+                (funds - cash).abs() < 1e-6,
+                "g={g} deployed={deployed}: cash {funds}, expected {cash}",
+            );
+            let pos = w.position(&sym).amount;
+            let ff = Size::funds_frac(1.0).resolve(100.0, pos, funds, equity);
+            assert!(
+                (ff - (cash.max(0.0) / 100.0)).abs() < 1e-9,
+                "g={g} deployed={deployed}: funds_frac(1.0) resolved to {ff}",
+            );
+            // Equity, by contrast, is defined on both sides of zero cash: the
+            // reason every strategy in the crate sizes on `value_frac`.
+            let vf = Size::value_frac(1.0).resolve(100.0, pos, funds, equity);
+            assert!((vf - 100.0).abs() < 1e-9, "value_frac moved: {vf}");
+        }
     }
 
     /// The cap counts *gross*, so a long and a short share one budget rather

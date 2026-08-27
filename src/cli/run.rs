@@ -2068,18 +2068,6 @@ fn print_carry_coverage_warning<Sym>(report: &fugazi::RunReport<Sym>) {
     )]);
 }
 
-/// How far short of its requested magnitude a fill has to land before the
-/// banner below calls it material.
-///
-/// There has to be a threshold, and it has to be here rather than in the
-/// wallet. *Any* reduction means the fill was bound by cash or by leverage, so
-/// an all-in under any positive commission model lands a hair under 1.0 on
-/// every single trade — a counter that fired on "not exactly what was asked"
-/// would report every costed run as one long anomaly. 1% is comfortably above
-/// the room a commission needs and far below a request that was scaled to a
-/// fraction of itself, which is the case worth a line of output.
-const MATERIALLY_FITTED: f64 = 0.99;
-
 /// The post-run "orders were scaled down" banner.
 ///
 /// The other half of [`print_rejection_warning`]: an order the wallet *fitted*
@@ -2088,18 +2076,15 @@ const MATERIALLY_FITTED: f64 = 0.99;
 /// either, and it used to be invisible at every layer. A `sizing:` above what
 /// the account's leverage allows, or a rotation whose funding leg did not
 /// arrive, both surface here.
+///
+/// The threshold and the count are
+/// [`RunReport::materially_fitted`](fugazi::RunReport::materially_fitted)'s, not
+/// this banner's — the CLI used to own the only copy, which meant a Python or
+/// library caller had no way to ask the question the CLI was answering.
 fn print_fitted_warning<Sym>(report: &fugazi::RunReport<Sym>) {
-    let fitted: Vec<f64> = report
-        .fills
-        .iter()
-        .map(|f| f.order.fill_ratio())
-        .filter(|ratio| *ratio < MATERIALLY_FITTED)
-        .collect();
-    if fitted.is_empty() {
+    let Some((n, worst)) = report.materially_fitted() else {
         return;
-    }
-    let n = fitted.len();
-    let worst = fitted.iter().copied().fold(f64::INFINITY, f64::min);
+    };
     style::print_warns(&[format!(
         "{n} fill{} scaled down to fit the account — the size traded was not the \
          size the document asked for (smallest: {:.1}% of the request). Compare \

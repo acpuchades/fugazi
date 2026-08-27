@@ -337,3 +337,186 @@ fn a_carry_model_that_cannot_charge_warns() {
         out.stdout,
     );
 }
+
+// ---------------------------------------------------------------------------
+// What `sizing:` is denominated in
+// ---------------------------------------------------------------------------
+//
+// `Size::ValueFraction` is a multiple of **equity**, and `max_gross` is a
+// ceiling on the *result* — two numbers with two owners, the same split
+// `TradingCostsConfig` draws. The tempting alternative is to re-base the
+// fraction on `max_gross * equity`, so that `sizing: 1.0` always means "fully
+// deployed" and a document becomes leverage-agnostic. It is inert at the
+// default `max_gross = 1`, which makes it look free.
+//
+// It is not free, and the three tests below are why. The first pins the
+// invariant it would break; the second measures the counter-case that killed
+// it; the third pins the boundary the re-base would have had to land on.
+
+/// **The invariant.** A document's `sizing:` means the same exposure on every
+/// account. Raising the ceiling cannot enlarge a request that already fits — it
+/// can only stop truncating one that does not.
+///
+/// Exact equality, byte for byte, because that is the whole claim: not "close
+/// enough at 1x" but "the account's leverage is not an input to the sizing
+/// arithmetic at all". A re-base on `max_gross * equity` fails this at the
+/// second ceiling, tripling a `sizing: 0.5` document's exposure on a 3x wallet
+/// that its author never asked to use.
+#[test]
+fn a_sizing_that_fits_is_identical_at_every_ceiling() {
+    let baseline = run("lev_inv_1", "long", "0.5", &["--quiet", "--max-gross", "1"]);
+    let fills = baseline.out.read("fills.csv");
+    let returns = baseline.out.read("returns.csv");
+
+    for (i, cap) in ["1.5", "2", "3", "10"].iter().enumerate() {
+        let r = run(
+            &format!("lev_inv_{}", i + 2),
+            "long",
+            "0.5",
+            &["--quiet", "--max-gross", cap],
+        );
+        assert_eq!(
+            r.out.read("fills.csv"),
+            fills,
+            "--max-gross {cap} moved the fills of a document that already fit",
+        );
+        assert_eq!(
+            r.out.read("returns.csv"),
+            returns,
+            "--max-gross {cap} moved the equity curve of a document that already fit",
+        );
+    }
+}
+
+/// **The counter-case.** `sizing:` is not a fraction and is not bounded by
+/// `1.0` — it is an arbitrary real-valued expression, and every recipe in
+/// `indicators::sizing` exceeds `1.0` whenever the quantity it inverts is
+/// small. `!vol_target` produces `target / realized_vol`, which is above `1.0`
+/// on any market calmer than the target.
+///
+/// So a correctly-written document *is* sensitive to `max_gross` already, and
+/// the fraction it hands the wallet is denominated in equity by convention: "a
+/// 20% vol target" is 20% of equity's vol, not 20% of buying power's. Re-basing
+/// would multiply that risk target by the account's leverage — measured on a
+/// levered wallet, realized vol went from 15.8% to 35.5% against a 20% target,
+/// max drawdown from 25% to 55%, and the run was *still* clamped, because
+/// `3.81 * 3` overshoots a 3x cap. It fails at the thing it was for.
+#[test]
+fn a_vol_target_document_is_bounded_by_the_ceiling_not_rescaled_by_it() {
+    // Two flat-vol regimes: a calm one the vol target sizes *up* into, well
+    // past 1.0, and a wild one it sizes down into.
+    let mut csv = String::from("symbol;freq;time;open;high;low;close;volume\n");
+    let mut px = 100.0_f64;
+    for d in 0..120 {
+        // Deterministic alternating ±sigma: realized stddev is exactly sigma.
+        let sigma = if d < 60 { 0.002 } else { 0.02 };
+        let step = if d % 2 == 0 { sigma } else { -sigma };
+        let day = 1 + d % 28;
+        let month = 1 + (d / 28) % 12;
+        let year = 2024 + d / 336;
+        csv += &format!(
+            "S;1d;{year}-{month:02}-{day:02}T00:00:00Z;{px:.6};{:.6};{:.6};{:.6};1000\n",
+            px * 1.0001,
+            px * 0.9999,
+            px * (1.0 + step),
+        );
+        px *= 1.0 + step;
+    }
+
+    let doc = "\
+root: S
+long:
+  enter: !gt { lhs: !close, rhs: 0 }
+sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 365 }
+";
+    let (_, spec) = scratch_file("lev_vt.yml", doc);
+    let (_, series) = scratch_file("lev_vt.csv", &csv);
+    let at = |cap: &str, dir: &str| {
+        Cmd::new("run")
+            .arg(&spec)
+            .series(&series)
+            .args(&[
+                "--crypto",
+                "-f",
+                "1d",
+                "-c",
+                "10000",
+                "--quiet",
+                "--max-gross",
+                cap,
+            ])
+            .costs("none")
+            .output_dir(dir)
+            .ok()
+    };
+
+    // The calm regime asks for more than 1x. At the default ceiling it is cut
+    // down to it and the blotter says so; at 3x it is honoured in full.
+    let one = at("1", "lev_vt_1");
+    let three = at("3", "lev_vt_3");
+
+    let requested = |out: &Outcome| -> Vec<(f64, f64)> {
+        out.rows("fills.csv")
+            .iter()
+            .map(|r| {
+                let c: Vec<&str> = r.split(',').collect();
+                (c[3].parse().expect("units"), c[4].parse().expect("req"))
+            })
+            .collect()
+    };
+
+    let at_one = requested(&one);
+    let at_three = requested(&three);
+    assert!(
+        at_one.iter().any(|(u, q)| u < q),
+        "a vol target in a calm market should overshoot an unlevered account: {at_one:?}",
+    );
+    assert!(
+        at_one.iter().any(|(_, q)| *q > 100.0),
+        "the sizing expression should ask for more than 1x equity (100 units at 100): {at_one:?}",
+    );
+
+    // The request itself is *unchanged* by the ceiling — that is the whole
+    // point. Only what the account let through moved.
+    let (u1, q1) = at_one[0];
+    let (u3, q3) = at_three[0];
+    assert_eq!(
+        q1, q3,
+        "raising the ceiling changed what the document asked for",
+    );
+    assert!(
+        u3 > u1,
+        "raising the ceiling should let more of the same request through, {u1} vs {u3}",
+    );
+}
+
+/// **The boundary.** A `sizing:` that lands exactly on the ceiling has to fill
+/// exactly — neither shaved by a ULP nor refused for being one over. The gross
+/// check's tolerance is relative, so this holds at any account scale; the run
+/// below spends its capital to the last unit and books no rejection.
+#[test]
+fn a_request_that_lands_exactly_on_the_ceiling_fills_whole() {
+    for (name, cap) in [
+        ("lev_edge_1", "1"),
+        ("lev_edge_15", "1.5"),
+        ("lev_edge_3", "3"),
+    ] {
+        let sizing = cap; // "exactly the ceiling", spelled in equity
+        let r = run(name, "long", sizing, &["--quiet", "--max-gross", cap]);
+        let (units, requested) = r.fill();
+        assert_eq!(
+            units, requested,
+            "{name}: a request that lands on the ceiling was fitted",
+        );
+        let target: f64 = cap.parse::<f64>().unwrap() * 10_000.0 / 100.0;
+        assert_eq!(
+            units, target,
+            "{name}: expected {target} units, got {units}"
+        );
+        assert!(
+            !r.out.stdout.contains("scaled down"),
+            "{name}: the run reported a scale-down:\n{}",
+            r.out.stdout,
+        );
+    }
+}

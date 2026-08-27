@@ -152,7 +152,19 @@ number) or the requested magnitude carried alongside the filled one so the
 consumer can judge. Carrying the magnitude costs one field, needs no new drain or
 retention policy, rides the blotter that already reaches `fills.csv` and the
 Python report, and leaves the threshold where it belongs — with whoever is
-reading. The CLI picks 1% and says so; nothing else has to.
+reading.
+
+**Amended in 0.84.0: the threshold moved into the library.** "The CLI picks 1%
+and says so; nothing else has to" was half right. Carrying the magnitude *is* the
+right primitive and it stays. But leaving the threshold to each consumer meant
+the CLI owned the only implementation of the question, so a library or Python
+caller had no way to ask what the banner was answering, and would have had to
+pick a second number that could disagree with it. The threshold is now
+`wallet::MATERIALLY_FITTED` with `Order::is_materially_fitted` over it and
+`RunReport::materially_fitted` reducing a run to `(count, worst)`; the CLI banner
+reads that rather than its own copy. The magic number is still a magic number —
+it is just a magic number stated once, and it governs *reporting* only: nothing
+on the fill path reads it, so moving it changes no backtest.
 
 What made it urgent was the second half of the same report: the bound itself was
 asymmetric. A buy was limited by the cash it spent and a sale credited cash, so
@@ -217,6 +229,58 @@ What is **not** here, and what a real venue does:
 backtest and finding the *size* of the loss wrong rather than its existence.
 Getting the event right is most of the value; getting the fill exact needs the
 path, which a bar does not carry.
+
+### Sizing stays denominated in equity, not in buying power — *settled*
+
+**Rejected in 0.84.0, by measurement.** The proposal: re-base
+`Size::ValueFraction` so `value_frac(f)` targets `f × max_gross × equity` rather
+than `f × equity`. Then `sizing` would span flat → fully deployed, `max_gross`
+would define what "fully deployed" means, and a document would become
+leverage-agnostic. It is inert at `max_gross = 1` (verified byte-identical on
+fills, returns, trades and metrics), 1 is the default, and the window closes the
+first time anyone runs a genuinely levered book — so it looked both free and
+urgent.
+
+It is neither. Three measurements, all on a 1,200-bar three-regime fixture:
+
+1. **The premise is false.** "Only documents written incorrectly exceed
+   `sizing: 1.0`" assumes `sizing` is a fraction. It is an arbitrary
+   real-valued expression, and every recipe in `indicators::sizing` is unbounded
+   above: `!vol_target` at a 20% target exceeded `1.0` on **54%** of bars
+   (median 1.07, max 3.81); `!atr_risk` at 2%/2×ATR on **33%** (max 1.96).
+   Correctly-written documents are already `max_gross`-sensitive — at the
+   default cap that run had 38 of 139 fills fitted, the worst to 33.5%.
+2. **It breaks the thing it would apply to.** A vol target is denominated in
+   equity by convention: "a 20% vol target" is 20% of equity's vol, not of
+   buying power's. Re-based on a 3x wallet the same document realized **35.5%**
+   vol against its 20% target (from 15.8%), max drawdown **55.0%** (from 25.0%),
+   Sharpe 0.38 (from 0.74). Multiplying a risk target by leverage does not scale
+   it, it removes it.
+3. **It does not achieve its own goal.** The point was for `sizing ∈ [0,1]` to
+   never be clipped. Re-based at 3x, 38 of 139 fills were *still* fitted —
+   because `3.81 × 3` overshoots a 3x cap. The current base at 3x fits **zero**.
+   The re-base makes a levered account strictly worse at honouring the document.
+
+So the split stands, and it is the split the proposal itself argued for: the
+document states the rule in equity, the account states what it will carry, and
+the rule stays portable — exactly `TradingCostsConfig`'s standing. The docstring
+was the thing that was wrong ("`value_frac(1.0)` is all-in" stopped being true in
+0.75), and it is now corrected everywhere rather than the semantics being bent to
+fit it. The additive `gross_frac` sibling is rejected for the same reason: it
+would be a second spelling of `value_frac(f × max_gross)` that re-introduces
+exactly the ambiguity above for whoever reaches for it.
+
+`tests/leverage.rs::a_sizing_that_fits_is_identical_at_every_ceiling` pins the
+invariant by **exact equality** across five ceilings, and
+`a_vol_target_document_is_bounded_by_the_ceiling_not_rescaled_by_it` pins the
+counter-case. Both fail against a re-based build, as do three tests that predate
+this entry.
+
+**What would change this:** a sizing vocabulary in which every expression is
+provably a fraction of buying power — which would mean `vol_target`,
+`atr_risk`, `equity_vol_target` and `fractional_kelly` all dividing by
+`max_gross` to stay equity-denominated, i.e. four special cases to preserve one
+general rule. That trade is worse than the one it replaces.
 
 ### `max_gross` limits what is asked for, not what is held
 

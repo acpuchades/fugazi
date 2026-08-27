@@ -801,9 +801,29 @@ order.fill_ratio        # 0.333…
 
 `requested_units` exists because "was this shrunk?" is a useless question: under
 any positive commission an all-in sheds a sliver on every trade, so a flag would
-fire constantly. Carrying the requested magnitude beside the filled one lets you
-pick the gap that matters to you. An explicit unit count (`Size.units`,
-`set_position`) is never fitted — it raises `WalletError` instead, on both sides.
+fire constantly. `is_materially_fitted` applies the one threshold the whole
+library uses (`ta.MATERIALLY_FITTED`, 99%), and `RunReport.materially_fitted`
+asks it of a whole run:
+
+```py
+report.materially_fitted    # None, or (count, worst_ratio) — e.g. (38, 0.335)
+```
+
+That third value belongs beside `rejections` and `carry_coverage`: a *fitted*
+fill is not a refusal, so it never reached `rejections`, and until this existed a
+`sizing:` the account could not carry looked exactly like a signal that sized
+smaller. An explicit unit count (`Size.units`, `set_position`) is never fitted —
+it raises `WalletError` instead, on both sides.
+
+**The cap bounds the result; it does not re-denominate the request.**
+`value_frac(1.0)` is 1x equity on a 1x wallet and 1x equity on a 10x one —
+raising `max_gross` never enlarges what a document asks for, it only stops
+truncating it. So a strategy reaching for leverage says so in its own sizing.
+The corollary is that sizing rules which exceed `1.0` — `vol_target` in a calm
+market, `atr_risk` on a narrow range — are *already* clipped by the default cap:
+on a 1,200-bar sample, a 20% vol target had 38 of 139 fills fitted (worst: 33.5%
+of the request) and realized 12.4% vol at `max_gross=1`, against 15.8% and zero
+fitted fills at `max_gross=3`.
 
 On the live side, `OkxWallet` answers from the venue. It is filled for free for
 any symbol the account holds a position in, and read on demand for anything else:
@@ -886,8 +906,9 @@ never got an answer.
 
 The wallet is fed each symbol's price with `update(symbol, price)` and is
 otherwise market-agnostic. Sizes are an absolute number of units, or
-`ta.Size.funds_frac(f)` (cash) / `ta.Size.value_frac(f)` (equity; `1.0` is
-all-in) / `ta.Size.position_frac(f)`; sides are `"buy"`/`"sell"`. A movement that
+`ta.Size.funds_frac(f)` (cash) / `ta.Size.value_frac(f)` (equity; `1.0` targets
+1x equity, and `f` is not capped at `1.0`) / `ta.Size.position_frac(f)`; sides
+are `"buy"`/`"sell"`. A movement that
 can't be carried out — no/zero price fed, or a buy beyond available funds —
 raises `ValueError`. A full strategy loop — price the wallet, advance **every**
 signal each bar, then act:
@@ -902,7 +923,7 @@ for o, h, l, c, v in bars:
     wallet.update("AAPL", c)                          # price the wallet
     went_long, went_flat = enter.update(candle), exit_.update(candle)
     if went_long:
-        wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # all-in long
+        wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # long, 1x equity
     elif went_flat:
         wallet.close("AAPL")
 ```

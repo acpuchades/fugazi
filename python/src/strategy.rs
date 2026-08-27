@@ -320,16 +320,26 @@ impl PyOrder {
     /// what the account can carry rather than refused: an all-in has to shed a
     /// sliver to leave room for commission, and a `sizing:` above what the
     /// wallet's `max_gross` allows is scaled back to it. Both used to be
-    /// invisible. Compare against `units`, or read `fill_ratio`, and decide for
-    /// yourself which gaps are material.
+    /// invisible. Read `fill_ratio` for the quotient and
+    /// `is_materially_fitted` for the crate-wide "worth reporting" answer;
+    /// `RunReport.materially_fitted` asks it of a whole run at once.
     #[getter]
     pub(crate) fn requested_units(&self) -> f64 {
         self.inner.requested_units
     }
     /// `units / requested_units`, in `(0, 1]` — `1.0` when nothing was fitted.
+    ///
+    /// The raw ratio: a costed all-in lands a hair under `1.0` every time, so
+    /// test it with `is_materially_fitted` rather than against `1.0`.
     #[getter]
     pub(crate) fn fill_ratio(&self) -> f64 {
         self.inner.fill_ratio()
+    }
+    /// Whether this fill traded materially less than it asked for —
+    /// `fill_ratio` below `fugazi.MATERIALLY_FITTED` (99%).
+    #[getter]
+    pub(crate) fn is_materially_fitted(&self) -> bool {
+        self.inner.is_materially_fitted()
     }
     /// `+units` for a buy, `-units` for a sell.
     pub(crate) fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -3559,6 +3569,24 @@ impl PyRunReport {
     #[getter]
     pub(crate) fn carry_coverage(&self) -> Option<(usize, usize)> {
         self.inner.carry_coverage
+    }
+
+    /// `(count, worst_ratio)` over the fills that traded materially less than
+    /// they asked for, or `None` when every fill got what it wanted.
+    ///
+    /// The third data-quality companion to [`rejections`](Self::rejections) and
+    /// [`carry_coverage`](Self::carry_coverage). A refused order lands in
+    /// `rejections`; a *fitted* one is not a refusal — the fill happened — so
+    /// until this existed a `sizing:` the account could not carry was
+    /// indistinguishable in the blotter from a signal that sized smaller, and
+    /// every metric downstream described the size that traded rather than the
+    /// size that was asked for.
+    ///
+    /// Materiality is `fugazi.MATERIALLY_FITTED` (99%), not "below 1.0": a
+    /// costed all-in sheds a sliver on every trade.
+    #[getter]
+    pub(crate) fn materially_fitted(&self) -> Option<(usize, f64)> {
+        self.inner.materially_fitted()
     }
 
     /// Rebuild through [`_rebuild_run_report`].

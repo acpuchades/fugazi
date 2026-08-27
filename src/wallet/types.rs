@@ -29,6 +29,22 @@ pub const PRICE_EPSILON: Real = 1e-8;
 /// when the amount is large — see the crate-internal `cash_tolerance` helper.
 pub const CASH_EPSILON: Real = 1e-8;
 
+/// [`fill_ratio`](Order::fill_ratio) below which a fitted fill stops being a
+/// rounding adjustment and starts being a different trade: **99%**.
+///
+/// A [`PaperWallet`](crate::PaperWallet) *shrinks* a fractional sizing to what
+/// the account can carry rather than refusing it, so some reduction is the
+/// normal case — an all-in has to shed a sliver to leave room for commission,
+/// and refusing that would drop the fill entirely. A counter that fires on "not
+/// exactly `1.0`" therefore fires on every costed all-in and reads as noise.
+///
+/// The number is a judgement about *reporting*, not about execution: nothing
+/// reads it on the fill path, and moving it changes no backtest. It is a
+/// constant rather than a per-caller choice so that the CLI banner, a Python
+/// caller and [`RunReport::materially_fitted`](crate::RunReport::materially_fitted)
+/// cannot disagree about whether a given run was fitted.
+pub const MATERIALLY_FITTED: Real = 0.99;
+
 /// The tolerance for a cash comparison at `scale`: `CASH_EPSILON` near zero,
 /// growing with the balance beyond that. Money spans many orders of magnitude
 /// across accounts, so an all-in `value_frac(1.0)` on a large balance rounds by
@@ -160,16 +176,66 @@ pub struct Units<Sym> {
 /// market), or the symbol's current **position** — the first two converted to
 /// units at the current price. Fractions and unit counts are taken as magnitudes
 /// (the sign comes from the trade's [`Side`]).
+///
+/// # Sizing is what the rule wants; leverage is what the account will carry
+///
+/// A `Size` is resolved **without reference to the account's leverage**, and
+/// deliberately so. [`ValueFraction`](Self::ValueFraction) is denominated in
+/// equity, full stop — `value_frac(1.0)` is *one times equity* on a 1x account
+/// and on a 10x one alike. The account's
+/// [`max_gross`](crate::PaperWallet::with_max_gross) then bounds the *result*.
+///
+/// This is the same separation
+/// [`TradingCosts`](crate::costs::TradingCosts) has: the document states the
+/// rule, the account states its own properties, and the rule stays portable
+/// across accounts. Folding the ceiling into the fraction — so that
+/// `value_frac(1.0)` meant "fully deployed, whatever that is here" — would
+/// re-denominate every sizing expression in buying power, and the sizing
+/// recipes in [`sizing`](crate::indicators::sizing) are **not** buying-power
+/// quantities. [`vol_target`](crate::indicators::sizing::vol_target) means "hold
+/// this much realized vol", which is a statement about equity; multiplying it
+/// by the account's leverage does not scale a risk target, it destroys one.
+///
+/// The corollary is that a fraction is **not bounded by `1.0`**. Every recipe
+/// in [`sizing`](crate::indicators::sizing) exceeds it routinely when the
+/// quantity it inverts is small — low realized vol for `vol_target`, a narrow
+/// ATR for `atr_risk` — and a document is entitled to say `3.0` and mean it. A
+/// [`PaperWallet`](crate::PaperWallet) fits what it cannot carry rather than
+/// refusing it, and records the gap on the fill as
+/// [`requested_units`](Order::requested_units).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Size {
     /// An absolute number of units.
     Units(Real),
     /// A fraction of available funds, converted to units at the current price:
-    /// `fraction * funds / price`. Sizes against cash on hand.
+    /// `fraction * funds / price`. Sizes against **cash on hand**, and only
+    /// cash on hand.
+    ///
+    /// **Unusable on a levered book, by construction.** Cash goes negative the
+    /// moment gross notional passes equity, and a negative magnitude would come
+    /// back through `side.sign() * magnitude` as a fill on the *opposite* side —
+    /// so `resolve` floors funds at zero and this resolves to **zero units**.
+    /// Measured on a `max_gross = 3` account: half-deployed leaves cash at
+    /// `-5,000` and `funds_frac(1.0)` resolves to `0`; fully deployed leaves it
+    /// at `-20,000`, likewise `0`. The degenerate answer is the honest one —
+    /// there is no cash to take a fraction of — but it means this variant
+    /// silently stops sizing anything once a book crosses 1x.
+    ///
+    /// Use it for a **cash-account** rule where "spend what I have" is the
+    /// literal intent. Anything that has to survive leverage, a reversal, or an
+    /// already-deployed book wants [`ValueFraction`](Self::ValueFraction):
+    /// equity is defined on both sides of zero cash and both sides of a flip.
     FundsFraction(Real),
     /// A fraction of total equity, converted to units at the current price:
-    /// `fraction * equity / price`. `value_frac(1.0)` is "all-in", and resizes
-    /// correctly on a reversal because equity (unlike cash) survives the flip.
+    /// `fraction * equity / price`. Resizes correctly on a reversal because
+    /// equity (unlike cash) survives the flip.
+    ///
+    /// **`value_frac(1.0)` is one times equity — not "all-in".** The two were
+    /// the same sentence until an account could hold more than it funded; with
+    /// [`max_gross`](crate::PaperWallet::with_max_gross) above `1.0` they are
+    /// not. "All-in" on a 3x account is `value_frac(3.0)`, which is exactly
+    /// what it says: three times equity. The fraction is **not** capped at
+    /// `1.0` and is not rescaled by the account — see the type-level docs.
     ValueFraction(Real),
     /// A fraction of the symbol's current position magnitude (adjust-only: from
     /// a flat position it resolves to zero).
@@ -181,11 +247,13 @@ impl Size {
     pub fn units(units: Real) -> Self {
         Size::Units(units)
     }
-    /// Sugar for [`Size::FundsFraction`].
+    /// Sugar for [`Size::FundsFraction`] — a fraction of **cash**, which
+    /// resolves to zero once a levered book has driven cash negative.
     pub fn funds_frac(fraction: Real) -> Self {
         Size::FundsFraction(fraction)
     }
-    /// Sugar for [`Size::ValueFraction`].
+    /// Sugar for [`Size::ValueFraction`] — a fraction of **equity**, never
+    /// rescaled by the account's leverage, and not bounded by `1.0`.
     pub fn value_frac(fraction: Real) -> Self {
         Size::ValueFraction(fraction)
     }
@@ -212,6 +280,11 @@ impl Size {
     /// Resolve to a non-negative unit magnitude from the current `price`, the
     /// symbol's `position`, the wallet's available `funds`, and its total
     /// `equity`.
+    ///
+    /// The account's leverage is **not** a parameter: a fraction means the same
+    /// number of units on every account, and the ceiling is applied afterwards
+    /// by whatever fits the fill (`PaperWallet::fit_to_account`). See the
+    /// type-level docs for why the two stay separate.
     pub fn resolve(&self, price: Real, position: Real, funds: Real, equity: Real) -> Real {
         match self {
             Size::Units(units) => units.abs(),
@@ -321,10 +394,13 @@ pub struct Order<Sym> {
     /// and a 17× reduction were indistinguishable in the blotter.
     ///
     /// This field is what tells them apart. It carries the *requested*
-    /// magnitude beside the filled one and leaves the consumer to decide what
-    /// is material — see [`fill_ratio`](Self::fill_ratio). An explicit
-    /// [`Size::Units`] target is never shrunk (it fails loudly instead), so on
-    /// those the two are equal by construction.
+    /// magnitude beside the filled one; [`fill_ratio`](Self::fill_ratio) is the
+    /// quotient and [`is_materially_fitted`](Self::is_materially_fitted) the
+    /// crate-wide "worth reporting" predicate over it, so no consumer has to
+    /// compare two fields by hand to find out. A whole run's answer is
+    /// [`RunReport::materially_fitted`](crate::RunReport::materially_fitted).
+    /// An explicit [`Size::Units`] target is never shrunk (it fails loudly
+    /// instead), so on those the two are equal by construction.
     pub requested_units: Real,
 }
 
@@ -375,16 +451,26 @@ impl<Sym> Order<Sym> {
     /// What fraction of the requested magnitude this order actually traded:
     /// `units / requested_units`, in `(0, 1]`. `1.0` when nothing was shrunk.
     ///
-    /// The materiality threshold is deliberately the *caller's*: an all-in
-    /// under any positive commission lands a hair under `1.0` every time, so a
-    /// counter that fires on "not exactly 1.0" reads as noise. Compare against
-    /// whatever gap matters to you.
+    /// The raw ratio, with no threshold applied: an all-in under any positive
+    /// commission lands a hair under `1.0` every time. For the "is this gap
+    /// worth reporting" question use [`is_materially_fitted`](Self::is_materially_fitted),
+    /// which applies the one crate-wide threshold rather than leaving every
+    /// caller to pick its own.
     pub fn fill_ratio(&self) -> Real {
         if self.requested_units > 0.0 {
             self.units / self.requested_units
         } else {
             1.0
         }
+    }
+
+    /// Whether this fill traded *materially* less than it asked for —
+    /// [`fill_ratio`](Self::fill_ratio) below [`MATERIALLY_FITTED`].
+    ///
+    /// The predicate the whole crate reports on, so "the document did not get
+    /// the trade it asked for" has one definition rather than one per layer.
+    pub fn is_materially_fitted(&self) -> bool {
+        self.fill_ratio() < MATERIALLY_FITTED
     }
 
     /// The order that moves `symbol`'s position by `delta` units, filled at

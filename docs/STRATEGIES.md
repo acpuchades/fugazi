@@ -350,8 +350,23 @@ reading a costed `metrics.yml`:
 Every shape takes a top-level `sizing:` field — a **source** whose current value
 scales the position each entry (or reversal) is opened at. The position is sized
 as a fraction of *equity*, and `sizing` is the multiplier on that fraction:
-`!value 1.0` (the default) is all-in, `!value 0.5` a fixed half position, and any
-real-valued expression makes the size dynamic.
+`!value 1.0` (the default) targets **1x equity**, `!value 0.5` a fixed half
+position, and any real-valued expression makes the size dynamic.
+
+`sizing` is **not capped at `1.0`**, and `1.0` is not "all of the account". The
+number is a multiple of equity, full stop; how much of it the account will
+actually carry is the wallet's `--max-gross` (`1.0` by default, so a request
+above 1x is fitted back down to 1x and the gap recorded in `fills.csv`'s
+`requested_units`). A document wanting real leverage says `3.0` here *and* runs
+against `--max-gross 3`; the two numbers have two different owners, the same way
+`costs:` describes the venue rather than the rule.
+
+This matters more than it looks, because most sizing expressions are not
+fractions. `!vol_target` is `target / realized_vol` and exceeds `1.0` on any
+market calmer than its target — on a 1,200-bar sample it did so on 54% of bars,
+peaking at 3.8. So a vol-targeted document is already sensitive to
+`--max-gross`, and leaving it at the default silently truncates the sizing rule
+into a different one.
 
 ```yaml
 root: BTC
@@ -803,7 +818,7 @@ signals fired).
 | --- | --- | --- | --- |
 | `long` | side | omitted | the long side — `enter` + optional `exit` / `stop_loss` / `take_profit`, each templated by `!arg SYM` |
 | `short` | side | omitted | the short side, same shape as `long` |
-| `sizing` | source *(template)* | `!value 1` (all-in per leg) | the per-leg size, as a fraction of equity |
+| `sizing` | source *(template)* | `!value 1` (1x equity per leg) | the per-leg size, as a multiple of equity — not capped at `1`; see [Sizing](#sizing) |
 | `universe` | universe rule | *floating* (every symbol in the series) | which symbols the portfolio is willing to trade — see [Universe](#universe) (shared with `basket:`) |
 | `rebalance_on` | signal | `!never` | resize every held position when this fires (see [Rebalance](#rebalance)) |
 | `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |

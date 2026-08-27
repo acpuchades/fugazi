@@ -534,11 +534,16 @@ Where fugazi lands:
 
 ## Caveats
 
-- **Sizing math is theoretical-price based.** A `value_frac(1.0)` all-in
-  entry under a non-trivial cost model overshoots funds by the cost
-  overhead and is silently dropped by the wallet's queued-order
-  semantics. Leave headroom by sizing under `1.0` (`0.99`, say) when a
-  cost model is active.
+- **Sizing math is theoretical-price based.** A `value_frac(1.0)` entry
+  under a non-trivial cost model asks for slightly more than the account
+  can pay for, because the fraction is computed before spread, slippage
+  and commission are known. The wallet *fits* it — the fill lands a hair
+  under the request rather than being dropped — and records the gap in
+  `Order::requested_units`. That sliver is exactly what the
+  `MATERIALLY_FITTED` threshold (99%) exists to ignore, so it does not
+  show up in `RunReport::materially_fitted` or in the CLI's scale-down
+  banner. Nothing needs doing about it; sizing at `0.99` buys no
+  accuracy, only a smaller position.
 - **`volume_participation` is a single-bar approximation.** No
   participation cap carries across bars; a fill uses only its own bar's
   volume. Not a substitute for a full market-impact model.

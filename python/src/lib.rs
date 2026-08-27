@@ -186,6 +186,12 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DEFAULT_TOLERANCE_ABS", DEFAULT_TOLERANCE.abs)?;
     m.add("DEFAULT_TOLERANCE_REL", DEFAULT_TOLERANCE.rel)?;
 
+    // The one threshold `Order.is_materially_fitted` and
+    // `RunReport.materially_fitted` apply, exposed so a caller reproducing the
+    // predicate over its own fills gets the same answer the CLI banner does
+    // rather than picking a second number.
+    m.add("MATERIALLY_FITTED", fugazi_core::wallet::MATERIALLY_FITTED)?;
+
     macro_rules! reg {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
     }

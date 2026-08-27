@@ -556,7 +556,7 @@ internally, one child's stop only takes off its own share — all covered under
 
 The wallet is fed each symbol's bar every tick via `wallet.update` (its `close`
 marks to market, its `[low, high]` bounds fills). `set` targets an absolute
-position — an opposite-side `set` reverses, `value_frac(1.0)` is all-in — and
+position — an opposite-side `set` reverses, `value_frac(1.0)` targets 1x equity — and
 `close` flattens. Queries return unit-tagged amounts (`Reference` cash and equity,
 `Units` of a symbol). For multi-asset strategies, feed the wallet each symbol's
 price and act on more than one symbol per `trade`; see the `pairs` example.

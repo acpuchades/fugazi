@@ -1808,6 +1808,14 @@ def test_one_sizing_value_means_one_exposure_on_both_sides():
         assert order.requested_units == pytest.approx(300.0)
         assert order.fill_ratio == pytest.approx(1 / 3)
 
+        # ...and the whole run says so, without a caller diffing two fields on
+        # every fill to find out. This is the third member of the family
+        # `rejections` and `carry_coverage` belong to.
+        assert order.is_materially_fitted
+        n, worst = report.materially_fitted
+        assert n == 1
+        assert worst == pytest.approx(1 / 3)
+
     # And the knob lifts both by the same multiple, which is what makes a 3x
     # live account comparable to a backtest at all.
     for side in ("long", "short"):
@@ -1815,6 +1823,17 @@ def test_one_sizing_value_means_one_exposure_on_both_sides():
         assert gross == pytest.approx(3.0), f"{side} carried {gross:.2f}x"
         order = report.fills[0].order
         assert order.units == pytest.approx(order.requested_units)
+        assert not order.is_materially_fitted
+        assert report.materially_fitted is None
+
+    # The ceiling bounds the *result*; it does not re-denominate the request.
+    # A document that already fits carries the same exposure at every cap —
+    # `value_frac` is a multiple of equity, not of buying power.
+    for cap in (1.0, 1.5, 3.0, 10.0):
+        gross, report = carried("long", 0.5, max_gross=cap)
+        assert gross == pytest.approx(0.5), f"max_gross={cap} carried {gross:.2f}x"
+        assert report.materially_fitted is None
+        assert report.fills[0].order.requested_units == pytest.approx(50.0)
 
 
 def test_leverage_is_readable_off_every_wallet():

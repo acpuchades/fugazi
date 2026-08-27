@@ -15,8 +15,8 @@ mod types;
 pub use paper::{DEFAULT_RETENTION, PaperWallet};
 pub use sleeve::{SleeveWallet, external_baseline, own_equity};
 pub use types::{
-    Ack, CASH_EPSILON, Order, OrderId, OrderKind, POSITION_EPSILON, PRICE_EPSILON, Reference,
-    Rejection, Side, Size, Units, WalletError,
+    Ack, CASH_EPSILON, MATERIALLY_FITTED, Order, OrderId, OrderKind, POSITION_EPSILON,
+    PRICE_EPSILON, Reference, Rejection, Side, Size, Units, WalletError,
 };
 // `pub(crate)` in `types`, so they can only be re-exported crate-wide.
 pub(crate) use types::{cash_tolerance, marked_sum, trim_front};
