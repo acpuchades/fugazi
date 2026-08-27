@@ -56,6 +56,8 @@ reader can identify the run.
 | Column | Meaning |
 |---|---|
 | `run.bars` | Number of bars in the run (or window). |
+| `run.period_start` / `run.period_end` | Labels of the first and last **evaluated** bars, after any [`--from`/`--until`](CLI.md#date-range-selection) slicing and warm-up prefix. What the numbers below describe — not what the input file covers. Written to `metrics.yml` only. |
+| `run.warmup_bars` | Bars read *before* `period_start` to settle the chains, and therefore excluded from `run.bars` and from every metric here. Present only under `--from` without `--strict-from`. |
 | `run.initial_equity` | Equity at the start of the run (or window). |
 | `run.final_equity` | Equity at the last bar (or window). `0` on a ruined run. |
 | `run.ruin_bar` | The bar the account was **wiped out** on, or absent if it stayed solvent. See [Ruin](#ruin). |

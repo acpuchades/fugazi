@@ -18,7 +18,7 @@ two shipped venue presets, and — for readers coming from another tool — a
 side-by-side with how zipline, backtrader, backtesting.py and vectorbt
 model the same three effects.
 
-- [The pipeline](#the-pipeline)
+- [The pipeline](#the-pipeline) — and [the fourth leg, carry](#the-fourth-leg-cost-of-carry)
 - [Wiring costs into a run](#wiring-costs-into-a-run)
 - [Commission](#commission)
 - [Spread](#spread)
@@ -51,9 +51,10 @@ bar's `open` on a gap through the trigger):
 The commission lands on `Order::commission` and in `fills.csv`'s
 `commission` column — a distinct axis so cost accounting is unambiguous.
 
-Everything is under [`src/costs/`](../src/costs/) as three tiny traits, one
-model per struct, plus a `TradingCosts` bundle that
-[`PaperWallet::with_costs`](../src/strategy.rs) takes.
+Everything is under [`src/costs/`](../src/costs/) as four tiny traits (the
+three above plus [carry](#the-fourth-leg-cost-of-carry)), one model per struct,
+plus a `TradingCosts` bundle that
+[`PaperWallet::with_costs`](../src/wallet/paper.rs) takes.
 
 ### The fourth leg: cost of carry
 
@@ -107,8 +108,8 @@ charges and the model needs no notion of settlement cadence.
 
 ```sh
 fugazi get binance-vision-futures:BTCUSDT[1d] --since 2023-01-01 -o funding.csv
-fugazi run @strategy.yml -s @btc.csv -s @funding.csv \
-  --max-gross 3 --costs 'carry=!funding {}' --costs commission=!percentage:0.0005
+fugazi run @strategy.yml -s @btc.csv -s @funding.csv -o out/ \
+  --max-gross 3 --costs 'carry=!funding {}' --costs 'commission=!percentage { rate: 0.0005 }'
 ```
 
 **`year_fraction` is measured, not declared.** A bar's carry is pro-rated by the

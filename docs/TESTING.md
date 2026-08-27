@@ -23,12 +23,12 @@ places belongs in the narrower one.
 |---|---|---|---|
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
-| **End-to-end** | `tests/{run,costs,optimize,overlap,cadence,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
+| **End-to-end** | `tests/{run,costs,optimize,pooled,overlap,cadence,date_range,examples_validate,…}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
 | **Coverage guard** | `tests/metrics_coverage.rs` | which metrics have a reference at all | `cargo test` (reads key sets only — never skips) |
 | **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
 
-Plus **doctests** (37 of them, mostly in `README.md` and the strategy-shape
+Plus **doctests** (~55 of them, mostly in `README.md` and the strategy-shape
 docs), which are the executable half of the user-facing prose. A `no_run` /
 `ignore` doctest is a compile check only — say so in the fence when that is
 deliberate.
@@ -44,7 +44,7 @@ rustc versions. Timed comparisons live in `benches/` and
 
 ### Unit tests
 
-The bulk of the suite (~785 in the library, ~93 in the binary). They exist to
+The bulk of the suite (~1 070 in the library, ~180 in the binary). They exist to
 reach what the public API can't: `pub(crate)` cores (`WindowStats`,
 `WilderState`), private helpers, and the wildcard-free match tables that back
 the drift guards.
@@ -130,7 +130,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 | Strategy decision logic | `tests/strategies.rs` (catalogue-wide) or the shape's own file (`pairs.rs`, `portfolio.rs`) |
 | `backtest::run` / `backtest::warm_up` | `tests/driver_contract.rs` |
 | Run resuming (`save_state`/`restore_state`, `RunState`, `--flatten`) | `tests/resume.rs` — chunked-resume-vs-one-shot for **every** shape, at three or more chunks — **and** `python/tests/test_specs.py`, which drives the same property through the bindings |
-| Wallet order flow | unit tests in `src/wallet.rs`; live venues via the `common::live` conformance suite in `tests/live_<venue>.rs`, against `wiremock` |
+| Wallet order flow | unit tests in `src/wallet/`; live venues via the `common::live` conformance suite in `tests/live_<venue>.rs`, against `wiremock` |
 | `PaperWallet` fill pricing, cash or cost arithmetic | `tests/wallet_validation.rs` — extend the schedule in `tools/gen_wallet_bars.py` or add a cost configuration, then `pixi run gen-wallet` |
 | A metric | a unit test in `src/metrics.rs`, **plus** a reference value in one of the two `(metric, expected)` generators — `tests/metrics_coverage.rs` fails until it has one or an exemption. Nothing else is needed for the degenerate cases: `tests/metrics_degenerate.rs` walks `metrics::flatten` over empty / one-bar / flat / ruined / zero-stake runs and over a blotter with no trades, one open position, all winners and all losers, so a new metric is covered there the day it is added |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
@@ -298,10 +298,8 @@ because the grouping is the information.
 **Tolerances carry a reason.** `1e-12` for closed-form arithmetic, `1e-9` for
 two implementations of one formula, `2e-2` for a recursive smoother compared
 over its converged tail only. A loosened tolerance with no comment is a silenced
-failure. `stats.rs`'s
-`variance_precision_is_bounded_by_the_mean_to_dispersion_ratio` goes further and
-pins a *known limitation* with a note saying which assertion to delete when it
-is fixed.
+failure. `stats.rs` goes further in places and pins a *known limitation* with a note
+saying which assertion to delete when it is fixed.
 
 **Test data goes in a unique temp path.** `common::cli::unique_path` — never a
 fixed name in the shared `/tmp`, which collides with a parallel run or another

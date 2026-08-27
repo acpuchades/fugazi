@@ -228,15 +228,12 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
 }
 
 /// Parse a plain symbol string (no `[freq]` bracket) into a [`SymbolSpec`]
-/// with the given interval. Accepts the `OUTPUT=QUERY` remap form used by
-/// overlay providers (e.g. `BTCUSDT=bitcoin` for CoinGecko), and the same
-/// `\=` escape — see [`split_remap`].
+/// with the given interval — the `@dataset.yml` path, where the interval comes
+/// from the dataset rather than a bracket.
 ///
-/// A dataset YAML listing a provider id that contains `=` (Yahoo's `EURUSD=X`,
-/// `JPY=X`) must escape it, or the head splits and only `X` reaches the
-/// provider: write `- EURUSD\=X` as a plain or single-quoted scalar, both of
-/// which keep the backslash. A *double*-quoted YAML scalar processes escapes
-/// itself and rejects `\=`, so don't use that form here.
+/// The symbol is read **verbatim**, exactly as [`parse_symbol`] reads the head
+/// of a bracketed entry, so a dataset may list `EURUSD=X` or `BTC/USDT:USDT`
+/// with no escaping.
 fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
     let s = s.trim();
     if s.is_empty() {
@@ -365,18 +362,14 @@ fn provider_schema(name: &str) -> Arc<Schema> {
         .unwrap_or_else(Schema::empty)
 }
 
-/// One `[OUTPUT=]QUERY[freq,freq,...]` entry in the CLI spec.
+/// One `SYMBOL[freq,freq,...]` entry in the CLI spec.
 ///
-/// The optional `OUTPUT=` prefix decouples the name a row is *emitted* under
-/// from the identifier the provider is *queried* with. That matters whenever a
-/// provider's vocabulary differs from the one your price series uses —
-/// CoinGecko keys on coin ids (`bitcoin`) while a Binance series is keyed on
-/// pairs (`BTCUSDT`), and the `--series` join is an exact string match on
-/// `symbol`. `cg:BTCUSDT=bitcoin[1d]` fetches `bitcoin` and writes
-/// `BTCUSDT`, so the two files line up.
-///
-/// With no unescaped `=`, output and query are the same string. A symbol that
-/// contains a literal `=` escapes it as `\=` — see [`split_remap`].
+/// The symbol is one string: it is what the provider is queried with *and* what
+/// lands in the `symbol` column. There is no emit/fetch remap — a `--series`
+/// join is an exact string match on `symbol`, so a file fetched from a provider
+/// with its own vocabulary (CoinGecko keys on coin ids, `bitcoin`, where a
+/// Binance series keys on pairs, `BTCUSDT`) is joined by keying both sides the
+/// same way, not by relabelling one at fetch time.
 #[derive(Debug, Clone, PartialEq)]
 struct SymbolSpec {
     /// The symbol: sent to the provider, and written to the `symbol` column.
@@ -409,7 +402,7 @@ impl FetchSpec {}
 pub struct GetArgs {
     /// Fetch specs: one or more of the following, all series downloading in parallel:
     ///
-    /// * **Inline:** `<provider>:[OUT=]<symbol>[<freq>,...](,...)*`, e.g.
+    /// * **Inline:** `<provider>:<symbol>[<freq>,...](,...)*`, e.g.
     ///   `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens: `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`.
     ///
     /// * **Dataset file:** `@path/to/dataset.yml` — a YAML descriptor with `name`,
@@ -417,18 +410,13 @@ pub struct GetArgs {
     ///   of `{ provider, symbols }`). All sources share the dataset's interval.
     ///   Example: `fugazi get @datasets/crypto/large-cap-1d.yml --since 2019-01-01 -o out.csv`.
     ///
-    /// The symbol accepts an optional `EMITTED=FETCHED` remap — the left side is
-    /// written to the CSV, the right side is what the provider is asked for.
-    /// Omit it and the two are the same. Use it when a provider's vocabulary
-    /// differs from the price series you intend to join against, since `run`
-    /// joins on an exact `(symbol, time)` match: `cg:BTCUSDT=bitcoin[1d]`
-    /// fetches the coin id `bitcoin` and emits `symbol=BTCUSDT`. The same form
-    /// works for a dataset file's `symbols:` entries.
-    ///
-    /// A ticker that itself contains `=` — Yahoo's `EURUSD=X`, `ES=F` — escapes
-    /// it as `\=`, on either side of the remap. Quote the argument so the shell
-    /// doesn't eat the backslash: `fugazi get 'yfinance:EURUSD\=X[1d]'`. The
-    /// only escapes are `\=` and `\\`; anything else is an error.
+    /// The symbol is taken **verbatim**: the provider is split off at the first
+    /// colon and no provider name contains one, so everything after it is the
+    /// symbol. A ticker carrying `=` or `:` therefore needs no escaping —
+    /// `fugazi get 'yfinance:EURUSD=X[1d]'`,
+    /// `fugazi get 'binance-vision:BTC/USDT:USDT[1d]'`. It is also what lands in
+    /// the `symbol` column, so a series joined against another through
+    /// `run --series` has to be keyed the way this provider spells it.
     ///
     /// Each row's `freq` cell is the fetched cadence's own token — cadences are
     /// not relabellable.
@@ -1706,8 +1694,8 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     })
 }
 
-/// Parse one `[OUTPUT=]QUERY[freq,...]` entry. See [`SymbolSpec`] for what the
-/// `OUTPUT=` prefix is for and [`split_remap`] for the `\=` escape.
+/// Parse one `SYMBOL[freq,...]` entry. The head is the symbol, verbatim — see
+/// [`SymbolSpec`].
 fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     let s = s.trim();
     let open = s

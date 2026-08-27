@@ -48,10 +48,21 @@ custom source.
 - **`Frequency`** — bar cadence enum (`Minute(u32)`/`Hour`/`Day`/`Week`/`Month`),
   totally ordered by duration, `FromStr` on `N<unit>` (`m`/`h`/`d`/`w`/`M`).
   `sources::Interval` is the provider-side twin.
-- **`Selector { symbol: Option<String>, freq: Option<Frequency> }`** — partial
-  key. `None` = wildcard; shorthands `by_symbol`/`by_freq`/`exact`.
-- **`Snapshot<K>`** — newtype `HashMap<K, Atom>` with `get`/`insert`/`iter`/
-  `FromIterator` + the **sole-atom trio**, three spellings of one decision that
+- **`StreamId`** — an opaque `Arc<str>` label for *which series of a symbol* an
+  entry is. `From<Frequency>` yields the cadence's canonical token, so a bar
+  stream's id is normally `1h`/`1d`; a price-less or activity-sampled series
+  carries whatever it likes (`dollar-1e6`, a session id). `types::stream(id)`
+  builds one directly.
+- **`Selector<Sym> { symbol: Option<Sym>, stream: Option<StreamId> }`** — partial
+  key. `None` = wildcard; shorthands `by_symbol`/`by_stream`/`exact`, plus
+  `is_empty`/`matches`.
+- **`Snapshot<Sym>`** — an `Arc<Entries<Sym>>` over an **interleaved**
+  `Vec<(Option<Sym>, Option<StreamId>, Atom)>` (the tag beside the atom it
+  describes, one allocation — splitting them measured 14% slower), plus a
+  lazily built `symbol → first row` side index amortised across the bar's
+  clones. `new`/`of_atom`/`single`/`push`/`len`/`iter`/`find(&Selector)`/
+  `remove_matching` + `FromIterator<Entry<Sym>>`, plus the **sole-atom trio** —
+  three spellings of one decision that
   differ only in how a 2+ priceable snapshot is answered (all three read `None`
   on empty and `Some` on exactly one): `sole_atom_or_panic` (**panics** — the
   unrooted guard, where nothing named an asset), `sole_atom_or_none` (`None` —
@@ -59,8 +70,7 @@ custom source.
   means "the blessed leg is absent this bar", not "mis-wired"), and
   `sole_atom_or_err` (`Err(count)` — the FFI boundary, which turns it into a
   `ValueError` rather than an unwinding `PanicException`).
-  `impl Snapshot<Selector>` adds `find(query)`.
-- **`Pick<S = Identity<Snapshot<Selector>>>`** projects one asset: `Output =
+- **`Pick<Sym, S = Identity<Snapshot<Sym>>>`** projects one asset: `Output =
   Atom`. Three modes: `Pick::new()` (empty selector → sole-atom, **panics** on
   2+); `Pick::matching(selector)` (strict structural match → `None` when absent —
   the explicit cross-asset form); **`Pick::rooted(selector)`** (match, else fall
@@ -68,13 +78,13 @@ custom source.
   `source:`-omitted leaves; the fallback keeps untagged size-1 snapshots, i.e.
   `Vec<Candle>` drivers, resolving). `Pick::of(selector, source)` re-roots any of
   them. **`Atom` equality is by `time`**; `Ord` sorts chronologically with `None`
-  first. **`PickAny<S = Identity<Snapshot<Sym>>>`** is the symbol-agnostic
+  first. **`PickAny<Sym, S = Identity<Snapshot<Sym>>>`** is the symbol-agnostic
   sibling: no selector, always returns the first entry's atom (`snap.any_atom()`),
   `None` on empty. Used by every calendar accessor's default source path.
 
-Python: `ta.Frequency("1h")`, `ta.Selector(symbol="BTC", freq="1h")`,
+Python: `ta.Frequency("1h")`, `ta.Selector(symbol="BTC", stream="1h")`,
 `ta.Snapshot({...})`, `ta.pick(...)`. Snapshot keys accept `str`/`Frequency`/
-`(str, freq)`/`Selector`.
+`(str, stream)`/`Selector`.
 
 ### Position-anchored sources (`indicators/position.rs`)
 
@@ -150,9 +160,10 @@ the **`component_accessors!` macro** — don't hand-write.
 ## Signals — boolean indicators (`src/signal.rs`, `src/indicators/{compare,logic,ext}.rs`)
 
 **A signal is just `Indicator<Output = bool>`** — no second trait hierarchy.
-`Signal` is a thin marker `trait Signal: Indicator<Input = Candle, Output = bool>`
-(blanket, `?Sized`) so strategies hold `Box<dyn Signal>`. `None` until warmed; read
-as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
+`Signal<In>` is a thin marker `trait Signal<In>: Indicator<Input = In, Output =
+bool>` (blanket, `?Sized`) so strategies hold `Box<dyn Signal<Snapshot<Sym>>>`.
+`None` until warmed; read as `bool` (false until ready) via
+`BoolIndicatorExt::is_true`.
 
 - **Comparisons**: aliases `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` for `Combine<L, R,
   GtOp>` etc. The op carries a **`Tolerance { abs, rel }`**, whose band is
@@ -163,7 +174,7 @@ as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
   overrides with an **absolute** band (a deadband the caller means literally);
   `Gt::with_tolerance(a, b, t)` takes both terms. YAML `epsilon:` is the absolute
   form. The execution-side quantity epsilons are separate and live in
-  `src/wallet.rs`: `POSITION_EPSILON` (units), `PRICE_EPSILON` (price),
+  `src/wallet/types.rs`: `POSITION_EPSILON` (units), `PRICE_EPSILON` (price),
   `CASH_EPSILON` / `cash_tolerance(scale)` (money).
 - **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are
   dedicated unary carriers; `Const<In>` is a constant-bool leaf; `Every<In>(period)`
@@ -184,7 +195,7 @@ as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
   composed `a.gt(b).and(a.gt(b).changed())` form, which cloned both operands and
   did ~2× the source work.
 
-## Strategies — decision layer (`src/strategy.rs`, `src/wallet.rs`)
+## Strategies — decision layer (`src/strategy.rs`, `src/wallet/`)
 
 `Strategy` trait: `update(&mut self, Input)`; `on_fill(&mut self, &Order<Symbol>)`
 (default no-op); `on_reject(&mut self, &Rejection<Symbol>)` (default no-op — the
@@ -199,13 +210,13 @@ strategy, then `trade` each *only if* `is_ready()`. Deliberately **no one-shot
 `evaluate`**.
 
 `src/strategy.rs` carries only the `Strategy` trait. `Wallet` vocabulary lives in
-**`src/wallet.rs`** so downstream broker crates don't drag `Strategy` machinery in.
+**`src/wallet/`** so downstream broker crates don't drag `Strategy` machinery in.
 
 ### `SingleAssetStrategy<Sym>` (`strategies/single_asset.rs`)
 
-The concrete `Strategy` (Input = Candle) — long/flat/short driven by boolean
-signals, sized against equity. Four `Box<dyn Signal>` slots (open/close long,
-open/close short), default `Const::<Candle>::new(false)`.
+The concrete `Strategy` (`Input = Snapshot<Sym>`) — long/flat/short driven by
+boolean signals, sized against equity. Four `Box<dyn Signal<Snapshot<Sym>>>`
+slots (open/close long, open/close short), defaulting to a constant `false`.
 
 - **Readiness gate.** `is_ready()` = `bars_seen >= max(stable_bars())` across
   every wired signal, protective level, and sizing indicator. Wrap a subtree in
@@ -503,7 +514,7 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
 - **Not shipped (yet):** inverse-vol / performance-weighted `WeightPolicy`
   built-ins.
 
-## Wallet (`src/wallet.rs`)
+## Wallet (`src/wallet/`)
 
 **`Wallet<Sym>`** (`&mut dyn`) — the single **seam** to downstream execution.
 Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per tick
@@ -621,8 +632,8 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   `update`'s fill stream. `Rejection { symbol, id, error, kind }`. Default empty;
   **any impl that can drop an order must override**. `PaperWallet` books all three
   refusal paths (submit-time pre-flight via `reject_submission`, the queued market
-  order in `update`, a triggered protective leg in `match_protective`). Destructive
-  drain via a `rejections_drained` cursor, undisturbing the non-destructive
+  order in `update`, a triggered protective leg in `execute_protective`).
+  Destructive drain via a `rejections_drained` cursor, undisturbing the non-destructive
   `rejections()` history accessor. For a portfolio, the driver drains the passed
   wallet's `take_rejections()` and routes each to `Portfolio::on_reject`.
 - **No explicit-price primitive, no `trade(delta)`** — scale-in is
@@ -630,7 +641,7 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
 - **Unit-tagged amounts.** `Reference(Real)` (quote/funds), `Units<Sym> { symbol,
   amount }`. `Order<Sym>` = `{ symbol, side, units, price, kind, id }`; `OrderKind`
   = `Market`/`Stop`/`TakeProfit`/`Limit`. `Order::from_delta(...)` returns `None`
-  within `DEFAULT_EPSILON`. **A `Limit` fill is passive** — crosses no spread
+  within `POSITION_EPSILON`. **A `Limit` fill is passive** — crosses no spread
   (`wallet::half_spread_for`), takes a `0.0` slippage multiplier
   (`costs::kind_multiplier`); commission still applies (no maker/taker distinction).
 - **`Ack<Sym>`** (`Filled(Order) | Working(OrderId)`), **`OrderId(u64)`**
@@ -761,7 +772,7 @@ one written; `report_slice` rebases them like fills; CLI `run` prints a post-run
 `warn` banner grouped by reason+kind). `Fill`/`Rejected`/`RunReport` re-exported at
 crate root; `run` namespaced.
 
-## Run resuming — full-state serialization (`fugazi::spec::RunState`, `src/runtime.rs`, `fugazi-derive/`)
+## Run resuming — full-state serialization (`fugazi::spec::RunState`, `src/runtime/`, `fugazi-derive/`)
 
 Persist a run's **entire runtime state** to JSON and continue it later over new
 bars with **bit-identical** behavior. **Full-state serialization, not replay** — a
@@ -1114,12 +1125,12 @@ only the carrier differs: `AddOp` is binary `+` *and* the fold behind `CumSum`;
 `MaxOp`/`MinOp` serve the pairwise, rolling and cumulative extremes alike.
 
 **`IfElse<Cond, T, F>`** — three-source ternary. `Cond: Indicator<Output=bool>`
-picks: `Some(true)` → `if_true`, `Some(false)` → `if_false`, `None` propagates. All
+picks: `Some(true)` → `then`, `Some(false)` → `otherwise`, `None` propagates. All
 three advanced every bar (never short-circuited). `warm_up_bars()`/`stable_bars()`
 report the max across three (safe worst case), but **first `Some` can arrive
 earlier** — cond + the selected branch settled is enough. `IfElse` is excluded from
 `tests/warm_up.rs`. Fluent `.if_else(t, f)` on `BoolIndicatorExt`. YAML: `!if_else {
-cond, if_true, if_false }`.
+cond, then, otherwise }`.
 
 ## Shared cores (`pub(crate)`)
 
@@ -1185,7 +1196,7 @@ consumer.
 
 ```text
 fugazi get binance:BTCUSDT[1d]                       -o prices.csv
-fugazi get cg:BTCUSDT=bitcoin[1d]                    -o caps.csv
+fugazi get cg:bitcoin[1d]                            -o caps.csv
 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/
 ```
 
@@ -1241,7 +1252,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   `SignalSpec` — a "signal" is a `NodeSpec` whose `output_type()` is `Bool`). Every
   tag lives here: numeric sources, boolean predicates (`!gt`/`!and`/`!crosses_above`/
   `!changed`/`!every`/`!is_weekday`/…), string comparisons (`!str_eq`/`!str_ne`).
-  Polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`.
+  Polymorphic over `PayloadType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`.
   `!changed` dispatches Bool-toggle vs Real-change on the child's `output_type()` at
   build; `!unstable { source }` is output-agnostic; `!eq`/`!ne` dispatch Real/Str on
   the lhs. Carries `default_source`/`default_high`/`default_low`/`default_bar_source`,
@@ -1296,17 +1307,20 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
 
 - **`costs/`** — `--costs`. `spec.rs`: CLI-arg parsing into `CostSpec`; `config.rs`:
   `CostConfig`, `LegConfig<T>`, `ScopedEntry<T>`, typed `CommissionSpec`/`SpreadSpec`/
-  `SlippageSpec` (**externally tagged** — `!percentage { rate: 0.001 }`, never `kind:
+  `SlippageSpec`/`CarrySpec` (**externally tagged** — `!percentage { rate: 0.001 }`, never `kind:
   percentage`). Dotted `--costs` setter is a *literal* address. See [docs/COSTS.md](COSTS.md).
-- **`dyn_indicator.rs`** — facade re-exporting **`fugazi::runtime`** (`DynIndicator` +
-  `DynValue` (`Real | Bool | Atom | Candle | Str | Time | Snapshot<String>`) + `DynType`
-  + `Adapter` blanket + `AsReal`/`AsBool`/`AsCandle`/`AsAtom`/`AsStr` + `chain`/
-  `unstable_wrap`). **New YAML-visible indicators plug in via `dyn_indicator::wrap(...)`.**
+- **`dyn_indicator.rs`** — facade re-exporting **`fugazi::runtime`** (`PayloadIndicator`
+  + `PayloadValue` (`Real | Bool | Atom | Candle | Str | Time | Snapshot<String>`) +
+  `PayloadType` + `Adapter` blanket + `AsReal`/`AsBool`/`AsCandle`/`AsAtom`/`AsStr` +
+  `chain`/`try_chain`/`unstable_wrap`, plus the domain-typed `DynIndicator`/`Chain`
+  half). **New YAML-visible indicators plug in via `dyn_indicator::wrap(...)`.**
 - **`csv_source.rs`** — the CSV reader behind `fugazi get file:PATH`. The provider
   is named for its transport (`file:`), not its format; a second format would be a
   sibling reader here, dispatched off the path's extension.
-- **`data.rs`** — `--series` data frame (`@file.csv` + inline, full-joined on `symbol`
-  +`time`).
+- **`data.rs`** — `--series` data frame (`@file.csv` + inline), keyed and full-joined
+  on **`(symbol, freq, IndexKey)`** — the `IndexKey` being the row's `index` cell
+  (`Ordinal`, sorting numerically) when it has one and its `time` cell (`Label`,
+  sorting lexicographically) otherwise.
 - **`overlay.rs`** — `--overlay` parsing for `fugazi get`.
 - **`calendar.rs`** — `Frequency`, `AssetClass`, `Scope`, `ScopedFrequency`,
   `parse_scope`/`parse_scope_parts`, **`WindowSpec`** (`-w`), **`parse_time_to_millis`**,
@@ -1324,7 +1338,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   resolves the imported subtree's `!param` against the inline table first (via
   `params::substitute_partial`).
 - **`typecheck.rs`** — static input/output type checking of `NodeSpec` trees, run from
-  `NodeSpec::try_from` **only in check mode**. `output_type(&NodeSpec) -> Option<DynType>`
+  `NodeSpec::try_from` **only in check mode**. `output_type(&NodeSpec) -> Option<PayloadType>`
   (`None` = undecidable ⇒ *skip*, never *invalid*) and `children()`. Both matches
   **exhaustive with no wildcard**, so a new `NodeSpec` variant fails to compile until
   classified. Pinned bidirectionally against the engine by two tests
@@ -1344,8 +1358,8 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
 **Type-erased mirror** of the Rust library (pyo3 cdylib, `fugazi-python` → `fugazi`).
 See [docs/PYTHON.md](PYTHON.md) for the user-facing API. Python can't carry source
 generics across FFI, so everything is erase-then-dispatch via **`fugazi::runtime`**
-(`DynIndicator`+`DynValue`, plus `DynIndicatorSync` subtrait adding `Send + Sync` and
-deep clone via `runtime::wrap_sync`). Output-typed carriers = `TypedSource<In, Out>`
+(`PayloadIndicator`+`PayloadValue`, plus the `PayloadIndicatorSync` subtrait adding
+`Send + Sync` and deep clone via `runtime::wrap_sync`). Output-typed carriers = `TypedSource<In, Out>`
 newtypes: `Source<I>`, `StrSource<I>`, `AtomBox<I>`, `SignalBox<I>` (flattens warm-up
 `None` to `Some(false)`). Multi-output stays local as `DynMulti<I>`/`MultiBox<I>`.
 `AnySource`/`AnySignal`/`AnyMulti` record the input domain; `map_source!`/
@@ -1524,7 +1538,8 @@ descriptor: a JSON Schema (draft 2020-12) for the expression grammar's **JSON br
 (single-key `{tag: body}` objects + bare-literal shorthands + authored load-time
 placeholders), for structural validation by consumers without the Rust build path.
 `spec_document_json_schema()` extends it to the whole document — the five strategy shapes as
-a `oneOf`, each `$ref`-ing the same node/selection grammar for every expression slot. Both are
+an `anyOf` (not a `oneOf`: a `root:`-less document is structurally both a `single` and a
+`multi`, and `oneOf` would reject a document both shapes accept), each `$ref`-ing the same node/selection grammar for every expression slot. Both are
 **complementary to `fugazi check`**, not a replacement — `check` (the typed parse) remains the
 authority, validating the type discipline and build-time semantics the schema can't express.
 
@@ -1592,8 +1607,8 @@ hardcoded whole-position size. **Change a `Wallet` method → update that list i
 PR.** Currently unbound with reasons: `take_rejections`, `set_costs_for`.
 
 **Intentionally not bound**: `Strategy` trait as subclassable, the CLI binary, `Wallet`
-as a trait to *implement* in Python (only concrete `PaperWallet` / live `OkxWallet` are
-bound), Rust-internal types (`Position`, `PositionField`, `Ack`, `OrderId`, `Reference`,
+as a trait to *implement* in Python (only the concrete `PaperWallet` and the live
+`OkxWallet` / `CoinbaseWallet` / `KrakenWallet` are bound), Rust-internal types (`Position`, `PositionField`, `Ack`, `OrderId`, `Reference`,
 `Units`). **Monte Carlo** *is* bound (`ta.MonteCarloConfig`,
 `StrategySpec.evaluate(montecarlo=cfg)`). Trailing risk indicators *are* bound
 (`sharpe_of` / `sortino_of` / `volatility_of` / `max_drawdown_of` / `calmar_of`). The
@@ -1602,7 +1617,7 @@ per-tag ledger lives in `python/tests/test_parity.py`.
 **Spec-loading discipline**: a new YAML tag under `src/spec/` usually needs no Python
 change — the `StrategySpec` wrapper calls the typed-parse machinery. But: (a) a new
 top-level strategy shape needs a `detect_kind` arm (in `python/src/spec.rs`) and a
-`LoadedSpec` variant; (b) new per-kind `.run()`/`.evaluate()` plumbing must be threaded.
+variant on the core `StrategySpec` the pyclass wraps; (b) new per-kind `.run()`/`.evaluate()` plumbing must be threaded.
 `optimize` shares the same dispatch as `.run()`; keep them in sync.
 
 ### Python layout — one module per concern
@@ -1611,10 +1626,10 @@ top-level strategy shape needs a `detect_kind` arm (in `python/src/spec.rs`) and
 |---|---|
 | `carriers.rs` | type-erasing `TypedSource` + `Source`/`SignalBox`/`StrSource`/`AtomBox`/`MultiBox`, the `AnySource`/`AnySignal`/`AnyMulti` domain enums |
 | `macros.rs` | the 8 domain-preserving dispatch macros. `#[macro_use]`d first in `lib.rs` |
-| `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyMulti` |
-| `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
+| `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyStrSource`/`PyMulti`/`PySharedMulti` |
+| `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the live wallets (`PyOkxWallet`/`PyCoinbaseWallet`/`PyKrakenWallet`), the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
 | `constructors.rs` | leaf sources, `src_period!`/`bar_period!`/… invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`, `compute_overlays` |
-| `sources.rs` | `PyBinance`/`PyYahoo`/`PyCoinGecko`/`PyBinanceVision` + `fetch` |
+| `sources.rs` | `PyBinance`/`PyBinanceVision`/`PyOkx`/`PyKraken`/`PyCoinbase`/`PyYahoo`/`PyCoinGecko` + `fetch` |
 | `metrics.rs` | `PyFill`/`PyTrade`/`PyDrawdownSegment` + one `#[pyfunction]` per metric; injected into `sys.modules["fugazi.metrics"]` |
 | `spec.rs` | `PyCostConfig`/`PyStrategySpec`/`PySweep`/`PySweepRow`/`PyWalkForward*` + `load_spec` / `optimize` / `spec_tags` |
 | `prelude.rs` | the shared `use` block every module glob-imports |

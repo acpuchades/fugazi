@@ -81,9 +81,10 @@ enum Command {
     Optimize(OptimizeArgs),
     /// Fetch OHLCV candles from remote providers into a `run`-ready CSV.
     ///
-    /// Spec grammar: `<provider>:[OUT=]<symbol>[<freq>,<freq>...](,[OUT=]<symbol>[<freq>...])*`;
-    /// several specs may be given and all series download in parallel. A `=`
-    /// inside a symbol escapes as `\=`.
+    /// Spec grammar: `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>...])*`;
+    /// several specs may be given and all series download in parallel. The
+    /// symbol is taken verbatim — the provider is split off at the first colon,
+    /// so a ticker carrying `=` or `:` needs no escaping.
     /// Example: `fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] yfinance:AAPL[1d] --since 2020-01-01 --until today -o candles.csv`.
     Get(get::GetArgs),
     /// Print a shell-completion script for the given shell to stdout.
@@ -137,8 +138,8 @@ enum Command {
     /// Print a JSON Schema (draft 2020-12) for the spec to stdout.
     ///
     /// Validates the JSON bridge form of a single expression by default, or a
-    /// whole strategy document (single / pairs / basket / multi / portfolio as a
-    /// `oneOf`) with `--document`. A second projection of the same descriptor
+    /// whole strategy document (single / pairs / basket / multi / portfolio as
+    /// an `anyOf`) with `--document`. A second projection of the same descriptor
     /// `grammar` prints. Structure only — the Real/Bool/Str type discipline
     /// stays in `fugazi check`, so this complements `check`, it doesn't replace
     /// it.

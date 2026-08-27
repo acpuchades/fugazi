@@ -378,29 +378,43 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `rsi(source, period=14) stochastic(source, period=14) cci(source, period=20)` | a value — the conventional period is the default |
 | `skewness kurtosis zscore (source, period)` | a value (distribution shape / normalization; `kurtosis` is raw, ~3 for normal) |
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
+| `covariance(lhs, rhs, period)` `beta(lhs, rhs, period)` | rolling population covariance; rolling least-squares slope of `lhs` on `rhs` |
 | `percentile(source, period, pct=0.5)` | the `pct`-quantile over the window (`pct=0.5` is the rolling median), linearly interpolated like numpy's default |
 | `percentile_rank(source, period)` | where the current reading sits in its own window: `count(v <= x)/period`, in `(0, 1]` |
 | `get(schema, key, source=None)` | the overlay column, typed by its declaration (real→Indicator, bool→Signal, str→StrSource); `source=pick(sym)` reads another series' column |
+| `get_real get_bool get_str (schema, key, source=None)` | the same read with the type **asserted** rather than inferred — each raises if the column is declared as something else, so a caller that needs an `Indicator` gets one or an error, never a `Signal` |
+| `value_str(s)` | a constant string source — the `StrSource` twin of `value(x)`, for the right-hand side of `str_eq` / `str_ne` |
 | `bars_since(signal)` | bars since `signal` was last true (`0` on the firing bar); `None` until it has fired once, so thresholds read false until then |
 | `bars_since_high bars_since_low (source, period)` | bars since the source set a new `period`-bar extreme, in `[0, period-1]` |
 | `variance_ratio(source, period, lag=2)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
+| `if_else(cond, then, otherwise)` | three-source ternary; every branch advances every bar, so a branch's warm-up progresses on bars it isn't selected |
 | `atr(period=14) mfi(period=14) williams_r(period=14)` | a value |
 | `vwap(period)` | a value (a rolling VWAP has no conventional window) |
 | `parkinson garman_klass rogers_satchell (period)` | range-based volatility estimate (uses the full candle; more efficient than close-to-close stddev) |
 | `obv() ad() true_range()` | a value |
 | `sar(step=0.02, max=0.2)` | a value |
-| `macd(source, fast=12, slow=26, signal=9)` | dict `{macd, signal, histogram}` |
+| `macd(source, fast_period=12, slow_period=26, signal_period=9)` | dict `{macd, signal, histogram}` |
 | `bollinger(source, period=20, k=2.0)` | dict `{upper, middle, lower}` |
 | `keltner(source, ema_period=20, atr_period=10, multiplier=2.0)` | dict `{upper, middle, lower}` |
 | `donchian(high, low, period=20)` | dict `{upper, middle, lower}` |
 | `adx(period=14)` | dict `{plus_di, minus_di, adx}` |
 | `dmi(period=14)` | dict `{plus_di, minus_di}` |
 | `aroon(period=14)` | dict `{up, down, oscillator}` |
+| `linreg(source, period=14)` | dict `{slope, intercept, value, r2}` — the rolling least-squares fit against the bar index (`period >= 2`) |
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
+| `volume_bars(threshold, inner)` `dollar_bars(threshold, inner)` | the same shape sampled on **activity** rather than elapsed bars — one bar per `threshold` units of traded quantity, or of traded notional (`typical × volume`). Emits on the completing tick, `None` between; wrap in `latch` for per-base-tick reads |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
 | `unstable(x)` | Passthrough that reports `unstable_bars() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |
 | `every(period)` | Signal: a pulse every `period` bars, first fire delayed to bar `period-1` — the usual [`rebalance_on`](#the-declarative-strategy-builder) gate |
+| `year() month() day() hour() minute() second()` | calendar decomposition of the bar's timestamp (UTC) |
+| `day_of_week() day_of_year() week_of_year() quarter()` | ISO day-of-week (1=Mon), day/week of year, calendar quarter |
+| `unix_seconds() unix_millis()` | the raw stamp, as a float |
+| `is_weekday() is_weekend()` | Signals over the same stamp |
+| `str_eq(lhs, rhs)` `str_ne(lhs, rhs)` | Signals over two string sources — `str_eq(get_str(schema, "regime"), value_str("bull"))` |
+
+Every calendar leaf, like every price leaf, takes an optional `source=` to
+re-root it onto another series' atom stream.
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
@@ -499,11 +513,11 @@ snap = ta.Snapshot({
 print(spread.update(snap))          # -> 40.0
 ```
 
-Snapshot keys are **Selectors** — a `(symbol?, freq?)` pair. A `Selector`
+Snapshot keys are **Selectors** — a `(symbol?, stream?)` pair. A `Selector`
 matches structurally: a `None` field on the query wildcards the corresponding
 storage field, so `pick(symbol="BTC")` finds every BTC entry regardless of
-frequency. A bare Python `str` is coerced to `Selector.by_symbol(...)`, a
-`(str, Frequency|str)` tuple to a full `(symbol, freq)` pair, so most call
+stream. A bare Python `str` is coerced to `Selector.by_symbol(...)`, a
+`(str, Frequency|str)` tuple to a full `(symbol, stream)` pair, so most call
 sites don't need to reach for `Selector` explicitly. Cross-frequency indexes
 disambiguate by giving both fields:
 
@@ -517,6 +531,21 @@ btc_hourly = ta.close(ta.pick(symbol="BTC", freq="1h"))
 any_hourly = ta.close(ta.pick(freq="1h"))              # wildcard on symbol
 assert btc_hourly.update(snap) == 100.0
 ```
+
+**`freq=` is checked; `stream=` is not.** A symbol's second series is not
+always a cadence — dollar bars, a session id, a venue tag — so the selector's
+stream half has two spellings, and the difference is a format contract.
+`freq=` promises a bar cadence and is validated against the same `N<unit>`
+alphabet `--frequency` uses, so `freq="1hh"` raises. The keyword-only
+`stream=` promises nothing and is taken verbatim:
+
+```python
+dollar_bars = ta.close(ta.pick(symbol="BTC", stream="dollar-1e6"))
+```
+
+Both resolve to the same stream id; naming both on one `pick` is an error,
+since there is no reading of two different streams on one leaf that is right.
+`Selector` exposes the resolved half as `.stream`.
 
 **Snapshot behaves like a dict of atoms**: `snap[selector]`, `snap[selector] =
 atom`, `selector in snap`, `len(snap)`, `snap.keys()`. Constructors accept a

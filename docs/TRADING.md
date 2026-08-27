@@ -277,7 +277,8 @@ one symbol is involved. Nothing stops the strategy re-entering next bar; the
 
 ## 4. Protective legs — stops and take-profits
 
-`match_protective`. A long's stop triggers when `low <= trigger`; its
+`protective_trigger` + `execute_protective`. A long's stop triggers when
+`low <= trigger`; its
 take-profit when `high >= trigger`; a short is the mirror. The **fill price**
 is the level, or the open when the bar gapped past it —
 `min(level, open)` for a downside exit, `max(level, open)` for an upside one — so
@@ -399,11 +400,11 @@ unless you `--flatten`.
 | --- | --- |
 | The per-bar loop, and its warm-up-only twin | `src/backtest.rs` (`run`, `warm_up`, `drive`) |
 | Decision → submission | `src/strategies/mod.rs::trade_leg`, each shape's `trade` |
-| Queue / rest / trigger / fill | `src/wallet/paper.rs` (`update`, `fill_at`, `match_protective`, `match_limit`) |
+| Queue / rest / trigger / fill | `src/wallet/paper.rs` (`update`, `fill_at`, `protective_trigger`/`execute_protective`, `limit_trigger`/`execute_limit`) |
 | The `Wallet` contract every venue implements | `src/wallet/mod.rs` |
 | Cost pipeline | `src/costs/`, and see [COSTS.md](COSTS.md) |
 | Per-leg and per-strategy bookkeeping | `src/indicators/position.rs`, `src/indicators/book.rs` |
 | Netting, crossing, attribution | `src/portfolio/netting.rs`, `src/portfolio/ledger.rs` |
-| Live venues | `src/live/okx.rs`, `src/live/coinbase.rs` |
+| Live venues | `src/live/okx.rs`, `src/live/coinbase.rs`, `src/live/kraken.rs`, and the shared flow in `src/live/venue/` |
 | Fills → trades → metrics | `src/metrics.rs`, and see [METRICS.md](METRICS.md) |
 | The ordering contract, asserted | `tests/driver_contract.rs` |

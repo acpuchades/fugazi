@@ -14,7 +14,8 @@ Eight subcommands:
   resume its own state — see [Resuming a run](#resuming-a-run). No charts — plot
   post-hoc.
 - [`check`](#check) — parse and validate a `strategy.yml` or `get --overlay`
-  spec without running it. Nested: `check strategy` / `check overlay`.
+  spec without running it. Nested: `check strategy` / `check overlay` /
+  `check costs`.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
@@ -89,7 +90,8 @@ cargo run --bin fugazi -- get binance:BTCUSDT[1d] \
 cargo run --bin fugazi -- optimize \
     @examples/strategy.params.yml \
     --series @examples/candles.csv \
-    --params 'FAST=3..15:1,SLOW=[20,50,100],SYM=BTC' \
+    --params SYM=BTC \
+    --grid 'FAST=3..15:1,SLOW=[20,50,100]' \
     --metrics sharpe,sortino,cagr_pct,max_pct \
     --best-by sharpe \
     --crypto -f 1d \
@@ -136,7 +138,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the cadence comes from the input's `freq` column, else is auto-detected from the `time` column. Also **selects** which cadence to trade when a symbol carries more than one — see [Bar cadence](#bar-cadence). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written; the console prints an extra **windowed metrics** block right after the whole-run one, showing `mean ± std` over the non-overlapping rows for the same headline stats. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written; the console prints an extra **windowed metrics** block right after the whole-run one, showing `mean ± std` over the non-overlapping rows for the same headline stats. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#bar-cadence) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
 | `--from <DATE>` | Evaluate only bars at or after `DATE`. Bars before it are still read, to warm the chains without trading — see [Date-range selection](#date-range-selection). |
 | `--until <DATE>` | Evaluate only bars strictly before `DATE`. The interval is half-open, so adjacent ranges tile exactly. |
 | `--strict-from` | Make `--from` a hard slice: read nothing before it and start the strategy cold. Requires `--from`. |
@@ -330,7 +332,7 @@ permutation.
 | `--mc-metrics NAMES` | headline set | Comma-separated short or dotted names, e.g. `sharpe,calmar,drawdown.max_pct`. |
 
 ```sh
-fugazi run @strategy.yml -s BTCUSDT=data.csv --crypto \
+fugazi run @strategy.yml -s 'symbol=BTCUSDT,@data.csv' -o out/ --crypto \
   --montecarlo --mc-permutations 2000 --mc-metrics sharpe,calmar
 ```
 
@@ -359,8 +361,8 @@ between versions: re-run the history to regenerate the state, or finish the run 
 the build that wrote it. Resuming optimizes a re-run; it doesn't replace one.
 
 ```sh
-fugazi run @strategy.yml -s BTCUSDT=jan.csv --crypto --save-state state.json
-fugazi run @strategy.yml -s BTCUSDT=feb.csv --crypto --resume state.json
+fugazi run @strategy.yml -s 'symbol=BTCUSDT,@jan.csv' -o out/jan --crypto --save-state state.json
+fugazi run @strategy.yml -s 'symbol=BTCUSDT,@feb.csv' -o out/feb --crypto --resume state.json
 ```
 
 Fidelity is exact — the crate depends on serde's `float_roundtrip` feature
@@ -514,7 +516,7 @@ surface here — not at fetch time.
 
 | Flag | Description |
 | --- | --- |
-| `<SPEC>...` | One or more `get --overlay` specs. Same shape as [`get --overlay`](#-x----overlay), including the optional `SYMBOL[FREQ]:` scope prefix. |
+| `<SPEC>...` | One or more `get --overlay` specs. Same shape as [`get --overlay`](#-x--overlay), including the optional `SYMBOL[FREQ]:` scope prefix. |
 | `-q`, `--quiet` | Suppress the "ok" message on success. |
 
 #### `check costs`
@@ -539,7 +541,7 @@ printed.
 
 ```
 fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
-               --params <SPEC> [--params <SPEC> …] [--import-root <DIR>]
+               -g <SPEC> [-g <SPEC> …] [--params <SPEC> …] [--import-root <DIR>]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
                [-w <LEN> | --pooled <SPEC> …] [-k <K>]
@@ -555,7 +557,8 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML. Same shape as `run`. |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
-| `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
+| `-p`, `--params <SPEC>` | Baseline scalars, shared by every grid point — same syntax and meaning as `run --params`. **Axis-shaped values are refused here**: a list or a range belongs on `--grid`. Repeatable. |
+| `-g`, `--grid <SPEC>` | **Required.** Declare one sweep subgrid: the same term grammar as `--params`, plus the two axis forms `NAME=[v1,v2,…]` and `NAME=start..end[:step]`. Each subgrid layers over `--params`; repeat the flag to stack subgrids (a *union* of cartesian products). See [Sweep axes](#sweep-axes). |
 | `--import-root <DIR>` | Widen the `!import` confinement boundary beyond the strategy document's own directory. See [--import-root](#--import-root). |
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<N>_<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
@@ -583,20 +586,34 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 
 #### Sweep axes
 
-A `--params` term is a sweep axis when its value is a **list** or a **range**;
-otherwise it's a fixed scalar shared by every grid point.
+Axes are declared on **`-g/--grid`**, which is required — `--params` carries
+scalars only, and an axis-shaped value there is an error naming the offending
+key rather than a silently fixed point. The split is what keeps "the baseline
+this sweep varies around" and "what it varies" two separate statements.
 
-| Form | Example | Expands to |
-| --- | --- | --- |
-| List | `FAST=[3,5,8,13]` | `{3, 5, 8, 13}` |
-| Integer range | `FAST=3..20:2` | `{3, 5, 7, …, 19}` (inclusive) |
-| Float range | `K=0.5..2.0:0.5` | `{0.5, 1.0, 1.5, 2.0}` |
-| Scalar (unchanged) | `SYM=BTC` | `{"BTC"}` — fixed, not an axis |
+| Form | Where | Example | Expands to |
+| --- | --- | --- | --- |
+| List | `--grid` | `FAST=[3,5,8,13]` | `{3, 5, 8, 13}` |
+| Integer range | `--grid` | `FAST=3..20:2` | `{3, 5, 7, …, 19}` (inclusive) |
+| Float range | `--grid` | `K=0.5..2.0:0.5` | `{0.5, 1.0, 1.5, 2.0}` |
+| Scalar | either | `SYM=BTC` | `{"BTC"}` — fixed, not an axis |
+
+Every axis' cartesian product **within one `--grid` flag** is that subgrid's
+point set; a scalar written there stays fixed across it. Repeat the flag to
+stack subgrids — a *union* of cartesian products, so the total grid is the sum
+of the subgrid point counts:
+
+```sh
+--grid 'X=A,Y=1..10' --grid 'X=B,Z=10..100:10'
+```
+
+which is how a parameter that only makes sense conditionally on another gets
+swept without a rectangular grid full of meaningless cells.
 
 The range step is optional (`3..7` → step `1`). Ranges are inclusive on both
 ends. A range whose step doesn't align with the endpoint stops at the last
-value that still fits (`3..10:2` → `3, 5, 7, 9`). Every axis' cartesian
-product is one grid point.
+value that still fits (`3..10:2` → `3, 5, 7, 9`). A range may expand to at most
+**1 000 000 points**; past that it is an error naming the count.
 
 **A list may not repeat a value** — on any axis, numeric or categorical.
 `FAST=[4,5,5,6]` and `SL_MODE=["none","none","atr"]` are refused rather than
@@ -610,10 +627,11 @@ identically into the strategy — and the error names both spellings. Ranges
 can't produce an exact duplicate, so this only ever fires on a written list.
 
 Axes are emitted as CSV columns **sorted by axis name** (stable regardless
-of `--params` flag order), followed by the requested metric columns.
+of `--grid` flag order), followed by the requested metric columns. Stacked
+subgrids project onto the union of their axis columns, so a row leaves blank
+the axes its own subgrid didn't sweep.
 
-Passing `optimize --params` with no axis at all is an error — for a single
-combination, use `run`.
+For a single combination there is no grid — use `run`.
 
 #### Best-by directions
 
@@ -948,7 +966,7 @@ fugazi get file:./btc.csv --since 2023-01-01 --until today       -o btc_validate
 #    training period, not one lucky stretch of it.
 fugazi optimize @strategy.params.yml \
     --series @btc_train.csv \
-    --params 'FAST=3..20:2,SLOW=[20,50,100]' \
+    --grid 'FAST=3..20:2,SLOW=[20,50,100]' \
     -m sharpe,cagr_pct,max_pct --best-by sharpe \
     -w 252 -k 1.0 --smooth=box:1 \
     --crypto -f 1d \
@@ -995,7 +1013,7 @@ backtests as ranking all three instruments would — and emits **6 rows**, one p
 because it is no longer something the sweep chose. Two consequences:
 
 - The grid is `N` hypotheses wide rather than `N × M`, which is the count a
-  [deflated Sharpe](#deflated-sharpe) should be parameterized by. Declaring the
+  [deflated Sharpe](METRICS.md#selectiondeflated_sharpe--dsr-bailey--lópez-de-prado-2014) should be parameterized by. Declaring the
   panel outside the grid is what makes that structural: a name cannot be ranked
   on and reduced over at once, and every row necessarily pools over the same
   population — the property that makes two rows' `_mean` columns comparable.
@@ -1037,7 +1055,7 @@ zero — so a mean over 2 of 30 members and a mean over 30 of 30 would otherwise
 render identically. A ruined member is different again: it disqualifies the
 whole row from ranking, because dropping it from the mean would *raise* the
 pooled score and reward a search for parameters that destroy an account (the
-same rule as [ruin exclusion](#ruined-cells), applied to a panel).
+same rule as [ruin exclusion](#best-by-directions), applied to a panel).
 
 ##### Pooled walk-forward
 
@@ -1075,7 +1093,7 @@ reason `run`'s member directories are) plus a pooled
 and the cross-member pooled reading of each. There is deliberately no single
 netted composite curve: netting `M` members into one account requires a
 weighting and a rebalance cadence, which is an allocation policy — and fugazi
-already has a shape that states one explicitly ([`portfolio:`](#portfolio)).
+already has a shape that states one explicitly ([`portfolio:`](#strategy-shape-prefix)).
 
 #### Walk-forward optimization
 
@@ -1177,7 +1195,7 @@ fugazi get <SPEC> [<SPEC> …] -o <FILE>
 | `--since <DATE>` | Start date, inclusive. Grammar: `today`, `yesterday`, `Nd/Nw ago`, `YYYY-MM-DD`, `D-M-YYYY`, `3 weeks ago`, `last monday`, `Mar 1, 2020`, … Default `2020-01-01`. When set, extra leading bars are pulled ahead of `--since` so the overlays are already stable at the first output row. |
 | `--until <DATE>` | End date, exclusive. Same grammar as `--since`. Default `today`. |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories created if missing. |
-| `-x`, `--overlay <SPEC>` | Extra column(s) computed on top of the fetched bars. Repeatable. See [`-x`/`--overlay`](#-x----overlay). |
+| `-x`, `--overlay <SPEC>` | Extra column(s) computed on top of the fetched bars. Repeatable. See [`-x`/`--overlay`](#-x--overlay). |
 | `-p`, `--params <SPEC>` | Resolve `!param` placeholders inside the `-x/--overlay` expressions. Repeatable. See [--params](#--params). Applies only to overlays — a fetch with no `-x` has nothing to substitute. |
 | `--keep-unstable` | Emit the warm-up rows instead of dropping them. Overlay cells are blank where an applicable overlay has not yet warmed up. |
 | `-q`, `--quiet` | Suppress the summary line. Errors still print. |
@@ -1242,9 +1260,15 @@ mismatched series as separate fetches and separate strategies.
 
 #### Fetch specs
 
-The common shape is `<provider>:[<out>=]<symbol>[<freq>,<freq>...](,[<out>=]<symbol>[<freq>,...])*`
+The common shape is `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>,...])*`
 — several symbols and several frequencies per spec are one download. `file:`
 is the one exception; see below.
+
+A whole dataset can also be named as **`@path/to/dataset.yml`**: a descriptor
+with `name`, an optional `description`, one top-level `interval` every source
+shares, an optional `until`, and `sources` (a list of `{ provider, symbols }`).
+With a single `@dataset.yml` and no `-o`, the output defaults to
+`{name}_{YYYYMMDD}.csv` in the working directory.
 
 A symbol is taken verbatim: the provider is split off at the **first** colon,
 and no provider name contains one, so everything after it is the symbol. That
@@ -1261,7 +1285,7 @@ Frequency tokens have no remap form — each is parsed as a real cadence and the
 | `kraken` | `kraken:XBTUSD[1d,4h],ETHEUR[1d]` | Kraken spot OHLC. Symbols are Kraken pair names (`XBTUSD`, `ETHEUR`); several spellings resolve to the same pair (`XBTUSD`, `BTCUSD` and `XXBTZUSD` are all Bitcoin/USD), and `fugazi list tickers kraken` prints the `altname` form to send. Fixed cadences only: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `15d` — no month bar and no arbitrary multiples. Adds `vwap` and `n_trades` columns. **Reaches back at most 720 bars** — Kraken's `since` truncates from the front rather than paging backward, so the endpoint cannot serve older history at all: ~2 years at `[1d]`, 30 days at `[1h]`, 12 hours at `[1m]`. A `--since` beyond that is reported by the usual "earliest available candle is later than --since" warning. The bar currently forming is dropped, so the last row is always a settled one. |
 | `coinbase` | `coinbase:BTC-USD[1d,1h],ETH-USD[1d]` | Coinbase Advanced Trade candles. Symbols are dash-separated product ids (`BTC-USD`, not `BTCUSD`). Fixed cadences only: `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `6h`, `1d` — no week/month and no arbitrary multiples. OHLCV only, no side channel. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
-| `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
+| `cg` | `cg:bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`), and that id is what lands in the `symbol` column — join onto a price series keyed the same way, via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
 | `binance-vision` | `binance-vision:BTCUSDT[1d]` | Binance spot klines from the public archive (`data.binance.vision`) — deeper and cheaper than the live endpoint (one request per month, no rate limit), at the cost of a ~2-day lag: a fetch running to now stops at the last published file. Same columns as `binance`. Frequencies: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `1w`, `1M`. |
 | `binance-vision-futures` | `binance-vision-futures:BTCUSDT[1d]` | Binance USDⓈ-M perpetual klines from the same archive — **OHLCV plus** the side channels only a derivative has: `funding_rate`, `premium_index`, `open_interest`, `open_interest_value` and the long/short ratios. No join needed; they ride alongside the bar. Funding settles every 4–8h and settlements inside one bar are **summed**, so `[1d]` is that day's total carry and `[8h]` is one settlement per row; the rest are levels, so a bar keeps its last sample. Frequencies: `1h`…`12h`, `1d` — the range `premiumIndexKlines` publishes. |
 | `file` | `file:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV file — CSV today, with the delimiter autodetected (`;`, `,`, `\t`, `|`); the format is read off the path, not the scheme. Typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
@@ -1338,7 +1362,7 @@ fugazi get binance:BTCUSDT[1d] --since 2020-01-01 \
 bars_per_year }` (plus an optional `risk_free_rate`, default `0`, on Sharpe /
 Sortino; `!max_drawdown` needs neither `bars_per_year` nor `risk_free_rate`).
 The `strategy:` field is an ordinary single-asset strategy document — inline or
-`!import`ed — and the `symbol:` inside it names the instrument the embedded
+`!import`ed — and the `root:` inside it names the instrument the embedded
 wallet prices, so it should match the series being fetched. A full-window
 `period` reproduces the whole-run [`metrics.yml`](#metricsyml-from-run) number
 for Sharpe / Sortino / volatility. These read a live equity curve, so they are
@@ -1351,16 +1375,18 @@ Printed catalogue, three shapes:
 
 ```
 fugazi list indicators   # every YAML tag `run --series` and `get --overlay` accept
-fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `csv`)
+fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `file`, …)
 fugazi list tickers <PROVIDER> [PATTERN]   # every symbol the provider exposes (HTTP)
 ```
 
-`list indicators` groups the vocabulary alphabetically (arithmetic, bands,
-bar indicators, boolean logic, comparisons, constants, cross-timeframe
-composition — `!resample` + `!latch`, which `check overlay` also validates
-(missing `inner`, `every: 0`, and unknown nested tags all fail there) —
-crossovers, MACD, moving averages, oscillators, placeholders, position
-anchors, rolling extrema, stability gate, trend/directional). Each entry shows
+`list indicators` groups the vocabulary alphabetically — thirty-odd groups,
+from `arithmetic operators` through `unstable pass-through`, covering the
+candle leaves, the calendar, the bands, the oscillators, the rolling
+statistics, the book fields, the sizing helpers, basket selection and universe,
+portfolio weighting, and cross-timeframe composition (`!resample`,
+`!volume_bars`, `!dollar_bars` and `!latch`, which `check overlay` also
+validates — missing `inner`, `every: 0`, and unknown nested tags all fail
+there). Each entry shows
 the tag's YAML surface, **required keys first**, with an omissible key rendered
 as `name=<default>` when the descriptor says what omitting it is equivalent to —
 `!sma { period, source=!close }`, `!bb_upper { period=20, k=2.0, source=!close }`
@@ -1376,9 +1402,9 @@ binance` calls
 `/api/v3/exchangeInfo` and prints its full spot vocabulary — piped into
 `grep`/`wc -l`/`sort -u` it's one ticker per line; interactive, it lays out
 as a column-major grid sized to the terminal (like `ls`). Yahoo has no such
-enumeration endpoint and returns an "unsupported" error; `csv` needs a path
+enumeration endpoint and returns an "unsupported" error; `file` needs a path
 per invocation, so the ticker list is whatever `symbol` values the file
-itself contains — enumerate it with `cut -d';' -f1 <path> | sort -u`.
+itself contains — enumerate it with `cut -d, -f1 <path> | sort -u`.
 
 #### Filtering the ticker list
 
@@ -1514,7 +1540,7 @@ which it complements rather than replaces. A couple of quick uses:
 
 ```sh
 fugazi grammar | jq '.tags[] | select(.kind == "predicate") | .name'   # every boolean tag
-fugazi schema --document | jq '.oneOf | length'                        # 5
+fugazi schema --document | jq '.anyOf | length'                        # 5
 ```
 
 ## Common flags
@@ -1530,7 +1556,7 @@ The strategy is the first positional argument, not a flag. It takes two forms:
 - `@path/to/file.yml` — load the file.
 - Anything else — inline YAML (block or flow style). Handy for one-offs:
   ```sh
-  fugazi check '{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'
+  fugazi check strategy '{ root: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'
   ```
 
 The format is YAML. JSON is a subset of YAML, so a JSON-shaped document
@@ -1652,7 +1678,7 @@ To sample *inside* a run that is otherwise time-indexed, use the
 [STRATEGIES.md](STRATEGIES.md#cross-timeframe-composition--resample--volume_bars--dollar_bars--latch).
 
 **Which symbols a run actually carries.** Not necessarily all of them. A run
-carries the symbols its document *trades* — `symbol:` for a single-asset
+carries the symbols its document *trades* — `root:` for a single-asset
 document, both legs for a pair, the children's declared symbols for a portfolio,
 every symbol in the input for `basket:` and `multi:`, whose universe is the
 frame by definition — plus any symbol the document *reads* through an explicit
@@ -1681,17 +1707,17 @@ carry is an error, not an empty read.
 ### `--params`
 
 `--params` resolves `!param` placeholders in the strategy YAML (and, on `get`,
-in the `-x/--overlay` expressions), and — on `optimize` — also declares the
-sweep axes.
+in the `-x/--overlay` expressions). On `optimize` it is the **scalar baseline**
+every grid point shares; the sweep axes are declared separately, on
+[`-g/--grid`](#sweep-axes).
 
 It's a `,`-separated list of terms, itself repeatable:
 
 - `NAME=value` — set one placeholder. The value parses as a JSON scalar
-  (`FAST=3` → number, `TRUE=true` → bool, `SYM=BTC` → string). On
-  `optimize`, `NAME=[v1,v2,…]` or `NAME=start..end[:step]` declares a
-  [sweep axis](#sweep-axes). A range is inclusive at both ends, needs a
-  positive step, and may expand to at most **1 000 000 points** — past that it
-  is an error naming the count rather than an allocation the OOM killer ends.
+  (`FAST=3` → number, `TRUE=true` → bool, `SYM=BTC` → string). The two
+  axis forms — `NAME=[v1,v2,…]` and `NAME=start..end[:step]` — are accepted
+  only by `optimize --grid` and `--pooled`; written here they are refused, by
+  name. See [Sweep axes](#sweep-axes).
 - `@file.yml` — load a whole `NAME: value` mapping. See
   [`examples/params.yml`](../examples/params.yml).
 
@@ -1728,8 +1754,9 @@ didn't. See [Omitting the root](STRATEGIES.md#omitting-the-root).
 
 ### `--costs`
 
-`--costs` configures the trading-cost model applied to every fill: one
-**commission**, one **spread** and one **slippage** leg, resolved per
+`--costs` configures the trading-cost model: three per-*fill* legs —
+**commission**, **spread** and **slippage** — plus a per-*bar* **carry** leg
+(funding, margin interest, borrow fee), each resolved per
 `(symbol, frequency)` at run start. Omit the flag and the wallet is
 frictionless — output is byte-identical to the pre-costs release, and the
 console prints a one-line warning banner (`no cost model set — …`). Pass
@@ -1740,8 +1767,8 @@ It's a `,`-separated list of terms, itself repeatable — same grammar
 as [`--params`](#--params):
 
 - `[SCOPE:]key=value` — set one leg (or nudge one field of it) inline.
-  `key` starts with `commission` / `spread` / `slippage`; `value` is the
-  model expression (`!percentage { rate: 0.001 }`, `!bps { bps: 5 }`, …).
+  `key` starts with `commission` / `spread` / `slippage` / `carry`; `value` is
+  the model expression (`!percentage { rate: 0.001 }`, `!bps { bps: 5 }`, …).
   A `key` that reaches *into* a model addresses the spec tree literally, so
   it names the variant too — `commission.percentage.rate=0.00075`. See
   [Nudging one field](#nudging-one-field-of-a-preset).
@@ -1752,7 +1779,7 @@ as [`--params`](#--params):
   banner. Any later term re-establishes a real model.
 
 Terms apply left-to-right, later wins; the `SYMBOL[FREQ]:` scope prefix is
-the same as [`get --overlay`](#-x----overlay) — either half is optional
+the same as [`get --overlay`](#-x--overlay) — either half is optional
 (`BTC:`, `[1d]:`, `BTC[1d]:`), and a symbol containing `:` escapes it as `\:`
 (`'BTC/USDT\:USDT:commission=!percentage { rate: 0.0002 }'`).
 
@@ -1794,6 +1821,15 @@ a preset file and on the inline CLI form alike (the same tag vocabulary the
 | spread | `absolute` | `amount` | Absolute full spread; half per side. |
 | slippage | `bps` | `bps`, `stop_multiplier` (opt.) | Fixed bps adverse. |
 | slippage | `volume_participation` | `coefficient`, `exponent`, `stop_multiplier` (opt.) | Almgren-Chriss: `coef × (units/candle.volume)^exp × price`. `exponent` defaults to `0.5` (square-root). Zero-volume bars yield zero impact. |
+| carry | `funding` | `column` (opt., default `funding_rate`) | Per-bar perpetual funding read from an **overlay column**, signed — a short is *paid* at a positive rate. |
+| carry | `annual` | `rate`, `long`, `short` (all opt.) | A constant annualized rate on the position's notional, pro-rated by the interval each bar actually spans. `rate` sets both sides; `long` / `short` override either. |
+| carry | `both` | `column`, `rate`, `long`, `short` (all opt.) | Funding **and** an annual rate, summed — the margined-perp case. |
+
+Every leg also takes `!none`, the no-op default. Carry is charged once per bar
+by the wallet's `advance`, on the position carried *into* the bar and before
+that bar's fills — see [The fourth leg](COSTS.md#the-fourth-leg-cost-of-carry)
+for why it cannot be a function of a trade, and for the two ways it can
+silently charge nothing (both of which `run` reports).
 
 **Scope precedence.** For each leg, resolution picks the winning model in
 this order at run time:
@@ -1867,7 +1903,7 @@ fugazi run @strategy.yml -s @candles.csv -o out/ --costs none
 ```
 
 **Reporting.** When a cost model is active, `fills.csv` gains a
-`commission` column and `metrics.yml` a [`costs:` section](#costs-catalogue)
+`commission` column and `metrics.yml` a [`costs:` section](#costs--cost-aggregates)
 with `total_commission`, `total_slippage_cost`, and `cost_drag_pct` (gross
 CAGR minus net CAGR). The console `metrics` block prints both the **gross**
 (frictionless) and **net** (priced) `sharpe`/`cagr` side by side so the
@@ -1923,11 +1959,11 @@ data):
 
 ```sh
 # Two cadences in one file — refused, then resolved.
-fugazi run @s.yml --series @both.csv                  # error: BTC carries 2 cadences
-fugazi run @s.yml --series @both.csv -f BTC:1h        # trades the 1h series
+fugazi run @s.yml -o out/ --series @both.csv           # error: BTC carries 2 cadences
+fugazi run @s.yml -o out/ --series @both.csv -f BTC:1h # trades the 1h series
 
 # Different cadences per symbol, chosen individually.
-fugazi run basket:@b.yml --series @mixed.csv -f BTC:1h -f ETH:1h
+fugazi run basket:@b.yml -o out/ --series @mixed.csv -f BTC:1h -f ETH:1h
 ```
 
 ### Calendar and annualization
@@ -1989,7 +2025,7 @@ crossovers and the like — have `unstable_bars() = 0`, so the gate elapses
 on the last warm-up bar and never lags them.
 
 To **opt out** on a subtree, wrap it in `!unstable`: `!unstable { source: <s> }`
-(real source) or `!unstable { signal: <s> }` (boolean signal) is a
+is output-agnostic — a real source or a boolean signal alike — and is a
 passthrough that reports `unstable_bars() = 0` for the wrapped subtree
 while forwarding the underlying output. The readiness gate then only waits
 for the wrapped chain's `warm_up_bars()`. Use it when you're comfortable
@@ -2095,7 +2131,7 @@ flag.
 
 `-w/--windowed <LEN>` reduces the run in **windows of `LEN`** on top of the
 whole-run summary. `LEN` is either a plain bar count (`10`, `252`) or a
-duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`); a
+duration in the [`-f`](#bar-cadence) alphabet (`1d`, `1w`, `1M`, `4h`); a
 duration resolves to a bar count against the trading calendar as
 `win.trading_seconds / bar_freq.trading_seconds` — so `-w 1w` picks 5 bars
 on daily equities and 7 on continuous crypto, `-w 1d` picks 7 bars on hourly
@@ -2146,17 +2182,20 @@ is exactly right for an always-in long/short reversal (the opposite side's
 
 Anywhere a single-asset strategy document is accepted — a top-level
 `fugazi run @strat.yml`, or the `strategy:` field of a
-[trailing risk tag](#-x----overlay) — you can name a ready-made recipe instead
+[trailing risk tag](#-x--overlay) — you can name a ready-made recipe instead
 of spelling out the sides. A preset builds the exact same strategy as its
 `fugazi::strategies` Rust twin:
 
 | Tag | Fields | Recipe |
 |---|---|---|
-| `!buy_and_hold` | `symbol` | all-in long on bar 1, hold |
-| `!ma_crossover` | `symbol, fast, slow` | always-in SMA fast/slow crossover |
-| `!rsi_reversal` | `symbol, period, oversold, exit` | RSI dip-buy, long/flat |
-| `!donchian_breakout` | `symbol, period` | always-in Donchian channel breakout |
-| `!keltner_breakout` | `symbol, ema_period, atr_period, multiplier` | always-in Keltner breakout |
+| `!buy_and_hold` | `root` | all-in long on bar 1, hold |
+| `!ma_crossover` | `root, fast, slow` | always-in SMA fast/slow crossover |
+| `!rsi_reversal` | `root, period, oversold, exit` | RSI dip-buy, long/flat |
+| `!donchian_breakout` | `root, period` | always-in Donchian channel breakout |
+| `!keltner_breakout` | `root, ema_period, atr_period, multiplier` | always-in Keltner breakout |
+
+Each also accepts the document-wide `meta:`. Unknown fields are a hard error,
+as everywhere else.
 
 ```yaml
 # strat.yml — a whole document is just the preset tag:
@@ -2170,8 +2209,8 @@ fugazi get binance:BTCUSDT[1d] \
   -x 'sharpe=!sharpe { strategy: !buy_and_hold { root: BTCUSDT }, period: 60, bars_per_year: 365 }'
 ```
 
-Presets are single-asset only, and are not swept by `optimize` (they carry no
-`!param` axes — use a full spec for grids).
+Presets are single-asset only. Their fields take `!param` like any other value,
+but `optimize` does not accept a preset document — use a full spec for grids.
 
 ```yaml
 root: BTC
@@ -2256,7 +2295,7 @@ Boolean-valued nodes:
 - **Logic**: `!and`/`!or`/`!xor { lhs, rhs }`, `!all [signal, …]`,
   `!any [signal, …]`, `!not <signal>`, `!changed <signal>` (fires on any
   transition).
-- **Unstable-tail override**: `!unstable { signal: <signal> }` — passthrough
+- **Unstable-tail override**: `!unstable { source: <signal> }` — passthrough
   that reports `unstable_bars() = 0` for the wrapped subtree while
   forwarding its output. The explicit opt-out to the safe-by-default
   strategy-readiness gate; see [Stability gating](#stability-gating).
@@ -2406,7 +2445,7 @@ including `selection.deflated_sharpe`, takes a different value.
 
 ## Metrics catalogue
 
-`metrics.yml` (and the `optimize` metric columns) draws from four
+`metrics.yml` (and the `optimize` metric columns) draws from six
 sections. Ratios and averages whose denominator is degenerate are omitted
 rather than emitted as `NaN`/`Infinity`. Any name in the tables below can
 appear in `optimize -m`; short leaf names (`sharpe`, `max_pct`) work as
@@ -2532,7 +2571,8 @@ fugazi run @examples/strategy.params.yml \
 # Optimize over one integer and one list axis, rank by Sortino.
 fugazi optimize @examples/strategy.params.yml \
     --series @examples/candles.csv \
-    --params 'FAST=3..10:1,SLOW=[20,50,100],SYM=BTC' \
+    --params SYM=BTC \
+    --grid 'FAST=3..10:1,SLOW=[20,50,100]' \
     -m sharpe,sortino,cagr_pct,max_pct \
     --best-by sortino \
     --crypto -f 1d \
@@ -2549,7 +2589,8 @@ fugazi run @examples/strategy.yml \
 # Consistency-aware sweep: rank by windowed Sharpe, one sigma conservative.
 fugazi optimize @examples/strategy.params.yml \
     --series @examples/candles.csv \
-    --params 'FAST=3..10:1,SLOW=[20,50,100],SYM=BTC' \
+    --params SYM=BTC \
+    --grid 'FAST=3..10:1,SLOW=[20,50,100]' \
     -m sharpe,max_pct \
     --best-by sharpe \
     -w 10 -k 1 \
@@ -2557,5 +2598,5 @@ fugazi optimize @examples/strategy.params.yml \
     -o grid.csv
 
 # Lint a spec in CI.
-fugazi check @strategies/my_strategy.yml --params ENV=prod
+fugazi check strategy @strategies/my_strategy.yml --params ENV=prod
 ```

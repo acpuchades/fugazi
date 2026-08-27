@@ -12,7 +12,7 @@ fugazi run @strategy.yml --series @candles.csv --output-dir out/
 
 The strategy is the positional argument and follows the `@` convention the data
 flags use: `@file.yml` loads a file, anything else is treated as
-inline content (handy for one-offs, e.g. `'{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`).
+inline content (handy for one-offs, e.g. `'{ root: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`).
 
 ## The five strategy shapes
 
@@ -50,7 +50,7 @@ without data.
 
 > This document is the syntax reference. For the surrounding CLI (`--series`,
 > `--params`, output files, console output) see the
-> [Command-line backtester](../README.md#command-line-backtester) section of the
+> [CLI guide](../README.md#guide-the-command-line) section of the
 > README. For the library API the vocabulary mirrors, see the rest of the README.
 
 > **Single-series and cross-asset.** Every existing strategy YAML keeps
@@ -175,7 +175,7 @@ default it *to*. `!sma`, `!ema`, `!wma`, `!hma`, `!rma`, `!stddev`, `!zscore`,
 volatility estimators all have windows that *are* the modelling decision; a
 30 invented here would be a silent one. The same reasoning applies to a
 `source:` with no meaningful fallback — see
-[Threshold comparisons](#threshold-comparisons--source-level) and the note under
+[Threshold comparisons](#threshold-comparisons---source-level-) and the note under
 [Transforms](#transforms).
 
 ## Metadata — `meta:`
@@ -275,7 +275,7 @@ long, the `stop_loss` fires when the bar's `low` reaches it and the `take_profit
 when the bar's `high` does (mirrored for a short); the position flattens, filled
 at the level — or at the bar's `open` when it gaps past the level (opens already
 beyond it). Build the level from the
-[position-anchored sources](#position-anchored-sources): `entry` is the entry
+[position-anchored sources](#position-anchored-sources-bare-words): `entry` is the entry
 price (a fixed stop), `peak` / `trough` the running extreme since entry (a
 **trailing** stop, which tracks completed bars and so reacts the bar after a new
 extreme). They are checked every bar, so they fire intra-bar, independently of
@@ -1960,7 +1960,7 @@ flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal
 (`fugazi run '…'`):
 
 ```yaml
-{ symbol: ETH, long: { enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } } } }
+{ root: ETH, long: { enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } } } }
 ```
 
 A quantile basket over whatever universe the series carry — long the top decile

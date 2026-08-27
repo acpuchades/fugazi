@@ -118,8 +118,8 @@ Worth saying plainly, so you don't find out in week three:
 - **You want plots.** It writes CSV and YAML, nothing else. Plotting is post-hoc —
   [there's an R recipe below](#analyzing-a-run).
 - **You need tick data or L2 microstructure.** The unit of time is a bar.
-- **You want a hosted order-management system.** Two venue wallets ship (OKX
-  swaps, Coinbase spot); anything else is a `Wallet` impl you write.
+- **You want a hosted order-management system.** Three venue wallets ship (OKX
+  swaps, Coinbase spot, Kraken spot); anything else is a `Wallet` impl you write.
 - **Your hot path is `stddev` on huge windows.** fugazi's is ~3.5× TA-Lib's, on
   purpose — [the shortcut it refuses](#performance) returns exactly `0.0` for 896
   of 4 981 windows on the benchmark series.
@@ -151,7 +151,7 @@ pip install fugazi            # prebuilt wheels for Linux, macOS, Windows
 
 | Feature | Default | What it adds |
 | --- | :---: | --- |
-| `sources` | ✅ | Remote data providers (Binance, OKX, Coinbase, Yahoo, CoinGecko) |
+| `sources` | ✅ | Remote data providers (Binance, Binance Vision, OKX, Kraken, Coinbase, Yahoo, CoinGecko) |
 | `cli` | ✅ | The `fugazi` binary; implies `sources`, `runtime`, `montecarlo`, `parallel` |
 | `runtime` | ✅ | The type-erasure vocabulary the YAML and Python layers build on |
 | `parallel` | — | `backtest::run_many`, the rayon ensemble driver |
@@ -237,7 +237,7 @@ let report = run(&mut strategy, &mut wallet, live_snapshots);
 Rather not write Rust at all? The same strategy as a one-liner:
 
 ```sh
-fugazi run '{ symbol: AAPL, long: { enter: !crosses_above {
+fugazi run '{ root: AAPL, long: { enter: !crosses_above {
     lhs: !sma { period: 10 }, rhs: !sma { period: 30 } } } }' \
   --series symbol=AAPL,@candles.csv --output-dir out/
 ```
@@ -393,7 +393,7 @@ history for the recursive tail to decay in HTF terms.
 ### Cross-asset composition
 
 For strategies reasoning about more than one instrument per bar, feed a
-**`Snapshot<Sym>`** — a series of `(Option<Sym>, Option<Frequency>, Atom)` entries
+**`Snapshot<Sym>`** — a series of `(Option<Sym>, Option<StreamId>, Atom)` entries
 — and use `Pick<Sym, S>` to project one asset out. Every atom-input leaf composes
 on top verbatim through its `T::of(source)` constructor:
 
@@ -414,9 +414,11 @@ assert_eq!(spread.update(snap), Some(40.0));
 ```
 
 `Selector<Sym>` is a **partial-key predicate**, not a snapshot key:
-`by_symbol("BTC")` matches every BTC entry regardless of frequency,
-`by_freq(Frequency::Hour(1))` matches every hourly entry regardless of symbol, and
-`exact("BTC", Frequency::Hour(1))` matches a single tagged entry. The empty
+`by_symbol("BTC")` matches every BTC entry regardless of stream,
+`by_stream("1h")` matches every hourly entry regardless of symbol, and
+`exact("BTC", Frequency::Hour(1))` matches a single tagged entry. A `StreamId`
+is an opaque label — a `Frequency` converts into one, so a cadence is the usual
+spelling, but a price-less or activity-sampled series can carry any id. The empty
 selector (`Selector::default()`) is the "no query" sentinel — `Pick::new()` uses it
 to trigger `Snapshot::sole_atom_or_panic`, so a strategy authored around cross-asset
 primitives still runs cleanly on a single-series driver feeding size-1 snapshots.
@@ -666,7 +668,7 @@ biased toward **waiting**, with a single named opt-out.
   unstable_bars()`) across every wired signal and every attached protective level,
   and `backtest::run` skips `trade()` until then. Wrap a subtree in
   [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html)
-  — `.unstable()` in Rust/Python, `!unstable { source }` / `!unstable { signal }` in
+  — `.unstable()` in Rust/Python, `!unstable { source }` in
   YAML — to zero its reported `unstable_bars()` and skip the wait for its IIR tail.
   `update()` and `on_fill()` still run every bar so warm-up progresses.
 - **`fugazi get` overlays.** The CLI trims each column's pre-`stable_bars()` cells
@@ -819,7 +821,7 @@ fugazi run @strategy.yml --series @btc.csv --output-dir out/
 
 # 4. Sweep the parameters, ranked by Sharpe, across all cores.
 fugazi optimize @strategy.params.yml --series @btc.csv \
-  --params FAST=3..15 --params SLOW=20..60:5 \
+  --grid 'FAST=3..15,SLOW=20..60:5' \
   --best-by sharpe -j 8 -o grid.csv
 ```
 
@@ -835,7 +837,7 @@ Writes four files:
 
 | File | One row per | Columns |
 | --- | --- | --- |
-| `fills.csv` | booked order | `time,symbol,side,units,price,kind` |
+| `fills.csv` | booked order | `time,symbol,side,units,requested_units,price,kind` (plus `commission` under `--costs`) |
 | `trades.csv` | closed round-trip | `entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held` |
 | `returns.csv` | bar | `time,equity,return` |
 | `metrics.yml` | run | the whole metric catalogue |
@@ -844,7 +846,7 @@ Writes four files:
 the interface. [An R recipe is below](#analyzing-a-run).
 
 Console output is a two-line banner plus four blocks: **inputs** (strategy, params
-in effect, candle period, starting capital, output dir), **trades** (each fill),
+in effect, candle period, starting capital, output dir), **fills** (each fill),
 **result** (bars, trade count, capital start→end with absolute and percent change,
 elapsed runtime), and **metrics** (the headline lines of `metrics.yml`). `-q`
 silences all of it; the files are still written.
@@ -1099,12 +1101,16 @@ and `--mc-metrics a,b,…`.
 
 ```sh
 fugazi optimize @strategy.params.yml --series @btc.csv \
-  --params FAST=3..15 --params SLOW=20..60:5 \
+  --grid 'FAST=3..15,SLOW=20..60:5' \
   --best-by sharpe -w 126 -k 1.0 -j 8 -o grid.csv
 ```
 
-The grid fans out across a rayon pool sized by `-j/--jobs` (default: one worker per
-logical CPU), and every combination lands in a ranked CSV.
+Sweep axes live on `-g/--grid` (a list `[a,b,c]` or a range `start..end[:step]`);
+`--params` stays scalars-only, the baseline every subgrid layers over. Repeat
+`--grid` to stack subgrids — a *union* of cartesian products, for when one
+parameter only makes sense conditionally on another. The grid fans out across a
+rayon pool sized by `-j/--jobs` (default: one worker per logical CPU), and every
+combination lands in a ranked CSV.
 
 Three flags exist because a raw grid maximum is usually an artefact:
 
