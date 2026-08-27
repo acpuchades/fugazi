@@ -92,6 +92,7 @@ BY_PARAM = {
     "base_dir": "str | None",
     "import_root": "str | None",
     "imports": "bool",
+    "shrink": "bool",
     "metric_names": "list[str] | None",
     "params": "Mapping[str, Any] | None",
     "grid": "Sequence[Mapping[str, Any]] | None",

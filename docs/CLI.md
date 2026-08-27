@@ -555,7 +555,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                -g <SPEC> [-g <SPEC> …] [--params <SPEC> …] [--import-root <DIR>]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <LEN> | --pooled <SPEC> …] [-k <K>]
+               [-w <LEN>] [--pooled <SPEC> …] [-k <K>] [--shrink]
                [--walkforward <IS,OS[,E]> [--keep-unstable]]
                [--smooth[=<KERNEL>] [--smooth-min-support <FRAC>]]
                [--cash <N>]
@@ -575,10 +575,11 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). Under `--pooled --walkforward`, one composite equity file **per member** (`<stem>.composite_oos_equity.<N>_<MEMBER>.csv`) plus a pooled `<stem>.composite_oos_metrics.yml`. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). Mutually exclusive with `--walkforward`. |
-| `--pooled <SPEC>` | **Reduce over** a panel instead of ranking on it — fit *one* parameter set across every member rather than picking the best `(params, instrument)` cell. Carries the panel's axes with their values, in `--grid` term grammar (typically the axis driving `root:`); several axes pool over their cartesian product. The panel's names are not CSV axis columns — they are not something the sweep chose — and every `-m` metric becomes three columns (`<name>_mean` / `<name>_std` / `<name>_n`, the last being how many members reported it). A name it declares may not also appear in `--params` or `--grid`. Composes with `--walkforward` and `-k`. Mutually exclusive with `-w`. See [Pooling across a panel](#pooling-across-a-panel). |
+| `--pooled <SPEC>` | **Reduce over** a panel instead of ranking on it — fit *one* parameter set across every member rather than picking the best `(params, instrument)` cell. Carries the panel's axes with their values, in `--grid` term grammar (typically the axis driving `root:`); several axes pool over their cartesian product. The panel's names are not CSV axis columns — they are not something the sweep chose — and every `-m` metric becomes three columns (`<name>_mean` / `<name>_std` / `<name>_n`, the last being how many members reported it). A name it declares may not also appear in `--params` or `--grid`. Composes with `--walkforward`, `-k` and `-w` (which supplies the replication `--shrink` needs and changes no pooled number). See [Pooling across a panel](#pooling-across-a-panel). |
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
-| `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's mean *against* it by `K` standard deviations before sorting. Requires `--best-by` plus one of `-w` (dispersion across time windows) or `--pooled` (dispersion across panel members); `K >= 0`. See [Best-by directions](#best-by-directions). |
+| `--shrink` | **Partial pooling** (needs `--pooled` and `--best-by`; refuses `-k`): let each panel member depart from the pooled winner by however much the panel's own disagreement justifies. The sweep estimates `λ` — the share of the spread between members that is real disagreement rather than backtest noise — and each member selects off `μ + αᵣ + λ·γᵣₘ`. At `λ = 0` this is complete pooling; at `λ = 1` every member picks its own. Needs replication to estimate `λ` at all: `-w` in a sweep, per-fold in-sample sub-spans under `--walkforward`. Without it `λ` reports as unavailable rather than as a number. See [Partial pooling](#partial-pooling---shrink). |
+| `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's mean *against* it by `K` standard deviations before sorting. Requires `--best-by` plus one of `-w` (dispersion across time windows) or `--pooled` (dispersion across panel members); `K >= 0`. Refused alongside `--shrink`, which models that dispersion rather than charging for it. See [Best-by directions](#best-by-directions). |
 | `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *grid steps* — the parameter gap divided by that axis' own median gap. Requires `--best-by` **and a lattice**: a grid where no subgrid sweeps a numeric axis of two or more values (an enumerated point list, an all-categorical grid) is an error, since smoothing there would be the identity. Composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-scale <SPEC>` | Pin which scale `--smooth` measures an axis on. `,`-separated: a bare `linear` / `log` / `index` sets the grid-wide default, `NAME:SCALE` pins one axis. Default is per-axis automatic. `--smooth-scale=index` restores the pre-0.65 measure between declared positions. A `NAME` that no subgrid sweeps is an error — an unmatched pin is never looked up, so it would silently leave the axis on the automatic choice. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Above `0` it also drops a row whose subgrid had no axis to smooth along, whose support is blank rather than a number. Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
@@ -1033,8 +1034,101 @@ because it is no longer something the sweep chose. Two consequences:
   different partition — members rather than time windows — so
   [`-k/--risk-aversion`](#best-by-directions) composes and means the same
   thing: a parameter set that only works on one member is penalized for the
-  spread. (For that reason the two are mutually exclusive; a `mean ∓ k·std` of
-  a set of `mean ∓ k·std`s is not a statistic worth emitting silently.)
+  spread.
+
+`-w` composes with `--pooled` and does **not** change any pooled number. The
+pooled `_mean`/`_std`/`_n` columns still come from each member's whole-run
+document; the windowed reduction rides beside it, and exists so
+[`--shrink`](#partial-pooling---shrink) can tell member disagreement apart from
+backtest noise.
+
+###### When pooling is the right thing to do
+
+Pooling buys **variance reduction on the selection surface**. Optimizing over a
+grid of `M` points selects the argmax of `M` noisy estimates, so the winner is
+inflated by the largest noise draw as much as by the largest signal.
+[Deflating](METRICS.md#selectiondeflated_sharpe--dsr-bailey--lópez-de-prado-2014)
+corrects how that inflation is *reported*; averaging `N` members' estimates
+before selecting reduces it, because the surface you take the argmax of is
+smoother.
+
+That holds on one condition: **the swept parameter has to mean the same thing on
+every member.**
+
+| Axis kind | Shared meaning? | Pooling |
+| --- | --- | --- |
+| Bar counts — `SMA 20`, `RSI 14`, an ATR window | **Yes, by construction.** A bar is a bar | The clean case |
+| Dimensionless thresholds — `RSI > 70`, `z > 2` | Partial. `70` sits at a different quantile on each instrument | Degrades gracefully |
+| Dimensioned quantities — a `$100` stop, `min_volume 1e6` | **No.** No shared quantity to average | Averages apples |
+
+This is a property of each **axis**, not of the document — a strategy never
+written with pooling in mind still pools cleanly on its bar-count axes while
+being corrupted on its dimensioned ones, in the same sweep. Pooling a
+non-shared axis does not error; it silently returns a compromise that can be
+worse on *every* member than that member's own answer. Two readouts tell you
+which case you are in: the `λ` line (below) and `effective breadth`, which
+reports what the panel is worth as evidence rather than how many members it
+has — thirty correlated perpetuals are worth about one backtest, not thirty.
+
+##### Partial pooling (`--shrink`)
+
+`--pooled` alone is **complete** pooling: one answer for the whole panel. A
+plain `SYM=[...]` grid axis is **no** pooling: a separate answer per member,
+each fit on its share of the evidence and each overfit accordingly. `--shrink`
+is the middle — estimate how much of the spread between members is real
+disagreement rather than backtest noise, and let each member move that far and
+no further.
+
+```bash
+fugazi optimize @ma.yml -s @panel.csv \
+  --grid 'FAST=[5,10,20],SLOW=[50,100]' \
+  --pooled 'SYM=["BTC/USDT","ETH/USDT","SOL/USDT"]' \
+  --walkforward 500,120 --best-by sharpe --shrink \
+  -o out/shrunk.csv --crypto
+```
+
+The sweep lays its results out as a row × member table and reads it as a two-way
+layout — a shared parameter effect, a per-member level, and the interaction
+between them — then reports
+
+```text
+λ = interaction variance / (interaction variance + noise)
+```
+
+At `λ = 0` the members share an optimum, every member picks the pooled winner,
+and `--shrink` changes nothing but the readout. At `λ = 1` they are separate
+problems and each member picks its own. In between, a member whose results are
+noisy is pulled toward the consensus while one that genuinely disagrees is
+allowed to keep disagreeing.
+
+**`λ` needs replication, and says so when it has none.** With one measurement
+per member, disagreement and noise are the same quantity and no honest split
+exists — so `λ` reports as `—` rather than as a number. Replicates come from
+`-w/--windowed` in a sweep, and from sub-spans of each fold's own in-sample
+window under `--walkforward` (which needs no extra flag). A fold estimates `λ`
+only from data that fold could see; using every fold's measurements to pick fold
+1's winner would be lookahead.
+
+Because per-fold `λ` rests on a handful of short sub-spans, it is deliberately
+**conservative** — a metric measured over a short span is itself noisy, that
+noise lands in the denominator, and `λ` comes out lower. A fold that reports a
+low `λ` on a panel whose run-level `λ` is high is not a contradiction; it is the
+fold saying it cannot yet distinguish the disagreement from noise on its own
+evidence. The run-level `λ` printed beside the folds uses folds as replicates,
+which is better powered — but it is a description of the run after the fact, not
+something any selection used.
+
+`--shrink` refuses `-k/--risk-aversion`. The two are rival answers to the same
+question: `-k` *charges* a parameter set for the spread between members, and
+this *models* that spread. Applying both pays for the same disagreement twice.
+
+Outputs, beyond the usual:
+
+| Where | What |
+| --- | --- |
+| `<name>_z` / `<name>_z_std` columns | The `--best-by` metric's cross-member mean and std with the **member effect removed**. The raw `_mean`/`_std` conflate "this parameter set is unstable" with "these instruments have different achievable Sharpe"; the second is identical for every row and so carries no ranking information, yet still inflates every row's `-k` penalty. Emitted for any pooled sweep; `--shrink` also *ranks* on it |
+| `lambda`, `lambda_support`, `lambda_cells`, `members_departed` on `folds.csv` | Each fold's own decomposition, so a reader can see why members did or did not split without re-running |
+| `<stem>.member_winners.csv` | One row per `(fold, member)`: which parameters that member chose, and whether that differed from the pooled winner. **Not written when nothing departed** — a `departed` column of uniformly `false` reads like a finding when it is the absence of one, and the console reports that negative result instead |
 
 **Several axes pool over their cartesian product.** A panel is not restricted
 to instruments:

@@ -606,6 +606,16 @@ struct CheckCostsArgs {
 }
 
 #[derive(Args)]
+// `reduction` is what `-k/--risk-aversion` requires — "there is a spread to be
+// conservative about". Both `-w` and `--pooled` supply one, and they supply
+// *different* ones, so the group has to admit both at once: pooling reduces
+// across members while `-w` cuts each member's run into windows, and a panel
+// measured over windows is the only configuration in which the variance
+// components `--shrink` rests on are estimable at all (see
+// `fugazi::spec::shrinkage`). Exclusivity still holds where it belongs —
+// `sweep_shape` keeps `-w` and `--walkforward` apart, since those really are
+// two geometries for one sweep.
+#[command(group = clap::ArgGroup::new("reduction").multiple(true))]
 struct OptimizeArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
     /// May carry a leading shape prefix: `single:` (or none) for a
@@ -819,6 +829,41 @@ struct OptimizeArgs {
         requires = "best_by"
     )]
     risk_aversion: Option<f64>,
+
+    /// Partial pooling (needs `--pooled` and `--best-by`): let each panel
+    /// member depart from the pooled winner by however much the panel's own
+    /// disagreement justifies, instead of fitting one parameter set to all of
+    /// them.
+    ///
+    /// `--pooled` alone is *complete* pooling — one answer for the whole panel,
+    /// which is right only when the members share an optimum. A plain
+    /// `SYM=[...]` grid axis is the opposite, *no* pooling: a separate answer
+    /// per member, each fit on its share of the evidence and each overfit
+    /// accordingly. This is the middle: the sweep estimates how much of the
+    /// spread between members is real disagreement (`λ`) rather than backtest
+    /// noise, and lets each member move that far and no further.
+    ///
+    /// At `λ = 0` every member picks the pooled winner and this changes
+    /// nothing but the readout. At `λ = 1` every member picks its own.
+    ///
+    /// **Needs replication to estimate `λ` at all.** With one measurement per
+    /// member, disagreement and noise are the same quantity and no honest split
+    /// exists. In a sweep that means `-w/--windowed`, which supplies each
+    /// member's run cut into windows; under `--walkforward` each fold splits
+    /// its own in-sample window and needs no extra flag. Without either, `λ`
+    /// reports as unavailable rather than as a number.
+    ///
+    /// Refuses `-k/--risk-aversion`: the two are rival answers to the same
+    /// question. `-k` *charges* a parameter set for the spread between members;
+    /// this *models* that spread and lets each member move by however much of
+    /// it is real. Applying both pays for the same disagreement twice.
+    #[arg(
+        long = "shrink",
+        requires = "pooled",
+        requires = "best_by",
+        conflicts_with = "risk_aversion"
+    )]
+    shrink: bool,
 
     /// Rank `--best-by` by a kernel-weighted average over each grid point's
     /// *parameter neighbourhood* (needs `--best-by`), so a broad plateau
@@ -1764,6 +1809,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         keep_unstable: args.keep_unstable,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),
         smoothing,
+        shrink: args.shrink,
         cost_config: &cost_config,
         frequency: &args.frequency,
         costs_supplied: costs_were_supplied,

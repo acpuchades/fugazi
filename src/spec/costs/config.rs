@@ -515,6 +515,27 @@ pub(super) enum SpreadSpec {
     Absolute { amount: Real },
 }
 
+/// Name every currency-denominated part of a commission spec, recursing through
+/// the two combinators — a `Fixed` buried inside a `max` is exactly as
+/// panel-sensitive as one at the top.
+fn collect_absolute_commission(spec: &CommissionSpec, out: &mut Vec<String>) {
+    match spec {
+        CommissionSpec::Fixed { .. } => out.push("commission.fixed".to_string()),
+        CommissionSpec::PerUnit { .. } => out.push("commission.per_unit".to_string()),
+        CommissionSpec::Composite { parts } => {
+            for p in parts {
+                collect_absolute_commission(p, out);
+            }
+        }
+        CommissionSpec::Max { lhs, rhs } => {
+            collect_absolute_commission(lhs, out);
+            collect_absolute_commission(rhs, out);
+        }
+        // Scale-free: the same fraction of notional on every member.
+        CommissionSpec::None | CommissionSpec::Percentage { .. } => {}
+    }
+}
+
 impl SpreadSpec {
     fn build(&self) -> Box<dyn SpreadModel> {
         match self {
@@ -651,6 +672,34 @@ impl SlippageSpec {
 }
 
 impl CostConfig {
+    /// Cost terms in the **`default`** leg that are denominated in currency
+    /// rather than in a fraction of notional — named as a user would spell
+    /// them, deduped, sorted.
+    ///
+    /// The distinction matters exactly once: applied to a panel. A `bps` rate
+    /// is the same *fraction* on every member and pools cleanly; a fixed
+    /// per-trade fee is the same number of currency units, which across
+    /// instruments three orders of magnitude apart in price is not one cost
+    /// model at all. Per-unit rates and absolute spreads are the same problem
+    /// in a different denominator.
+    ///
+    /// Only the `default` leg is reported. A term that carries a scope has
+    /// already been aimed at a particular stream, which is precisely the fix
+    /// this exists to suggest — flagging it would be telling the user off for
+    /// having done the right thing.
+    pub fn unscoped_absolute_terms(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if let Some(c) = &self.commission.default {
+            collect_absolute_commission(c, &mut names);
+        }
+        if let Some(SpreadSpec::Absolute { .. }) = &self.spread.default {
+            names.push("spread.absolute".to_string());
+        }
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     /// Whether every leg is empty (no default, no scoped, no by-something) —
     /// what `--costs none` and an absent `--costs` flag both resolve to.
     pub fn is_none(&self) -> bool {

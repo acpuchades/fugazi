@@ -91,16 +91,23 @@ pub fn probe_params(subgrid: &Subgrid) -> HashMap<String, Value> {
 /// value, the atom / snapshot stream(s), cost config, and the choice of
 /// whole-run vs windowed reduction. That closure is the seam Single /
 /// Basket / Multi share — the sweep loop itself is strategy-type-agnostic.
-/// `windowed` mirrors the closure's mode (used only to shape column
-/// headers and DSR aggregation).
+/// Which reduction the closure chose is then read back off the rows
+/// ([`Sweep::windowed`], [`Sweep::panel`]) rather than declared alongside them,
+/// so the column headers cannot disagree with the records under them.
+///
+/// `shrink` selects **partial pooling** for a pooled sweep: rank on the
+/// member-demeaned score rather than the raw pooled mean, since the member
+/// effect is the same for every row and charging `risk_aversion` for the spread
+/// it creates penalizes the panel's composition instead of the parameter set.
+/// See [`crate::spec::shrinkage`].
 #[allow(clippy::too_many_arguments)]
 pub fn optimize<F>(
     subgrids: Vec<Subgrid>,
-    windowed: Option<usize>,
     metric_names: &[String],
     best_by: Option<&str>,
     risk_aversion: Real,
     smooth: Option<&Smoothing>,
+    shrink: bool,
     jobs: Option<usize>,
     evaluate_row: F,
 ) -> Result<Sweep>
@@ -115,6 +122,14 @@ where
     // Smoothing averages the `--best-by` ranking key over a neighbourhood;
     // without a key to rank by there is nothing to average. (Enforced by clap
     // for the CLI; this catches the library and Python callers.)
+    if shrink && risk_aversion > 0.0 {
+        bail!(
+            "--shrink and --risk-aversion are rival answers to the same question. \
+             `-k` charges a parameter set for the spread between members; --shrink models \
+             that spread and lets each member move by however much of it is real. Applying \
+             both pays for the same disagreement twice. Pick one"
+        );
+    }
     if smooth.is_some() && best_by.is_none() {
         bail!(
             "--smooth needs --best-by: there is no ranking key to average over the neighbourhood"
@@ -225,6 +240,7 @@ where
                     values: project_row(subgrid, combo, union_ref),
                     eval,
                     smoothed: None,
+                    demeaned: None,
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -239,6 +255,7 @@ where
         ),
         eval: first_eval,
         smoothed: None,
+        demeaned: None,
     });
     rows.extend(remaining);
 
@@ -251,10 +268,47 @@ where
     let smoothing = smooth.cloned();
     let mut plateau: Option<usize> = None;
     let mut smooth_scales: Option<Vec<(String, AxisScale)>> = None;
+    let mut shrinkage: Option<crate::spec::shrinkage::Summary> = None;
     if let Some((_, ref path, direction)) = best_by {
+        // Pooled: fit the row × member layout while the rows are still in
+        // lattice order, and hand every row its member-demeaned score. Both
+        // this and `smooth_keys` below need that order, which is why both sit
+        // between the rejoin and the sort that destroys it.
+        //
+        // Computed whenever the sweep is pooled, not only under `--shrink`:
+        // the columns are a readout, and a reader comparing `_mean` against
+        // `_z` learns whether the ranking was resting on the panel's
+        // composition. `--shrink` decides what the sweep *ranks* on, below.
+        if rows.iter().any(|r| r.eval.panel().is_some()) {
+            let per_row: Vec<&[crate::spec::panel::PanelMetrics]> =
+                rows.iter().map(|r| r.eval.panel().unwrap_or(&[])).collect();
+            if let Some((demeaned, summary)) = crate::spec::panel::demeaned_sweep(&per_row, path) {
+                for (row, value) in rows.iter_mut().zip(demeaned) {
+                    row.demeaned = value;
+                }
+                shrinkage = Some(summary);
+            }
+        }
         let keys: Vec<Option<Real>> = rows
             .iter()
-            .map(|r| ranking_value(&r.eval, path, direction, risk_aversion))
+            .map(|r| {
+                // `--shrink` ranks on the demeaned score: the member effect is
+                // the same for every row, so charging `-k` for the spread it
+                // creates penalizes the panel's composition rather than the
+                // parameter set. A row with no demeaned reading falls back to
+                // the raw one rather than dropping out of the ranking — it is
+                // a row the fit could not cover, not a row that failed.
+                if shrink && let Some(p) = r.demeaned {
+                    if r.eval.ruin_bar().is_some() {
+                        return None;
+                    }
+                    // No `-k` term: it is refused alongside `--shrink` above,
+                    // so `risk_aversion` is zero here by construction and
+                    // writing it in would only suggest otherwise.
+                    return Some(p.mean);
+                }
+                ranking_value(&r.eval, path, direction, risk_aversion)
+            })
             .collect();
         match smooth {
             // Rank by the neighbourhood average instead of the point estimate.
@@ -287,6 +341,12 @@ where
     let deflated_sharpe_context = compute_dsr_context(&rows);
 
     let panel = rows.first().and_then(|r| r.eval.panel()).map(<[_]>::len);
+    // Both read off the same row, so they cannot contradict each other: a
+    // pooled row is `Evaluation::Panel` whether or not `-w` was passed, and a
+    // windowed one is `Evaluation::Windowed` only when it was *not* pooled.
+    let windowed = rows
+        .first()
+        .is_some_and(|r| matches!(r.eval, Evaluation::Windowed(_)));
 
     Ok(Sweep {
         union_columns,
@@ -294,12 +354,14 @@ where
         metric_columns,
         best_by,
         rows,
-        windowed: windowed.is_some(),
+        windowed,
         panel,
         deflated_sharpe_context,
         smoothing,
         smooth_scales,
         plateau,
+        shrinkage,
+        shrunk: shrink,
     })
 }
 
@@ -685,6 +747,19 @@ pub struct Row {
     /// `None` when smoothing didn't run at all. Populated *before* the sort, so
     /// it rides the permutation with its row. See [`smooth_keys`].
     pub smoothed: Option<SmoothedKey>,
+    /// (`--pooled`) This row's cross-member mean and std **after the member
+    /// effect is removed** — the `_z` columns.
+    ///
+    /// The raw `_mean`/`_std` conflate "this parameter set is unstable across
+    /// members" with "these instruments have different achievable Sharpe". The
+    /// second is identical for every row, so it cannot separate them — but it
+    /// does inflate every row's `−k·std`, and unequally, since rows differ in
+    /// which members they are defined on. See
+    /// [`crate::spec::panel::demeaned_sweep`].
+    ///
+    /// Populated before the sort, like [`Self::smoothed`], so it rides the
+    /// permutation. `None` for an unpooled sweep or a table too sparse to fit.
+    pub demeaned: Option<crate::spec::panel::Pooled>,
 }
 
 /// Rows and metadata produced by [`optimize`], ready for the CLI to write out.
@@ -708,8 +783,16 @@ pub struct Sweep {
     /// `None` when no `--best-by` was passed.
     pub best_by: Option<(String, String, Direction)>,
     pub rows: Vec<Row>,
-    /// True iff `windowed` was set — the CSV writer uses this to emit
-    /// `<name>_mean` / `<name>_std` columns per metric.
+    /// True iff the rows are **windowed** evaluations — the CSV writer uses
+    /// this to emit `<name>_mean` / `<name>_std` columns per metric.
+    ///
+    /// **Derived from the rows, not from the flag**, for the same reason
+    /// [`Self::panel`] is. `-w` composes with `--pooled`, where it supplies the
+    /// within-cell replication `--shrink` needs while the *reduction* stays
+    /// pooled — so a pooled sweep can have `-w` set and still produce
+    /// `Evaluation::Panel` rows. Reading the flag there emitted a two-column
+    /// windowed header over three-column panel records, and the CSV writer
+    /// failed on the field-count mismatch.
     pub windowed: bool,
     /// `Some(member_count)` iff the rows were pooled across a panel
     /// (`--pooled`) — the CSV writer emits `<name>_mean` / `<name>_std` /
@@ -757,6 +840,19 @@ pub struct Sweep {
     /// the result; its maximum is not, and a one-cell plateau under a wide
     /// kernel says the peak is an artifact of this sample.
     pub plateau: Option<usize>,
+    /// (`--pooled`) The sweep's two-way decomposition: how much of the spread
+    /// between members is shared parameter effect, how much is member level,
+    /// and how much is genuine disagreement about the optimum.
+    ///
+    /// Its `lambda` is the headline — but it is `None` unless the panel was
+    /// *replicated*, which in a sweep means `-w/--windowed`. Without that,
+    /// disagreement and backtest noise are the same quantity, and the other
+    /// components are still reported because they do not depend on separating
+    /// the two.
+    pub shrinkage: Option<crate::spec::shrinkage::Summary>,
+    /// Whether `--shrink` ranked this sweep — i.e. whether `rows` is ordered by
+    /// [`Row::demeaned`] rather than by the raw pooled reduction.
+    pub shrunk: bool,
 }
 
 /// True iff `v` is axis-shaped — a JSON array or a `start..end[:step]`
@@ -4214,6 +4310,7 @@ mod tests {
                             values: vec![],
                             eval: Evaluation::Whole(Box::new(m)),
                             smoothed: None,
+                            demeaned: None,
                         }
                     })
                     .collect()

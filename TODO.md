@@ -987,7 +987,7 @@ per-member path. That is a data-layer change, not a flag-grammar one, and it is
 deliberately not in this one. Pooling over `FREQ` works today only where the
 cadences live on different symbols.
 
-### Pooling's validity is measured, not classified
+### Pooling's validity is measured, not classified — *settled, shipped as `--shrink`*
 
 `--pooled` is already an aggregated objective — `ranking_value`'s Panel arm
 optimizes `mean_m ∓ k·std_m` over the panel, once. What was missing is any
@@ -1062,8 +1062,45 @@ Also noted while surveying: `panel::effective_breadth` is computed, exposed to
 Python, and printed by **no CLI path** — the number that stops a reader treating
 thirty correlated perps as thirty pieces of evidence exists and is invisible.
 
-Full design, staging and the rest of the rejected alternatives:
-[docs/design/pooling.md](docs/design/pooling.md).
+Three things the build changed, each because writing it exposed a design error:
+
+- **`-w` and `--pooled` were mutually exclusive**, in one clap `ArgGroup` — so
+  the sweep had no replication available and the design doc's claim that
+  `--pooled -w` is where the components become estimable was simply false. They
+  compose now, and the windowed reduction rides *beside* the whole-run document
+  (`PanelMetrics::windows`) rather than replacing it, so turning replication on
+  changes no pooled number. That surfaced a latent bug in turn: `Sweep::windowed`
+  came from the *flag* while `Sweep::panel` came from the *rows*, and once both
+  could hold at once the CSV wrote a two-column header over three-column
+  records. `windowed` is derived from the rows now, as its own rustdoc had
+  argued for.
+- **The `λ = 0` reference had to move onto the shrunk scale.** Choosing the
+  pooled winner from each member's whole in-sample window while the members
+  chose from cell means over sub-spans put two honest numbers on different
+  scales, and a fold could report `λ 0.000` beside `2 member(s) chose
+  differently` — impossible by construction, since at `λ = 0` every member sees
+  one surface. Under `--shrink` the reference is `argmax_r (μ + α_r)`.
+- **`-k` is refused alongside `--shrink`.** They are rival answers to the same
+  question — one charges for the spread between members, the other models it —
+  and applying both pays for the same disagreement twice. Refused rather than
+  quietly ignored, per the precedent set by refusing an inert `--smooth`.
+
+And one thing worth knowing before reading a `λ`: there are **two**, and they
+disagree on purpose. The per-fold one is estimated from sub-spans of that fold's
+own in-sample window, so it is lookahead-free and is what selection acts on —
+and because a metric measured over a short span is itself noisy, and that noise
+lands in the denominator, it is systematically conservative. The run-level one
+uses folds as replicates, is better powered, and is deliberately not used for
+selection, because a component estimated over every fold and applied inside fold
+1 would let fold 10's data pick fold 1's winner. A low per-fold `λ` beside a high
+run-level one is the fold saying it cannot yet separate disagreement from noise
+on its own evidence.
+
+Still open, and still blocking the plain-sweep form: the DSR **trial count**
+under partial pooling.
+
+Full design, staging, the measured end-to-end result and the rest of the
+rejected alternatives: [docs/design/pooling.md](docs/design/pooling.md).
 
 ## Repo hygiene
 

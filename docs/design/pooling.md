@@ -1,7 +1,9 @@
 # Pooling — from one shared parameter to partial pooling
 
-**Status:** proposed. Nothing below is built; `--pooled` today is Stage 0's
-starting point, not Stage 0.
+**Status:** built, Stages 0–3. `--shrink` ships; Stage 4 (partial pooling in the
+plain sweep, returning N parameter sets) remains blocked on the DSR trial count
+— see *Open questions*. What the implementation changed relative to the plan is
+recorded in *What shipped* at the end.
 **Scope:** what pooling actually buys, the four ways it can buy nothing, and a
 partial-pooling design that replaces the all-or-nothing choice between "one
 parameter set for the whole panel" and "one per member".
@@ -344,3 +346,77 @@ Blocked on the output-shape question below. Not scheduled.
   `tests/metrics_coverage.rs` — that guard never skips.
 - `tests/pooled.rs` is where the panel's behaviour is pinned; each stage adds to
   it. Stage 0's readouts are console output, so they pin as CLI assertions.
+
+## What shipped
+
+Stages 0–3, as `fugazi optimize --shrink` (`src/spec/shrinkage.rs`, wired
+through `src/spec/panel.rs` and both `optimize` paths). Four things differ from
+the plan above, each because building it exposed something the design had wrong.
+
+### D5 was factually wrong: `-w` and `--pooled` were mutually exclusive
+
+The plan asserted that `--pooled -w` "is the configuration in which the variance
+components are estimable". They were in the same clap `ArgGroup`, so the
+combination was **refused** — the sweep had no replication available at all.
+
+Fixed by declaring the group `multiple(true)`. `-w` now composes and supplies
+each member's run cut into windows, carried on `PanelMetrics::windows` *beside*
+the whole-run document rather than instead of it. `pool_metric` and every
+`_mean`/`_std`/`_n` column still read `PanelMetrics::metrics`, so **turning
+replication on changes no pooled number** — pinned by
+`windowed_composes_with_pooled_and_changes_no_pooled_number`.
+
+That exposed a latent bug in turn: `Sweep::windowed` was set from the *flag*
+while `Sweep::panel` was derived from the *rows*. Once both could be true at
+once, the CSV writer emitted a two-column windowed header over three-column
+panel records and failed on the field-count mismatch. `windowed` is now derived
+from the rows like `panel`, which is what the field's own rustdoc had argued for
+all along.
+
+### The λ = 0 contradiction, and why the reference had to move
+
+The first implementation chose the pooled winner with `pooled_ranking_key` (each
+member's *whole* in-sample window) and let members pick off the decomposition
+(cell means over in-sample *sub-spans*). Two honest numbers on different scales,
+which need not share an argmax — so a fold could report `λ 0.000` beside `2
+member(s) chose differently`, which is impossible by construction: at `λ = 0`
+every member sees the identical surface `μ + α_r`.
+
+Under `--shrink` the reference is now `argmax_r (μ + α_r)` — complete pooling
+expressed on the shrunk scale — so `λ = 0` yields no departures by construction.
+Pinned by `a_zero_lambda_fold_has_no_departures`. Without `--shrink` nothing
+changed.
+
+### `-k` is refused, not composed
+
+Making the reference share the shrunk scale left `-k` with nothing to act on,
+and the honest reading is that it never belonged there: `-k` **charges** a
+parameter set for the spread between members, `--shrink` **models** that spread.
+Running both pays for the same disagreement twice.
+
+Refused rather than silently ignored, following the precedent
+`fix(optimize): … refuse an inert --smooth` already set.
+
+### Two λs, not one, and they disagree on purpose
+
+- **Per fold** (`PanelFoldRow::shrinkage`) — estimated from sub-spans of that
+  fold's own in-sample window, so it is lookahead-free and is what selection
+  acts on. Because a metric measured over a short sub-span is itself noisy, and
+  that noise lands in `σ²_ε`, it is systematically **conservative**.
+- **Per run** (`PanelWalkForward::run_shrinkage`) — folds as the replicate axis,
+  accumulated during the fold loop as scalars. Free, better powered, and
+  deliberately *not* used for selection: a component estimated over every fold
+  and applied inside fold 1 would let fold 10's data pick fold 1's winner.
+
+A low per-fold `λ` beside a high run-level one is therefore not a contradiction
+to be tuned away — it is the fold saying it cannot yet separate disagreement
+from noise on its own evidence. Both are reported.
+
+### Measured end to end
+
+On a two-member panel of a 6-bar cycle and a 90-bar cycle — members with
+genuinely different optima — `λ ≈ 0.99` ("separate problems"), the slow member
+departed in all four folds, and its out-of-sample total went from `+609%` under
+complete pooling to `+647%` under partial pooling, with the agreeing member
+untouched. That is the shape the design predicted: borrow strength where members
+agree, let them differ where they do not.

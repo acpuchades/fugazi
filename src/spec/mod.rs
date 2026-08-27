@@ -88,6 +88,11 @@ pub mod panel;
 // Shared rayon thread-pool constructor — the optimize kernel uses it.
 pub mod pool;
 
+// Partial pooling — the two-way decomposition of a panel's score table, and the
+// shrinkage weight it estimates. Reads what `panel` produces; nothing in
+// `panel` depends on it.
+pub mod shrinkage;
+
 /// The load-time passes every strategy document goes through before typed
 /// deserialization, in order: parse the YAML into an untyped tree, splice in
 /// every `!import`ed document, then resolve every `!param` placeholder against

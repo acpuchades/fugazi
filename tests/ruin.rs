@@ -972,6 +972,7 @@ fn row_of(m: metrics::Metrics) -> Row {
         values: Vec::new(),
         eval: whole(m),
         smoothed: None,
+        demeaned: None,
     }
 }
 

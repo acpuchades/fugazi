@@ -1643,6 +1643,7 @@ pub(crate) fn build_subgrids(
     smooth = None,
     smooth_min_support = 0.0,
     smooth_scale = None,
+    shrink = false,
     jobs = None,
     bars_per_year = 252.0,
     risk_free_rate = 0.0,
@@ -1675,6 +1676,7 @@ pub(crate) fn optimize(
     smooth: Option<&str>,
     smooth_min_support: Real,
     smooth_scale: Option<&str>,
+    shrink: bool,
     jobs: Option<usize>,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -1814,6 +1816,7 @@ pub(crate) fn optimize(
             best_by_str.as_deref(),
             risk_aversion,
             smoothing.as_ref(),
+            shrink,
             jobs,
             cash,
             max_gross,
@@ -1950,11 +1953,11 @@ pub(crate) fn optimize(
 
             spec_optimize::optimize(
                 subgrids,
-                windowed,
                 &metric_names_vec,
                 best_by_str.as_deref(),
                 risk_aversion,
                 smoothing.as_ref(),
+                shrink,
                 jobs,
                 evaluate_row,
             )
@@ -2845,6 +2848,10 @@ pub(crate) fn run_panel_walkforward(
     best_by: Option<&str>,
     risk_aversion: Real,
     smoothing: Option<&spec_optimize::Smoothing>,
+    // Partial pooling — see `fugazi_core::spec::shrinkage`. Each fold estimates
+    // its own `λ` from sub-spans of its in-sample window and lets each member
+    // depart from the pooled winner by that much.
+    shrink: bool,
     jobs: Option<usize>,
     cash: Real,
     max_gross: Option<Real>,
@@ -2953,6 +2960,7 @@ pub(crate) fn run_panel_walkforward(
                 best_by,
                 risk_aversion,
                 smoothing,
+                shrink,
                 jobs,
                 cash,
             )

@@ -547,6 +547,13 @@ pub fn run_pooled(
 
     let mut panel_metrics: Vec<fugazi::spec::panel::PanelMetrics> =
         Vec::with_capacity(setups.len());
+    // Each member's bar clock and per-bar returns, for `effective_breadth`.
+    // Measured on the members' **results**, never on their prices: what a
+    // pooled figure rests on is how much the equity curves co-moved. A strategy
+    // trading two correlated markets at different times produces two more
+    // nearly independent curves than their prices suggest, and is entitled to
+    // the credit.
+    let mut curves: Vec<(Vec<i64>, Vec<Real>)> = Vec::with_capacity(setups.len());
     let total = setups.len();
     for (index, (name, setup)) in setups.iter().enumerate() {
         let member_dir = opts.out_dir.join(member_file_stem(index, name, total));
@@ -608,17 +615,32 @@ pub fn run_pooled(
             print_rejection_warning(&iter.report);
         }
 
-        panel_metrics.push(fugazi::spec::panel::PanelMetrics {
-            member: (*name).to_string(),
-            metrics: iter.metrics,
-        });
+        // A member whose bars carry no timestamp contributes no curve — the
+        // panel is joined on *when*, and a stream that cannot say when its bars
+        // happened cannot be placed on that axis. It still counts in every
+        // pooled mean; it is only absent from the breadth reading, which is
+        // what `Breadth::members` reports against.
+        let keys: Vec<i64> = setup
+            .sliced
+            .snapshots
+            .iter()
+            .filter_map(|s| s.any_atom().and_then(|a| a.time).map(|t| t.0))
+            .collect();
+        if keys.len() == setup.sliced.snapshots.len() {
+            curves.push((
+                keys,
+                fugazi::metrics::per_bar_returns(&iter.report.equity_curve, opts.cash),
+            ));
+        }
+
+        panel_metrics.push(fugazi::spec::panel::PanelMetrics::new(*name, iter.metrics));
     }
 
     write_pooled_metrics_yaml(&panel_metrics, &opts.out_dir.join("metrics.yml"))?;
 
     let finished = SystemTime::now();
     if !opts.quiet {
-        print_pooled_result_block(&panel_metrics, opts, started, finished);
+        print_pooled_result_block(&panel_metrics, &curves, opts, started, finished);
     }
     Ok(())
 }
@@ -640,6 +662,7 @@ fn write_pooled_metrics_yaml(
 /// would otherwise show for a single run.
 fn print_pooled_result_block(
     members: &[fugazi::spec::panel::PanelMetrics],
+    curves: &[(Vec<i64>, Vec<Real>)],
     opts: &RunOptions,
     started: SystemTime,
     finished: SystemTime,
@@ -703,10 +726,89 @@ fn print_pooled_result_block(
             ),
         );
     }
+    print_breadth_field(curves);
+    print_activity_field(members);
     style::field(
         "cash",
         &format!("{:.2} per member (not netted across the panel)", opts.cash),
     );
+}
+
+/// How many *independent* members the panel is actually worth.
+///
+/// A pooled mean over thirty members invites the reading that it rests on
+/// thirty pieces of evidence. For thirty instruments of one market it does not
+/// — they mostly track the same beta, and the mean deserves roughly the
+/// confidence of a single backtest. This is the line that says so.
+///
+/// Silent when fewer than two members have enough shared history to be
+/// correlated against anything: reporting a member count there would be
+/// answering a question nobody could check.
+fn print_breadth_field(curves: &[(Vec<i64>, Vec<Real>)]) {
+    let borrowed: Vec<(&[i64], &[Real])> = curves
+        .iter()
+        .map(|(k, r)| (k.as_slice(), r.as_slice()))
+        .collect();
+    let Some(b) = fugazi::spec::panel::effective_breadth(&borrowed) else {
+        return;
+    };
+    style::field(
+        "effective breadth",
+        &format!(
+            "{:.1} of {} members (mean pairwise correlation {:.2} over {} pairs) — \
+             what the pooled means above are worth as evidence, not the member count",
+            b.effective, b.members, b.mean_correlation, b.pairs,
+        ),
+    );
+}
+
+/// Whether this was recognisably the same strategy on every member.
+///
+/// A parameter set can be perfectly scale-free and still not *mean* the same
+/// thing across a panel: a fixed threshold sits at a different quantile on each
+/// instrument, so the same document can trade twice a week on one member and
+/// twice a year on another. Pooled, that is not one strategy measured six
+/// times, it is six strategies averaged — and no cross-member `std` reveals it,
+/// because each member's own numbers are internally consistent.
+///
+/// Reported as a spread rather than judged. A wide one is a reason to look, not
+/// a defect: a regime filter that genuinely fires more often in one market is
+/// doing its job.
+fn print_activity_field(members: &[fugazi::spec::panel::PanelMetrics]) {
+    let rates: Vec<Real> = members
+        .iter()
+        .filter(|m| m.metrics.run.bars > 0)
+        .map(|m| m.metrics.trades.total as Real * 1000.0 / m.metrics.run.bars as Real)
+        .collect();
+    if rates.len() < 2 {
+        return;
+    }
+    let (lo, hi) = rates
+        .iter()
+        .fold((Real::INFINITY, Real::NEG_INFINITY), |(lo, hi), &r| {
+            (lo.min(r), hi.max(r))
+        });
+    let exposure: Vec<Real> = members
+        .iter()
+        .map(|m| m.metrics.trades.exposure_pct)
+        .collect();
+    let mut detail = match fugazi::spec::metrics::mean_std(rates.iter().copied()) {
+        Some((mean, std)) => format!("{mean:.1} ± {std:.1} trades per 1000 bars ({lo:.1}–{hi:.1})"),
+        None => return,
+    };
+    if let Some((mean, std)) = fugazi::spec::metrics::mean_std(exposure.iter().copied()) {
+        detail.push_str(&format!(" · {mean:.0}% ± {std:.0}% of bars in position"));
+    }
+    // A member trading ten times as often as another is not running the same
+    // strategy in any useful sense, whatever the document says.
+    if lo > 0.0 && hi / lo >= 3.0 {
+        detail.push_str(&format!(
+            " — the busiest member trades {:.0}× the quietest; check the entry threshold \
+             means the same thing on each",
+            hi / lo,
+        ));
+    }
+    style::field("activity", &detail);
 }
 
 /// The pairs twin of [`run`]: drive a

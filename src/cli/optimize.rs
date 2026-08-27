@@ -141,6 +141,15 @@ pub struct OptimizeOptions<'a> {
     /// exactly as before. Composes with `risk_aversion`, which is folded into
     /// the key before it is smoothed. See [`fugazi::spec::optimize::smooth_keys`].
     pub smoothing: Option<Smoothing>,
+    /// `--shrink`: partial pooling. Estimate how much of the spread between
+    /// panel members is real disagreement rather than backtest noise, and let
+    /// each member depart from the pooled winner by that much.
+    ///
+    /// Requires `pooled` and `best_by` (clap enforces both). Requires
+    /// *replication* to produce a number at all — `windowed` in a sweep, the
+    /// per-fold in-sample split under `walkforward`. See
+    /// [`fugazi::spec::shrinkage`].
+    pub shrink: bool,
     /// Cost model configured via `--costs`. Every grid point resolves against
     /// the same config for its (strategy symbol, frequency) pair.
     pub cost_config: &'a CostConfig,
@@ -814,10 +823,23 @@ fn run_single(
                     let (snapshots_ref, ctx_ref) = streams_ref
                         .get(&key)
                         .expect("every member's root was prepared by `distinct_roots`");
-                    Ok(fugazi::spec::panel::PanelMetrics {
-                        member: member.label.clone(),
-                        metrics: backtest::evaluate_any(&spec, snapshots_ref, ctx_ref)
-                            .map_err(backtest::build_error)?,
+                    // Measured once, reduced twice under `-w`: the whole-run
+                    // document every pooled column already reads, plus the
+                    // per-window replicates `--shrink` needs to tell member
+                    // disagreement apart from backtest noise. No pooled number
+                    // changes — see `PanelMetrics::windows`.
+                    let report = backtest::measured_report_any(&spec, snapshots_ref, ctx_ref)
+                        .map_err(backtest::build_error)?;
+                    let metrics = ctx_ref.reduce(&report);
+                    Ok(match ctx_ref.windowed {
+                        Some(window) => fugazi::spec::panel::PanelMetrics::with_windows(
+                            member.label.clone(),
+                            metrics,
+                            ctx_ref.reduce_windowed(&report, window.get()),
+                        ),
+                        None => {
+                            fugazi::spec::panel::PanelMetrics::new(member.label.clone(), metrics)
+                        }
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -844,11 +866,11 @@ fn run_single(
 
     let sweep = optimize(
         subgrids,
-        windowed_n,
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
         opts.smoothing.as_ref(),
+        opts.shrink,
         opts.jobs,
         evaluate_row,
     )?;
@@ -1148,11 +1170,11 @@ fn run_multi_symbol(
 
     let sweep = optimize(
         subgrids,
-        windowed_n,
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
         opts.smoothing.as_ref(),
+        opts.shrink,
         opts.jobs,
         evaluate_row,
     )?;
@@ -1394,6 +1416,20 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         header.push(format!("{path}_smoothed"));
         header.push(format!("{path}_support"));
     }
+    // The member-demeaned ranking key: the same reduction as `_mean`/`_std`,
+    // over scores with the member effect taken out. Emitted for the `--best-by`
+    // metric only — it is a *ranking* readout, and demeaning every metric
+    // column would triple the file to answer a question nobody asked of the
+    // other forty. See `panel::demeaned_sweep`.
+    let demeaned_path = rows
+        .iter()
+        .any(|r| r.demeaned.is_some())
+        .then(|| sweep.best_by.as_ref().map(|(_, path, _)| path.as_str()))
+        .flatten();
+    if let Some(path) = demeaned_path {
+        header.push(format!("{path}_z"));
+        header.push(format!("{path}_z_std"));
+    }
     writer.write_record(&header)?;
 
     // Precompute the flatten position of each metric column against a sample
@@ -1506,6 +1542,10 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
             record.push(cell(smoothed.and_then(|s| s.value)));
             record.push(cell(smoothed.and_then(|s| s.support)));
         }
+        if demeaned_path.is_some() {
+            record.push(cell(row.demeaned.map(|p| p.mean)));
+            record.push(cell(row.demeaned.map(|p| p.std)));
+        }
         writer.write_record(&record)?;
     }
     writer.flush()?;
@@ -1598,7 +1638,93 @@ fn print_inputs_block(
             }
             style::field("smooth", &msg);
         }
+        if opts.shrink {
+            style::field(
+                "shrink",
+                "partial pooling — ranked on the member-demeaned score, with λ reporting how \
+                 much of the spread between members is real disagreement rather than noise",
+            );
+            if windowed_bars.is_none() {
+                style::field_continuation(
+                    "no -w, so each member is measured once and λ cannot be estimated: \
+                     disagreement and backtest noise are the same quantity. The demeaning \
+                     still applies; the λ line will read `—`",
+                );
+            }
+        }
     }
+    if let Some(panel) = &opts.pooled {
+        print_pooled_activity_field(rows);
+        warn_unscoped_absolute_costs(opts, panel);
+    }
+}
+
+/// Whether this was recognisably the same strategy on every member.
+///
+/// The sweep twin of `run`'s activity line, measured on the **best** row rather
+/// than the panel as a whole — a grid contains parameter sets that trade at
+/// wildly different rates by design, so averaging over the grid would say
+/// nothing. What matters is whether the set the sweep is about to recommend
+/// behaves comparably across the panel.
+///
+/// See `run::print_activity_field` for why this is not derivable from any
+/// cross-member `std`.
+fn print_pooled_activity_field(rows: &[Row]) {
+    let Some(members) = rows.first().and_then(|r| r.eval.panel()) else {
+        return;
+    };
+    let rates: Vec<Real> = members
+        .iter()
+        .filter(|m| m.metrics.run.bars > 0)
+        .map(|m| m.metrics.trades.total as Real * 1000.0 / m.metrics.run.bars as Real)
+        .collect();
+    if rates.len() < 2 {
+        return;
+    }
+    let (lo, hi) = rates
+        .iter()
+        .fold((Real::INFINITY, Real::NEG_INFINITY), |(lo, hi), &r| {
+            (lo.min(r), hi.max(r))
+        });
+    if lo > 0.0 && hi / lo >= 3.0 {
+        style::field(
+            "activity",
+            &format!(
+                "the busiest member trades {:.0}× the quietest on the first row \
+                 ({lo:.1}–{hi:.1} per 1000 bars) — check the entry threshold means the \
+                 same thing on each before reading the pooled means as one strategy",
+                hi / lo,
+            ),
+        );
+    }
+}
+
+/// An absolute cost term with no `SYMBOL:` scope, applied to a panel.
+///
+/// A flat `fee_per_trade` is the same number of currency units on every member.
+/// Across instruments three orders of magnitude apart in price that is not one
+/// cost model measured six times — it is nearly free on the expensive members
+/// and ruinous on the cheap ones, and it reads downstream as "the parameters do
+/// not generalize" rather than as a mis-specified cost.
+///
+/// A warning, not a refusal: an unscoped absolute fee is correct whenever the
+/// members really do share a fee schedule, which for one venue's perpetuals is
+/// the common case. Cost terms already scope on stream ids, so the fix is a
+/// prefix.
+fn warn_unscoped_absolute_costs(opts: &OptimizeOptions, panel: &fugazi::spec::panel::Panel) {
+    let unscoped = opts.cost_config.unscoped_absolute_terms();
+    if unscoped.is_empty() {
+        return;
+    }
+    style::print_warns(&[format!(
+        "`{}` is an absolute (per-trade or per-unit) cost with no `SYMBOL:` scope, applied \
+         unchanged to all {} panel members. If they differ much in price level this charges \
+         them very differently — scope it per member (`--costs 'BTCUSDT:{}=…'`) or check \
+         that one schedule really does cover the panel",
+        unscoped.join("`, `"),
+        panel.len(),
+        unscoped[0],
+    )]);
 }
 
 /// The "result" block for `optimize`: number of grid points evaluated, then
@@ -1723,6 +1849,58 @@ fn friendly_metric_label(dotted_or_short: &str) -> String {
         .unwrap_or_else(|| dotted_or_short.to_string())
 }
 
+/// The pooled half of the best block: how much of the spread between members is
+/// real disagreement, and what the ranking looks like once the member effect is
+/// taken out.
+///
+/// Printed whenever the sweep was pooled — not only under `--shrink`. Both
+/// lines are the answer to a question the pooled `_mean` column raises and
+/// cannot settle: **was aggregating these members the right thing to do at
+/// all**. A user who never passes `--shrink` still deserves to know that their
+/// pooled winner is a compromise no member wanted.
+fn print_shrinkage_lines(sweep: &Sweep, best: &fugazi::spec::optimize::Row) {
+    let Some(summary) = sweep.shrinkage else {
+        return;
+    };
+    // `_z` beside `_mean`: the same reduction with the member effect removed.
+    // A large gap between the two orderings is the whole diagnostic — it says
+    // the raw ranking was resting on which members happened to be easy.
+    if let Some(p) = best.demeaned {
+        let label = if sweep.shrunk {
+            "demeaned (ranked on)"
+        } else {
+            "demeaned"
+        };
+        // No `-k` term: `--shrink` refuses it, and without `--shrink` this line
+        // is a readout rather than the ranking key, so a penalised score here
+        // would describe an ordering nothing used.
+        style::field(
+            label,
+            &format!("{:.4} ± {:.4} ({}/{})", p.mean, p.std, p.defined, p.members),
+        );
+    }
+
+    let verdict = fugazi::spec::shrinkage::verdict(summary.lambda);
+    let detail = match summary.lambda {
+        None => format!("— · {verdict} (pass -w to replicate each member and estimate it)"),
+        Some(lambda) => {
+            let mut detail = format!(
+                "{lambda:.3} · {verdict} · support {:.0}% of {} cells",
+                summary.support * 100.0,
+                summary.cells,
+            );
+            // A `λ` on a grid that does not move the metric is members
+            // disagreeing about which of several equivalent parameter sets is
+            // marginally best — which is not the finding it reads as.
+            if !summary.parameter_matters() {
+                detail.push_str(" · but the grid barely moves this metric");
+            }
+            detail
+        }
+    };
+    style::field("member agreement (λ)", &detail);
+}
+
 /// The `--smooth` half of the best block: the winner's smoothed value, and the
 /// gap between the raw argmax and the smoothed ordering.
 ///
@@ -1822,6 +2000,7 @@ fn print_best_block(sweep: &Sweep, k: Real) {
         if let Some(smoothing) = &sweep.smoothing {
             print_smoothing_lines(sweep, path, *direction, k, smoothing);
         }
+        print_shrinkage_lines(sweep, best);
     }
     for (_name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
@@ -2497,6 +2676,7 @@ fn pooled_walkforward_run(
         opts.best_by.as_deref(),
         opts.risk_aversion,
         opts.smoothing.as_ref(),
+        opts.shrink,
         opts.jobs,
         cash,
     )?;
@@ -2509,6 +2689,12 @@ fn pooled_walkforward_run(
             .as_ref()
             .and(result.best_by.as_ref())
             .map(|(_, path, _)| path.as_str()),
+        &result.fold_rows,
+    )?;
+    let member_winners_path = derive_sibling(opts.output, "member_winners", "csv");
+    let wrote_member_winners = write_pooled_member_winners_csv(
+        &member_winners_path,
+        &result.union_columns,
         &result.fold_rows,
     )?;
     // One composite curve per member — the panel does not net into one account.
@@ -2575,6 +2761,25 @@ fn pooled_walkforward_run(
             "folds are laid out on the panel's shared clock (the union of every member's \
              bar times), so fold k is one span for every member",
         );
+        if opts.shrink {
+            style::field(
+                "shrink",
+                "partial pooling — each member may depart from the pooled winner by as much \
+                 as the panel's own disagreement (λ) justifies, estimated per fold from \
+                 sub-spans of that fold's in-sample window",
+            );
+            if wrote_member_winners {
+                style::field_continuation(&format!(
+                    "per-member choices in `{}`",
+                    member_winners_path.display(),
+                ));
+            } else {
+                style::field_continuation(
+                    "every member took the pooled winner in every fold — complete pooling was \
+                     already the right answer, so no per-member file was written",
+                );
+            }
+        }
         print_pooled_walkforward_summary(&result);
         print_result_block(result.fold_rows.len(), started, SystemTime::now());
     }
@@ -2625,6 +2830,16 @@ fn write_pooled_walkforward_csv(
         header.push(format!("{path}_is_smoothed"));
         header.push(format!("{path}_is_support"));
     }
+    // Under `--shrink`, what the fold's own decomposition found. `lambda` is
+    // blank rather than zero when the in-sample window was too short to
+    // replicate — the two are opposite readings and must not share a cell.
+    let shrunk = rows.iter().any(|r| r.shrinkage.is_some());
+    if shrunk {
+        header.push("lambda".into());
+        header.push("lambda_support".into());
+        header.push("lambda_cells".into());
+        header.push("members_departed".into());
+    }
     writer.write_record(&header)?;
 
     let cell = |v: Option<Real>| v.map(format_number).unwrap_or_default();
@@ -2665,10 +2880,85 @@ fn write_pooled_walkforward_csv(
             record.push(cell(row.is_smoothed.and_then(|s| s.value)));
             record.push(cell(row.is_smoothed.and_then(|s| s.support)));
         }
+        if shrunk {
+            record.push(cell(row.shrinkage.and_then(|s| s.lambda)));
+            record.push(cell(row.shrinkage.map(|s| s.support)));
+            record.push(
+                row.shrinkage
+                    .map(|s| s.cells.to_string())
+                    .unwrap_or_default(),
+            );
+            record.push(
+                row.member_winners
+                    .iter()
+                    .filter(|w| w.departed)
+                    .count()
+                    .to_string(),
+            );
+        }
         writer.write_record(&record)?;
     }
     writer.flush()?;
     Ok(())
+}
+
+/// One row per `(fold, member)` under `--shrink`: which parameters that member
+/// actually chose, and whether that differed from the pooled winner.
+///
+/// A separate file rather than more columns on `folds.csv`, because it has a
+/// different grain — the fold file is one row per fold and this is
+/// `folds × members`. Folding them together would either repeat every
+/// fold-level cell per member or hide the per-member choice behind a summary,
+/// and the whole point of partial pooling is that the choices differ.
+///
+/// Not written at all when nothing departed: a run in which every member took
+/// the pooled winner *is* complete pooling, and a file whose `departed` column
+/// is uniformly `false` reads like a finding when it is the absence of one. The
+/// console still reports `λ`, which is where that negative result belongs.
+fn write_pooled_member_winners_csv(
+    path: &Path,
+    union_columns: &[String],
+    rows: &[fugazi::spec::panel::PanelFoldRow],
+) -> Result<bool> {
+    if !rows
+        .iter()
+        .any(|r| r.member_winners.iter().any(|w| w.departed))
+    {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(path)
+        .with_context(|| format!("creating `{}`", path.display()))?;
+
+    let mut header: Vec<String> = vec!["fold".into(), "member".into(), "departed".into()];
+    header.extend(union_columns.iter().cloned());
+    writer.write_record(&header)?;
+
+    for row in rows {
+        for winner in &row.member_winners {
+            let mut record: Vec<String> = vec![
+                row.fold.to_string(),
+                winner.member.clone(),
+                winner.departed.to_string(),
+            ];
+            record.extend(
+                winner
+                    .values
+                    .iter()
+                    .map(|v| v.as_ref().map(format_value).unwrap_or_default()),
+            );
+            writer.write_record(&record)?;
+        }
+    }
+    writer.flush()?;
+    Ok(true)
 }
 
 /// The pooled composite document: every member's composite metrics, plus the
@@ -2703,11 +2993,42 @@ fn print_pooled_walkforward_summary(result: &fugazi::spec::panel::PanelWalkForwa
                     |p| format!("{:.4} ± {:.4} ({}/{})", p.mean, p.std, p.defined, p.members),
                 )
             };
-            style::field(
-                &format!("fold {}", row.fold),
-                &format!("{label} IS {} · OOS {}", fmt(is_p), fmt(oos_p),),
-            );
+            let mut detail = format!("{label} IS {} · OOS {}", fmt(is_p), fmt(oos_p));
+            // This fold's own `λ`, and how many members it moved off the
+            // pooled winner. Per fold rather than once for the run, because a
+            // panel that agreed early and split later is a different story
+            // from one that never agreed, and a single number tells neither.
+            if let Some(s) = row.shrinkage {
+                let departed = row.member_winners.iter().filter(|w| w.departed).count();
+                detail.push_str(&match s.lambda {
+                    Some(l) => format!(" · λ {l:.3} · {departed} member(s) chose differently"),
+                    None => " · λ — (in-sample window too short to replicate)".to_string(),
+                });
+            }
+            style::field(&format!("fold {}", row.fold), &detail);
         }
+    }
+    if let Some(s) = result.run_shrinkage {
+        style::field(
+            "member agreement (λ)",
+            &format!(
+                "{} · {} · over the whole run, folds as replicates",
+                s.lambda
+                    .map_or_else(|| "—".to_string(), |l| format!("{l:.3}")),
+                fugazi::spec::shrinkage::verdict(s.lambda),
+            ),
+        );
+    }
+    let departures = result.departures();
+    if !departures.is_empty() {
+        style::field(
+            "departed from the pooled winner",
+            &departures
+                .iter()
+                .map(|(name, n)| format!("{name} ({n})"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
     println!();
     style::print_section("composite (out-of-sample)");
@@ -2728,6 +3049,18 @@ fn print_pooled_walkforward_summary(result: &fugazi::spec::panel::PanelWalkForwa
             &format!(
                 "{:.4} ± {:.4} over {} of {} members",
                 p.mean, p.std, p.defined, p.members
+            ),
+        );
+    }
+    // Measured on the composites' own returns rather than the members' prices —
+    // what a pooled figure rests on is how much the *results* co-moved.
+    if let Some(b) = result.effective_breadth() {
+        style::field(
+            "effective breadth",
+            &format!(
+                "{:.1} of {} members (mean pairwise correlation {:.2} over {} pairs) — \
+                 what the pooled figures above are worth as evidence",
+                b.effective, b.members, b.mean_correlation, b.pairs,
             ),
         );
     }

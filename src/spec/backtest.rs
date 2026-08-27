@@ -479,9 +479,20 @@ pub fn evaluate_panel_any(
         .par_iter()
         .map(|(name, snapshots)| {
             check_member_universe_pub(spec, name, snapshots)?;
-            Ok(crate::spec::panel::PanelMetrics {
-                member: name.clone(),
-                metrics: ctx.reduce(&measured_report_any(spec, snapshots, ctx)?),
+            // Measured **once**, reduced twice. `ctx.windowed` set means the
+            // caller passed `-w`, which under `--pooled` buys the within-cell
+            // replication `shrinkage` needs and changes no pooled number: the
+            // whole-run `metrics` is the same document either way, and it is
+            // the only one `pool_metric` ever reads.
+            let report = measured_report_any(spec, snapshots, ctx)?;
+            let metrics = ctx.reduce(&report);
+            Ok(match ctx.windowed {
+                Some(window) => crate::spec::panel::PanelMetrics::with_windows(
+                    name.clone(),
+                    metrics,
+                    ctx.reduce_windowed(&report, window.get()),
+                ),
+                None => crate::spec::panel::PanelMetrics::new(name.clone(), metrics),
             })
         })
         .collect()

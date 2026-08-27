@@ -58,6 +58,7 @@ use serde_json::Value;
 use crate::market::Real;
 use crate::spec::metrics::{self, Metrics};
 use crate::spec::optimize::{cartesian, format_value, split_axes};
+use crate::spec::shrinkage;
 use crate::types::{Snapshot, Symbol};
 
 // ---------------------------------------------------------------------------
@@ -227,12 +228,55 @@ impl Panel {
 pub struct PanelMetrics {
     pub member: String,
     pub metrics: Metrics,
+    /// This member's run cut into non-overlapping windows, when the caller
+    /// asked for one (`-w/--windowed`). Empty otherwise.
+    ///
+    /// **Nothing in the pooled reduction reads this.** `pool_metric` and every
+    /// `_mean`/`_std`/`_n` column go through [`Self::metrics`] exactly as
+    /// before, so adding windows to a panel changes no pooled number. It exists
+    /// for [`crate::spec::shrinkage`], which needs *within-cell* replication to
+    /// separate "the members disagree" from "the backtests are noisy" — and
+    /// with one observation per member those two are the same quantity.
+    pub windows: Vec<metrics::WindowMetrics>,
 }
 
 impl PanelMetrics {
+    /// A member's whole-run document, with no windowed replicates.
+    pub fn new(member: impl Into<String>, metrics: Metrics) -> Self {
+        Self {
+            member: member.into(),
+            metrics,
+            windows: Vec::new(),
+        }
+    }
+
+    /// The same, carrying the windowed reduction of the *same* run.
+    pub fn with_windows(
+        member: impl Into<String>,
+        metrics: Metrics,
+        windows: Vec<metrics::WindowMetrics>,
+    ) -> Self {
+        Self {
+            member: member.into(),
+            metrics,
+            windows,
+        }
+    }
+
     /// Whether this member's account was ruined over the measured span.
     pub fn is_ruined(&self) -> bool {
         self.metrics.run.ruin_bar.is_some()
+    }
+
+    /// This member's readings of one metric across its windows — the replicate
+    /// observations for its cell of a [`crate::spec::shrinkage::ScoreTable`].
+    ///
+    /// Windows that could not compute the metric are dropped rather than
+    /// zero-filled, the same `filter_map` contract [`pool_metric`] keeps.
+    pub fn window_values<'a>(&'a self, path: &'a str) -> impl Iterator<Item = Real> + 'a {
+        self.windows
+            .iter()
+            .filter_map(move |w| crate::spec::optimize::lookup(&w.metrics, path))
     }
 }
 
@@ -284,6 +328,125 @@ pub fn pool_metric(members: &[PanelMetrics], path: &str) -> Option<Pooled> {
         defined: values.len(),
         members: members.len(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// The score table
+// ---------------------------------------------------------------------------
+
+/// Lay a pooled sweep out as the row × member table
+/// [`crate::spec::shrinkage`] decomposes.
+///
+/// `rows` is one entry per grid point, each holding that point's per-member
+/// documents. `members` is the panel's member labels **in panel order**, which
+/// is what gives every row the same column layout — a row's documents only
+/// cover the members that reported, so they cannot index the table by
+/// themselves.
+///
+/// Each cell takes that member's windowed replicates when it has them
+/// ([`PanelMetrics::windows`], populated under `-w`) and falls back to its
+/// single whole-span reading otherwise. A table built entirely from the
+/// fallback is unreplicated, and [`crate::spec::shrinkage::Decomposition::lambda`]
+/// will be `None` for it — which is the honest answer, not a shortfall.
+/// Every member label appearing in a pooled sweep, in first-appearance order.
+///
+/// The panel's own order where the caller has it; derived here because
+/// [`crate::spec::optimize::optimize`] is handed evaluations, not a [`Panel`],
+/// and a row's documents cover only the members that *reported* — so no single
+/// row can be trusted to name the whole panel.
+pub fn member_labels(rows: &[&[PanelMetrics]]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for row in rows {
+        for doc in *row {
+            if !seen.iter().any(|n| n == &doc.member) {
+                seen.push(doc.member.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// The whole sweep-level reading: each row's member-demeaned pooled score, and
+/// the decomposition it came from.
+///
+/// The demeaned score is what makes a cross-member spread mean *"this parameter
+/// set ranks consistently well"* rather than *"these instruments are alike"* —
+/// the member effect is identical for every row and therefore carries no
+/// ranking information, while still inflating every row's `−k·std` penalty, and
+/// inflating it unequally because rows differ in which members they are defined
+/// on.
+///
+/// `None` when the table cannot be fitted (see
+/// [`crate::spec::shrinkage::MIN_CELLS`]). Note this is *not* the same
+/// condition as `λ` being available: demeaning needs only the table, while `λ`
+/// additionally needs within-cell replication.
+pub fn demeaned_sweep(
+    rows: &[&[PanelMetrics]],
+    path: &str,
+) -> Option<(Vec<Option<Pooled>>, shrinkage::Summary)> {
+    let members = member_labels(rows);
+    if members.len() < 2 {
+        return None;
+    }
+    let table = score_table_of(rows, &members, path);
+    let decomposition = table.decompose()?;
+    let cells = decomposition.demeaned(&table);
+    let per_row = (0..rows.len())
+        .map(|r| {
+            let values: Vec<Real> = (0..members.len())
+                .filter_map(|m| cells[r * members.len() + m])
+                .collect();
+            let (mean, std) = metrics::mean_std(values.iter().copied())?;
+            Some(Pooled {
+                mean,
+                std,
+                defined: values.len(),
+                members: members.len(),
+            })
+        })
+        .collect();
+    let summary = decomposition.summary(&table);
+    Some((per_row, summary))
+}
+
+/// [`score_table`] over borrowed rows — what a sweep has, since its per-row
+/// documents live inside an [`crate::spec::optimize::Evaluation`].
+pub fn score_table_of(
+    rows: &[&[PanelMetrics]],
+    members: &[String],
+    path: &str,
+) -> crate::spec::shrinkage::ScoreTable {
+    let index: HashMap<&str, usize> = members
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    let mut table = crate::spec::shrinkage::ScoreTable::new(rows.len(), members.len());
+    for (r, row) in rows.iter().enumerate() {
+        for doc in *row {
+            let Some(&m) = index.get(doc.member.as_str()) else {
+                continue;
+            };
+            let mut any = false;
+            for v in doc.window_values(path) {
+                table.push(r, m, v);
+                any = true;
+            }
+            if !any && let Some(v) = crate::spec::optimize::lookup(&doc.metrics, path) {
+                table.push(r, m, v);
+            }
+        }
+    }
+    table
+}
+
+pub fn score_table(
+    rows: &[Vec<PanelMetrics>],
+    members: &[String],
+    path: &str,
+) -> crate::spec::shrinkage::ScoreTable {
+    let borrowed: Vec<&[PanelMetrics]> = rows.iter().map(Vec::as_slice).collect();
+    score_table_of(&borrowed, members, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +894,34 @@ pub struct PanelFoldRow {
     pub oos_members: Vec<PanelMetrics>,
     /// Under `--smooth`, the winner's smoothed pooled IS key.
     pub is_smoothed: Option<SmoothedKey>,
+    /// Under `--shrink`, this fold's two-way decomposition of the in-sample
+    /// score table — estimated from sub-spans of **this fold's** IS window, so
+    /// it rests only on data the fold could see.
+    pub shrinkage: Option<shrinkage::Summary>,
+    /// Under `--shrink`, the row each member selected off the shrunk surface.
+    /// Empty otherwise, which is complete pooling: every member took
+    /// [`Self::values`].
+    pub member_winners: Vec<MemberWinner>,
+}
+
+/// One member's own choice for a fold, under partial pooling.
+///
+/// At `λ = 0` every entry names the pooled winner and this is a more verbose
+/// spelling of complete pooling. At `λ = 1` each names that member's own
+/// argmax. The interesting cases are in between, and they are the reason this
+/// is recorded per member rather than summarized: "the panel mostly agreed
+/// except for one member" is a different finding from "every member went its
+/// own way", and a mean `λ` renders them identically.
+#[derive(Clone, Debug)]
+pub struct MemberWinner {
+    pub member: String,
+    /// Index into the fold's row plan — the same index space as
+    /// [`PanelFoldRow::values`]'s row.
+    pub row: usize,
+    /// This member's winning parameters, projected onto the union columns.
+    pub values: Vec<Option<Value>>,
+    /// Whether this member departed from the pooled winner.
+    pub departed: bool,
 }
 
 impl PanelFoldRow {
@@ -760,6 +951,22 @@ pub struct PanelWalkForward {
     pub oos_bars: usize,
     pub embargo_bars: usize,
     pub cash: Real,
+    /// The panel's `λ` over the whole run, with **folds** as the replicate axis
+    /// — one observation per `(grid row, member, fold)`.
+    ///
+    /// Free, and therefore reported without `--shrink`: every fold already
+    /// measures every `(row, member)` in-sample to rank the grid, so this
+    /// accumulates readings that were taken anyway rather than taking more.
+    ///
+    /// It is deliberately **not** what selection uses. A component estimated
+    /// over every fold and then applied inside fold 1 would let fold 10's data
+    /// pick fold 1's winner. This describes the run after the fact;
+    /// [`PanelFoldRow::shrinkage`] is the lookahead-free estimate each fold
+    /// actually acted on.
+    ///
+    /// `None` without `--best-by` (no metric to build a table over) or when the
+    /// table is too sparse to fit.
+    pub run_shrinkage: Option<shrinkage::Summary>,
 }
 
 impl PanelWalkForward {
@@ -768,10 +975,7 @@ impl PanelWalkForward {
     pub fn composite_members(&self) -> Vec<PanelMetrics> {
         self.composites
             .iter()
-            .map(|c| PanelMetrics {
-                member: c.member.clone(),
-                metrics: c.metrics.clone(),
-            })
+            .map(|c| PanelMetrics::new(c.member.clone(), c.metrics.clone()))
             .collect()
     }
 
@@ -802,6 +1006,34 @@ impl PanelWalkForward {
             }
         }
         out
+    }
+
+    /// Whether any fold departed from complete pooling — i.e. whether
+    /// `--shrink` changed a single selection.
+    ///
+    /// A run where it did not is the useful negative result: the panel agreed,
+    /// and the pooled winner was already each member's own answer.
+    pub fn any_member_departed(&self) -> bool {
+        self.fold_rows
+            .iter()
+            .any(|r| r.member_winners.iter().any(|w| w.departed))
+    }
+
+    /// Members that departed from the pooled winner at least once, and in how
+    /// many folds — the "one member went its own way" reading a mean `λ`
+    /// flattens.
+    pub fn departures(&self) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for row in &self.fold_rows {
+            for w in row.member_winners.iter().filter(|w| w.departed) {
+                match counts.iter_mut().find(|(name, _)| *name == w.member) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((w.member.clone(), 1)),
+                }
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts
     }
 
     /// How many *independent* members this panel's out-of-sample results are
@@ -850,6 +1082,23 @@ impl PanelWalkForward {
 /// inside a row one, which would fight for the same threads. Folds stay serial
 /// (the composite carries running equity across them); rows within a fold are
 /// parallel.
+///
+/// # `shrink`
+///
+/// With `shrink` set, each fold additionally estimates its own `λ` (see
+/// [`crate::spec::shrinkage`]) from sub-spans of its in-sample window, and each
+/// member selects its own winner off the shrunk surface `μ + α_r + λ·γ_rm`
+/// rather than taking the pooled one. At `λ = 0` that is complete pooling and
+/// every member picks the same row — the flag adds a readout and changes
+/// nothing else. At `λ = 1` each member picks its own.
+///
+/// It needs `best_by`: there is no surface to shrink without a ranking key, the
+/// same way `smooth` needs one.
+///
+/// **Everything the fold selects on comes from that fold's own in-sample
+/// window.** Estimating `λ` over all folds at once would be cheaper — the fold
+/// measurements are already there — and would be lookahead: fold 1's winner
+/// would rest on a variance component that fold 10's data helped estimate.
 #[allow(clippy::too_many_arguments)]
 pub fn panel_walkforward<P, R>(
     subgrids: Vec<Subgrid>,
@@ -866,6 +1115,7 @@ pub fn panel_walkforward<P, R>(
     best_by: Option<&str>,
     risk_aversion: Real,
     smooth: Option<&Smoothing>,
+    shrink: bool,
     jobs: Option<usize>,
     cash: Real,
 ) -> Result<PanelWalkForward>
@@ -885,6 +1135,20 @@ where
     if smooth.is_some() && best_by.is_none() {
         bail!(
             "--smooth needs --best-by: there is no ranking key to average over the neighbourhood"
+        );
+    }
+    if shrink && best_by.is_none() {
+        bail!(
+            "--shrink needs --best-by: partial pooling shrinks a *ranking key* toward the \
+             panel's consensus, and without one there is no surface for a member to select off"
+        );
+    }
+    if shrink && risk_aversion > 0.0 {
+        bail!(
+            "--shrink and --risk-aversion are rival answers to the same question. \
+             `-k` charges a parameter set for the spread between members; --shrink models \
+             that spread and lets each member move by however much of it is real. Applying \
+             both pays for the same disagreement twice. Pick one"
         );
     }
     if let Some(cfg) = smooth {
@@ -990,28 +1254,76 @@ where
     // bars in the range yields `None` and is simply absent from the row's
     // result — never a zero-filled placeholder, which is what would make
     // `Pooled::defined` a lie.
+    let reduce = |report: &crate::RunReport<Symbol>, range: Range<usize>| {
+        metrics::from_report(
+            &metrics::report_slice(report, range),
+            bars_per_year,
+            risk_free_rate,
+            seconds_per_bar,
+        )
+    };
     let measure_one = |row: usize, m: usize, pooled: Range<usize>| -> Option<PanelMetrics> {
         let range = axis.member_range(m, pooled);
         if range.is_empty() {
             return None;
         }
-        Some(PanelMetrics {
-            member: axis.members[m].name.clone(),
-            metrics: metrics::from_report(
-                &metrics::report_slice(report_at(row, m), range),
-                bars_per_year,
-                risk_free_rate,
-                seconds_per_bar,
-            ),
-        })
+        Some(PanelMetrics::new(
+            axis.members[m].name.clone(),
+            reduce(report_at(row, m), range),
+        ))
     };
-    let measure = |row: usize, pooled: Range<usize>| -> Vec<PanelMetrics> {
-        (0..n_members)
-            .filter_map(|m| measure_one(row, m, pooled.clone()))
-            .collect()
-    };
-
+    // The same measurement, plus the within-cell replicates a fold needs to
+    // estimate `λ` from **its own** in-sample data.
+    //
+    // Sub-spans of the in-sample window, never other folds: a fold selects on
+    // what it can see, and borrowing another fold's measurements to decide this
+    // fold's winner is lookahead however it is dressed up. The extra cost is
+    // metric reduction over slices of a report that was already run, not extra
+    // backtests — which is why this is affordable per fold at all.
+    let measure_one_replicated =
+        |row: usize, m: usize, pooled: Range<usize>| -> Option<PanelMetrics> {
+            let range = axis.member_range(m, pooled);
+            if range.is_empty() {
+                return None;
+            }
+            let report = report_at(row, m);
+            let whole = reduce(report, range.clone());
+            let Some(k) = shrinkage::replicate_split(range.len()) else {
+                // Too short to cut. The cell still reports its whole-span
+                // value; it simply cannot speak to within-cell spread, and
+                // `Decomposition::lambda_support` is what makes that visible.
+                return Some(PanelMetrics::new(axis.members[m].name.clone(), whole));
+            };
+            let span = range.len() / k;
+            let windows: Vec<metrics::WindowMetrics> = (0..k)
+                .map(|i| {
+                    let start = range.start + i * span;
+                    // The last sub-span absorbs the remainder rather than
+                    // dropping it — the same rule `windowed_from_report`
+                    // follows for a trailing partial window.
+                    let end = if i + 1 == k { range.end } else { start + span };
+                    metrics::WindowMetrics {
+                        start_bar: start,
+                        end_bar: end.saturating_sub(1),
+                        metrics: reduce(report, start..end),
+                    }
+                })
+                .collect();
+            Some(PanelMetrics::with_windows(
+                axis.members[m].name.clone(),
+                whole,
+                windows,
+            ))
+        };
     let mut fold_rows: Vec<PanelFoldRow> = Vec::with_capacity(folds.len());
+    // The run-wide score table, accumulated as the folds go: one cell per
+    // `(grid row, member)`, one replicate per fold. Scalars only — retaining
+    // each fold's `per_row_is` documents to rebuild this afterwards would cost
+    // `folds × rows × members` full metric documents for the sake of one number
+    // per cell.
+    let mut run_table = best_by
+        .as_ref()
+        .map(|_| shrinkage::ScoreTable::new(plan.len(), n_members));
     let mut equity: Vec<Vec<Real>> = vec![Vec::new(); n_members];
     let mut fills: Vec<Vec<crate::Fill<Symbol>>> = vec![Vec::new(); n_members];
     let mut rejections: Vec<Vec<crate::Rejected<Symbol>>> = vec![Vec::new(); n_members];
@@ -1033,7 +1345,13 @@ where
         // `smooth_keys` reads its lattices out of.
         let measured: Vec<Option<PanelMetrics>> = pool.install(|| {
             work.par_iter()
-                .map(|&(r, m)| measure_one(r, m, fold.is.clone()))
+                .map(|&(r, m)| {
+                    if shrink {
+                        measure_one_replicated(r, m, fold.is.clone())
+                    } else {
+                        measure_one(r, m, fold.is.clone())
+                    }
+                })
                 .collect()
         });
         let per_row_is: Vec<Vec<PanelMetrics>> = measured
@@ -1041,14 +1359,80 @@ where
             .map(|row| row.iter().flatten().cloned().collect())
             .collect();
 
+        // Accumulate this fold's readings into the run-wide table before
+        // anything is selected — every row, not just the winner, since the
+        // table's rows *are* the grid.
+        if let (Some(table), Some((_, path, _))) = (run_table.as_mut(), best_by.as_ref()) {
+            let names: Vec<&str> = axis.members.iter().map(|m| m.name.as_str()).collect();
+            for (r, docs) in per_row_is.iter().enumerate() {
+                for doc in docs {
+                    let Some(m) = names.iter().position(|n| *n == doc.member) else {
+                        continue;
+                    };
+                    if let Some(v) = crate::spec::optimize::lookup(&doc.metrics, path) {
+                        table.push(r, m, v);
+                    }
+                }
+            }
+        }
+
+        // Partial pooling: fit this fold's own two-way layout, and select the
+        // pooled winner *and* every member's own pick off the **same** surface.
+        //
+        // Sharing the scale is what makes `departed` mean anything. The
+        // decomposition is fitted on cell means over in-sample sub-spans, while
+        // `pooled_ranking_key` reads each member's whole-window document — two
+        // honest numbers that need not agree on an argmax. Ranking the members
+        // on one and the reference on the other produced the contradiction it
+        // was built to rule out: a fold reporting `λ = 0`, where every member
+        // sees the identical surface `μ + α_r`, and *also* reporting that both
+        // members chose differently.
+        //
+        // So under `--shrink` the reference is `argmax_r (μ + α_r)` — complete
+        // pooling expressed on the shrunk scale — and `λ = 0` yields no
+        // departures by construction. Without `--shrink`, nothing changes.
+        let mut fold_shrinkage: Option<shrinkage::Summary> = None;
+        let mut member_winners: Vec<MemberWinner> = Vec::new();
+        let mut shrunk_columns: Option<Vec<Vec<Option<Real>>>> = None;
+        let mut consensus: Option<Vec<Option<Real>>> = None;
+        if shrink && let Some((_, path, _)) = &best_by {
+            let names: Vec<String> = axis.members.iter().map(|m| m.name.clone()).collect();
+            let table = score_table(&per_row_is, &names, path);
+            if let Some(decomposition) = table.decompose() {
+                fold_shrinkage = Some(decomposition.summary(&table));
+                consensus = Some(
+                    (0..plan.len())
+                        .map(|r| decomposition.row_effects[r].map(|a| decomposition.grand_mean + a))
+                        .collect(),
+                );
+                shrunk_columns = decomposition.shrunk(&table).map(|surface| {
+                    (0..n_members)
+                        .map(|m| {
+                            (0..plan.len())
+                                .map(|r| surface[r * n_members + m])
+                                .collect()
+                        })
+                        .collect()
+                });
+            }
+        }
+
         let mut fold_smoothed: Option<Vec<SmoothedKey>> = None;
         let mut winner_smoothed: Option<SmoothedKey> = None;
         let winner: usize = match &best_by {
             Some((_, path, direction)) => {
-                let keys: Vec<Option<Real>> = per_row_is
-                    .iter()
-                    .map(|ms| pooled_ranking_key(ms, path, *direction, risk_aversion))
-                    .collect();
+                // Under `--shrink` the key is the consensus surface; otherwise
+                // it is the pooled `mean ∓ k·std` it has always been. `-k` is
+                // refused alongside `--shrink` precisely because the two are
+                // rival answers to "what should spread between members cost" —
+                // one charges for it, the other models it.
+                let keys: Vec<Option<Real>> = match &consensus {
+                    Some(c) => c.clone(),
+                    None => per_row_is
+                        .iter()
+                        .map(|ms| pooled_ranking_key(ms, path, *direction, risk_aversion))
+                        .collect(),
+                };
                 let ranked: Vec<Option<Real>> = match smooth {
                     Some(cfg) => {
                         let smoothed = smooth_keys(&subgrids, &keys, cfg)?;
@@ -1065,17 +1449,52 @@ where
             None => 0,
         };
 
-        let oos_members = measure(winner, fold.oos.clone());
+        let mut chosen: Vec<usize> = vec![winner; n_members];
+        if let (Some(columns), Some((_, _, direction))) = (&shrunk_columns, &best_by) {
+            let names: Vec<String> = axis.members.iter().map(|m| m.name.clone()).collect();
+            for (m, column) in columns.iter().enumerate() {
+                // Smoothing runs *after* the shrink: it borrows strength from
+                // neighbouring parameter points, shrinkage from other members,
+                // and this order leaves both defined. The column is in lattice
+                // order, the same layout `smooth_keys` reads the pooled key
+                // vector out of, so it applies unchanged.
+                let column: Vec<Option<Real>> = match smooth {
+                    Some(cfg) => smooth_keys(&subgrids, column, cfg)?
+                        .iter()
+                        .map(|s| s.value)
+                        .collect(),
+                    None => column.clone(),
+                };
+                let Some(idx) = argbest(&column, *direction) else {
+                    continue;
+                };
+                chosen[m] = idx;
+                let (si, ci) = plan[idx];
+                member_winners.push(MemberWinner {
+                    member: names[m].clone(),
+                    row: idx,
+                    values: project_row(&subgrids[si], &subgrids[si].combos[ci], &union_columns),
+                    departed: idx != winner,
+                });
+            }
+        }
 
-        // Stitch the winner's OOS slice onto each member's own composite. Each
-        // member carries its own running equity, so a fold in which a member had
-        // no bars leaves that member's curve untouched rather than flat-filling
+        // Each member's out-of-sample documents, under the row *that member*
+        // selected. Without `--shrink` every entry of `chosen` is the pooled
+        // winner and this is `measure(winner, ..)` spelled out.
+        let oos_members: Vec<PanelMetrics> = (0..n_members)
+            .filter_map(|m| measure_one(chosen[m], m, fold.oos.clone()))
+            .collect();
+
+        // Stitch each member's OOS slice onto its own composite. Each member
+        // carries its own running equity, so a fold in which a member had no
+        // bars leaves that member's curve untouched rather than flat-filling
         // it — a gap in coverage, not a run of zero returns.
         for (m, range) in axis.member_ranges(fold.oos.clone()).into_iter().enumerate() {
             if range.is_empty() {
                 continue;
             }
-            let slice = metrics::report_slice(report_at(winner, m), range);
+            let slice = metrics::report_slice(report_at(chosen[m], m), range);
             let scale = if slice.initial_equity > 0.0 {
                 running[m] / slice.initial_equity
             } else {
@@ -1103,6 +1522,8 @@ where
             is_members: per_row_is[winner].clone(),
             oos_members,
             is_smoothed: winner_smoothed,
+            shrinkage: fold_shrinkage,
+            member_winners,
         });
     }
 
@@ -1143,6 +1564,9 @@ where
         oos_bars,
         embargo_bars,
         cash,
+        run_shrinkage: run_table
+            .as_ref()
+            .and_then(|t| t.decompose().map(|d| d.summary(t))),
     })
 }
 
@@ -1282,10 +1706,7 @@ mod tests {
             ruin_bar: None,
             carry_coverage: None,
         };
-        PanelMetrics {
-            member: name.to_string(),
-            metrics: metrics::from_report(&report, 252.0, 0.0, None),
-        }
+        PanelMetrics::new(name, metrics::from_report(&report, 252.0, 0.0, None))
     }
 
     #[test]
