@@ -876,6 +876,7 @@ fn run_single(
     )?;
 
     write_grid_csv(opts.output, &sweep)?;
+    let member_winners_path = write_sweep_member_winners_csv(opts.output, &sweep)?;
 
     if !opts.quiet {
         let finished = SystemTime::now();
@@ -898,7 +899,7 @@ fn run_single(
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
         if sweep.best_by.is_some() {
-            print_best_block(&sweep, opts.risk_aversion);
+            print_best_block(&sweep, opts.risk_aversion, member_winners_path.as_deref());
         }
         warn_if_nothing_traded(&sweep.rows);
         warn_if_ruined(&sweep.rows, sweep.best_by.is_some());
@@ -1180,6 +1181,7 @@ fn run_multi_symbol(
     )?;
 
     write_grid_csv(opts.output, &sweep)?;
+    let member_winners_path = write_sweep_member_winners_csv(opts.output, &sweep)?;
 
     if !opts.quiet {
         let finished = SystemTime::now();
@@ -1199,7 +1201,11 @@ fn run_multi_symbol(
             sweep.smooth_scales.as_deref(),
         );
         if sweep.best_by.is_some() {
-            print_best_block(&sweep, opts.risk_aversion);
+            // The path is `None` on this route today — `--pooled` (and so
+            // `--shrink`) is single-asset only — but threaded rather than
+            // dropped, so lifting that restriction does not silently lose the
+            // readout.
+            print_best_block(&sweep, opts.risk_aversion, member_winners_path.as_deref());
         }
         warn_if_nothing_traded(&sweep.rows);
         warn_if_ruined(&sweep.rows, sweep.best_by.is_some());
@@ -1849,6 +1855,46 @@ fn friendly_metric_label(dotted_or_short: &str) -> String {
         .unwrap_or_else(|| dotted_or_short.to_string())
 }
 
+/// Under `--shrink` in a plain sweep: what each member actually chose.
+///
+/// The grid CSV's winner is the **consensus** — what complete pooling would
+/// have picked. These are the answers partial pooling produced, and the useful
+/// case is both directions: a panel that split names who and to what, a panel
+/// that did not says so rather than leaving the flag looking inert.
+fn print_member_winners_lines(sweep: &Sweep, path: Option<&Path>) {
+    if sweep.member_winners.is_empty() {
+        return;
+    }
+    let label = |values: &[Option<serde_json::Value>]| -> String {
+        sweep
+            .union_columns
+            .iter()
+            .zip(values)
+            .filter_map(|(name, v)| v.as_ref().map(|v| format!("{name}={}", format_value(v))))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some(path) = path else {
+        style::field(
+            "per-member picks",
+            "every member chose the same parameters — complete pooling was already the right \
+             answer here, so no per-member file was written",
+        );
+        return;
+    };
+    style::field(
+        "per-member picks",
+        &format!(
+            "{} members diverged — written to `{}`",
+            sweep.member_winners.len(),
+            path.display()
+        ),
+    );
+    for winner in &sweep.member_winners {
+        style::field_continuation(&format!("{}: {}", winner.member, label(&winner.values)));
+    }
+}
+
 /// The pooled half of the best block: how much of the spread between members is
 /// real disagreement, and what the ranking looks like once the member effect is
 /// taken out.
@@ -1899,6 +1945,26 @@ fn print_shrinkage_lines(sweep: &Sweep, best: &fugazi::spec::optimize::Row) {
         }
     };
     style::field("member agreement (λ)", &detail);
+
+    // What the per-member selections cost in multiple-testing terms. Reported
+    // rather than left implicit because it is the number that made partial
+    // pooling honest enough to put in a plain sweep at all: every member
+    // searching for itself takes the maximum over more draws than the candidate
+    // count alone admits, and the deflated Sharpe beside it has already been
+    // widened to match.
+    if let Some(b) = sweep.selection {
+        style::field(
+            "independent searches",
+            &format!(
+                "{:.1} of {} members (mean pairwise correlation {:.2} between their ranking \
+                 surfaces) — the deflated Sharpe is deflated against {}× the grid",
+                b.effective,
+                b.members,
+                b.mean_correlation,
+                format_number(b.effective),
+            ),
+        );
+    }
 }
 
 /// The `--smooth` half of the best block: the winner's smoothed value, and the
@@ -1963,7 +2029,7 @@ fn print_smoothing_lines(
     }
 }
 
-fn print_best_block(sweep: &Sweep, k: Real) {
+fn print_best_block(sweep: &Sweep, k: Real, member_winners: Option<&Path>) {
     let (union_columns, metric_columns, rows) =
         (&sweep.union_columns, &sweep.metric_columns, &sweep.rows);
     let best_by = sweep.best_by.as_ref();
@@ -2001,6 +2067,7 @@ fn print_best_block(sweep: &Sweep, k: Real) {
             print_smoothing_lines(sweep, path, *direction, k, smoothing);
         }
         print_shrinkage_lines(sweep, best);
+        print_member_winners_lines(sweep, member_winners);
     }
     for (_name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
@@ -2900,6 +2967,60 @@ fn write_pooled_walkforward_csv(
     }
     writer.flush()?;
     Ok(())
+}
+
+/// One row per member under `--shrink` in a plain sweep: the parameters that
+/// member selected off the shrunk surface.
+///
+/// A sibling file rather than more columns on the grid CSV, and rather than
+/// reshaping it. Every column of the grid CSV describes a *parameter point the
+/// sweep evaluated*; these are a different grain — one row per **member** — and
+/// folding them in would mean either repeating every metric column per member
+/// or collapsing the per-member choice into a summary, which is the one thing
+/// partial pooling exists to avoid.
+///
+/// Not written when every member picked the same point: that is complete
+/// pooling, the grid CSV's own winner already says what was chosen, and a file
+/// whose rows are all identical reads like a finding when it is the absence of
+/// one. Returns the path only when something was written.
+fn write_sweep_member_winners_csv(
+    output: &Path,
+    sweep: &Sweep,
+) -> Result<Option<std::path::PathBuf>> {
+    let winners = &sweep.member_winners;
+    let split = winners
+        .iter()
+        .any(|w| w.values != winners[0].values || winners.len() < 2);
+    if winners.len() < 2 || !split {
+        return Ok(None);
+    }
+    let path = derive_sibling(output, "member_winners", "csv");
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(&path)
+        .with_context(|| format!("creating `{}`", path.display()))?;
+
+    let mut header: Vec<String> = vec!["member".into()];
+    header.extend(sweep.union_columns.iter().cloned());
+    writer.write_record(&header)?;
+    for winner in winners {
+        let mut record: Vec<String> = vec![winner.member.clone()];
+        record.extend(
+            winner
+                .values
+                .iter()
+                .map(|v| v.as_ref().map(format_value).unwrap_or_default()),
+        );
+        writer.write_record(&record)?;
+    }
+    writer.flush()?;
+    Ok(Some(path))
 }
 
 /// One row per `(fold, member)` under `--shrink`: which parameters that member

@@ -1096,8 +1096,22 @@ selection, because a component estimated over every fold and applied inside fold
 run-level one is the fold saying it cannot yet separate disagreement from noise
 on its own evidence.
 
-Still open, and still blocking the plain-sweep form: the DSR **trial count**
-under partial pooling.
+The DSR **trial count** under partial pooling, which was the stated blocker on
+the plain-sweep form, turned out to need no new theory. Under `--shrink` a member
+ranks on `mu + alpha_r + lambda*gamma_rm` — a shared term every member has and a
+private term only it has — so two members' *ranking surfaces* are correlated
+exactly to the extent the shared term dominates, and `K / (1 + (K-1)*rho)` is the
+same correlated-estimators reading `effective_breadth` already applies to member
+returns. Trials become `grid points x searches`. Both limits land on counts that
+were already right: `x1` at complete pooling (so an agreeing panel's deflated
+Sharpe is bit-identical with and without the flag — the property that made it
+safe to ship) and `xK` when the members share nothing. `rho` is measured off the
+surface rather than derived, so nothing is assumed of the fit's orthogonality and
+a ragged table needs no special case.
+
+The output-shape half was never a real obstacle either, once Stage 3's precedent
+was taken seriously: don't reshape the grid CSV, add a sibling. Per-member picks
+go to `<stem>.member_winners.csv`, written only when the members diverged.
 
 Full design, staging, the measured end-to-end result and the rest of the
 rejected alternatives: [docs/design/pooling.md](docs/design/pooling.md).

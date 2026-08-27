@@ -1,9 +1,10 @@
 # Pooling — from one shared parameter to partial pooling
 
-**Status:** built, Stages 0–3. `--shrink` ships; Stage 4 (partial pooling in the
-plain sweep, returning N parameter sets) remains blocked on the DSR trial count
-— see *Open questions*. What the implementation changed relative to the plan is
-recorded in *What shipped* at the end.
+**Status:** built, Stages 0–4. `--shrink` ships, in both the plain sweep and
+walk-forward. The DSR trial count that blocked Stage 4 is answered — see *The
+trial count, answered* — and the two open questions that remain are narrower than
+the ones this document opened with. What the implementation changed relative to
+the plan is recorded in *What shipped* at the end.
 **Scope:** what pooling actually buys, the four ways it can buy nothing, and a
 partial-pooling design that replaces the all-or-nothing choice between "one
 parameter set for the whole panel" and "one per member".
@@ -299,9 +300,17 @@ folds on the shared clock, so it has both the output shape and the replication
 structure. Per-member winners per fold, shrunk by `λ`. Prototype here, where
 there is no friction, rather than in the plain sweep, where there is.
 
-### Stage 4 — partial pooling in the plain sweep
+### Stage 4 — partial pooling in the plain sweep — **done**
 
-Blocked on the output-shape question below. Not scheduled.
+Both blockers dissolved rather than being solved by force.
+
+The **output shape** was never a real obstacle once Stage 3's precedent was
+taken seriously: don't reshape the grid CSV, add a sibling. Every column in the
+grid CSV describes a parameter point the sweep evaluated; per-member picks are a
+different grain, so they go to `<stem>.member_winners.csv` exactly as pooled
+walk-forward's do. One row per member, written only when the members diverged.
+
+The **trial count** had an answer sitting in the crate already — see below.
 
 ### Explicitly not in scope
 
@@ -320,20 +329,53 @@ Blocked on the output-shape question below. Not scheduled.
 
 ## Open questions
 
-- **The DSR trial count under partial pooling.** Complete pooling is `N`
-  hypotheses, which is the argument `src/spec/panel.rs`'s module doc rests on. No
-  pooling is `N×M`. Partial pooling is between, and presumably scales with `λ` —
-  but "presumably" is doing real work there and there is no defensible formula
-  yet. Since making the deflation honest was pooling's original motivation, this
-  is a blocker for Stage 4, not a detail.
-- **The output shape of N parameter sets.** Stage 3 escapes it because
-  `MemberComposite` already refuses to net. The plain sweep's contract is one row
-  per parameter point; per-member winners do not fit it, and inventing a shape
-  before Stage 3 has run on real data would be guessing.
 - **`λ` per axis or per sweep.** Per axis is more useful and needs a defensible
   decomposition when axes interact (a `FAST`/`SLOW` ridge is not separable).
 - **The interaction estimate on a ragged matrix.** `defined < members` is common;
   the estimator must degrade rather than assume balance.
+
+## The trial count, answered
+
+This was the blocker, and it needed no new theory — only noticing that the crate
+already owned the reading.
+
+Under `--shrink`, member `m` ranks on `μ + α_r + λ·γ_rm`: a **shared** term every
+member has, and a **private** term only it has. So two members' *ranking
+vectors* are correlated exactly to the extent the shared term dominates — and
+"K correlated estimators are worth `K / (1 + (K−1)·ρ̄)` independent ones" is the
+formula [`effective_breadth`] has been applying to member returns since before
+any of this. Applied to selection surfaces instead, it is the number of
+independent searches over the grid:
+
+```text
+searches = K / (1 + (K − 1)·ρ̄)      trials = grid points × searches
+```
+
+`ρ̄` is **measured**, not derived — the mean pairwise correlation of the surface
+columns as they actually came out. That assumes no orthogonality of the fit
+(which holds exactly only when balanced) and needs no special case for a ragged
+table. Negative `ρ̄` is floored at zero for the reason `effective_breadth`
+already gives: the denominator crosses zero on the way to claiming more
+independence than a panel can support.
+
+Every limit lands on a count that was already right:
+
+| Situation | `ρ̄` | Searches | Trials |
+|---|---|---|---|
+| `λ = 0`, one shared surface | 1 | **1** | `M` — exactly what complete pooling reports today |
+| `λ = 1`, nothing shared | 0 | **K** | `M·K` — exactly what a `SYM=[...]` grid axis deserves |
+| `λ = 1`, dominant shared effect | ~1 | ~1 | `M` — every member picks the same row anyway |
+
+The first row is the one that made this safe to ship: on an agreeing panel every
+row's deflated Sharpe is **bit-identical** with and without `--shrink`, so the
+flag cannot silently re-baseline a sweep that never needed it.
+`an_agreeing_panel_leaves_the_deflated_sharpe_untouched` pins it.
+
+Measured on the disagreeing fixture: same parameter row, same data, only the
+effective trial count changed — `selection.deflated_sharpe` fell from `0.999994`
+to `0.162717`. That is the correction doing its job. A winner that looked
+significant against one pass over the grid does not necessarily survive being
+deflated against two.
 
 ## Parity and CI obligations
 

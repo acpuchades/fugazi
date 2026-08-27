@@ -232,6 +232,10 @@ MEMBER_RETURNS = {
     ("StrategySpec", "evaluate"): "dict[str, Any]",
     ("Sweep", "best"): "SweepRow | None",
     ("Sweep", "rows"): "list[SweepRow]",
+    # `{member: {axis: value}}` under `shrink=` — each member's own parameters.
+    ("Sweep", "member_winners"): "dict[str, dict[str, Any]]",
+    # How many independent searches over the grid those selections amounted to.
+    ("Sweep", "independent_searches"): "float | None",
     ("WalkForwardResult", "folds"): "list[WalkForwardFold]",
     ("RunReport", "fills"): "list[Fill]",
     ("RunReport", "rejections"): "list[Rejected]",

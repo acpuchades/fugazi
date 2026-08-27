@@ -380,10 +380,43 @@ pub fn member_labels(rows: &[&[PanelMetrics]]) -> Vec<String> {
 /// [`crate::spec::shrinkage::MIN_CELLS`]). Note this is *not* the same
 /// condition as `λ` being available: demeaning needs only the table, while `λ`
 /// additionally needs within-cell replication.
-pub fn demeaned_sweep(
+pub fn demeaned_sweep(rows: &[&[PanelMetrics]], path: &str) -> Option<SweepShrinkage> {
+    analyse_sweep(rows, path, None)
+}
+
+/// Everything a pooled sweep can learn from one fit of its score table.
+///
+/// One struct rather than three entry points because all of it comes off the
+/// same decomposition, and building the table three times to answer three
+/// questions about it would be both slower and a chance for the three answers
+/// to disagree.
+pub struct SweepShrinkage {
+    /// Each row's member-demeaned pooled score, in row order.
+    pub demeaned: Vec<Option<Pooled>>,
+    /// The decomposition's headline scalars.
+    pub summary: shrinkage::Summary,
+    /// Member labels, in the column order the fit used.
+    pub members: Vec<String>,
+    /// Under a direction, each member's own argmax over the shrunk surface —
+    /// `(member, row index)`. Empty when no direction was given, or when `λ` is
+    /// unavailable and there is therefore no defensible surface to select off.
+    pub member_winners: Vec<(String, usize)>,
+    /// How many **independent searches over the grid** those selections amount
+    /// to — see [`selection_breadth`]. `None` alongside an empty
+    /// `member_winners`.
+    pub selection: Option<Breadth>,
+}
+
+/// [`demeaned_sweep`] plus, when a ranking direction is supplied, the per-member
+/// selections and the search count they imply.
+///
+/// The direction is optional because the demeaned columns are a readout every
+/// pooled sweep gets, while selecting per member is what `--shrink` asks for.
+pub fn analyse_sweep(
     rows: &[&[PanelMetrics]],
     path: &str,
-) -> Option<(Vec<Option<Pooled>>, shrinkage::Summary)> {
+    direction: Option<Direction>,
+) -> Option<SweepShrinkage> {
     let members = member_labels(rows);
     if members.len() < 2 {
         return None;
@@ -391,7 +424,7 @@ pub fn demeaned_sweep(
     let table = score_table_of(rows, &members, path);
     let decomposition = table.decompose()?;
     let cells = decomposition.demeaned(&table);
-    let per_row = (0..rows.len())
+    let demeaned = (0..rows.len())
         .map(|r| {
             let values: Vec<Real> = (0..members.len())
                 .filter_map(|m| cells[r * members.len() + m])
@@ -405,8 +438,34 @@ pub fn demeaned_sweep(
             })
         })
         .collect();
-    let summary = decomposition.summary(&table);
-    Some((per_row, summary))
+
+    // Per-member selection, only when asked and only when `λ` exists. Without a
+    // `λ` there is no shrunk surface — falling back to either pooling extreme
+    // would be choosing a pooling policy by accident, which is the one thing
+    // this module refuses to do.
+    let mut member_winners = Vec::new();
+    let mut selection = None;
+    if let Some(direction) = direction
+        && let Some(surface) = decomposition.shrunk(&table)
+    {
+        for (m, name) in members.iter().enumerate() {
+            let column: Vec<Option<Real>> = (0..table.rows())
+                .map(|r| surface[r * members.len() + m])
+                .collect();
+            if let Some(idx) = argbest(&column, direction) {
+                member_winners.push((name.clone(), idx));
+            }
+        }
+        selection = selection_breadth(&decomposition, &table);
+    }
+
+    Some(SweepShrinkage {
+        demeaned,
+        summary: decomposition.summary(&table),
+        members,
+        member_winners,
+        selection,
+    })
 }
 
 /// [`score_table`] over borrowed rows — what a sweep has, since its per-row
@@ -566,6 +625,96 @@ pub fn effective_breadth(members: &[(&[i64], &[Real])]) -> Option<Breadth> {
         pairs: coefficients.len(),
         mean_correlation,
         effective: m as Real / denominator,
+    })
+}
+
+/// How many *independent searches over the grid* a shrunk panel actually ran.
+///
+/// This is the number a [deflated Sharpe](crate::metrics::deflated_sharpe_from_stats)
+/// has to be parameterized by once each member selects for itself, and it is
+/// the question that kept partial pooling out of the plain sweep: complete
+/// pooling searches the grid **once** (`M` trials), no pooling searches it once
+/// **per member** (`M·K`), and partial pooling is somewhere between with no
+/// obvious place to stand.
+///
+/// It turns out to need no new theory. Under `--shrink` member `m` ranks on
+/// `μ + α_r + λ·γ_rm` — a shared term every member has and a private term only
+/// it has — so two members' *ranking vectors* are correlated exactly to the
+/// extent that the shared term dominates. That is the same "M correlated
+/// estimators are worth `M / (1 + (M−1)·ρ̄)` independent ones" reading
+/// [`effective_breadth`] already applies to member returns, applied instead to
+/// the surfaces those members select off.
+///
+/// Measured rather than derived: the correlation is taken over the columns of
+/// the surface as it actually came out, so no orthogonality is assumed of the
+/// fit and a ragged table needs no special case. The limits come out right by
+/// construction —
+///
+/// * `λ = 0` — every column is `μ + α_r`, identical, `ρ̄ = 1`, and this is `1`.
+///   One search, `M` trials, exactly the count complete pooling reports today.
+/// * `λ = 1` with nothing shared — the columns are unrelated, `ρ̄ = 0`, and this
+///   is `K`. `M·K` trials, exactly the count an ordinary `SYM=[...]` grid axis
+///   deserves.
+/// * `λ = 1` but a dominant shared effect — still near `1`, which is right:
+///   every member picks the same row anyway, so only one search happened.
+///
+/// A negative mean correlation is floored at zero, for the reason
+/// [`effective_breadth`] gives: the denominator crosses zero on the way to
+/// claiming more independence than a panel can support. `None` when the surface
+/// has fewer than two usable columns or no column varies — with nothing to
+/// correlate, this would be a number about nothing.
+pub fn selection_breadth(
+    decomposition: &shrinkage::Decomposition,
+    table: &shrinkage::ScoreTable,
+) -> Option<Breadth> {
+    let surface = decomposition.shrunk(table)?;
+    let members = table.members();
+    // Each member's ranking vector, keyed by row index so two columns defined
+    // on different subsets of the grid still line up. Rows where a member has
+    // no score are simply absent from its vector, exactly as a member that had
+    // not listed is absent from a returns series.
+    let columns: Vec<(Vec<i64>, Vec<Real>)> = (0..members)
+        .map(|m| {
+            (0..table.rows())
+                .filter_map(|r| surface[r * members + m].map(|v| (r as i64, v)))
+                .unzip()
+        })
+        .collect();
+    let borrowed: Vec<(&[i64], &[Real])> = columns
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    // The grid is not a clock, so the `MIN_SHARED_BARS` floor `effective_breadth`
+    // applies to bar keys would be measuring the wrong thing here — a four-point
+    // grid is a legitimate sweep. Correlate directly, on the same pairwise
+    // "shared keys" rule.
+    let usable: Vec<&(&[i64], &[Real])> = borrowed.iter().filter(|(k, _)| k.len() >= 2).collect();
+    if usable.len() < 2 {
+        return None;
+    }
+    let mut coefficients: Vec<Real> = Vec::new();
+    for (i, a) in usable.iter().enumerate() {
+        for b in usable.iter().skip(i + 1) {
+            let (xs, ys) = shared(a, b);
+            if xs.len() < 2 {
+                continue;
+            }
+            if let Some(r) = pearson(&xs, &ys) {
+                coefficients.push(r);
+            }
+        }
+    }
+    if coefficients.is_empty() {
+        return None;
+    }
+    let k = usable.len();
+    let mean_correlation = coefficients.iter().sum::<Real>() / coefficients.len() as Real;
+    let denominator = 1.0 + (k as Real - 1.0) * mean_correlation.max(0.0);
+    Some(Breadth {
+        members: k,
+        pairs: coefficients.len(),
+        mean_correlation,
+        effective: k as Real / denominator,
     })
 }
 
@@ -1557,6 +1706,127 @@ where
             .as_ref()
             .and_then(|t| t.decompose().map(|d| d.summary(t))),
     })
+}
+
+#[cfg(test)]
+mod selection_breadth_tests {
+    use super::*;
+
+    /// A replicated table whose cells are `f(row, member)`.
+    fn table_from(
+        rows: usize,
+        members: usize,
+        f: impl Fn(usize, usize) -> Real,
+    ) -> ScoreTableFixture {
+        let mut t = shrinkage::ScoreTable::new(rows, members);
+        for r in 0..rows {
+            for m in 0..members {
+                // Two replicates per cell, symmetric about the cell value, so
+                // the within-cell variance is a knob independent of the value.
+                let v = f(r, m);
+                t.extend(r, m, [v - 0.05, v + 0.05]);
+            }
+        }
+        let d = t.decompose().expect("dense replicated table fits");
+        ScoreTableFixture { table: t, fit: d }
+    }
+
+    struct ScoreTableFixture {
+        table: shrinkage::ScoreTable,
+        fit: shrinkage::Decomposition,
+    }
+
+    /// **The complete-pooling limit, and the reason this is safe to ship.**
+    ///
+    /// When the members agree, `λ` is zero, every member's ranking surface is
+    /// the identical `μ + α_r`, and the panel ran exactly **one** search over
+    /// the grid. The deflated Sharpe's trial count is then unchanged from what
+    /// complete pooling has always reported — so turning `--shrink` on cannot
+    /// silently re-baseline the DSR of a panel that did not need it.
+    #[test]
+    fn an_agreeing_panel_ran_one_search() {
+        // Purely additive: row effect plus member level, no interaction.
+        let f = table_from(6, 3, |r, m| r as Real + 10.0 * m as Real);
+        assert_eq!(
+            f.fit.lambda,
+            Some(0.0),
+            "an additive table has no interaction"
+        );
+
+        let b = selection_breadth(&f.fit, &f.table).expect("three usable columns");
+        assert_eq!(b.members, 3);
+        assert!(
+            (b.mean_correlation - 1.0).abs() < 1e-9,
+            "identical surfaces are perfectly correlated, got {}",
+            b.mean_correlation,
+        );
+        assert!(
+            (b.effective - 1.0).abs() < 1e-9,
+            "one shared surface is one search, got {}",
+            b.effective,
+        );
+    }
+
+    /// **The no-pooling limit.** Members that rank the grid in unrelated orders
+    /// each searched it for themselves, so the maximum was taken over `K` times
+    /// as many draws and the trial count has to say so.
+    #[test]
+    fn members_that_share_nothing_ran_a_search_each() {
+        // Each member's optimum sits at a different row, and the shared row
+        // effect cancels — so the surface is almost pure interaction.
+        let peaks = [0usize, 3, 6];
+        let f = table_from(9, 3, |r, m| if r == peaks[m] { 10.0 } else { 0.0 });
+        assert!(
+            f.fit.lambda.expect("replicated") > 0.9,
+            "members peaking on different rows disagree, got {:?}",
+            f.fit.lambda,
+        );
+
+        let b = selection_breadth(&f.fit, &f.table).expect("three usable columns");
+        assert!(
+            b.effective > 2.5,
+            "three unrelated surfaces are close to three searches, got {} (rho {})",
+            b.effective,
+            b.mean_correlation,
+        );
+        assert!(b.effective <= 3.0, "never more searches than members");
+    }
+
+    /// A dominant shared effect means every member picks the same row *anyway*,
+    /// so only one search happened however high `λ` is. Charging the panel for
+    /// `K` searches there would deflate a result nobody over-searched for.
+    #[test]
+    fn a_dominant_shared_effect_is_still_one_search() {
+        // A large row effect with a small per-member wobble on top.
+        let f = table_from(8, 3, |r, m| {
+            r as Real * 10.0 + if (r + m) % 2 == 0 { 0.2 } else { -0.2 }
+        });
+        let b = selection_breadth(&f.fit, &f.table).expect("three usable columns");
+        assert!(
+            b.effective < 1.5,
+            "a shared optimum is one search whatever lambda says, got {} (rho {})",
+            b.effective,
+            b.mean_correlation,
+        );
+    }
+
+    /// Without `λ` there is no shrunk surface, so there is nothing to correlate
+    /// and no search count to report — `None`, never a default.
+    #[test]
+    fn an_unreplicated_table_reports_no_search_count() {
+        let mut t = shrinkage::ScoreTable::new(6, 3);
+        for r in 0..6 {
+            for m in 0..3 {
+                t.push(r, m, r as Real + m as Real);
+            }
+        }
+        let d = t.decompose().expect("dense table fits");
+        assert_eq!(
+            d.lambda, None,
+            "one observation per cell identifies nothing"
+        );
+        assert!(selection_breadth(&d, &t).is_none());
+    }
 }
 
 #[cfg(test)]

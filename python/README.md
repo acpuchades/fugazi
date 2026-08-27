@@ -1637,10 +1637,16 @@ Three things to know before using it:
   question — `risk_aversion=` *charges* a parameter set for the spread between
   members, `shrink=` *models* it — and applying both pays for the same
   disagreement twice.
-- **Per-member parameter sets come only from `walkforward=`.** In a plain sweep
-  `shrink=True` ranks on the member-demeaned score and reports `lambda`, but
-  still yields one parameter set; the plain-sweep form that returns N is not
-  built (the deflated-Sharpe trial count under partial pooling is unresolved).
+- **It hands back one parameter set per member**, in `sweep.member_winners` —
+  `{member: {axis: value}}`, empty when every member chose the same point (which
+  is complete pooling, and `sweep.best` already says what that point was).
+  `sweep.independent_searches` reports how many independent searches over the
+  grid those selections amounted to: `1.0` when the members agree, up to the
+  member count when they share nothing. That is the factor the deflated Sharpe's
+  trial count was scaled by — per-member selection searches the grid harder than
+  complete pooling does, and the deflation is widened to match. On an agreeing
+  panel it is exactly `1.0`, so every row's DSR is unchanged from a run without
+  `shrink=`.
 
 #### Pooled walk-forward
 

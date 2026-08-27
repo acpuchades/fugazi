@@ -754,6 +754,102 @@ def test_optimize_panel_composes_with_windowed_and_shrink():
     assert set(shrunk.best.metrics_panel) == {"AAA", "BBB"}
 
 
+def test_optimize_shrink_returns_a_parameter_set_per_member():
+    """Stage 4's point: a plain sweep can hand back one parameter set per
+    member, not just a better-conditioned single answer.
+
+    The CLI writes these to a sibling CSV; Python has no file, so
+    `sweep.member_winners` is the only route to them. `independent_searches` is
+    reported beside it because per-member selection searches the grid harder
+    than complete pooling does, and the deflated Sharpe has already been
+    widened to match."""
+    import math
+
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+      exit: !crosses_below
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    sizing: !value 1.0
+    """
+    day = 86_400_000
+
+    def cycle(sym, period, amp):
+        return [
+            ta.Snapshot(
+                {
+                    sym: ta.Atom(
+                        ta.Candle(
+                            *(
+                                4
+                                * [
+                                    200.0
+                                    + amp * math.sin(2 * math.pi * i / period)
+                                    + i * 0.02
+                                ]
+                            ),
+                            1.0,
+                        ),
+                        time=i * day,
+                    )
+                }
+            )
+            for i in range(900)
+        ]
+
+    # A tight cycle only a short lookback tracks, and a long one only a long
+    # lookback survives — two members with genuinely different optima.
+    sweep = ta.optimize(
+        doc,
+        panel={"CHOP": cycle("CHOP", 6, 18), "TREND": cycle("TREND", 90, 40)},
+        panel_axis="SYM",
+        grid=[{"FAST": [2, 3, 5, 15, 30], "SLOW": [8, 20, 45, 90]}],
+        windowed=120,
+        best_by="sharpe",
+        shrink=True,
+        cash=10_000.0,
+    )
+
+    winners = sweep.member_winners
+    assert set(winners) == {"CHOP", "TREND"}, winners
+    assert winners["CHOP"] != winners["TREND"], (
+        f"members with different optima must get different parameters, got {winners}"
+    )
+    # Two unrelated ranking surfaces are two searches, and that is what the
+    # trial count was scaled by.
+    assert sweep.independent_searches == pytest.approx(2.0), sweep.independent_searches
+
+
+def test_optimize_without_shrink_reports_no_per_member_selection():
+    """The readouts are absent rather than defaulted when nothing selected per
+    member: an empty dict and `None`, not a fabricated single-member answer."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(120)]
+    sweep = ta.optimize(
+        doc,
+        panel={
+            "AAA": _snaps_single("AAA", rising),
+            "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+        },
+        panel_axis="SYM",
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        cash=1000.0,
+        best_by="returns.total_pct",
+    )
+    assert sweep.member_winners == {}
+    assert sweep.independent_searches is None
+
+
 def test_optimize_shrink_refuses_what_it_cannot_do():
     """`shrink=` needs a panel to pool across and a key to rank on, and refuses
     `risk_aversion=` — which charges for the spread between members while

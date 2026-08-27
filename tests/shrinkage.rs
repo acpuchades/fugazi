@@ -649,3 +649,166 @@ fn smoothing_composes_with_shrinking() {
         out.stdout
     );
 }
+
+/// Daily bars stamped as **epoch milliseconds**, which the time column accepts
+/// alongside RFC3339 (`calendar::parse_time_to_millis`).
+///
+/// The `YYYY-MM-DD` helper above cannot express a series longer than a few
+/// months without hand-rolling a calendar, and these fixtures need hundreds of
+/// bars: `-w` has to cut each member into windows that are each long enough to
+/// give a stable Sharpe, or the within-cell variance swamps the interaction and
+/// `λ` reads low for a panel that genuinely splits.
+fn epoch_bars(symbol: &str, closes: &[f64]) -> String {
+    const DAY_MS: i64 = 86_400_000;
+    let mut out = String::new();
+    for (i, c) in closes.iter().enumerate() {
+        let t = i as i64 * DAY_MS;
+        out.push_str(&format!("{symbol},1d,{t},{c},{c},{c},{c},1000\n"));
+    }
+    out
+}
+
+/// A cycle a short lookback tracks, and one only a long lookback survives — two
+/// members with genuinely different optima, over enough bars for `-w` to cut
+/// stable replicates out of each.
+fn split_optima_frame() -> String {
+    let wave = |period: f64, amp: f64| -> Vec<f64> {
+        (0..900)
+            .map(|i| {
+                let t = i as f64;
+                200.0 + amp * (2.0 * std::f64::consts::PI * t / period).sin() + t * 0.02
+            })
+            .collect()
+    };
+    let mut out = String::from("symbol,freq,time,open,high,low,close,volume\n");
+    out.push_str(&epoch_bars("CHOP", &wave(6.0, 18.0)));
+    out.push_str(&epoch_bars("TREND", &wave(90.0, 40.0)));
+    out
+}
+
+/// **Stage 4's headline: a plain sweep can return one parameter set per
+/// member**, and the multiple-testing correction is told about it.
+///
+/// A pooled sweep normally searches the grid once. Under `--shrink` each member
+/// searches it for itself, so the maximum was taken over more draws than the
+/// candidate count admits — and a deflated Sharpe that ignored that would be
+/// deflating against a search smaller than the one that happened.
+#[test]
+fn a_shrunk_sweep_returns_a_parameter_set_per_member() {
+    let (frame_path, _keep) = scratch_file("s4_split.csv", &split_optima_frame());
+    let (doc_path, _keep_doc) = scratch_file("s4_split.yml", DOC);
+
+    let path = out_path("s4_split");
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--grid", "FAST=[2,3,5,15,30],SLOW=[8,20,45,90]"])
+        .args(&["--pooled", "SYM=[\"CHOP\",\"TREND\"]"])
+        .args(&["-w", "120"])
+        .args(&["--best-by", "sharpe"])
+        .args(&["--shrink"])
+        .args(&["--crypto"])
+        .args(&["--output", &path.to_string_lossy()])
+        .ok();
+
+    assert!(
+        out.stdout.contains("independent searches"),
+        "a shrunk sweep must report how hard it actually searched:\n{}",
+        out.stdout
+    );
+
+    let winners = path.with_file_name(format!(
+        "{}.member_winners.csv",
+        path.file_stem().expect("stem").to_string_lossy()
+    ));
+    assert!(
+        winners.exists(),
+        "members with different optima must each get their own parameters; \
+         console was:\n{}",
+        out.stdout
+    );
+    let (header, rows) = read_csv(&winners);
+    assert!(
+        header.starts_with("member,"),
+        "the per-member file is keyed by member, header was `{header}`"
+    );
+    assert_eq!(
+        rows.len(),
+        2,
+        "one row per member, got:\n{}",
+        rows.join("\n")
+    );
+    assert_ne!(
+        rows[0].split_once(',').map(|(_, v)| v),
+        rows[1].split_once(',').map(|(_, v)| v),
+        "the file is only written when the members diverged, so their \
+         parameters must differ:\n{}",
+        rows.join("\n"),
+    );
+
+    // The grid CSV keeps its shape: one row per parameter point, not per
+    // member. Reshaping it would break every downstream reader for a result
+    // that belongs in a sibling.
+    let (grid_header, grid_rows) = read_csv(&path);
+    assert_eq!(grid_rows.len(), 20, "5 FAST x 4 SLOW parameter points");
+    assert!(
+        !grid_header.split(',').any(|c| c == "member"),
+        "per-member results belong in the sibling, not in the grid CSV; \
+         header was `{grid_header}`"
+    );
+}
+
+/// **The limit that makes this safe to ship.** A panel whose members agree ran
+/// one search, so its deflated Sharpe must be *bit-identical* with and without
+/// `--shrink` — turning the flag on cannot silently re-baseline the DSR of a
+/// sweep that never needed partial pooling.
+///
+/// The comparison is per parameter point rather than on the winner, because
+/// `--shrink` also changes what the sweep *ranks* on; matching rows isolates
+/// the trial count, which is the thing under test.
+#[test]
+fn an_agreeing_panel_leaves_the_deflated_sharpe_untouched() {
+    let (frame_path, _keep) = scratch_file("s4_agree.csv", &agreeing_frame());
+    let (doc_path, _keep_doc) = scratch_file("s4_agree.yml", DOC);
+
+    let run = |shrink: bool, name: &str| -> Vec<String> {
+        let path = out_path(name);
+        let mut cmd = Cmd::new("optimize")
+            .arg(&format!("@{}", doc_path.display()))
+            .series(&format!("@{}", frame_path.display()))
+            .args(&["--grid", "FAST=[2,3,4,5]"])
+            .args(&["--params", "SLOW=12"])
+            .args(&["--pooled", "SYM=[\"AAA\",\"BBB\"]"])
+            .args(&["-w", "40"])
+            .args(&["--best-by", "sharpe"])
+            .args(&["-m", "sharpe"])
+            .args(&["--crypto"])
+            .args(&["--output", &path.to_string_lossy()]);
+        if shrink {
+            cmd = cmd.args(&["--shrink"]);
+        }
+        cmd.ok();
+        let (header, rows) = read_csv(&path);
+        let dsr = header
+            .split(',')
+            .position(|c| c == "selection.deflated_sharpe")
+            .expect("a sweep of 4 points has a DSR column");
+        let fast = header.split(',').position(|c| c == "FAST").expect("axis");
+        let mut keyed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                let cells: Vec<&str> = r.split(',').collect();
+                format!("{}={}", cells[fast], cells[dsr])
+            })
+            .collect();
+        keyed.sort();
+        keyed
+    };
+
+    assert_eq!(
+        run(false, "s4_agree_plain"),
+        run(true, "s4_agree_shrunk"),
+        "an agreeing panel ran one search either way, so every row's deflated \
+         Sharpe must be identical — `--shrink` is a readout here, not a re-baselining"
+    );
+}

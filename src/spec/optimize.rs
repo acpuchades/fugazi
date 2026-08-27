@@ -269,6 +269,8 @@ where
     let mut plateau: Option<usize> = None;
     let mut smooth_scales: Option<Vec<(String, AxisScale)>> = None;
     let mut shrinkage: Option<crate::spec::shrinkage::Summary> = None;
+    let mut selection: Option<crate::spec::panel::Breadth> = None;
+    let mut member_winners: Vec<MemberWinner> = Vec::new();
     if let Some((_, ref path, direction)) = best_by {
         // Pooled: fit the row × member layout while the rows are still in
         // lattice order, and hand every row its member-demeaned score. Both
@@ -282,11 +284,29 @@ where
         if rows.iter().any(|r| r.eval.panel().is_some()) {
             let per_row: Vec<&[crate::spec::panel::PanelMetrics]> =
                 rows.iter().map(|r| r.eval.panel().unwrap_or(&[])).collect();
-            if let Some((demeaned, summary)) = crate::spec::panel::demeaned_sweep(&per_row, path) {
-                for (row, value) in rows.iter_mut().zip(demeaned) {
+            // The ranking direction is handed over only under `--shrink`:
+            // without it the fit still yields the `_z` columns, but nothing
+            // selects per member and the sweep's trial count is the ordinary
+            // one.
+            let analysis =
+                crate::spec::panel::analyse_sweep(&per_row, path, shrink.then_some(direction));
+            if let Some(a) = analysis {
+                for (row, value) in rows.iter_mut().zip(a.demeaned) {
                     row.demeaned = value;
                 }
-                shrinkage = Some(summary);
+                shrinkage = Some(a.summary);
+                selection = a.selection;
+                // Winners name a *lattice* position, which the sort below
+                // destroys — so resolve each to the axis values it stands for
+                // while the mapping still holds.
+                member_winners = a
+                    .member_winners
+                    .into_iter()
+                    .map(|(member, idx)| MemberWinner {
+                        member,
+                        values: rows[idx].values.clone(),
+                    })
+                    .collect();
             }
         }
         let keys: Vec<Option<Real>> = rows
@@ -338,7 +358,28 @@ where
 
     // Grid-wide DSR context — computed the same way for whole-run and windowed
     // sweeps; see the field's rustdoc for the windowed-mode aggregation.
-    let deflated_sharpe_context = compute_dsr_context(&rows);
+    //
+    // Under `--shrink` the grid was searched more than once: every member
+    // selects for itself, so the maximum was taken over more draws than the
+    // candidate count alone says. Scaling the trial count by the number of
+    // *independent* searches is what makes the deflation honest again — see
+    // `panel::selection_breadth`, and note both limits land exactly on the
+    // counts that were already right: `×1` at complete pooling, `×K` when the
+    // members share nothing.
+    let deflated_sharpe_context = compute_dsr_context(&rows).map(|(trials, var)| {
+        match selection {
+            Some(b) if b.effective > 1.0 => {
+                // Round up: a fractional search is still a search, and rounding
+                // down would make the deflation *less* conservative than the
+                // evidence supports.
+                let scaled = (trials as Real * b.effective).ceil();
+                // `usize::MAX` is unreachable for any real grid; the clamp is
+                // there so a degenerate breadth cannot wrap the cast.
+                (scaled.min(usize::MAX as Real) as usize, var)
+            }
+            _ => (trials, var),
+        }
+    });
 
     let panel = rows.first().and_then(|r| r.eval.panel()).map(<[_]>::len);
     // Both read off the same row, so they cannot contradict each other: a
@@ -362,7 +403,22 @@ where
         plateau,
         shrinkage,
         shrunk: shrink,
+        member_winners,
+        selection,
     })
+}
+
+/// One member's own pick in a shrunk sweep: the member, and the axis values it
+/// selected.
+///
+/// Values rather than a row index, because the sweep sorts its rows and an
+/// index into the pre-sort lattice would silently mean something else
+/// afterwards.
+#[derive(Clone, Debug)]
+pub struct MemberWinner {
+    pub member: String,
+    /// Sparse across [`Sweep::union_columns`], exactly like [`Row::values`].
+    pub values: Vec<Option<Value>>,
 }
 
 /// Extract a [`metrics::Metrics`] document from an evaluation — the whole-run
@@ -853,6 +909,18 @@ pub struct Sweep {
     /// Whether `--shrink` ranked this sweep — i.e. whether `rows` is ordered by
     /// [`Row::demeaned`] rather than by the raw pooled reduction.
     pub shrunk: bool,
+    /// (`--shrink`) Each member's own pick off the shrunk surface.
+    ///
+    /// The grid CSV keeps one row per parameter point — that contract is not
+    /// negotiable, since every column in it describes a point the sweep
+    /// evaluated. These are a different grain (one per *member*), so they ride
+    /// alongside rather than reshaping it, exactly as the pooled walk-forward's
+    /// per-member winners do.
+    pub member_winners: Vec<MemberWinner>,
+    /// (`--shrink`) How many independent searches over the grid those
+    /// selections amount to — the factor [`Self::deflated_sharpe_context`]'s
+    /// trial count is scaled by. See [`crate::spec::panel::selection_breadth`].
+    pub selection: Option<crate::spec::panel::Breadth>,
 }
 
 /// True iff `v` is axis-shaped — a JSON array or a `start..end[:step]`

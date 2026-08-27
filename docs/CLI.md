@@ -1118,6 +1118,51 @@ evidence. The run-level `λ` printed beside the folds uses folds as replicates,
 which is better powered — but it is a description of the run after the fact, not
 something any selection used.
 
+###### What partial pooling costs in multiple testing
+
+Per-member selection searches the grid harder than complete pooling does, and
+the deflated Sharpe has to be told. `--shrink` scales its trial count by the
+number of **independent** searches the panel actually ran:
+
+```text
+searches = K / (1 + (K - 1) * rho)
+```
+
+where `rho` is the mean pairwise correlation between the members' *ranking
+surfaces* — the same "M correlated estimators are worth `M / (1 + (M-1)·rho)`
+independent ones" reading `effective breadth` applies to member returns, applied
+to the surfaces they select off. Both ends land on the counts that were already
+right:
+
+| Situation | `rho` | Searches | Trials |
+| --- | --- | --- | --- |
+| `lambda = 0` — every member sees `mu + alpha_r` | 1 | **1** | `M`, exactly what complete pooling reports today |
+| `lambda = 1`, nothing shared | 0 | **K** | `M·K`, exactly what a `SYM=[...]` grid axis deserves |
+| `lambda = 1`, dominant shared effect | ~1 | ~1 | `M` — every member picks the same row anyway, so only one search happened |
+
+The first row is why `--shrink` is safe to add to an existing workflow: on a
+panel whose members agree, every row's deflated Sharpe is **identical** with and
+without the flag.
+
+Note this is a *correction*, not a penalty — it makes the deflation match the
+search that happened. On a panel that genuinely splits, a winner that looked
+significant against one pass over the grid may not survive being deflated
+against two.
+
+##### Per-member results in a plain sweep
+
+`--shrink` in a plain sweep ranks on the member-demeaned score **and** writes
+each member's own pick to `<stem>.member_winners.csv` — one row per member, the
+member name plus its chosen axis values.
+
+The grid CSV keeps its shape: one row per parameter point, because every column
+in it describes a point the sweep evaluated. Per-member picks are a different
+grain and ride alongside rather than reshaping it, the same way pooled
+walk-forward's per-member winners do. The file is not written when every member
+chose the same point — that is complete pooling, the grid CSV's own winner
+already says what was chosen, and a file whose rows are all identical reads like
+a finding when it is the absence of one. The console states that case in words.
+
 `--shrink` refuses `-k/--risk-aversion`. The two are rival answers to the same
 question: `-k` *charges* a parameter set for the spread between members, and
 this *models* that spread. Applying both pays for the same disagreement twice.
@@ -1129,6 +1174,7 @@ Outputs, beyond the usual:
 | `<name>_z` / `<name>_z_std` columns | The `--best-by` metric's cross-member mean and std with the **member effect removed**. The raw `_mean`/`_std` conflate "this parameter set is unstable" with "these instruments have different achievable Sharpe"; the second is identical for every row and so carries no ranking information, yet still inflates every row's `-k` penalty. Emitted for any pooled sweep; `--shrink` also *ranks* on it |
 | `lambda`, `lambda_support`, `lambda_cells`, `members_departed` on `folds.csv` | Each fold's own decomposition, so a reader can see why members did or did not split without re-running |
 | `<stem>.member_winners.csv` | One row per `(fold, member)`: which parameters that member chose, and whether that differed from the pooled winner. **Not written when nothing departed** — a `departed` column of uniformly `false` reads like a finding when it is the absence of one, and the console reports that negative result instead |
+| `independent searches` (console) | How many independent searches over the grid the per-member selections amount to, and the factor the deflated Sharpe's trial count is scaled by. See below |
 
 **Several axes pool over their cartesian product.** A panel is not restricted
 to instruments:

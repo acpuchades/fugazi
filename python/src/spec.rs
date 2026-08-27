@@ -1503,6 +1503,15 @@ pub(crate) struct PySweep {
     pub(crate) metric_columns: Vec<(String, String)>,
     pub(crate) rows: Vec<Py<PySweepRow>>,
     pub(crate) best_idx: Option<usize>,
+    // Under `shrink=`, each member's own pick: `(member, axis values)` sparse
+    // across `columns`. The CLI writes these to a sibling CSV; a Python caller
+    // has no file, so this getter is the only way to reach the N parameter sets
+    // partial pooling exists to produce.
+    pub(crate) member_winners: Vec<(String, Vec<Option<JsonValue>>)>,
+    // Under `shrink=`, how many independent searches over the grid those
+    // selections amounted to — the factor the deflated Sharpe's trial count was
+    // scaled by.
+    pub(crate) independent_searches: Option<Real>,
 }
 
 #[pymethods]
@@ -1525,6 +1534,39 @@ impl PySweep {
     #[getter]
     pub(crate) fn best(&self, py: Python<'_>) -> Option<Py<PySweepRow>> {
         self.best_idx.map(|i| self.rows[i].clone_ref(py))
+    }
+
+    /// Under `shrink=`, each member's own parameters as `{member: {axis: value}}`.
+    ///
+    /// Empty when the sweep was not shrunk, and **also** when every member
+    /// chose the same point — which is complete pooling, and `best` already
+    /// says what that point was.
+    #[getter]
+    pub(crate) fn member_winners(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let out = pyo3::types::PyDict::new(py);
+        for (member, values) in &self.member_winners {
+            let d = pyo3::types::PyDict::new(py);
+            for (name, v) in self.columns.iter().zip(values) {
+                match v {
+                    Some(val) => d.set_item(name, json_to_py(py, val)?)?,
+                    None => d.set_item(name, py.None())?,
+                }
+            }
+            out.set_item(member, d)?;
+        }
+        Ok(out.into())
+    }
+
+    /// Under `shrink=`, how many *independent* searches over the grid the
+    /// per-member selections amounted to — `1.0` when the members agreed (one
+    /// shared surface), up to the member count when they share nothing.
+    ///
+    /// This is the factor the deflated Sharpe's trial count was scaled by, so a
+    /// caller comparing DSR across runs can see why it moved. `None` when the
+    /// sweep was not shrunk or `λ` was unavailable.
+    #[getter]
+    pub(crate) fn independent_searches(&self) -> Option<Real> {
+        self.independent_searches
     }
 
     /// The number of grid points evaluated — `len(sweep)` == `len(sweep.rows)`.
@@ -2067,6 +2109,12 @@ pub(crate) fn optimize(
             metric_columns,
             rows: row_objs,
             best_idx,
+            member_winners: sweep
+                .member_winners
+                .iter()
+                .map(|w| (w.member.clone(), w.values.clone()))
+                .collect(),
+            independent_searches: sweep.selection.map(|b| b.effective),
         },
     )?;
     Ok(py_sweep.into_any())
