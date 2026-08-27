@@ -987,6 +987,84 @@ per-member path. That is a data-layer change, not a flag-grammar one, and it is
 deliberately not in this one. Pooling over `FREQ` works today only where the
 cadences live on different symbols.
 
+### Pooling's validity is measured, not classified
+
+`--pooled` is already an aggregated objective — `ranking_value`'s Panel arm
+optimizes `mean_m ∓ k·std_m` over the panel, once. What was missing is any
+report of whether aggregating was *valid* for the strategy in hand, and the two
+candidate ways to supply it are not equally good.
+
+**Rejected: a static dimension lattice.** `#[grammar(dim = "price" | …)]` on each
+`NodeSpec` variant, propagated through `typecheck`, flagging a comparison between
+a bare `!value` literal and a dimensioned side — the idea being that pooling a
+`$100` stop across BTC and DOGE averages apples. It dies three ways. `!get` is
+schema-dependent and must resolve to `Unknown`, so the check goes **silent for
+exactly the documents that read prices through overlay columns** and stays loud
+on toy ones. Dimensioned comparisons are frequently correct (`!volume > 1e6`, a
+support level in a single-instrument document), so the false-positive rate is
+unknown and plausibly high. And it is subsumed: a dimensioned axis does not fail
+subtly under pooling — the members disagree about the optimum, which is what the
+parameter×member interaction term measures, along with regime-dependent
+thresholds and genuinely heterogeneous members, none of which the lattice
+reaches. Cost avoided: a declaration on ~142 variants, a propagation lattice, an
+exemption table with staleness tests, and a staged rollout to bound the
+false-positive rate.
+
+What would change it: the interaction readout shipping and users routinely
+unable to explain a high fraction. That is evidence a *localizing* check earns
+its keep — and by then real cases would name which node shapes cause it, so it
+would be a small targeted check, not a lattice. That is the better order anyway.
+
+**Kept, because they are closed sets rather than inference over a user's tree:**
+warning when a *dimensioned metric* is the pooled ranking metric (~40 fixed keys
+in `metrics::flatten`, already enumerated by `tests/metrics_coverage.rs`; its
+cross-member `std` carries each member's volatility, so `-k` penalizes the
+panel's composition), and warning on an *unscoped absolute cost term* under
+`--pooled` (cost terms scope on stream ids already; a flat `fee_per_trade` across
+three price magnitudes ruins the cheap members and reads as "the parameters do
+not generalize").
+
+**Chosen instead: measure it.** Pooling buys variance reduction on the selection
+surface — `√N_eff`, not `√N` — and only when the swept parameter means the same
+thing on every member. That is a **per-axis** property, so a strategy never
+written for pooling still benefits on its bar-count axes while being corrupted on
+its dimensioned ones, in one sweep, with nothing today separating the two. The
+row×member score matrix a pooled sweep already produces supports a two-way
+decomposition whose interaction component is the method-of-moments estimator for
+the random-effect variance — so one quantity both diagnoses whether to pool and
+supplies the weight that acts on it. Complete pooling is that variance at zero;
+today's `SYM=[...]` grid axis is it at infinity; partial pooling estimates it.
+
+Three consequences already settled, before any of it is built:
+
+- **Shrinkage goes in score space, not parameter space.** `θ_m = θ̄ + λ(θ̂_m − θ̄)`
+  is easier to explain and needs every axis numeric with a meaningful metric (a
+  categorical axis has no shrinkage target), produces off-lattice values, and
+  shrinks each axis independently — which walks off a `FAST`/`SLOW` ridge.
+- **Demeaning is an added column, never a replacement.** Removing the member
+  fixed effect makes `-k` mean "ranks consistently well" instead of "these
+  instruments are alike", but it destroys the level: the best row of a uniformly
+  losing grid ranks first. Pre-1.0 the default *could* be switched; it should not
+  be, because it answers a different question rather than the same one better.
+- **`--pooled -w` is what makes the variance components estimable.** With one
+  observation per cell the interaction and the residual are confounded, and their
+  ratio is the whole estimator. Folds supply the replication; the analytic Sharpe
+  SE the DSR path already computes is a Sharpe-only cross-check.
+
+Open and not papered over: the DSR **trial count** under partial pooling. Complete
+pooling is `N` hypotheses — the argument `src/spec/panel.rs`'s module doc rests
+on — and no pooling is `N×M`; between them it presumably scales with the
+shrinkage weight, but there is no defensible formula, and making the deflation
+honest was pooling's original motivation. That blocks the plain-sweep form, not
+the walk-forward one.
+
+Also noted while surveying: `panel::effective_breadth` is computed, exposed to
+Python, and printed by **no CLI path** — the number that stops a reader treating
+thirty correlated perps as thirty pieces of evidence exists and is invisible.
+
+Full design, staging and the rest of the rejected alternatives:
+[docs/design/pooling.md](docs/design/pooling.md).
+
 ## Repo hygiene
 
 ### `python/uv.lock` is not enforced by anything, and `uv sync` prunes `maturin`
