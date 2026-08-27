@@ -705,6 +705,108 @@ def test_optimize_panel_axis_substitutes_a_string_member_as_a_symbol():
     assert set(sweep.best.metrics_panel) == {"AAA", "BBB"}
 
 
+def test_optimize_panel_composes_with_windowed_and_shrink():
+    """`panel=` and `windowed=` used to be refused as a pair, which left
+    `shrink=` unable to estimate anything in a sweep: with one measurement per
+    member, member disagreement and backtest noise are the same quantity.
+
+    They compose now, and the composition is not a nested reduction — the
+    windowed documents ride *beside* each member's whole-run one as within-cell
+    replicates, so no pooled number moves. Both halves are asserted here: that
+    the pair is accepted at all, and that accepting it changed nothing."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(120)]
+    panel = {
+        "AAA": _snaps_single("AAA", rising),
+        "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+    }
+    kwargs = dict(
+        panel=panel,
+        panel_axis="SYM",
+        grid=[{"FAST": [3, 5], "SLOW": [10, 15]}],
+        cash=1000.0,
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+    )
+    plain = ta.optimize(doc, **kwargs)
+    windowed = ta.optimize(doc, windowed=40, **kwargs)
+
+    def cells(sweep):
+        return {
+            tuple(sorted(r.values.items())): r.metrics["returns.total_pct"]
+            for r in sweep.rows
+        }
+
+    assert cells(plain) == cells(windowed), (
+        "windowed= supplies replication for lambda and must leave every pooled "
+        "cell exactly where it was"
+    )
+
+    # And `shrink=` runs on top of it rather than being unreachable.
+    shrunk = ta.optimize(doc, windowed=40, shrink=True, **kwargs)
+    assert "SYM" not in shrunk.best.values
+    assert set(shrunk.best.metrics_panel) == {"AAA", "BBB"}
+
+
+def test_optimize_shrink_refuses_what_it_cannot_do():
+    """`shrink=` needs a panel to pool across and a key to rank on, and refuses
+    `risk_aversion=` — which charges for the spread between members while
+    `shrink=` models it, so applying both pays for the same disagreement
+    twice."""
+    doc = """
+    root: !pick { symbol: !param SYM }
+    long:
+      enter: !crosses_above
+        lhs: !sma { period: !param FAST }
+        rhs: !sma { period: !param SLOW }
+    """
+    rising = [100.0 + i * 0.3 + (10 if 30 <= i < 50 else 0) for i in range(120)]
+    panel = {
+        "AAA": _snaps_single("AAA", rising),
+        "BBB": _snaps_single("BBB", [v * 1.1 for v in rising]),
+    }
+    grid = [{"FAST": [3, 5], "SLOW": [10, 15]}]
+
+    with pytest.raises(ValueError, match="panel"):
+        ta.optimize(
+            doc,
+            _snaps_single("AAA", rising),
+            grid=grid,
+            cash=1000.0,
+            best_by="returns.total_pct",
+            shrink=True,
+        )
+
+    with pytest.raises(ValueError, match="best_by"):
+        ta.optimize(
+            doc,
+            panel=panel,
+            panel_axis="SYM",
+            grid=grid,
+            cash=1000.0,
+            shrink=True,
+        )
+
+    with pytest.raises(ValueError, match="risk_aversion|rival"):
+        ta.optimize(
+            doc,
+            panel=panel,
+            panel_axis="SYM",
+            grid=grid,
+            cash=1000.0,
+            windowed=40,
+            best_by="returns.total_pct",
+            shrink=True,
+            risk_aversion=1.0,
+        )
+
+
 def test_optimize_panel_axis_pools_over_a_typed_parameter():
     """`panel_axis=` used to substitute the member name as a JSON *string*,
     which is right for a ticker and made every typed slot unreachable —

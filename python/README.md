@@ -1549,8 +1549,15 @@ which is what keeps a ragged instrument panel from running every member over
 the union timeline.
 
 `panel=` is the same reduction as `windowed=` over a different partition, so
-`risk_aversion=` composes and means the same thing. The two are mutually
-exclusive for that reason. Two properties are worth stating outright:
+`risk_aversion=` composes and means the same thing.
+
+`windowed=` **composes with** `panel=` and changes no pooled number: each member
+is measured once and reduced twice, so the whole-run document every pooled cell
+reads is untouched and the per-window documents ride beside it as within-cell
+*replicates*. That replication is what `shrink=` needs (below); without it,
+"the members disagree" and "the backtests are noisy" are the same quantity.
+
+Two properties are worth stating outright:
 
 - **An undefined metric stays undefined.** The pooled mean is over the members
   that *reported* — a member that never traded has no win rate and is dropped,
@@ -1559,6 +1566,81 @@ exclusive for that reason. Two properties are worth stating outright:
 - **A ruined member disqualifies the row.** Not "drops out of the mean" —
   dropping it would *raise* the pooled score and reward a search for parameters
   that destroy an account.
+
+#### Partial pooling (`shrink=`)
+
+`panel=` alone is **complete** pooling: one parameter set for the whole panel,
+right only when the members share an optimum. A plain `SYM=[...]` grid axis is
+**no** pooling: one per member, each fit on its share of the evidence.
+`shrink=True` is the middle — estimate how much of the spread between members is
+real disagreement rather than backtest noise, and let each member move that far
+and no further.
+
+```python
+shrink_doc = """
+root: !pick { symbol: !param SYM }
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+  exit: !crosses_below
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+sizing: !value 1.0
+"""
+
+DAY_MS = 86_400_000
+ramp = [100.0 + i * 0.4 + (12.0 if 60 <= i < 100 else 0.0) for i in range(160)]
+
+
+def shrink_member(sym, closes):
+    return [
+        ta.Snapshot({sym: ta.Atom(ta.Candle(c, c, c, c, 1.0), time=i * DAY_MS)})
+        for i, c in enumerate(closes)
+    ]
+
+
+sweep = ta.optimize(
+    shrink_doc,
+    grid=[{"FAST": [3, 5], "SLOW": [10, 20]}],
+    panel={
+        "AAA": shrink_member("AAA", ramp),
+        "BBB": shrink_member("BBB", [v * 1.1 for v in ramp]),
+    },
+    panel_axis="SYM",
+    windowed=40,           # supplies the replication lambda needs
+    best_by="returns.total_pct",
+    shrink=True,
+    cash=1000.0,
+)
+assert "SYM" not in sweep.best.values   # reduced over, not ranked on
+```
+
+The sweep reads its results as a row x member table and decomposes it into a
+shared parameter effect, a per-member level, and the interaction between them:
+
+```text
+lambda = interaction variance / (interaction variance + noise)
+```
+
+At `lambda = 0` the members share an optimum and every member picks the pooled
+winner; at `lambda = 1` they are separate problems and each picks its own.
+
+Three things to know before using it:
+
+- **It needs replication, and says so when it has none.** With one measurement
+  per member, disagreement and noise are the same quantity, so `lambda` is
+  `None` rather than a number invented out of an identification failure. Pass
+  `windowed=` in a sweep; under `walkforward=` each fold splits its own
+  in-sample window and needs no extra argument.
+- **It refuses `risk_aversion=`.** The two are rival answers to the same
+  question — `risk_aversion=` *charges* a parameter set for the spread between
+  members, `shrink=` *models* it — and applying both pays for the same
+  disagreement twice.
+- **Per-member parameter sets come only from `walkforward=`.** In a plain sweep
+  `shrink=True` ranks on the member-demeaned score and reports `lambda`, but
+  still yields one parameter set; the plain-sweep form that returns N is not
+  built (the deflated-Sharpe trial count under partial pooling is unresolved).
 
 #### Pooled walk-forward
 

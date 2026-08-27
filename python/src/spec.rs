@@ -1693,15 +1693,38 @@ pub(crate) fn optimize(
             "`walkforward=` and `windowed=` are mutually exclusive",
         ));
     }
-    // `panel=` and `windowed=` are the same reduction over different partitions
-    // — members vs. windows — so composing them would need a nested one, and
-    // `mean ∓ k·std` of a set of `mean ∓ k·std`s is not a statistic worth
-    // emitting silently. `panel=` and `walkforward=` *do* compose: pooling the
-    // fold's in-sample score is the whole point.
-    if panel.is_some() && windowed.is_some() {
+    // `panel=` and `windowed=` **compose**, and the composition is not a nested
+    // reduction. Under `panel=`, `windowed=` does not change the pooled numbers
+    // at all: each member is measured once and reduced twice, so the whole-run
+    // document every pooled column reads is untouched, and the per-window
+    // documents ride beside it as within-cell *replicates*.
+    //
+    // That replication is the whole point — it is the only thing that lets
+    // `shrink=` separate "the members disagree" from "the backtests are noisy",
+    // which with one observation per member are the same quantity. Refusing the
+    // pair left `shrink=` unable to estimate anything in a sweep.
+    if shrink && panel.is_none() {
         return Err(PyValueError::new_err(
-            "`panel=` and `windowed=` are mutually exclusive — both reduce a row to \
-             `mean ∓ k·std`, one across panel members and one across time windows",
+            "`shrink=True` needs `panel=` — partial pooling lets each panel member depart \
+             from the pooled answer, and without a panel there is nothing to pool",
+        ));
+    }
+    if shrink && best_by.is_none() {
+        return Err(PyValueError::new_err(
+            "`shrink=True` needs `best_by=` — partial pooling shrinks a ranking key toward \
+             the panel's consensus, and without one there is no surface to select off",
+        ));
+    }
+    // The kernel refuses this pair too, but in the CLI's own vocabulary
+    // (`--shrink`, `-k`). Catching it here keeps a Python caller from being
+    // told about flags they never typed — the same reason the two checks above
+    // are spelled in kwargs rather than left to the shared message.
+    if shrink && risk_aversion > 0.0 {
+        return Err(PyValueError::new_err(
+            "`shrink=` and `risk_aversion=` are rival answers to the same question. \
+             `risk_aversion=` charges a parameter set for the spread between panel members; \
+             `shrink=` models that spread and lets each member move by however much of it is \
+             real. Applying both pays for the same disagreement twice. Pick one",
         ));
     }
     // Exactly one source of data. `snapshots` stays positional for the single

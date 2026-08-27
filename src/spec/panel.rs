@@ -1008,17 +1008,6 @@ impl PanelWalkForward {
         out
     }
 
-    /// Whether any fold departed from complete pooling — i.e. whether
-    /// `--shrink` changed a single selection.
-    ///
-    /// A run where it did not is the useful negative result: the panel agreed,
-    /// and the pooled winner was already each member's own answer.
-    pub fn any_member_departed(&self) -> bool {
-        self.fold_rows
-            .iter()
-            .any(|r| r.member_winners.iter().any(|w| w.departed))
-    }
-
     /// Members that departed from the pooled winner at least once, and in how
     /// many folds — the "one member went its own way" reading a mean `λ`
     /// flattens.

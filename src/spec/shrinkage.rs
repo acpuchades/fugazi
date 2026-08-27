@@ -384,19 +384,13 @@ impl Decomposition {
             balanced: self.balanced,
         }
     }
-
-    /// How `λ` reads in prose — the one-line verdict beside the number.
-    pub fn verdict(&self) -> &'static str {
-        verdict(self.lambda)
-    }
 }
 
 /// How a `λ` reads in prose, from the bare number.
 ///
-/// A free function rather than only a method, because the console renders a
-/// `λ` it has as a [`Summary`] scalar and reconstructing a whole
-/// [`Decomposition`] to ask it would be silly — and two copies of these strings
-/// is how they drift.
+/// A free function rather than a method on either type: every caller holds a
+/// [`Summary`] scalar rather than the [`Decomposition`] it came from, and a
+/// second spelling would only be somewhere for these strings to drift apart.
 pub fn verdict(lambda: Option<Real>) -> &'static str {
     match lambda {
         None => "not estimable without replication",

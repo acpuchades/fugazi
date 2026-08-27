@@ -600,3 +600,52 @@ fn an_unscoped_absolute_cost_across_a_panel_is_warned_about() {
         "a scoped fee is the fix being suggested and must not itself warn:\n{all}"
     );
 }
+
+/// `--smooth` and `--shrink` compose, and in a defined order: shrinkage borrows
+/// strength from **other members**, smoothing from **neighbouring parameter
+/// points**. They are orthogonal axes of one idea — regularizing a noisy score
+/// surface — so each member's shrunk column is smoothed over the lattice before
+/// its argmax is taken.
+///
+/// Worth pinning because the order is a choice and the wrong one is silently
+/// wrong: smoothing the raw cells first would blur the very disagreement the
+/// decomposition exists to measure, and `λ` would read low for a panel that
+/// genuinely splits.
+#[test]
+fn smoothing_composes_with_shrinking() {
+    let (frame_path, _keep) = scratch_file("shrink_smooth.csv", &disagreeing_frame());
+    let (doc_path, _keep_doc) = scratch_file("shrink_smooth.yml", DOC);
+
+    let path = out_path("shrink_smooth");
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", doc_path.display()))
+        .series(&format!("@{}", frame_path.display()))
+        .args(&["--grid", "FAST=[2,3,5,8],SLOW=[10,16,24]"])
+        .args(&["--pooled", "SYM=[\"FAST_CYCLE\",\"SLOW_CYCLE\"]"])
+        .args(&["--walkforward", "60,30"])
+        .args(&["--best-by", "sharpe"])
+        .args(&["--shrink"])
+        .args(&["--smooth=box:1"])
+        .args(&["--crypto"])
+        .args(&["--output", &path.to_string_lossy()])
+        .ok();
+
+    // Both regularizers report. If either silently no-opped under the other,
+    // one of these column families would be missing from the fold CSV.
+    let (header, rows) = read_csv(&path);
+    assert!(
+        header.split(',').any(|c| c == "lambda"),
+        "shrinking must still report its decomposition under --smooth, header was `{header}`"
+    );
+    assert!(
+        header.contains("_is_smoothed") && header.contains("_is_support"),
+        "smoothing must still report its neighbourhood average under --shrink, \
+         header was `{header}`"
+    );
+    assert!(!rows.is_empty(), "the walk-forward produced no folds");
+    assert!(
+        out.stdout.contains("member agreement (λ)"),
+        "λ is reported whichever regularizers are on:\n{}",
+        out.stdout
+    );
+}
