@@ -2638,6 +2638,293 @@ pub(crate) fn run_walkforward(
 /// sorted union of every member's bar times — not into any one member's bars.
 /// That is what makes fold *k* the same span for every member of a ragged
 /// panel; see `PanelWalkForwardResult.axis_len`.
+/// A row × member table of scores — the estimator's input, for callers that
+/// pool a panel themselves.
+///
+/// `optimize(panel=…, shrink=True)` builds one of these internally and never
+/// shows it. That is no use to a caller who reduces across members with its own
+/// machinery: there is nothing for `shrink=` to be plumbed into, and reaching it
+/// would mean giving up whatever made the caller's own pooling worth having.
+/// This is the same estimator with the sweep taken off the front.
+///
+/// Rows are parameter points, members are whatever you pooled over. Each cell
+/// holds that pair's **replicate** observations — measure the same
+/// `(row, member)` over several sub-spans and push each one, because with a
+/// single observation per cell "the members disagree" and "the backtests are
+/// noisy" are the same sum of squares and no split exists.
+///
+/// **Ragged is expected.** A pair you never measured is simply an empty cell.
+/// Never push a zero to stand in for one: a substituted zero is
+/// indistinguishable from a measurement, and every statistic downstream would
+/// rest on it.
+///
+/// ```py
+/// t = ta.ScoreTable(rows=len(grid), members=len(panel))
+/// for r, params in enumerate(grid):
+///     for m, member in enumerate(panel):
+///         t.extend(r, m, sharpe_per_window(params, member))   # the replicates
+/// d = t.decompose()                    # None if too sparse to fit
+/// d.summary.disagreement               # lambda
+/// d.shrunk                             # per-member surface to select off
+/// ```
+#[pyclass(name = "ScoreTable", module = "fugazi")]
+pub(crate) struct PyScoreTable {
+    pub(crate) inner: fugazi_core::spec::shrinkage::ScoreTable,
+}
+
+#[pymethods]
+impl PyScoreTable {
+    /// An empty `rows × members` table.
+    #[new]
+    #[pyo3(signature = (rows, members))]
+    pub(crate) fn new(rows: usize, members: usize) -> Self {
+        Self {
+            inner: fugazi_core::spec::shrinkage::ScoreTable::new(rows, members),
+        }
+    }
+
+    /// Build from a nested `cells[row][member] -> sequence of replicates`.
+    ///
+    /// The shape is taken from the outer lengths, so a short row is an error
+    /// rather than a silently narrower table — a ragged *input* is a bug, while
+    /// a ragged *table* (empty cells) is ordinary and is spelled by passing an
+    /// empty sequence.
+    #[staticmethod]
+    pub(crate) fn from_cells(cells: Vec<Vec<Vec<Real>>>) -> PyResult<Self> {
+        let rows = cells.len();
+        let members = cells.first().map_or(0, Vec::len);
+        for (r, row) in cells.iter().enumerate() {
+            if row.len() != members {
+                return Err(PyValueError::new_err(format!(
+                    "ScoreTable.from_cells: row {r} has {} members but row 0 has {members} — \
+                     every row must span the same members; an unmeasured pair is an empty \
+                     sequence, not a missing column",
+                    row.len(),
+                )));
+            }
+        }
+        let mut inner = fugazi_core::spec::shrinkage::ScoreTable::new(rows, members);
+        for (r, row) in cells.into_iter().enumerate() {
+            for (m, replicates) in row.into_iter().enumerate() {
+                inner.extend(r, m, replicates);
+            }
+        }
+        Ok(Self { inner })
+    }
+
+    /// Record one observation. Out-of-range indices and non-finite values are
+    /// dropped rather than raising — a `NaN` in one cell would otherwise take
+    /// every sum of squares with it.
+    pub(crate) fn push(&mut self, row: usize, member: usize, value: Real) {
+        self.inner.push(row, member, value);
+    }
+
+    /// Record a cell's replicates in one call.
+    pub(crate) fn extend(&mut self, row: usize, member: usize, values: Vec<Real>) {
+        self.inner.extend(row, member, values);
+    }
+
+    #[getter]
+    pub(crate) fn rows(&self) -> usize {
+        self.inner.rows()
+    }
+
+    #[getter]
+    pub(crate) fn members(&self) -> usize {
+        self.inner.members()
+    }
+
+    /// One cell's replicates; empty when the pair was never measured.
+    pub(crate) fn cell(&self, row: usize, member: usize) -> Vec<Real> {
+        self.inner.cell(row, member).to_vec()
+    }
+
+    /// A cell's mean, or `None` when it holds nothing.
+    pub(crate) fn cell_mean(&self, row: usize, member: usize) -> Option<Real> {
+        self.inner.cell_mean(row, member)
+    }
+
+    /// Cells holding at least one observation.
+    #[getter]
+    pub(crate) fn populated(&self) -> usize {
+        self.inner.populated()
+    }
+
+    /// Total observations across every cell.
+    #[getter]
+    pub(crate) fn observations(&self) -> usize {
+        self.inner.observations()
+    }
+
+    /// Cells carrying enough replicates to speak to within-cell spread. Zero
+    /// here is why `decompose().summary.disagreement` comes back `None`.
+    #[getter]
+    pub(crate) fn replicated_cells(&self) -> usize {
+        self.inner.replicated_cells()
+    }
+
+    /// Fit the two-way layout, or `None` when the table cannot carry it.
+    ///
+    /// `None` on three conditions, all of them "there is not enough table",
+    /// never "the answer is zero": fewer than 6 populated cells, fewer than two
+    /// live rows or members, or no degrees of freedom left for an interaction
+    /// once both margins are spent (`cells - rows - members + 1 <= 0`).
+    /// [`populated`](Self::populated) and
+    /// [`replicated_cells`](Self::replicated_cells) are how you tell which.
+    pub(crate) fn decompose(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelDecomposition>>> {
+        self.inner
+            .decompose()
+            .map(|fit| {
+                Py::new(
+                    py,
+                    PyPanelDecomposition {
+                        table: self.inner.clone(),
+                        fit,
+                    },
+                )
+            })
+            .transpose()
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "ScoreTable(rows={}, members={}, populated={}, observations={})",
+            self.inner.rows(),
+            self.inner.members(),
+            self.inner.populated(),
+            self.inner.observations(),
+        )
+    }
+}
+
+/// A fitted two-way layout: the summary, and the two surfaces you act on.
+///
+/// Holds a copy of the table it was fitted from, so every reading below is a
+/// plain attribute rather than a call you have to pass the table back into.
+#[pyclass(name = "PanelDecomposition", module = "fugazi")]
+pub(crate) struct PyPanelDecomposition {
+    pub(crate) table: fugazi_core::spec::shrinkage::ScoreTable,
+    pub(crate) fit: fugazi_core::spec::shrinkage::Decomposition,
+}
+
+#[pymethods]
+impl PyPanelDecomposition {
+    /// The headline reading — `disagreement` (λ), `parameter_matters`,
+    /// `verdict`, and the variance components. Same class
+    /// `Sweep.shrinkage` returns.
+    #[getter]
+    pub(crate) fn summary(&self, py: Python<'_>) -> PyResult<Py<PyPanelShrinkage>> {
+        Py::new(
+            py,
+            PyPanelShrinkage {
+                inner: self.fit.summary(&self.table),
+            },
+        )
+    }
+
+    /// Cell means with the **member level removed**, as `rows × members`.
+    ///
+    /// This is what to rank on when you want a cross-member spread to mean
+    /// "this parameter set ranks consistently well" rather than "these members
+    /// are alike": the member effect is identical for every row, so it carries
+    /// no ranking information, yet it still inflates the spread — and
+    /// unequally, since rows differ in which members they are defined on.
+    ///
+    /// `None` where the cell is unpopulated, so your own support counts stay
+    /// honest. Needs no replication — only the table.
+    #[getter]
+    pub(crate) fn demeaned(&self) -> Vec<Vec<Option<Real>>> {
+        Self::nest(self.fit.demeaned(&self.table), self.table.members())
+    }
+
+    /// The surface each member selects its own parameters off under partial
+    /// pooling: `mu + alpha_r + lambda * gamma_rm`, as `rows × members`.
+    ///
+    /// At `lambda = 0` every column is identical and every member picks the
+    /// pooled winner; at `lambda = 1` each gets its own cell means back. In
+    /// between, a member whose column is noisy is pulled toward the consensus
+    /// while one that genuinely disagrees keeps disagreeing. Take an argmax
+    /// down each column.
+    ///
+    /// **`None` when `disagreement` is** — without a lambda there is no
+    /// defensible surface, and falling back to either pooling extreme would be
+    /// choosing a pooling policy by accident.
+    #[getter]
+    pub(crate) fn shrunk(&self) -> Option<Vec<Vec<Option<Real>>>> {
+        self.fit
+            .shrunk(&self.table)
+            .map(|s| Self::nest(s, self.table.members()))
+    }
+
+    /// The shared parameter effect per row, as a deviation from the grand mean.
+    /// `None` for a row with no populated cell.
+    #[getter]
+    pub(crate) fn row_effects(&self) -> Vec<Option<Real>> {
+        self.fit.row_effects.clone()
+    }
+
+    /// The member level per member — the nuisance term `demeaned` removes.
+    #[getter]
+    pub(crate) fn member_effects(&self) -> Vec<Option<Real>> {
+        self.fit.member_effects.clone()
+    }
+
+    /// What the additive part misses, as `rows × members` — the disagreement
+    /// itself, before it is shrunk.
+    #[getter]
+    pub(crate) fn interactions(&self) -> Vec<Vec<Option<Real>>> {
+        Self::nest(self.fit.interactions.clone(), self.table.members())
+    }
+
+    /// The grand mean the effects are deviations from.
+    #[getter]
+    pub(crate) fn grand_mean(&self) -> Real {
+        self.fit.grand_mean
+    }
+
+    /// How many **independent searches over the grid** per-member selection
+    /// amounts to, as `(effective, mean_correlation, members, pairs)`.
+    ///
+    /// Multiply your candidate count by `effective` before deflating: letting
+    /// every member select for itself takes the maximum over more draws than
+    /// the candidate count alone admits. `1.0` when the members agree (one
+    /// shared surface, so one search), up to the member count when they share
+    /// nothing.
+    ///
+    /// `None` alongside a `None` `shrunk` — with no surface there is nothing to
+    /// correlate.
+    #[getter]
+    pub(crate) fn selection_breadth(&self) -> Option<(Real, Real, usize, usize)> {
+        fugazi_core::spec::panel::selection_breadth(&self.fit, &self.table)
+            .map(|b| (b.effective, b.mean_correlation, b.members, b.pairs))
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        let s = self.fit.summary(&self.table);
+        let lambda = s
+            .lambda
+            .map_or_else(|| "None".to_string(), |l| format!("{l:.3}"));
+        format!(
+            "PanelDecomposition(disagreement={lambda}, cells={}, rows={}, members={})",
+            s.cells, s.live_rows, s.live_members,
+        )
+    }
+}
+
+impl PyPanelDecomposition {
+    /// Row-major flat vector to `rows × members` nesting.
+    ///
+    /// The Rust side is flat because it indexes hot loops; a Python caller
+    /// wants `surface[row][member]` and should not be doing the arithmetic —
+    /// getting that stride wrong is silent, not loud.
+    fn nest(flat: Vec<Option<Real>>, members: usize) -> Vec<Vec<Option<Real>>> {
+        if members == 0 {
+            return Vec::new();
+        }
+        flat.chunks(members).map(<[_]>::to_vec).collect()
+    }
+}
+
 /// How much of the spread between panel members is real disagreement rather
 /// than backtest noise — the reading `shrink=` acts on.
 ///

@@ -705,6 +705,130 @@ def test_optimize_panel_axis_substitutes_a_string_member_as_a_symbol():
     assert set(sweep.best.metrics_panel) == {"AAA", "BBB"}
 
 
+def test_score_table_estimates_over_a_caller_built_matrix():
+    """The estimator is reachable without `optimize(panel=…)`.
+
+    `shrink=` is a parameter of the pooled sweep, which is no use to a caller
+    that reduces across members with its own machinery — there is nothing to
+    plumb it into. `ScoreTable` is the same estimator with the sweep taken off
+    the front: hand it a row x member matrix of replicates and it hands back
+    lambda, the demeaned key, and the surface each member selects off.
+
+    The fixture has members 0 and 1 agreeing on row 1 while member 2 peaks on
+    row 4, so a correct `shrunk` surface must recover *both* answers — an
+    implementation that always returned the consensus would pass a test that
+    only checked lambda."""
+    peaks = {0: 1, 1: 1, 2: 4}
+    cells = [
+        [[10.0 - abs(r - peaks[m]) + d * 0.05 for d in (-1, 0, 1, 2)] for m in range(3)]
+        for r in range(6)
+    ]
+    table = ta.ScoreTable.from_cells(cells)
+    assert (table.rows, table.members) == (6, 3)
+    assert table.populated == 18
+    assert table.observations == 72
+    assert table.replicated_cells == 18
+
+    d = table.decompose()
+    assert d is not None
+    assert d.summary.disagreement > 0.9, "members that peak apart disagree"
+
+    surface = d.shrunk
+    assert surface is not None
+    for m, want in peaks.items():
+        column = [
+            (surface[r][m], r) for r in range(table.rows) if surface[r][m] is not None
+        ]
+        assert max(column)[1] == want, (
+            f"member {m} should select row {want} off the shrunk surface, got "
+            f"{max(column)[1]}"
+        )
+
+    # Letting three unrelated members each select is three searches over the
+    # grid, which is what a caller must deflate against.
+    effective, _rho, members, _pairs = d.selection_breadth
+    assert members == 3
+    assert effective > 2.5, effective
+
+
+def test_score_table_without_replication_still_demeans():
+    """One observation per cell cannot separate disagreement from noise, so
+    there is no lambda and no surface to select off — but the *additive* fit
+    needs no replication, so the demeaned key is still there.
+
+    That split matters: demeaning is the cheap half a caller can always have,
+    and it is what makes a cross-member spread mean "ranks consistently well"
+    rather than "these members are alike"."""
+    peaks = {0: 1, 1: 1, 2: 4}
+    table = ta.ScoreTable(rows=6, members=3)
+    for r in range(6):
+        for m in range(3):
+            table.push(r, m, 10.0 - abs(r - peaks[m]))
+    assert table.replicated_cells == 0
+
+    d = table.decompose()
+    assert d is not None
+    assert d.summary.disagreement is None, "no replication identifies no lambda"
+    assert d.summary.residual_variance is None
+    assert d.shrunk is None, "no lambda means no defensible surface"
+    assert d.selection_breadth is None, "and nothing to correlate"
+
+    # The additive part is fitted and usable all the same.
+    assert len(d.demeaned) == 6 and len(d.demeaned[0]) == 3
+    assert all(v is not None for row in d.demeaned for v in row)
+    assert len(d.row_effects) == 6
+    assert len(d.member_effects) == 3
+
+
+def test_score_table_keeps_holes_as_holes():
+    """A pair you never measured is an empty cell, not a zero — end to end.
+
+    A substituted zero is indistinguishable from a measurement, so it would sink
+    into the fit and every reading downstream would silently rest on it. The
+    hole has to survive into `demeaned`, `shrunk` and `interactions`."""
+    table = ta.ScoreTable(rows=5, members=3)
+    for r in range(5):
+        for m in range(3):
+            if (r, m) == (1, 2):
+                continue  # member 2 never reported row 1
+            table.extend(r, m, [float(r + m), float(r + m) + 1.0])
+    assert table.cell(1, 2) == []
+    assert table.cell_mean(1, 2) is None
+    assert table.populated == 14
+
+    d = table.decompose()
+    assert d is not None
+    assert d.demeaned[1][2] is None
+    assert d.interactions[1][2] is None
+    assert d.shrunk[1][2] is None
+    # ...and the cells around it are unaffected.
+    assert d.demeaned[1][0] is not None
+
+
+def test_score_table_refuses_a_ragged_input_and_an_unfittable_table():
+    """A ragged *input* is a bug; a ragged *table* is ordinary. The first
+    raises, the second is spelled by passing an empty sequence.
+
+    And a table too sparse to carry the fit returns `None` rather than a
+    zero-filled answer — "there is not enough table" is not "the answer is
+    zero"."""
+    with pytest.raises(ValueError, match="every row must span the same members"):
+        ta.ScoreTable.from_cells([[[1.0], [2.0]], [[3.0]]])
+
+    # Legitimately ragged: the hole is an empty sequence, and it fits.
+    ok = ta.ScoreTable.from_cells(
+        [[[1.0, 1.5], [2.0, 2.5], [3.0, 3.5]] for _ in range(4)]
+    )
+    assert ok.decompose() is not None
+
+    # Under the cell floor: no fit, and the counts say why.
+    sparse = ta.ScoreTable(rows=2, members=2)
+    sparse.push(0, 0, 1.0)
+    sparse.push(1, 1, 2.0)
+    assert sparse.populated == 2
+    assert sparse.decompose() is None
+
+
 def test_optimize_shrinkage_is_readable_and_none_is_not_zero():
     """`shrink=` used to be write-only from Python: the flag was accepted, it
     silently reordered the ranking, and nothing it computed was reachable. The

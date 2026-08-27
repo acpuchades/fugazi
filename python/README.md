@@ -1677,6 +1677,57 @@ for fold in result.folds:
 went its own way in every fold" and "everyone drifted once" can produce the same
 mean and mean very different things.
 
+#### Pooling it yourself: `ScoreTable`
+
+`shrink=` is a parameter of `optimize(panel=…)`. If you reduce across members
+with your own machinery — one `optimize()` per member over that member's own
+snapshots, say — there is nothing for it to be plumbed into, and reaching it
+would mean giving up whatever made your own pooling worth having.
+
+`ScoreTable` is the same estimator with the sweep taken off the front. Hand it a
+row x member matrix and it gives back everything the flag would have:
+
+```py
+t = ta.ScoreTable(rows=len(grid), members=len(panel))
+for r, params in enumerate(grid):
+    for m, member in enumerate(panel):
+        # the replicates: one reading per sub-span, NOT one per cell
+        t.extend(r, m, sharpe_per_window(params, member))
+
+d = t.decompose()                 # None if the table cannot carry the fit
+d.summary.disagreement            # lambda
+d.summary.verdict                 # the safe thing to print
+d.demeaned                        # rows x members, member level removed
+d.shrunk                          # rows x members, or None without lambda
+d.selection_breadth               # (effective, rho, members, pairs)
+```
+
+`ta.ScoreTable.from_cells(cells)` builds one from a nested
+`cells[row][member] -> replicates` if you already have the matrix.
+
+Then take an argmax down each column of `shrunk` to get that member's own
+parameters, and multiply your candidate count by `selection_breadth[0]` before
+deflating — letting every member select for itself takes the maximum over more
+draws than the candidate count alone admits.
+
+Four rules the type signatures already imply, spelled out because getting any of
+them wrong is silent:
+
+- **Cells hold replicates, not one number.** With a single observation per cell,
+  "the members disagree" and "the backtests are noisy" are the same sum of
+  squares. `disagreement` is then `None` — and `shrunk` and `selection_breadth`
+  with it, since there is no defensible surface. `demeaned` still works: the
+  additive fit needs no replication.
+- **A pair you never measured is an empty cell, never a zero.** A substituted
+  zero is indistinguishable from a measurement and would sink into the fit. The
+  hole survives into `demeaned`, `shrunk` and `interactions` as `None`.
+- **`decompose()` returning `None` means "not enough table", not "zero".** Under
+  6 populated cells, under two live rows or members, or no degrees of freedom
+  left for an interaction. `populated` and `replicated_cells` say which.
+- **A ragged *input* raises; a ragged *table* is ordinary.** `from_cells`
+  refuses rows of differing length — an unmeasured pair is an empty sequence,
+  not a missing column.
+
 Three more things to know before using it:
 
 - **It needs replication, and says so when it has none.** With one measurement

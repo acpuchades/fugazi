@@ -154,6 +154,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPanelWalkForwardResult>()?;
     m.add_class::<PyPanelFold>()?;
     m.add_class::<PyPanelShrinkage>()?;
+    m.add_class::<PyPanelDecomposition>()?;
+    m.add_class::<PyScoreTable>()?;
     m.add_class::<PyMemberComposite>()?;
 
     // `fugazi.Wallet` — an ABC with the three concrete wallets registered as
