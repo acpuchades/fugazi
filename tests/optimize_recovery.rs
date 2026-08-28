@@ -60,6 +60,30 @@
 //! | `-w` | keep one unrepeatable disaster from deciding the sweep | a single −30% bar flips the whole-run answer to the wrong parameter | windowing confines it to one window of eight and the truth comes back |
 //! | `--pooled` | average out what is idiosyncratic to one member | each member's own noise drags its private answer off the truth, in a different direction | the pooled mean has neither distortion and lands on the truth |
 //! | `--shrink` | report a *distribution* of parameters, not a point | complete pooling collapses a two-answer panel onto one, wrong for half of it | partial pooling recovers each member's own truth — and stays a point mass when the panel really does agree |
+//! | `--walkforward` | follow a process whose answer moves | a pivot that changes halfway leaves the whole-run fit on a compromise right for neither half | each fold re-fits on its own window and returns the regime it sits in |
+//!
+//! # The ablation is inside each test, not between them
+//!
+//! Every positive test above runs its own fixture **twice**, with and without
+//! the flag, and asserts that dropping it gives the wrong answer. That is
+//! deliberate: an assertion living in a sibling test proves nothing unless the
+//! reader checks that both used the same series, the same grid and the same
+//! ranking metric, and nothing enforces that they do. Keeping both invocations
+//! in one test body makes "the flag is what moved the answer" a thing the suite
+//! checks rather than a thing the comments claim.
+//!
+//! Each was then confirmed against a deliberately broken build — `-w` reduced
+//! to a no-op, `pool_metric` averaging one member instead of all of them,
+//! `opts.shrink` forced false, `walkforward_layout` handing every fold the
+//! whole run. Each mutation fails that mode's tests and only that mode's (plus,
+//! for `-w`, the two shrinkage tests, which need it for replication — `λ` is
+//! not estimable without replicates, and that dependency is real).
+//!
+//! The one test that does **not** discriminate is
+//! [`every_combination_of_the_reductions_lands_on_the_same_truth`], and its doc
+//! comment says so: it runs on clean agreeing data where every mode works, and
+//! exists to catch compositions that break, not to prove any flag is
+//! load-bearing.
 
 mod common;
 
@@ -125,6 +149,9 @@ struct Member {
     /// `(signal bar, return)` — one bar's return replaced outright. The
     /// unrepeatable disaster `-w` exists to quarantine.
     swan: Option<(usize, f64)>,
+    /// `(bar, pivot)` — the process changes its answer partway through. The
+    /// drift `--walkforward` exists to follow.
+    shift: Option<(usize, f64)>,
     /// Bars between decision and return; [`LAG`] unless a test is varying it.
     lag: usize,
 }
@@ -136,6 +163,7 @@ fn member(symbol: &'static str, pivot: f64, phase: usize) -> Member {
         phase,
         distort: None,
         swan: None,
+        shift: None,
         lag: LAG,
     }
 }
@@ -148,6 +176,11 @@ impl Member {
 
     fn swan(mut self, at: usize, ret: f64) -> Self {
         self.swan = Some((at, ret));
+        self
+    }
+
+    fn shift(mut self, at: usize, pivot: f64) -> Self {
+        self.shift = Some((at, pivot));
         self
     }
 
@@ -165,11 +198,15 @@ impl Member {
         }
         let wobble = WOBBLE[(j / CYCLE + self.phase) % WOBBLE.len()];
         let level = level(j);
+        let pivot = match self.shift {
+            Some((at, pivot)) if j >= at => pivot,
+            _ => self.pivot,
+        };
         let extra = match self.distort {
             Some((l, d)) if l == level => d,
             _ => 0.0,
         };
-        STEP * (level as f64 - self.pivot) * wobble + extra
+        STEP * (level as f64 - pivot) * wobble + extra
     }
 
     /// `symbol,freq,time,open,high,low,close,volume,edge` rows. Flat OHLC, so a
@@ -254,7 +291,7 @@ fn read(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 
 /// The value each named axis takes in the sweep's **answer**. `--best-by` sorts
 /// the file, so row 0 is the winner.
-fn winner(path: &Path, axes: &[&str]) -> Vec<i64> {
+fn winner_cells(path: &Path, axes: &[&str]) -> Vec<String> {
     let (header, rows) = read(path);
     let row = rows
         .first()
@@ -265,9 +302,17 @@ fn winner(path: &Path, axes: &[&str]) -> Vec<i64> {
                 .iter()
                 .position(|c| c == axis)
                 .unwrap_or_else(|| panic!("no `{axis}` column in {header:?}"));
-            row[at]
-                .parse()
-                .unwrap_or_else(|e| panic!("`{axis}` cell `{}` is not an integer: {e}", row[at]))
+            row[at].clone()
+        })
+        .collect()
+}
+
+fn winner(path: &Path, axes: &[&str]) -> Vec<i64> {
+    winner_cells(path, axes)
+        .iter()
+        .map(|cell| {
+            cell.parse()
+                .unwrap_or_else(|e| panic!("axis cell `{cell}` is not an integer: {e}"))
         })
         .collect()
 }
@@ -457,15 +502,35 @@ fn a_black_swan_captures_the_whole_run_sweep() {
 /// test of it.
 #[test]
 fn windowing_quarantines_the_black_swan_to_one_window() {
-    let (_out, csv) = sweep_by(
-        "recover_swan_windowed",
-        &swan_frame(),
+    let frame = swan_frame();
+
+    // The ablation, inline: the same fixture and the same grid, `-w` the only
+    // difference between the two invocations. Asserted here rather than left to
+    // the sibling test above so that this test alone establishes that `-w` is
+    // what moved the answer — not the fixture, not the ranking metric.
+    let (_out, without) = sweep_by(
+        "recover_swan_ablate_off",
+        &frame,
+        SWAN_GRID,
+        "sharpe",
+        &["--params", SWAN_PARAMS],
+    );
+    let (_out, with) = sweep_by(
+        "recover_swan_ablate_on",
+        &frame,
         SWAN_GRID,
         "sharpe",
         &["--params", SWAN_PARAMS, "-w", WINDOW],
     );
+
+    assert_ne!(
+        winner(&without, &["HIGH"]),
+        vec![TRUE_HIGH],
+        "drop `-w` and the swan must take the sweep with it — otherwise this fixture \
+         proves nothing about windowing"
+    );
     assert_eq!(
-        winner(&csv, &["HIGH"]),
+        winner(&with, &["HIGH"]),
         vec![TRUE_HIGH],
         "windowing must keep a one-window disaster from deciding the whole sweep"
     );
@@ -560,9 +625,37 @@ fn no_member_of_the_pool_finds_the_parameters_on_its_own() {
 /// arithmetic rather than hope.
 #[test]
 fn pooling_averages_the_members_idiosyncrasies_away() {
+    let panel = distorted_panel();
+
+    // The ablation. Dropping `--pooled` does not mean "sweep one member" — it
+    // means the member axis stays an ordinary grid axis, so the sweep ranks
+    // `(parameters, member)` cells against each other and its answer names a
+    // *series*. That is the failure in its most honest form: two members and a
+    // 16-point grid is 32 hypotheses dressed up as 16, and the cell that wins
+    // is the one whose noise was kindest.
+    let (unpooled_out, unpooled) = sweep(
+        "recover_unpooled",
+        &panel,
+        &format!("{GRID},SYM=[\"AAA\",\"BBB\"]"),
+        &[],
+    );
+    assert_eq!(
+        winner_cells(&unpooled, &["HIGH", "LOW", "SYM"]),
+        vec!["3", "2", "AAA"],
+        "without `--pooled` the winner is a (parameters, series) cell chosen on one \
+         member's idiosyncrasy — the wrong parameters, and a member picked as if that \
+         were an answer"
+    );
+    assert!(
+        unpooled_out.stderr.contains("--pooled"),
+        "and the run must say so — a member axis left in the grid makes the rows \
+         incomparable:\n{}",
+        unpooled_out.stderr
+    );
+
     let (out, csv) = sweep(
         "recover_pooled",
-        &distorted_panel(),
+        &panel,
         GRID,
         &["--pooled", "SYM=[\"AAA\",\"BBB\"]"],
     );
@@ -571,6 +664,10 @@ fn pooling_averages_the_members_idiosyncrasies_away() {
         vec![TRUE_HIGH, TRUE_LOW],
         "the pooled sweep must recover the pivot both members share, which neither of \
          them recovers alone"
+    );
+    assert!(
+        !read(&csv).0.iter().any(|c| c == "SYM"),
+        "and the member axis must be reduced over, not ranked on — no `SYM` column"
     );
     assert!(
         out.stdout.contains("2 of 2") || out.stdout.contains("(2/2)"),
@@ -668,9 +765,28 @@ fn complete_pooling_collapses_a_panel_that_has_two_answers() {
 /// that are actually there.
 #[test]
 fn shrinkage_recovers_the_panels_parameter_distribution() {
+    let panel = split_panel();
+
+    // The ablation: the identical run with `--shrink` removed. It still pools,
+    // still replicates, still ranks the same grid — and it still hands back one
+    // parameter set and no distribution, because a single answer is all
+    // complete pooling has to give. Everything the test below asserts is
+    // therefore attributable to `--shrink` and to nothing else in the stack.
+    let (_out, unshrunk) = sweep(
+        "recover_shrink_ablate",
+        &panel,
+        GRID,
+        &["--pooled", WIDE_PANEL, "-w", WINDOW],
+    );
+    assert!(
+        member_winners(&unshrunk).is_none(),
+        "without `--shrink` there is no per-member distribution at all — one answer for \
+         the panel, and half the panel was not generated from it"
+    );
+
     let (out, csv) = sweep(
         "recover_shrink_split",
-        &split_panel(),
+        &panel,
         GRID,
         &["--pooled", WIDE_PANEL, "-w", WINDOW, "--shrink"],
     );
@@ -735,13 +851,17 @@ fn shrinkage_does_not_manufacture_a_spread_that_is_not_there() {
 /// Every valid stack of the reductions, on clean agreeing data, lands on the
 /// same truth.
 ///
-/// The tests above each isolate one mode against the failure it exists for;
-/// this one is the flat sweep across the combinations, and its job is to catch
-/// a composition that breaks an answer neither flag breaks alone — a windowed
-/// reduction that stops being carried beside the pooled document, a shrink that
-/// re-ranks on a demeaned score whose sign convention drifted. `--shrink`
-/// requires a panel and a ranking key, so the two combinations that omit them
-/// are not reachable; the other six are all here.
+/// **This one does not discriminate, and is not meant to.** Its fixture is clean
+/// and agreeing, so every combination reaches the truth and it would pass on an
+/// implementation where all three flags were no-ops. What establishes that each
+/// flag is load-bearing is the ablation inside each mode's own test, where the
+/// same fixture is run with and without it. What *this* catches is the thing
+/// those cannot: a composition that breaks an answer neither flag breaks alone
+/// — a windowed reduction that stops being carried beside the pooled document,
+/// a shrink that re-ranks on a demeaned score whose sign convention drifted.
+///
+/// `--shrink` requires a panel and a ranking key, so the two combinations that
+/// omit them are not reachable; the other six are all here.
 #[test]
 fn every_combination_of_the_reductions_lands_on_the_same_truth() {
     let solo: &[&str] = &["--params", "SYM=\"AAA\""];
@@ -773,7 +893,112 @@ fn every_combination_of_the_reductions_lands_on_the_same_truth() {
     }
 }
 
-/// The fifth reduction: walk-forward, which re-picks per fold rather than once.
+// ------------------------------- `--walkforward`: follow the process as it moves
+
+/// Where the generating process changes its mind — halfway, at bar 168.
+const SHIFT: usize = 4 * CYCLE;
+
+/// One member whose pivot moves from [`PIVOT`] to [`ALT_PIVOT`] at [`SHIFT`]:
+/// the right parameters are `(4, 3)` for the first half of the run and
+/// `(2, 1)` for the second, and there is no single answer for the whole of it.
+fn regime_shift() -> String {
+    frame(vec![member("AAA", PIVOT, 0).shift(SHIFT, ALT_PIVOT)])
+}
+
+/// **The failure `--walkforward` exists for.** A process that changes its
+/// parameters cannot be fit by one number, and a whole-run sweep has only one
+/// number to offer.
+///
+/// The sweep does not fail loudly here — that is the point. It returns
+/// `(3, 2)`, an average of two regimes that is the right answer to neither, and
+/// it returns it with exactly the same confidence it would give a stationary
+/// series. Established as its own test because the fold assertions below are
+/// worth nothing unless the single-shot answer is genuinely wrong.
+#[test]
+fn a_whole_run_sweep_cannot_follow_a_regime_change() {
+    let (_out, csv) = sweep(
+        "recover_regime_whole",
+        &regime_shift(),
+        GRID,
+        &["--params", "SYM=\"AAA\""],
+    );
+    let single = winner(&csv, &["HIGH", "LOW"]);
+    assert_ne!(
+        single,
+        vec![TRUE_HIGH, TRUE_LOW],
+        "a whole-run fit must not land on the first regime's answer"
+    );
+    assert_ne!(
+        single,
+        vec![ALT_HIGH, ALT_LOW],
+        "nor on the second's — one fit over two regimes is a compromise between them"
+    );
+}
+
+/// **What `--walkforward` buys.** Each fold re-fits on its own in-sample
+/// window, so a fold that sits inside one regime returns that regime's
+/// parameters instead of the run-wide average.
+///
+/// Folds are graded by where their *in-sample* window falls, not by index: one
+/// entirely before [`SHIFT`] must return the early truth, one entirely after it
+/// the late truth. A fold straddling the change is not graded — it is fitting
+/// two processes at once and the compromise it returns is the correct answer to
+/// the question it was asked. Both classes have to be non-empty, or the layout
+/// drifted and the test stopped testing anything.
+#[test]
+fn walkforward_refits_each_fold_to_the_regime_it_sits_in() {
+    let (_out, csv) = sweep(
+        "recover_regime_folds",
+        &regime_shift(),
+        GRID,
+        &["--params", "SYM=\"AAA\"", "--walkforward", "84,42"],
+    );
+
+    let (header, rows) = read(&csv);
+    let at = |name: &str| header.iter().position(|c| c == name).expect("column");
+    let (start, end, h, l) = (at("is_start"), at("is_end"), at("HIGH"), at("LOW"));
+    let num = |row: &Vec<String>, i: usize| row[i].parse::<usize>().unwrap();
+
+    let (mut early, mut late) = (0, 0);
+    for row in &rows {
+        let picked = (
+            row[h].parse::<i64>().unwrap(),
+            row[l].parse::<i64>().unwrap(),
+        );
+        if num(row, end) <= SHIFT {
+            early += 1;
+            assert_eq!(
+                picked,
+                (TRUE_HIGH, TRUE_LOW),
+                "fold {} fits entirely inside the first regime and must return its \
+                 parameters",
+                row[0]
+            );
+        } else if num(row, start) >= SHIFT {
+            late += 1;
+            assert_eq!(
+                picked,
+                (ALT_HIGH, ALT_LOW),
+                "fold {} fits entirely inside the second regime and must return its \
+                 parameters",
+                row[0]
+            );
+        }
+    }
+    assert!(
+        early > 0 && late > 0,
+        "the layout must put at least one fold wholly inside each regime \
+         (got {early} early, {late} late) — otherwise nothing above was graded"
+    );
+}
+
+/// The fifth reduction under the full stack: walk-forward, which re-picks per
+/// fold rather than once.
+///
+/// The discrimination for `--walkforward` lives in the regime-change pair
+/// above; on a stationary panel every fold has the same right answer, so what
+/// this adds is that pooling and shrinking *underneath* the fold decision does
+/// not disturb it.
 ///
 /// Every fold sees a different slice of the same process, so every fold has the
 /// same right answer — and the fold CSV, not the console, is where that is
