@@ -1132,6 +1132,81 @@ fn an_ascending_best_by_sorts_the_smoothed_column_ascending() {
     );
 }
 
+/// A grid whose readiness is dominated by the **IIR settling tail** rather than
+/// the window — an `!ema` keeps updating long after `warm_up_bars`, so
+/// `stable_bars` far exceeds it. That gap is the whole subject of
+/// `--keep-unstable`, and an `!sma` grid (where the two are equal) cannot show it.
+const SETTLING: &str = "\
+root: BTC
+long:
+  enter: !crosses_above
+    lhs: !ema { source: close, period: !param FAST }
+    rhs: !ema { source: close, period: !param SLOW }
+  exit: !crosses_below
+    lhs: !ema { source: close, period: !param FAST }
+    rhs: !ema { source: close, period: !param SLOW }
+";
+
+/// **`--keep-unstable` is the named opt-out for the walk-forward head skip**,
+/// and it had no test — the flag appeared nowhere in `tests/`.
+///
+/// The default skips the grid-wide `max(stable_bars)` before laying out folds,
+/// which for this EMA grid is the whole 30-bar example: the sweep refuses
+/// rather than laying out folds over settling numbers. The opt-out skips only
+/// `max(warm_up_bars)`, so the same grid fits.
+///
+/// Both halves are asserted. A flag that silently did nothing would leave the
+/// refusal in place; a default that silently stopped trimming would make the
+/// refusal disappear.
+#[test]
+fn walkforward_keep_unstable_skips_only_the_warm_up_head() {
+    let (path, spec) = scratch_file("fugazi_opt_keep_unstable.yml", SETTLING);
+    let sweep = |extra: &[&str], name: &str| {
+        let out_csv = common::cli::unique_path(name).with_extension("csv");
+        let out_str = out_csv.to_string_lossy().into_owned();
+        let cmd = Cmd::new("optimize")
+            .arg(&spec)
+            .series(&at("examples/candles.csv"))
+            .args(&["--grid", "FAST=[2,3],SLOW=[6,8]"])
+            .args(&["-m", "total_pct", "--best-by", "total_pct"])
+            .args(&["--walkforward", "8,4"])
+            .args(&["--output", &out_str, "-q"])
+            .args(extra);
+        (cmd, out_str)
+    };
+
+    let (cmd, _) = sweep(&[], "fugazi_opt_ku_default");
+    let refused = cmd.fails();
+    assert!(
+        refused.stderr.contains("prefix skip"),
+        "the default must refuse rather than lay folds out over settling \
+         numbers: {}",
+        refused.stderr
+    );
+
+    let (cmd, out_str) = sweep(&["--keep-unstable"], "fugazi_opt_ku_optout");
+    cmd.ok();
+    let lines = read_csv(&out_str);
+    let header = &lines[0];
+    let is_start = column(header, "is_start");
+    let starts: Vec<i64> = lines[1..]
+        .iter()
+        .map(|l| cells(l)[is_start].parse().expect("a numeric fold start"))
+        .collect();
+    assert!(
+        !starts.is_empty(),
+        "the opt-out must lay out folds the default could not"
+    );
+    // `max(warm_up_bars)` over an EMA(2..3) grid is a handful of bars, against
+    // the 30 `stable_bars` the refusal above reported.
+    assert!(
+        starts[0] < 5,
+        "the first fold must start at the *warm-up* head, not the settling one: \
+         {starts:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn walkforward_folds_carry_the_smoothed_is_key() {
     let (path, _) = scratch_file("fugazi_opt_smooth_wf_strategy.yml", SWEEPABLE);

@@ -435,16 +435,23 @@ fn metrics_report(bars: usize) -> fugazi::backtest::RunReport<Symbol> {
 }
 
 fn main() {
-    let workload = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!(
+    // No workload named. `cargo test --all-targets` runs every `harness = false`
+    // bench target argless, and this one is a manual valgrind probe with nothing
+    // to run in that mode — so print the usage and exit **clean**. It used to
+    // exit 2, which made `cargo test --all-targets` red on a spotless tree: CI
+    // runs plain `cargo test -p fugazi` and never saw it, so the failure only
+    // ever hit whoever reached for the broader spelling. An *unknown* workload
+    // is still a real mistake and still exits 2, below.
+    let Some(workload) = std::env::args().nth(1) else {
+        println!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
              |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
              |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local|stddev_scan\
              |multi_none|aroon_candle|adx_candle|dmi_candle|metrics_none|metrics_reduction>"
         );
-        std::process::exit(2);
-    });
+        return;
+    };
     let schema = fugazi::market::Schema::empty();
 
     // Built lazily: `single_snapshots` allocates 20 000 snapshots, which at this
