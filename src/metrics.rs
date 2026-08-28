@@ -161,7 +161,7 @@ pub fn per_bar_returns(equity_curve: &[Real], initial_equity: Real) -> Vec<Real>
 /// consecutive-win/loss streak metrics read as a time series. Trades closing on
 /// the same bar keep blotter order. Positions still open at the end of the
 /// blotter are not emitted (a run wanting them counted should flatten first —
-/// see [`flatten_open_positions`](crate::backtest::flatten_open_positions)).
+/// see [`apply_closeout`](crate::backtest::apply_closeout)).
 ///
 /// `Sym` needs only [`PartialEq`]: the open legs live in a small
 /// insertion-ordered list, keyed by borrowed symbol. Grouping is therefore
