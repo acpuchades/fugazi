@@ -748,6 +748,64 @@ ever grows a real hedge-ratio slot (beta, cointegration weights) rather than
 splitting notional evenly, its default is worth re-opening — maintaining a
 *correct* ratio is a different proposition from maintaining an arbitrary one.
 
+### `check` types the placeholders nobody has values for, not every `!param`
+
+`spec::check` reports a `HoleTypes` per *unresolved* placeholder. A `!param`
+carrying a `default:`, or one bound through the caller's `params`, is resolved
+during `substitute_for_check` and never becomes a hole — so it is absent from
+`CheckedSpec::holes` and from Python's `SpecCheck.param_types`, **including its
+`type:` declaration if it wrote one**. Recorded because the omission looks like
+an oversight and is not.
+
+The report answers one question: *what does the caller still owe, and of what
+type*. That set is exactly the set with no default to read a type off, which is
+the case a downstream authoring tool cannot answer for itself — it ends up
+guessing from the parameter's name (`/symbol|ticker|instrument/i`), the rung
+`check` was built to retire. A defaulted parameter is not in that predicament:
+its default *is* a value of the right type, so reading the type off it is an
+inference rather than a guess.
+
+Including the resolved ones would also mean reporting a type for something that
+is not a hole, on a struct whose every other field describes gaps — and the
+`declared`/`demanded` split stops meaning anything for a placeholder no slot
+ever demanded a type of, because its value was substituted before the parse.
+
+What would change it: a caller that has to type *every* knob from the parse and
+finds the default's written form genuinely insufficient. The string cases are
+where that could bite — `default: "1h"` is a `frequency` and `default: "BTC"` a
+`symbol`, and nothing but the slot distinguishes them. The increment then is not
+to make defaulted parameters holes but to report them separately (a
+`resolved_types`, or a `declared:`-aware pass over the substituted tree), so the
+"still owed" set stays the honest answer to the question `holes` asks.
+
+### An omitted `root:` and the same root spelled out are different documents
+
+`root::default_tree` splices `!pick { symbol: !param { key: SYMBOL, default:
+null, … }, freq: !param { key: FREQ, default: null, … } }` — both placeholders
+**optional**. So a `root:`-less single-asset document loads with nothing bound
+(the `!pick` collapses to the sole-atom selector a single-series input resolves),
+and `check` reports no holes for it. Writing the same root out in the bare
+canonical form — `!pick { symbol: !param SYMBOL, freq: !param FREQ }` — makes
+both *required*: the loader refuses it with no values, and `check` reports them
+as the two typed holes they are.
+
+Both behaviours are right and they are not going to be merged. The optional form
+is what makes `fugazi run --series one.csv` work with no `--params` at all, which
+is the first thing anyone does; the required form is how an author says "the
+caller supplies this". Recorded because the asymmetry reads as a bug from the
+outside: a tool that renders a strategy with an empty root box and expects
+`SYMBOL`/`FREQ` back from `check.param_types` gets an empty dict, and the fix is
+to emit the bare spelling rather than to omit the key.
+
+The neighbouring trap, same shape: a `root:`-less document is structurally a
+`multi:` one, so `detect_kind` reads it as multi. `check` and the loader agree —
+this is not a check-vs-run divergence — but a caller that means single-asset has
+to say `kind = single` rather than let detection decide.
+
+What would change it: nothing in the defaults. If the two ever need to be told
+apart *without* a `kind`, the answer is a document-level marker, not making the
+spliced placeholders required.
+
 ## Datasets
 
 ### A fragmented universe is diagnosed, never repaired
