@@ -23,7 +23,7 @@ places belongs in the narrower one.
 |---|---|---|---|
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
-| **End-to-end** | `tests/{run,costs,optimize,pooled,overlap,cadence,date_range,examples_validate,…}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
+| **End-to-end** | `tests/{run,costs,optimize,optimize_recovery,pooled,overlap,cadence,date_range,examples_validate,…}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
 | **Coverage guard** | `tests/metrics_coverage.rs` | which metrics have a reference at all | `cargo test` (reads key sets only — never skips) |
 | **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
@@ -134,6 +134,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 | `PaperWallet` fill pricing, cash or cost arithmetic | `tests/wallet_validation.rs` — extend the schedule in `tools/gen_wallet_bars.py` or add a cost configuration, then `pixi run gen-wallet` |
 | A metric | a unit test in `src/metrics.rs`, **plus** a reference value in one of the two `(metric, expected)` generators — `tests/metrics_coverage.rs` fails until it has one or an exemption. Nothing else is needed for the degenerate cases: `tests/metrics_degenerate.rs` walks `metrics::flatten` over empty / one-bar / flat / ruined / zero-stake runs and over a blotter with no trades, one open position, all winners and all losers, so a new metric is covered there the day it is added |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
+| A sweep **reduction** — `-w`, `--pooled`, `--shrink`, `--walkforward`, or how they compose | `tests/optimize_recovery.rs`, which is the only file that grades the sweep's *answer* rather than its shape: series synthesised from a known parameter set, and each mode given the failure it exists to fix (a black swan for `-w`, per-member noise for `--pooled`, a two-answer panel for `--shrink`) so a mode that did nothing would fail rather than pass |
 | Ruin — the zero-equity floor (`RunReport::ruin_bar`, the pinned curve, the bounded drawdown) | `tests/ruin.rs`, which owns the property end to end: the driver, the metrics that derive from it, slicing, `--flatten`, `portfolio:`, and the `optimize --best-by` ranking. It spans four layers, so it is feature-named rather than split across the files for each |
 | A cost model, or a diagnostic about one | `tests/costs.rs` — including the post-run banners, which are on **stdout** with the report (unlike the cadence and overlap findings, which precede it on stderr) |
 | A diagnostic one subcommand prints | the file named for that command; one spanning several (like the snapshot-overlap warning or the bar-cadence census) gets a feature-named file — `tests/overlap.rs`, `tests/cadence.rs`, as `tests/costs.rs` already does for `--costs` |
