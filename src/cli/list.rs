@@ -408,7 +408,7 @@ fn payload_form(payload: Option<&str>) -> &'static str {
         Some("literal") => "<value>",
         Some("uint") => "<n>",
         Some("number") => "<x>",
-        Some("str") | Some("str_operand") => "<name>",
+        Some("str") => "<name>",
         _ => "<…>",
     }
 }
@@ -416,7 +416,9 @@ fn payload_form(payload: Option<&str>) -> &'static str {
 /// The placeholder for a `seq` tag's list body, by element/list payload type.
 fn seq_form(payload: Option<&str>) -> &'static str {
     match payload {
-        Some("str_list") => "[ SYM, … ]",
+        // `symbol_list` is `str_list`'s refinement — same rendering, since the
+        // placeholder was already naming a symbol.
+        Some("str_list") | Some("symbol_list") => "[ SYM, … ]",
         Some("number_list") => "[ w0, … ]",
         _ => "[ … ]",
     }

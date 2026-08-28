@@ -118,6 +118,7 @@ fn every_tag_is_well_formed() {
         "node",
         "node_list",
         "str_list",
+        "symbol_list",
         "number_list",
         "uint",
         "positive_uint",

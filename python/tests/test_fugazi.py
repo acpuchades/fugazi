@@ -2570,16 +2570,19 @@ def test_str_source_ne_signal_is_inverse_of_eq():
     assert ne.is_true() is True
 
 
-def test_str_eq_free_function_matches_the_fluent_method():
+def test_str_source_eq_accepts_a_bare_python_string():
+    # `StrSource.eq` is the whole string-comparison surface — the `str_eq` /
+    # `str_ne` free functions were retired with the `!str_eq` / `!str_ne` tags,
+    # since `eq` covers both operand types on either surface.
     schema = _typed_schema()
     candle = _typed_candle()
-    fluent = ta.get_str(schema, "regime").eq("bull")
-    free = ta.str_eq(ta.get_str(schema, "regime"), "bull")
+    sig = ta.get_str(schema, "regime").eq("bull")
 
     atom = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
-    fluent.update(atom)
-    free.update(atom)
-    assert fluent.is_true() == free.is_true() is True
+    sig.update(atom)
+    assert sig.is_true() is True
+    assert not hasattr(ta, "str_eq")
+    assert not hasattr(ta, "str_ne")
 
 
 def test_value_str_is_a_constant_str_source():
@@ -2597,7 +2600,7 @@ def test_str_eq_accepts_two_str_sources():
     candle = _typed_candle()
     lhs = ta.get_str(schema, "regime")
     rhs = ta.value_str("bull")
-    sig = ta.str_eq(lhs, rhs)
+    sig = lhs.eq(rhs)
 
     atom = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
     sig.update(atom)
@@ -3497,7 +3500,7 @@ def test_str_eq_composes_over_a_sourced_str_column():
     # column cross-series would be useless. The literal adopts its partner's
     # domain, same as on the Real side.
     schema = _overlay_schema()
-    sig = ta.str_eq(ta.get_str(schema, "regime", source=ta.pick("M")), "bull")
+    sig = ta.get_str(schema, "regime", source=ta.pick("M")).eq("bull")
     assert sig.update(_two_symbol_snaps(schema)[0]) is True
 
 

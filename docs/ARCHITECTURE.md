@@ -1325,7 +1325,9 @@ Consequences worth stating outright:
 - `expr.rs` — **`NodeSpec`, the one composable expression enum** (there is no separate
   `SignalSpec` — a "signal" is a `NodeSpec` whose `output_type()` is `Bool`). Every
   tag lives here: numeric sources, boolean predicates (`!gt`/`!and`/`!crosses_above`/
-  `!changed`/`!every`/`!is_weekday`/…), string comparisons (`!str_eq`/`!str_ne`).
+  `!changed`/`!every`/`!is_weekday`/…). String comparisons are `!eq`/`!ne` too:
+  both dispatch on the operands' built output type, so one tag covers `Real` and
+  `Str`.
   Polymorphic over `PayloadType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`.
   `!changed` dispatches Bool-toggle vs Real-change on the child's `output_type()` at
   build; `!unstable { source }` is output-agnostic; `!eq`/`!ne` dispatch Real/Str on

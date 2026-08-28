@@ -831,7 +831,7 @@ mod tests {
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.universe {
             Some(UniverseSpec::AllOf(ref v)) => {
-                assert_eq!(v, &vec!["X".to_string(), "Y".to_string()]);
+                assert_eq!(v, &vec!["X", "Y"]);
             }
             _ => panic!("expected AllOf"),
         }

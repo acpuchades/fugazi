@@ -383,7 +383,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `percentile_rank(source, period)` | where the current reading sits in its own window: `count(v <= x)/period`, in `(0, 1]` |
 | `get(schema, key, source=None)` | the overlay column, typed by its declaration (real→Indicator, bool→Signal, str→StrSource); `source=pick(sym)` reads another series' column |
 | `get_real get_bool get_str (schema, key, source=None)` | the same read with the type **asserted** rather than inferred — each raises if the column is declared as something else, so a caller that needs an `Indicator` gets one or an error, never a `Signal` |
-| `value_str(s)` | a constant string source — the `StrSource` twin of `value(x)`, for the right-hand side of `str_eq` / `str_ne` |
+| `value_str(s)` | a constant string source — the `StrSource` twin of `value(x)`, for the right-hand side of `StrSource.eq()` / `.ne()` |
 | `bars_since(signal)` | bars since `signal` was last true (`0` on the firing bar); `None` until it has fired once, so thresholds read false until then |
 | `bars_since_high bars_since_low (source, period)` | bars since the source set a new `period`-bar extreme, in `[0, period-1]` |
 | `variance_ratio(source, period, lag=2)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
@@ -411,7 +411,6 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `day_of_week() day_of_year() week_of_year() quarter()` | ISO day-of-week (1=Mon), day/week of year, calendar quarter |
 | `unix_seconds() unix_millis()` | the raw stamp, as a float |
 | `is_weekday() is_weekend()` | Signals over the same stamp |
-| `str_eq(lhs, rhs)` `str_ne(lhs, rhs)` | Signals over two string sources — `str_eq(get_str(schema, "regime"), value_str("bull"))` |
 
 Every calendar leaf, like every price leaf, takes an optional `source=` to
 re-root it onto another series' atom stream.
@@ -1221,7 +1220,18 @@ say "the caller supplies this". An authoring tool that validates on submit has
 nothing to bind, so every such strategy fails to validate. So does the
 [default `root:`](https://github.com/acpuchades/fugazi/blob/main/docs/STRATEGIES.md)
 spelled out longhand, `!pick { symbol: !param SYMBOL, freq: !param FREQ }`, which
-is two defaultless placeholders.
+is two required placeholders.
+
+> **Omitting `root:` is a different document from writing that line.** The root
+> the loader splices for a `root:`-less single-asset document carries
+> `default: null` on both placeholders, so they are *optional*: they resolve to
+> null, the `!pick` collapses to the sole-atom selector a single-series input
+> fills in, and `load_spec(text, params={})` has always accepted it. `check_spec`
+> reports no holes for it either — so if you are generating documents and want
+> `SYMBOL`/`FREQ` to come back as typed knobs, write the root out in the bare
+> spelling. Separately, a `root:`-less document is structurally a `multi:` one:
+> `kind="auto"` reads it as multi in `check_spec` and `load_spec` alike, so a
+> caller that means single-asset has to pass `kind="single"`.
 
 `ta.check_spec(text)` is that pass — the same one `fugazi check strategy` runs.
 An unset placeholder becomes a *hole* the typed parse fills with a value of
@@ -1260,11 +1270,19 @@ check says nothing about a document's *values*: not that a period is sensible,
 not that a symbol exists. It says the document is well-formed, and what it still
 needs.
 
-**The hole types are the point.** A required placeholder has no default to read a
-type off, which is exactly the case where a caller doing this itself has nothing
-left but the parameter's *name* to guess from. `check_spec` answers it from the
-parse — the slot the placeholder actually sits in — so `SYMBOL` is a string
-because `!pick`'s `symbol:` is. `check.param_types` is the `{name: type}` form;
+**The hole types are worth more than the verdict.** Knowing a document is
+well-formed is a nice-to-have. Knowing what each knob has to be is what lets you
+render a form for a strategy you have never seen — and it is the thing callers
+otherwise reconstruct by hand, as a ladder of fallbacks: walk the document
+against `spec_grammar()` and type a parameter by the slot it sits in; failing
+that, guess from the written form of its `default:`; failing that, guess from
+the parameter's *name* (`/symbol|ticker|instrument/i`). That last rung exists
+precisely because **a required parameter has no default to read a type off** —
+and it is the one that is a guess rather than an inference.
+
+`check_spec` answers the same question from the parse, authoritatively, for
+exactly that case: `SYMBOL` is a *symbol* because `!pick`'s `symbol:` slot is,
+with no name-matching anywhere. `check.param_types` is the `{name: type}` form;
 `check.holes` is the full record:
 
 ```python
@@ -1287,6 +1305,30 @@ contradiction above — and is empty when the placeholder stands where a whole
 *expression* goes and nothing narrowed it, in which case `required_type` reads
 `'expression'`.
 
+**It covers the unresolved placeholders, and only those.** A `!param` carrying a
+`default:`, or one you bound through `params=`, is *resolved* — not a hole, and
+absent from `param_types` and `holes` alike, whatever `type:` it declared:
+
+```python
+doc = """
+root: BTC
+long:
+  enter: !gt
+    lhs: !sma { period: !param { key: FAST, default: 10, type: integer } }
+    rhs: !sma { period: !param SLOW }
+"""
+ta.check_spec(doc).param_types      # {'SLOW': 'number'} — FAST resolved
+```
+
+That is the right set for the question the report answers ("what does the caller
+still owe, and of what type"), and it is exactly the set the name-guessing rung
+was invented for. So in ladder terms: it **retires the name-guessing rung
+outright**, and replaces the grammar-walk rung for the required parameters. It
+does not cover a parameter that has a default — for those, the default is itself
+a value of the right type, which is what makes that rung an inference rather than
+a guess. A form that types every knob reads the defaulted ones from their
+defaults and the required ones from here.
+
 **Not every string is the same string.** `!pick`'s `symbol:` and `freq:` are
 both `String` slots and they sit side by side in the default `root:`, so typing
 them both `'string'` tells a caller nothing about either. They are distinct
@@ -1300,6 +1342,10 @@ ta.check_spec(
 ).param_types
 # {'SYMBOL': 'symbol', 'FREQ': 'frequency'}
 ```
+
+A declared basket universe carries the same element type — `!all_of [BTC, ETH]`
+reports a `symbol_list` payload, and the JSON schema gives its items
+`"format": "symbol"` — so a picker built for one slot fits the other.
 
 `!pick`'s `stream:` stays `'string'`, because it genuinely promises nothing —
 that asymmetry was already the contract between the two spellings and is now
@@ -1323,10 +1369,39 @@ build needs an overlay schema only real data supplies), or a single-asset `root:
 left to the input. `False` is not a weaker verdict on the parse; everything the
 parse decides was decided either way.
 
+**Which claim `built=True` is.** It says the document is *constructible as
+written*. It does **not** say "this will load once you supply values": the build
+ran with a typed zero standing in each hole, so it never saw the values you will
+eventually pass, and those are validated when they are passed. A `built=True`
+document with holes can still fail `load_spec` on a value its slot rejects:
+
+```python
+doc = "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: !param P }, rhs: !value 0 }\n"
+check = ta.check_spec(doc)
+assert check.built and check.param_types == {"P": "number"}
+
+try:
+    ta.load_spec(doc, params={"P": 0})   # `number` is the coarse demand —
+except ta.SpecError as e:                # a period is a NonZeroUsize
+    print(e)   # parsing single strategy: !gt > !sma > invalid value: integer `0`, …
+```
+
+So for a service deciding whether to reject a submission: the **exception** is
+the document being wrong, and that is the 4xx. `built` is a note on how much of
+the document could be checked with no inputs in hand — not a second verdict, and
+neither value of it means "reject".
+
 `params=` is not all-or-nothing — a bound placeholder is substituted and
 type-checked normally, and only the rest stay holes. `base_dir`, `imports` and
 `import_root` mean exactly what they mean on `load_spec`, `imports=False`
 included. `check.reads` is the same `!pick` walk as `spec.reads`.
+
+Hole-aware parsing is a thread-local mode `check_spec` turns on for the duration
+of one call and drops before it returns — on the error path too. So a
+`check_spec` never changes what the **next** `load_spec` accepts, and a worker
+in a process or thread pool reused across requests cannot inherit it from the
+request before. `load_spec` refuses an unset required `!param` whatever ran
+before it on that thread.
 
 `check_spec` deliberately does **not** give you back a `StrategySpec`. A checked
 document parses with every unset placeholder standing as a typed zero — `period`

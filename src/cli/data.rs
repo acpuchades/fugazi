@@ -162,7 +162,7 @@ impl fmt::Display for IndexKey {
 /// `real_ok` → Real, otherwise → Str).
 ///
 /// This is what lets a `true`/`false` column drop straight into a `!get`
-/// signal position without a `!str_eq` gymnastics — CSV makes those tokens
+/// signal position without an `!eq` gymnastics — CSV makes those tokens
 /// unambiguously not-numeric-and-not-general-strings.
 #[derive(Debug, Clone, Copy)]
 struct ColumnState {

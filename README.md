@@ -930,9 +930,10 @@ The vocabulary mirrors the library one-to-one. A representative slice:
   `!bars_since_low`; overlay readers `!get { key: … }`; constants `!value`.
 - **Signals.** `!gt` `!lt` `!ge` `!le` `!eq` `!ne { lhs, rhs, epsilon? }`,
   `!above` / `!below { source, level }`, `!crosses_above` / `!crosses_below`,
-  `!and` `!or` `!xor` `!all [...]` `!any [...]` `!not` `!changed`, `!unstable`, and
-  `!str_eq` / `!str_ne` for string overlay columns (`lhs: !get { key: regime }`,
-  `rhs: bull`).
+  `!and` `!or` `!xor` `!all [...]` `!any [...]` `!not` `!changed`, `!unstable`.
+  `!eq` / `!ne` are polymorphic — they compare `Real` *or* `Str`, so a string
+  overlay column reads as `!eq { lhs: !get { key: regime }, rhs: bull }`, with
+  the bare word standing for the constant.
 - **Trailing strategy risk.** `!sharpe` `!sortino` `!volatility` `!max_drawdown`
   `!calmar { strategy, period, bars_per_year }` — embed a whole strategy, drive it
   against a private wallet, and read a rolling risk metric off its live equity

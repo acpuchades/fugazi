@@ -1459,6 +1459,14 @@ impl PySpecCheck {
     /// placeholder stands where any expression goes). `!undefined` holes are
     /// left out: they are keyed by document path, not by a name anyone passes a
     /// value for — read `holes` for those.
+    ///
+    /// **The unresolved placeholders only.** A `!param` carrying a `default:`,
+    /// or bound through `params=`, is *resolved* — it is not a hole and does
+    /// not appear here, whatever `type:` it declared. That is the right set for
+    /// the question this answers (what does the caller still owe, and of what
+    /// type), and it is exactly the set with no default to read a type off. A
+    /// form that types **every** knob reads the defaulted ones from their
+    /// defaults and only the required ones from here.
     #[getter]
     pub(crate) fn param_types(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let d = pyo3::types::PyDict::new(py);
@@ -1489,6 +1497,21 @@ impl PySpecCheck {
     ///
     /// `False` is not a weaker verdict on the parse — everything the parse
     /// decides was decided either way.
+    ///
+    /// ## Which claim this is
+    ///
+    /// `True` says the document is **constructible as written**. It does *not*
+    /// say "this will load once you supply values": the build ran with a typed
+    /// zero standing in each hole, so it never saw the values a caller will
+    /// eventually pass, and those are validated when they are passed. A
+    /// `built=True` document with holes can still fail `load_spec` on a value
+    /// its slot rejects — a `period` of `0`, a `type: integer` given `2.5`, a
+    /// `freq` that is not a bar cadence.
+    ///
+    /// So for a caller deciding whether to reject a submission: an exception is
+    /// the document being wrong, and that is the 4xx. `built` is a note on how
+    /// much of the document could be checked without inputs — not a second
+    /// verdict, and neither value of it means "reject".
     #[getter]
     pub(crate) fn built(&self) -> bool {
         self.built
@@ -1512,9 +1535,10 @@ impl PySpecCheck {
 /// authoring tool storing a strategy, a form validating on submit, a linter.
 /// `load_spec` refuses a required `!param` with no value — correctly, since it
 /// is about to hand back something runnable — and that refusal covers every
-/// strategy whose author wrote a knob they intend to supply per run, including
-/// the default `root:` (`!pick { symbol: !param SYMBOL, freq: !param FREQ }`),
-/// whose two placeholders are both defaultless.
+/// strategy whose author wrote a knob they intend to supply per run — including
+/// the default `root:` written out longhand,
+/// `!pick { symbol: !param SYMBOL, freq: !param FREQ }`, whose two placeholders
+/// are both required in that spelling.
 ///
 /// ```python
 /// >>> doc = """
@@ -1525,10 +1549,26 @@ impl PySpecCheck {
 /// ...     rhs: !value 0
 /// ... """
 /// >>> ta.check_spec(doc).param_types
-/// {'FAST': 'number', 'FREQ': 'string', 'SYMBOL': 'string'}
+/// {'FAST': 'number', 'FREQ': 'frequency', 'SYMBOL': 'symbol'}
 /// >>> ta.check_spec(doc).built            # a root left to the input is not built
 /// False
 /// ```
+///
+/// ## The two spellings of that root are different documents
+///
+/// *Omitting* `root:` is not the same as writing the line above. The spliced
+/// default's placeholders carry `default: null`, so they are **optional**: they
+/// resolve to null, the `!pick` collapses to the sole-atom selector a
+/// single-series input fills in, and `load_spec(text, params={})` has always
+/// taken that document. It reports no holes here either — so a form built on
+/// `param_types` is not offered a symbol box for it. Write the root out in the
+/// bare spelling to make the two knobs required, and therefore reportable.
+///
+/// And a `root:`-less document is only single-asset if the caller says so: it
+/// is structurally a `multi:` one, `kind="auto"` reads it that way, and only
+/// `kind="single"` splices a root at all. Both surfaces agree — `load_spec`
+/// detects the same shape — so the risk is a caller that meant single-asset and
+/// did not say, not a disagreement between checking and running.
 ///
 /// ## What it does *not* relax
 ///
@@ -1881,9 +1921,11 @@ impl PySweep {
 
     /// Under `shrink=`, each member's own parameters as `{member: {axis: value}}`.
     ///
-    /// Empty when the sweep was not shrunk, and **also** when every member
-    /// chose the same point — which is complete pooling, and `best` already
-    /// says what that point was.
+    /// **Always every member**, including the ones that landed on the pooled
+    /// winner — so an empty dict means the sweep was not shrunk (or `λ` was
+    /// unavailable, leaving no surface to select off) and *never* that the panel
+    /// agreed. For "did anyone depart", read
+    /// [`departed`](Self::departed), which does carry empty-means-agreed.
     #[getter]
     pub(crate) fn member_winners(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         winners_to_py(py, &self.columns, &self.member_winners)
@@ -3745,6 +3787,16 @@ impl PyPanelFold {
     /// Per fold rather than once for the run, because a panel that agreed early
     /// and split later is a different story from one that never agreed, and a
     /// single number tells neither.
+    ///
+    /// **Deliberately conservative, and lower than the run-wide reading.** A
+    /// fold estimates from sub-spans of its own in-sample window — which is
+    /// what keeps it lookahead-free — but a metric measured over a short span
+    /// is itself noisy, and that noise lands in the denominator. Per-fold
+    /// `disagreement` of 0.275 / 0.0 / 0.0 against 0.815 for
+    /// `PanelWalkForwardResult.shrinkage` is an ordinary spread, not a
+    /// contradiction: it is the fold saying it cannot yet separate disagreement
+    /// from noise on its own evidence. Label which is which if you render both;
+    /// `docs/CLI.md` carries the longer version.
     #[getter]
     pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
         PyPanelShrinkage::wrap(py, self.shrinkage)
@@ -4004,6 +4056,11 @@ impl PyPanelWalkForwardResult {
     /// fold 1's winner. Use `PanelFold.shrinkage` for the lookahead-free
     /// per-fold estimate each fold acted on; this one describes the run after
     /// the fact and is better powered.
+    ///
+    /// Better powered means it will read **higher** than the per-fold numbers,
+    /// which rest on a handful of short sub-spans and are conservative as a
+    /// result. Expect the two to differ; it is not a bug. See
+    /// `PanelFold.shrinkage`.
     #[getter]
     pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
         PyPanelShrinkage::wrap(py, self.shrinkage)

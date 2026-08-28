@@ -901,7 +901,7 @@ class SpecHole:
 class StrSource:
     """A string-valued source (`Arc<str>` output). Produced by `get_str()` for a
     `Str`-typed overlay column and `value_str()` for a string literal; consumed by
-    `str_eq()` / `str_ne()` to build a boolean signal.
+    its own `eq()` / `ne()` to build a boolean signal.
     """
     def eq(self, other: Any) -> Signal: ...
     def is_ready(self) -> bool: ...
@@ -1461,15 +1461,6 @@ def stoch_rsi(source: Indicator, rsi_period: int = ..., stoch_period: int = ...)
     ...
 def stochastic(source: Indicator, period: int = ...) -> Indicator:
     """Stochastic %K of `source` over `period` (14 by default)."""
-    ...
-def str_eq(lhs: Indicator | float, rhs: Indicator | float) -> Signal:
-    """`lhs == rhs` on two string sources. `lhs` is a `StrSource`; `rhs` may be another
-    `StrSource` or a Python `str` (lifted to a `ValueStr` constant). Returns a
-    `Signal`.
-    """
-    ...
-def str_ne(lhs: Indicator | float, rhs: Indicator | float) -> Signal:
-    """`lhs != rhs` on two string sources. The complement of [`str_eq`]."""
     ...
 def threshold(long_min: Any, short_max: Any, of: Any = ...) -> Selection:
     """Long every symbol scoring `>= long_min`, short every symbol scoring `<=

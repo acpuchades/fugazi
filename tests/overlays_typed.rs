@@ -98,7 +98,7 @@ fn get_real_composes_into_a_numeric_signal() {
 
 #[test]
 fn get_bool_is_a_direct_signal() {
-    // A Bool overlay column reads as a signal directly — no `!str_eq true`
+    // A Bool overlay column reads as a signal directly — no `!eq true`
     // gymnastics.
     let schema = schema();
     let mut sig = GetBool::new(&schema, "risk_on");
@@ -149,7 +149,7 @@ fn strategy_style_and_of_three_types_fires_only_on_full_agreement() {
     // fires when *all three* line up — the shape a strategy would compose
     // for an entry gate. Emulates
     //   !all [ !get { key: risk_on },
-    //          !str_eq { lhs: !get { key: regime }, rhs: "bull" },
+    //          !eq { lhs: !get { key: regime }, rhs: "bull" },
     //          !gt   { lhs: !get { key: vol_20 }, rhs: !value { 0.15 } } ]
     // at the library level.
     let schema = schema();

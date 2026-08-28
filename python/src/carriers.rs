@@ -121,7 +121,7 @@ impl<I> Indicator for SignalBox<I> {
 /// A boxed `I -> Arc<str>` indicator — the string twin of `Source<I>`.
 ///
 /// Backs the `GetStr` overlay-column reader and the `ValueStr` string
-/// constant leaf, which compose into `str_eq` / `str_ne` signals.
+/// constant leaf, which compose into `StrSource.eq()` / `.ne()` signals.
 pub(crate) type StrSource<I> = runtime::Chain<I, Arc<str>>;
 
 /// Maps a multi-output value struct to its line names and their values (in the
@@ -1355,7 +1355,7 @@ pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair
         (A::Atom(l), A::Atom(r)) => StrPair::Atom(l, r),
         (A::Snapshot(l), A::Snapshot(r)) => StrPair::Snapshot(l, r),
         // A neutral constant adopts its partner's domain, exactly as on the
-        // Real side — so `str_eq(get_str(.., source=pick("M")), "bull")` works
+        // Real side — so `get_str(.., source=pick("M")).eq("bull")` works
         // without the caller having to say which domain the literal is in.
         (A::Atom(l), A::Const(c)) => StrPair::Atom(l, lift_atom(c)),
         (A::Const(c), A::Atom(r)) => StrPair::Atom(lift_atom(c), r),

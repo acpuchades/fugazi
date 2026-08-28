@@ -87,7 +87,6 @@ const BOOL: Expect = Expect::Only(PayloadType::Bool);
 /// `!changed` accepts either a Bool inner (toggle) or a Real inner (any-change).
 const BOOL_OR_REAL: Expect = Expect::OneOf(&[PayloadType::Bool, PayloadType::Real]);
 /// A string comparison's `lhs` reads a `Str` column.
-const STR: Expect = Expect::Only(PayloadType::Str);
 /// `!match`'s `on:` — numeric or string dispatch (the two are not mixable
 /// within one `!match`, but that is a build-time check against the cases).
 const REAL_OR_STR: Expect = Expect::OneOf(&[PayloadType::Real, PayloadType::Str]);
@@ -147,8 +146,6 @@ pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
         | Changed(_)
         | BecameTrue(_)
         | BecameFalse(_)
-        | StrEq { .. }
-        | StrNe { .. }
         | Never
         | Every(_)
         | IsWeekday
@@ -494,10 +491,6 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         BarsSince { source } => vec![("source", BOOL, source)],
         // Polymorphic: a Bool inner (toggle) or a Real inner (any-change).
         Changed(inner) => vec![("source", BOOL_OR_REAL, inner)],
-        // The string comparisons read a `Str` column on the left; `rhs` is a
-        // `StrOperand`, not a `NodeSpec`.
-        StrEq { lhs, .. } | StrNe { lhs, .. } => vec![("lhs", STR, lhs)],
-
         // The book-anchored recipes take a `source:` that is a *book selector*
         // (`!strategy_book` / `!portfolio_book`), not a value — excluded above
         // from `output_type` for the same reason.
@@ -641,14 +634,33 @@ pub fn check_immediate(spec: &NodeSpec) -> Result<(), String> {
         };
         if !expect.admits(actual) {
             return Err(format!(
-                "{}'s `{slot}` expects a {} source, but {} produces {actual}",
+                "{}'s `{slot}` expects a {} source, but {} produces {actual}{}",
                 tag_name(spec),
                 expect.describe(),
                 tag_name(child),
+                bare_word_hint(child),
             ));
         }
     }
     Ok(())
+}
+
+/// The clause that recovers what the bare-scalar rule costs.
+///
+/// A bare word that names no tag parses as the string constant it reads as
+/// (`NodeSpec::parse_unchecked`), so a *misspelled* tag no longer reports
+/// serde's `unknown variant` — it arrives here as a `Str` in a slot that wanted
+/// something else. Naming the word, and saying it is not in the vocabulary,
+/// puts the real mistake back in the message. Only ever built on an error path,
+/// so re-deriving the vocabulary costs nothing that matters.
+fn bare_word_hint(child: &NodeSpec) -> String {
+    let NodeSpec::Value(crate::spec::expr::ValueLit::Str(word)) = child else {
+        return String::new();
+    };
+    if known_node_tags().iter().any(|t| t == word) {
+        return String::new();
+    }
+    format!(" — `{word}` names no tag, so it was read as a string constant")
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +699,7 @@ fn prototype_filler(ty: &str) -> Option<&'static str> {
         "node_list" => "[{ get: { key: probe } }]",
         "match_cases" => "[{ when: 1, value: { get: { key: probe } } }]",
         "positive_uint" | "number" | "literal" => "1",
-        "str" | "str_operand" => "probe",
+        "str" => "probe",
         _ => return None,
     })
 }
@@ -876,7 +888,7 @@ mod tests {
             "!above { source: close, level: 1.0 }",
             "!crosses_above { lhs: close, rhs: close }",
             "!and { lhs: !value true, rhs: !value true }",
-            "!str_eq { lhs: !value bull, rhs: bear }",
+            "!eq { lhs: !value bull, rhs: bear }",
             "!changed { source: close }",
             "!every 5",
             "!is_weekday",
@@ -1139,10 +1151,10 @@ mod tests {
         assert_eq!(slot_demand("sma", "source"), Some(vec![Real]));
         assert_eq!(slot_demand("atr", "source"), Some(vec![Candle]));
         assert_eq!(slot_demand("close", "source"), Some(vec![Atom]));
-        assert_eq!(slot_demand("str_eq", "lhs"), Some(vec![Str]));
         // Alternatives.
         assert_eq!(slot_demand("changed", "source"), Some(vec![Bool, Real]));
         assert_eq!(slot_demand("match", "on"), Some(vec![Real, Str]));
+        assert_eq!(slot_demand("eq", "lhs"), Some(vec![Real, Str]));
         // Passthrough — an expression slot that demands nothing.
         assert_eq!(slot_demand("unstable", "source"), Some(vec![]));
         assert_eq!(slot_demand("resample", "inner"), Some(vec![]));

@@ -2240,7 +2240,6 @@ def test_slot_demand_reports_the_output_a_slot_requires():
     assert ta.slot_demand("sma", "source") == ["scalar"]
     assert ta.slot_demand("atr", "source") == ["candle"]
     assert ta.slot_demand("close", "source") == ["atom"]
-    assert ta.slot_demand("str_eq", "lhs") == ["str"]
     # A leading `!` is accepted, since that is how the tag is written in YAML.
     assert ta.slot_demand("!ema", "source") == ["scalar"]
 
@@ -2249,6 +2248,7 @@ def test_slot_demand_reports_alternatives_and_passthroughs():
     # Either output is accepted here.
     assert ta.slot_demand("changed", "source") == ["bool", "scalar"]
     assert ta.slot_demand("match", "on") == ["scalar", "str"]
+    assert ta.slot_demand("eq", "lhs") == ["scalar", "str"]
     # A passthrough demands nothing — an empty list, not None.
     assert ta.slot_demand("unstable", "source") == []
     assert ta.slot_demand("resample", "inner") == []
@@ -2936,6 +2936,107 @@ def test_check_spec_leaves_nothing_behind_between_calls():
     assert ta.check_spec(doc).param_types == {"KEPT": "symbol"}
 
 
+def test_check_spec_does_not_leave_check_mode_on_for_the_next_load():
+    """`check_mode()` is a thread-local RAII guard, and the one thing it must
+    never do is outlive the check that took it: a leaked guard would put the
+    *next* ordinary `load_spec` on the hole-aware path, which is how a caller
+    validating in a loop — or a process-pool worker reused across requests —
+    would silently start accepting documents that have no values.
+
+    Pinned on both exits, because the error path is the one a worker hits
+    first."""
+    unset = "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: !param P }, rhs: !value 0 }\n"
+
+    ta.check_spec(UNBOUND)  # a check that passed, holes and all
+    with pytest.raises(ta.SpecError, match="`P` is not set"):
+        ta.load_spec(unset, params={})
+
+    with pytest.raises(ta.SpecError):  # ...and one that raised
+        ta.check_spec("root: BTC\nlong:\n  enter: !nope {}\n")
+    with pytest.raises(ta.SpecError, match="`P` is not set"):
+        ta.load_spec(unset, params={})
+
+    # ...and one that went all the way through the build, which the guard also
+    # spans (a deferred template body is re-parsed there).
+    ta.check_spec(
+        "universe: !any_of [BTC, ETH]\n"
+        "selection: !top_bottom { longs: 1, shorts: 0 }\n"
+        "score: !sma { period: !param LOOK }\nsizing: !value 1.0\n"
+    )
+    with pytest.raises(ta.SpecError, match="`P` is not set"):
+        ta.load_spec(unset, params={})
+
+
+def test_check_spec_types_only_the_placeholders_it_could_not_resolve():
+    """What `param_types` covers, stated as a test because it bounds what a
+    caller can build on it: a `!param` carrying a `default:` is *resolved*, not
+    held, so it is not a hole and does not appear — declaration and all.
+
+    That is the right set for the question the report answers ("what does the
+    caller still owe, and of what type"), and it is exactly the set with no
+    default to read a type off. A form that types *every* knob still reads the
+    defaulted ones from their defaults."""
+    doc = (
+        "root: BTC\nlong:\n  enter: !gt\n"
+        "    lhs: !sma { period: !param { key: FAST, default: 10, type: integer } }\n"
+        "    rhs: !sma { period: !param SLOW }\n"
+    )
+    check = ta.check_spec(doc)
+    assert check.param_types == {"SLOW": "number"}
+    assert [h.name for h in check.holes] == ["SLOW"]
+
+
+def test_the_two_spellings_of_the_default_root_are_not_the_same_document():
+    """Omitting `root:` and spelling the 0.81 default out are different
+    documents to a caller with no values, and the difference is `default:
+    null`.
+
+    The spliced default's placeholders are *optional*: they resolve to null, the
+    `!pick` collapses to the sole-atom selector, and `load_spec` has always
+    taken that document with nothing bound — so a form built on `param_types`
+    is not offered a symbol box for it. The bare canonical spelling is
+    *required*, which `load_spec` refuses and `check_spec` reports as the two
+    typed holes it is."""
+    omitted = "long:\n  enter: !value true\n"
+    spelled = (
+        "root: !pick { symbol: !param SYMBOL, freq: !param FREQ }\n"
+        "long:\n  enter: !value true\n"
+    )
+
+    assert ta.load_spec(omitted, params={}, kind="single").kind == "single"
+    assert ta.check_spec(omitted, kind="single").param_types == {}
+
+    with pytest.raises(ta.SpecError, match="`FREQ` is not set"):
+        ta.load_spec(spelled, params={}, kind="single")
+    assert ta.check_spec(spelled).param_types == {
+        "SYMBOL": "symbol",
+        "FREQ": "frequency",
+    }
+
+    # And a `root:`-less document is only single-asset if the caller says so —
+    # structurally it is a `multi:` one, and `kind="auto"` reads it that way in
+    # both surfaces rather than one of them guessing differently.
+    assert ta.check_spec(omitted).kind == "multi"
+    assert ta.load_spec(omitted, params={}).kind == "multi"
+
+
+def test_check_spec_built_is_a_claim_about_the_document_not_its_values():
+    """`built=True` is not "this will load once you supply values". The build
+    ran with a typed zero standing in each hole, so it says the document is
+    *constructible as written* — a supplied value is validated when it is
+    supplied, and can still be refused."""
+    doc = "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: !param P }, rhs: !value 0 }\n"
+    check = ta.check_spec(doc)
+    assert check.built and check.param_types == {"P": "number"}
+
+    # `number` is the coarse demand — a period is a `NonZeroUsize`, and each of
+    # these is a number the document will not take.
+    for bad in (0, -3, 2.5):
+        with pytest.raises(ta.SpecError):
+            ta.load_spec(doc, params={"P": bad})
+    assert ta.load_spec(doc, params={"P": 20}).kind == "single"
+
+
 def test_check_spec_binds_the_values_it_is_given():
     """`params=` is not all-or-nothing: a bound placeholder is substituted and
     type-checked exactly as `load_spec` does it, and only the rest stay holes."""
@@ -3068,3 +3169,82 @@ def test_spec_grammar_reports_the_refined_string_types():
     assert types["symbol"] == "symbol"
     assert types["freq"] == "frequency"
     assert types["stream"] == "str", "an opaque id promises nothing and says so"
+
+
+def test_a_declared_universe_is_a_list_of_symbols():
+    """`!all_of [BTC, ETH]` is a list of *symbols*, and the three published
+    surfaces say so from one source — the field is a `Vec<SymbolName>`, so the
+    grammar payload, the JSON schema's item format, and a checked document
+    cannot disagree about it."""
+    grammar = ta.spec_grammar()
+    tags = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "forms" in node:
+                tags.append(node)
+            else:
+                for value in node.values():
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(grammar)
+    for name in ("all_of", "any_of"):
+        (tag,) = [t for t in tags if t.get("name") == name]
+        assert tag["forms"][0]["payload"] == "symbol_list", name
+
+    universe = ta.spec_document_json_schema()["$defs"]["universe"]
+    items = universe["oneOf"][0]["properties"]["all_of"]["items"]
+    assert items == {"type": "string", "format": "symbol"}
+
+    check = ta.check_spec(
+        "universe: !all_of [BTC, ETH]\n"
+        "selection: !top_bottom { longs: 1, shorts: 0 }\n"
+        "score: !sma { period: 20 }\nsizing: !value 1.0\n"
+    )
+    assert check.kind == "basket" and check.built
+
+
+def test_a_refined_hole_answers_with_a_value_its_own_format_accepts():
+    """A hole stands in for a value, and the stand-in has to satisfy the slot it
+    stands in — the same rule that makes an integer hole answer `1` rather than
+    `0` so a `NonZeroUsize` period parses.
+
+    Regression: a cadence hole answered the generic `""`, which reached the
+    build as `invalid frequency ""`. A document parameterising its cadence — the
+    other half of the default `root:` — could not be checked at all."""
+    for name, doc in [
+        (
+            "cadence",
+            "root: BTC\nlong:\n  enter: !gt\n"
+            "    lhs: !close { source: !pick { freq: !param F } }\n    rhs: !value 0\n",
+        ),
+        (
+            "symbol",
+            "root: BTC\nlong:\n  enter: !gt\n"
+            "    lhs: !close { source: !pick { symbol: !param S } }\n    rhs: !value 0\n",
+        ),
+    ]:
+        check = ta.check_spec(doc)
+        assert check.built, f"{name}: nothing left it undetermined, so it must build"
+
+
+def test_an_empty_symbol_is_refused_but_an_unset_one_is_not():
+    """An empty symbol matches no bar, so the leaf reads `None` for the whole run
+    and the backtest reports a plausible zero-fill rather than failing.
+
+    Refused at *build*, and the second half is why: a checked document's unset
+    symbol is a hole standing in for a value, so refusing the empty string at
+    parse would refuse exactly the documents `check_spec` exists for."""
+    with pytest.raises(ta.SpecError, match="`symbol` is empty"):
+        ta.check_spec(
+            "root: BTC\nlong:\n  enter: !gt\n"
+            '    lhs: !close { source: !pick { symbol: "" } }\n    rhs: !value 0\n'
+        )
+
+    assert ta.check_spec(
+        "root: BTC\nlong:\n  enter: !gt\n"
+        "    lhs: !close { source: !pick { symbol: !param S } }\n    rhs: !value 0\n"
+    ).built

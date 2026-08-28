@@ -38,7 +38,7 @@ use crate::types::Snapshot;
 
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::indicators::compare;
-use crate::runtime::{AnyChain, AtomChain, BoolChain, CandleChain, RealChain, StrChain, any};
+use crate::runtime::{AnyChain, AtomChain, BoolChain, CandleChain, RealChain, any};
 use crate::spec::dyn_indicator::PayloadType;
 
 use crate::Selector;
@@ -457,51 +457,6 @@ fn stoch_rsi_stoch_period_default() -> NonZeroUsize {
     nz(STOCH_RSI_STOCH_PERIOD)
 }
 
-/// The right-hand operand of `!str_eq` / `!str_ne`.
-///
-/// A bare YAML string is the literal to match (`rhs: bull`) — the common case.
-/// Anything else deserializes as a [`NodeSpec`], so both sides of the
-/// comparison are symmetric: the same constant written the long way
-/// (`rhs: !value bull`) or a second `Str` column read (`rhs: !get { key: prev }`)
-/// both build to a `Str`-output source.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "serde_norway::Value")]
-pub enum StrOperand {
-    Literal(String),
-    Expr(Box<NodeSpec>),
-}
-
-impl TryFrom<serde_norway::Value> for StrOperand {
-    type Error = String;
-
-    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
-        match v {
-            serde_norway::Value::String(s) => Ok(StrOperand::Literal(s)),
-            other => NodeSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
-        }
-    }
-}
-
-impl StrOperand {
-    /// Build as a `Str`-output source. A literal materialises the same
-    /// [`ValueStr`] constant the `!value <string>` expression form builds.
-    pub(super) fn try_build(
-        &self,
-        anchor: &Position,
-        book: &Book,
-        portfolio_book: Option<&Book>,
-        schema: &Arc<Schema>,
-        root: Root<'_>,
-    ) -> Result<AnyChain, String> {
-        match self {
-            StrOperand::Literal(s) => Ok(any(ValueStr::<crate::types::Snapshot<Symbol>>::new(
-                s.as_str(),
-            ))),
-            StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
-        }
-    }
-}
-
 /// Fail unless `node`'s statically-known output type is `want`. An
 /// undecidable output (`None` — a `!get`, a hole, a passthrough over one) is
 /// **skipped**, exactly as [`crate::spec::typecheck::check_immediate`] skips
@@ -626,7 +581,7 @@ impl BoolNode {
 ///
 /// A YAML number builds a [`Value`] (`Real` output, the operand of every
 /// arithmetic op and comparison); a YAML string builds a
-/// [`ValueStr`] (`Arc<str>` output, the operand of `!str_eq` / `!str_ne`
+/// [`ValueStr`] (`Arc<str>` output, the string operand of `!eq` / `!ne`
 /// against a `Str` overlay column read by `!get`); a YAML list of numbers
 /// (`[w0, w1, w2, ...]`) is a per-child indexed constant — meaningful only
 /// inside a portfolio weight-share template, where the SpecTemplate's
@@ -635,7 +590,7 @@ impl BoolNode {
 ///
 /// ```yaml
 /// !gt      { lhs: !rsi { period: 14 }, rhs: !value 70 }        # Real
-/// !str_ne  { lhs: !get { key: regime }, rhs: !value bear }     # Str
+/// !ne      { lhs: !get { key: regime }, rhs: !value bear }     # Str
 /// weights: !value [0.4, 0.6]                                    # List (fixed per-child)
 /// ```
 ///
@@ -714,7 +669,7 @@ impl TryFrom<serde_norway::Value> for ValueLit {
             }
             other => Err(format!(
                 "!value takes a number (a constant scalar), a bool (a constant \
-                 signal), a string (a constant string, for !str_eq / !str_ne), \
+                 signal), a string (a constant string, for !eq / !ne), \
                  or a list of numbers (a per-child weight vector), got {other:?}"
             )),
         }
@@ -816,6 +771,28 @@ macro_rules! refined_string {
         impl std::ops::Deref for $ty {
             type Target = str;
             fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+        // Comparable against the plain strings it wraps, so a newtype at a
+        // field costs nothing at every site that only wanted the name.
+        impl PartialEq<str> for $ty {
+            fn eq(&self, other: &str) -> bool {
+                self.0 == other
+            }
+        }
+        impl PartialEq<&str> for $ty {
+            fn eq(&self, other: &&str) -> bool {
+                self.0 == *other
+            }
+        }
+        impl PartialEq<String> for $ty {
+            fn eq(&self, other: &String) -> bool {
+                &self.0 == other
+            }
+        }
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
                 &self.0
             }
         }
@@ -954,7 +931,7 @@ pub enum NodeSpec {
     },
 
     /// A constant value — a number (`!value 70`, a `Real` source) or a string
-    /// (`!value bull`, a `Str` source for `!str_eq` / `!str_ne`). See
+    /// (`!value bull`, a `Str` source for `!eq` / `!ne`). See
     /// [`ValueLit`].
     #[grammar(kind = "source", output = "any")]
     Value(ValueLit),
@@ -1059,7 +1036,7 @@ pub enum NodeSpec {
     /// `Real`-output source (fits everywhere a numeric source does), a
     /// `Bool` column yields a `Bool`-output source (fits in any signal
     /// position — `!get` reads as a signal directly), a `Str` column yields
-    /// a `Str`-output source (feeds into `!str_eq` / `!str_ne` on the
+    /// a `Str`-output source (feeds into `!eq` / `!ne` on the
     /// signal side).
     ///
     /// Builds panic on an unknown key or a type mismatch — a `Str` column
@@ -2490,22 +2467,6 @@ pub enum NodeSpec {
     /// Falling-edge detector (`true → false`).
     #[grammar(kind = "predicate", output = "bool", alt = "unary_source")]
     BecameFalse(Box<NodeSpec>),
-    /// `lhs == rhs` on two `Str`-typed operands.
-    #[grammar(kind = "predicate", output = "bool")]
-    StrEq {
-        /// Left-hand operand.
-        lhs: Box<NodeSpec>,
-        /// Right-hand operand — a string literal or a `Str`-typed expression.
-        rhs: StrOperand,
-    },
-    /// `lhs != rhs` on two `Str`-typed operands.
-    #[grammar(kind = "predicate", output = "bool")]
-    StrNe {
-        /// Left-hand operand.
-        lhs: Box<NodeSpec>,
-        /// Right-hand operand — a string literal or a `Str`-typed expression.
-        rhs: StrOperand,
-    },
     /// Sugar for `!value false` — reads better on a `rebalance_on:` field
     /// where the intent is "never".
     ///
@@ -2606,7 +2567,7 @@ enum NodeSpecRaw {
     },
 
     /// A constant value — a number (`!value 70`, a `Real` source) or a string
-    /// (`!value bull`, a `Str` source for `!str_eq` / `!str_ne`). See
+    /// (`!value bull`, a `Str` source for `!eq` / `!ne`). See
     /// [`ValueLit`].
     Value(ValueLit),
 
@@ -2693,7 +2654,7 @@ enum NodeSpecRaw {
     /// `Real`-output source (fits everywhere a numeric source does), a
     /// `Bool` column yields a `Bool`-output source (fits in any signal
     /// position — `!get` reads as a signal directly), a `Str` column yields
-    /// a `Str`-output source (feeds into `!str_eq` / `!str_ne` on the
+    /// a `Str`-output source (feeds into `!eq` / `!ne` on the
     /// signal side).
     ///
     /// Builds panic on an unknown key or a type mismatch — a `Str` column
@@ -3549,14 +3510,6 @@ enum NodeSpecRaw {
     Changed(Box<NodeSpec>),
     BecameTrue(Box<NodeSpec>),
     BecameFalse(Box<NodeSpec>),
-    StrEq {
-        lhs: Box<NodeSpec>,
-        rhs: StrOperand,
-    },
-    StrNe {
-        lhs: Box<NodeSpec>,
-        rhs: StrOperand,
-    },
     Never,
     Every(NonZeroUsize),
     IsWeekday,
@@ -3968,8 +3921,6 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Changed(inner) => NodeSpec::Changed(inner),
             NodeSpecRaw::BecameTrue(inner) => NodeSpec::BecameTrue(inner),
             NodeSpecRaw::BecameFalse(inner) => NodeSpec::BecameFalse(inner),
-            NodeSpecRaw::StrEq { lhs, rhs } => NodeSpec::StrEq { lhs, rhs },
-            NodeSpecRaw::StrNe { lhs, rhs } => NodeSpec::StrNe { lhs, rhs },
             NodeSpecRaw::Never => NodeSpec::Never,
             NodeSpecRaw::Every(n) => NodeSpec::Every(n),
             NodeSpecRaw::IsWeekday => NodeSpec::IsWeekday,
@@ -3993,6 +3944,9 @@ impl TryFrom<serde_norway::Value> for NodeSpec {
     ///
     /// - `Value::String(s)` (a bare word like `close`) → `Value::Tagged { tag:
     ///   s, value: Null }`, matching variant `s` with all fields defaulted.
+    ///   A word that matches no variant is **not** an error: it falls back to
+    ///   `!value <s>`, the string constant, completing the bare-scalar rule
+    ///   the `Number` / `Bool` / number-list arms already follow.
     /// - `Value::Tagged` — forwarded verbatim (the YAML `!close` /
     ///   `!ema { ... }` form already has the right shape).
     /// - `Value::Mapping` with a single string key — rewritten as
@@ -4103,7 +4057,21 @@ impl NodeSpec {
             }
         };
 
+        // The one scalar shape whose reading is ambiguous: every other bare
+        // scalar auto-wraps as `!value` below, because no number, bool or list
+        // can name a leaf — but a bare word can. Kept here so the arm below can
+        // try it as a tag first and fall back to the constant.
+        let bare_word = match &v {
+            serde_norway::Value::String(s) => Some(s.clone()),
+            _ => None,
+        };
+
         let normalised = match v {
+            // A bare word is read as the tag it names (`enter: never`,
+            // `source: close`) — the vocabulary wins where it applies. When it
+            // names nothing, the tail of this function retries it as
+            // `!value <word>`, which is what makes `rhs: bull` a string
+            // constant without a slot having to declare that it wants one.
             serde_norway::Value::String(s) => {
                 let value = if UNIT_VARIANTS.contains(&s.as_str()) {
                     serde_norway::Value::Null
@@ -4176,48 +4144,72 @@ impl NodeSpec {
             }
             other => other,
         };
-        // Sugar tags — rewrite to their canonical form before typed
-        // parse. `!equal_weight <N>` is really just `!value <1/N>`
-        // (a per-leg constant that normalizes to `1/N`); collapsing
-        // it here means there's one primitive (`!value`) instead of
-        // two variants doing the same thing.
-        let normalised = rewrite_sugar_tags(normalised)?;
-        // Wall-clock cadence sugar (`!daily` → `!changed { source: !day }`),
-        // then the wrapper dispatch: edge detectors (`!changed`,
-        // `!became_true`, `!became_false`) and `!unstable`'s bare-inner form
-        // are constructed directly from their extracted inner, because that
-        // inner is a bare tagged node rather than a `{ field: ... }` map the
-        // derived Raw parse expects.
-        let normalised = rewrite_cadence_sugar(normalised);
-        if let Some(rewritten) = try_dispatch_wrappers(&normalised)? {
-            return Ok(rewritten);
-        }
-        // The tag this node parses as, for the error breadcrumb below. Known
-        // here even when the typed parse fails, which is exactly when it is
-        // needed.
-        let tag = match &normalised {
-            serde_norway::Value::Tagged(t) => {
-                let s = t.tag.to_string();
-                Some(s.strip_prefix('!').unwrap_or(&s).to_string())
+        // A bare word that names no tag is the string constant it reads as —
+        // the fourth arm of the bare-scalar rule, decided here because it is
+        // the one arm the vocabulary has to settle. Retried rather than
+        // predicted: asking serde is the same authority `known_node_tags`
+        // reads, so a new variant, a new sugar tag and a new load-time rewrite
+        // all keep working with no list to update. A tag that *is* known but
+        // malformed fails on the first attempt and keeps its own error.
+        match parse_normalised(normalised) {
+            Err(e) if bare_word.is_some() && e.contains("unknown variant") => {
+                parse_normalised(serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("value"),
+                    value: serde_norway::Value::String(bare_word.expect("checked above")),
+                })))
             }
-            _ => None,
-        };
-        let raw: NodeSpecRaw = crate::spec::undefined::from_value(normalised)
-            // Nesting this at every level turns a bare "expects a Real source"
-            // into a trail from the outermost tag down to the offending one —
-            // the closest thing to a source location available, since the
-            // `!import` / `!param` passes rewrite the tree and drop any spans
-            // the original text had.
-            .map_err(|e| match &tag {
-                // A ` > `-separated path, built inside-out as the error rises.
-                // Rendered as one `at:` line by `diagnostics::split_trail`; if
-                // that ever fails to run, the raw string still reads as a path
-                // rather than as a stack of `in x: in y:` prefixes.
-                Some(t) => format!("!{t} > {e}"),
-                None => e.to_string(),
-            })?;
-        Ok(raw.into())
+            other => other,
+        }
     }
+}
+
+/// The second half of [`NodeSpec::parse_unchecked`]: sugar rewrites, wrapper
+/// dispatch, then the derived typed parse.
+///
+/// Split out so the bare-word arm can run it twice — once as the tag the word
+/// might name, once as the string constant it is when no tag answers.
+fn parse_normalised(normalised: serde_norway::Value) -> Result<NodeSpec, String> {
+    // Sugar tags — rewrite to their canonical form before typed
+    // parse. `!equal_weight <N>` is really just `!value <1/N>`
+    // (a per-leg constant that normalizes to `1/N`); collapsing
+    // it here means there's one primitive (`!value`) instead of
+    // two variants doing the same thing.
+    let normalised = rewrite_sugar_tags(normalised)?;
+    // Wall-clock cadence sugar (`!daily` → `!changed { source: !day }`),
+    // then the wrapper dispatch: edge detectors (`!changed`,
+    // `!became_true`, `!became_false`) and `!unstable`'s bare-inner form
+    // are constructed directly from their extracted inner, because that
+    // inner is a bare tagged node rather than a `{ field: ... }` map the
+    // derived Raw parse expects.
+    let normalised = rewrite_cadence_sugar(normalised);
+    if let Some(rewritten) = try_dispatch_wrappers(&normalised)? {
+        return Ok(rewritten);
+    }
+    // The tag this node parses as, for the error breadcrumb below. Known
+    // here even when the typed parse fails, which is exactly when it is
+    // needed.
+    let tag = match &normalised {
+        serde_norway::Value::Tagged(t) => {
+            let s = t.tag.to_string();
+            Some(s.strip_prefix('!').unwrap_or(&s).to_string())
+        }
+        _ => None,
+    };
+    let raw: NodeSpecRaw = crate::spec::undefined::from_value(normalised)
+        // Nesting this at every level turns a bare "expects a Real source"
+        // into a trail from the outermost tag down to the offending one —
+        // the closest thing to a source location available, since the
+        // `!import` / `!param` passes rewrite the tree and drop any spans
+        // the original text had.
+        .map_err(|e| match &tag {
+            // A ` > `-separated path, built inside-out as the error rises.
+            // Rendered as one `at:` line by `diagnostics::split_trail`; if
+            // that ever fails to run, the raw string still reads as a path
+            // rather than as a stack of `in x: in y:` prefixes.
+            Some(t) => format!("!{t} > {e}"),
+            None => e.to_string(),
+        })?;
+    Ok(raw.into())
 }
 
 /// Rewrite NodeSpec sugar tags to their canonical `!value` forms. Runs
@@ -4755,17 +4747,6 @@ impl NodeSpec {
         let boolean = |s: &NodeSpec| -> Result<BoolChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             built.into_bool().map_err(|e| trail(s, e))
-        };
-        let str_view = |s: &NodeSpec| -> Result<StrChain, String> {
-            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            built.into_str().map_err(|e| trail(s, e))
-        };
-        let str_operand = |s: &StrOperand| -> Result<StrChain, String> {
-            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            built.into_str().map_err(|e| match s {
-                StrOperand::Expr(e2) => trail(e2, e),
-                StrOperand::Literal(_) => e,
-            })
         };
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<NodeSpec>>| {
@@ -5531,8 +5512,6 @@ impl NodeSpec {
             }
             BecameTrue(inner) => any(boolean(inner)?.became_true()),
             BecameFalse(inner) => any(boolean(inner)?.became_false()),
-            StrEq { lhs, rhs } => any(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?)),
-            StrNe { lhs, rhs } => any(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?)),
             Never => any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false)),
             Every(n) => any(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get())),
             IsWeekday => any(crate::indicators::IsWeekday::of(pick_any_root())),
@@ -5612,6 +5591,23 @@ fn build_pick(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
 ) -> Result<AnyChain, String> {
+    // An empty symbol names nothing, and a `Selector` built from one matches no
+    // bar — so the leaf reads `None` for the whole run and the backtest reports
+    // a plausible zero-fill rather than failing. That is the same failure mode
+    // `RootSpec::as_pick` exists to prevent, and the only check a symbol admits:
+    // ticker shape is venue-specific (`BTCUSDT`, `BTC-USD`, `ES=F`, `BRK.B`), so
+    // there is no alphabet to hold one to.
+    //
+    // Here rather than in `SymbolName`'s parse, and that is not a preference: a
+    // `check`-mode hole answers its slot with a stand-in, and rejecting the
+    // empty string at parse would refuse every document with an unset symbol
+    // placeholder — the documents `check` exists for. See
+    // `undefined::refined_placeholder`, which is the other half of the rule.
+    if symbol == Some("") {
+        return Err("`symbol` is empty; give an asset name, or omit the key to \
+                    read the blessed series"
+            .to_string());
+    }
     let named = symbol.is_some();
     // The document gives a `&str`; interning happens here, once at build time,
     // so the resulting `Selector` clones as a refcount bump for the whole run.

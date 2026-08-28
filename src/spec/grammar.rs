@@ -104,7 +104,7 @@ pub const SINCE_BASELINE: &str = "0.46";
 /// Two cases, **tagged** rather than inferred, because a bare JSON value cannot
 /// distinguish them: `{ "expr": "!close" }` and a field whose default is the
 /// *string* `"close"` would both be `"close"`, and the field-type vocabulary
-/// has `str` / `str_operand`, so that collision is expressible today.
+/// has `str`, so that collision is expressible today.
 ///
 /// - [`Literal`](Self::Literal) — a scalar key with a serde `default`. 34
 ///   fields: `!macd_line`'s `fast: 12`, `!bb_upper`'s `k: 2.0`.
@@ -168,10 +168,10 @@ pub struct GrammarField {
     /// The YAML key, exactly as written under the tag.
     pub name: String,
     /// The value's grammar type: `node` (a nested expression) · `node_list` ·
-    /// `str_list` · `number_list` · `uint` · `number` · `str` · `symbol` ·
+    /// `str_list` · `symbol_list` · `number_list` · `uint` · `number` · `str` · `symbol` ·
     /// `frequency` · `bool` · `strategy` (an embedded strategy document) ·
-    /// `match_cases` · `str_operand`. A closed vocabulary the derive maps each
-    /// Rust field type onto.
+    /// `match_cases`. A closed vocabulary the derive maps each Rust field type
+    /// onto.
     ///
     /// `symbol` and `frequency` are `str` **refinements**: still strings, but
     /// naming an asset and a bar cadence respectively, so a form built over
@@ -601,10 +601,7 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
             "close", "high", "low", "open", "volume", "typical", "median", "current", "pick",
         ],
     ),
-    (
-        "comparisons",
-        &["str_eq", "str_ne", "gt", "lt", "ge", "le", "eq", "ne"],
-    ),
+    ("comparisons", &["gt", "lt", "ge", "le", "eq", "ne"]),
     ("conditional", &["if_else", "match"]),
     ("constants", &["value", "never", "every"]),
     (
@@ -1197,7 +1194,10 @@ fn basket_side_def() -> serde_json::Value {
 
 /// `UniverseSpec`: `!all_of [ SYM… ]` / `!any_of [ SYM… ]` (absent ⇒ floating).
 fn universe_def() -> serde_json::Value {
-    let list = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+    // Through the shared fragment rather than a literal, so the element type
+    // cannot drift from the field's: both `!all_of` and `!any_of` hold a
+    // `Vec<SymbolName>`, and the grammar reports them as `symbol_list`.
+    let list = type_fragment("symbol_list");
     serde_json::json!({
         "oneOf": [single_key("all_of", list.clone()), single_key("any_of", list)]
     })
@@ -1511,6 +1511,13 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         // sugar). Present for completeness; those tags are excluded from the
         // expression schema, so these arms aren't reached through `node`.
         "str_list" => json!({ "type": "array", "items": { "type": "string" } }),
+        // A list whose *elements* are symbols. The `format` rides on the item
+        // schema, which is where the refinement lives — the array itself is an
+        // ordinary array.
+        "symbol_list" => json!({
+            "type": "array",
+            "items": { "type": "string", "format": "symbol" },
+        }),
         "number_list" => json!({ "type": "array", "items": { "type": "number" } }),
         // A plain count that may legitimately be 0 (`longs` / `shorts` on a
         // selection rule).
@@ -1529,7 +1536,6 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         "symbol" => or_placeholder(json!({ "type": "string", "format": "symbol" })),
         "frequency" => or_placeholder(json!({ "type": "string", "format": "frequency" })),
         "bool" => or_placeholder(json!({ "type": "boolean" })),
-        "str_operand" => json!({ "oneOf": [{ "type": "string" }, node_ref()] }),
         "match_cases" => json!({ "type": "array", "items": { "$ref": "#/$defs/match_case" } }),
         "strategy" => json!({ "$ref": "#/$defs/strategy" }),
         "selection" => json!({ "$ref": "#/$defs/selection" }),

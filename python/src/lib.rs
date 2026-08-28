@@ -83,9 +83,9 @@ use crate::constructors::{
     identity, if_else, is_weekday, is_weekend, keltner, kurtosis_indicator, latch, linreg, log,
     low, macd, median, mfi, minute, month, obv, open, parkinson, percentile, percentile_rank, pick,
     quarter, resample, rma, rogers_satchell, rsi, sar, second, skewness_indicator, sma, stddev,
-    stoch_rsi, stochastic, str_eq, str_ne, true_range, typical, unix_millis, unix_seconds,
-    unstable, value, value_str, variance_ratio, volume, volume_bars, vwap, week_of_year,
-    williams_r, wma, year, zscore,
+    stoch_rsi, stochastic, true_range, typical, unix_millis, unix_seconds, unstable, value,
+    value_str, variance_ratio, volume, volume_bars, vwap, week_of_year, williams_r, wma, year,
+    zscore,
 };
 // Unpickling entry points. Not surface — but `__reduce__` names its callable by
 // `module.qualname`, so each has to be a real, importable module member.
@@ -267,8 +267,6 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         get_bool,
         get_str,
         compute_overlays,
-        str_eq,
-        str_ne,
         year,
         month,
         day,

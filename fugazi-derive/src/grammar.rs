@@ -361,16 +361,25 @@ fn default_path(field: &syn::Field, path: &str) -> Result<syn::Path, syn::Error>
 
 /// Map a Rust field type onto the grammar's closed type vocabulary.
 fn grammar_type(ty_str: &str) -> &'static str {
-    // Peel `Option<...>` / `Box<...>` wrappers to look at the inner type.
-    let inner = strip_wrappers(ty_str);
+    // Peel `Option<...>` / `Box<...>` wrappers to look at the inner type, then
+    // its path qualifiers: a type's *name* decides its grammar type, and where
+    // a field happens to import it from must not. `Vec<crate::spec::expr::
+    // SymbolName>` silently fell through to `other` — and `other` is an
+    // accepted payload, so no drift guard caught it.
+    let inner = strip_paths(&strip_wrappers(ty_str));
     if inner.contains("NodeSpec") {
         if inner.starts_with("Vec") {
             "node_list"
         } else {
             "node"
         }
+    } else if inner.contains("Vec<SymbolName>") {
+        // A declared universe, e.g. `!all_of [BTC, ETH]`. The `symbol` element
+        // type is what tells a consumer to offer instrument pickers rather than
+        // free text — same reason a lone `SymbolName` field is not `str`.
+        "symbol_list"
     } else if inner.starts_with("Vec<String>") || inner.starts_with("Vec<str>") {
-        // A raw list of names, e.g. `!all_of [BTC, ETH]` (`UniverseSpec`).
+        // A raw list of names with no domain attached.
         "str_list"
     } else if inner.starts_with("Vec<Real>") || inner.starts_with("Vec<f64>") {
         "number_list"
@@ -383,8 +392,6 @@ fn grammar_type(ty_str: &str) -> &'static str {
         "match_cases"
     } else if inner.contains("AnyStrategyRef") {
         "strategy"
-    } else if inner.contains("StrOperand") {
-        "str_operand"
     } else if inner == "NonZeroUsize" {
         // Periods and window lengths. Distinct from `uint` because serde
         // rejects 0 at *parse*, so the generated schema can say `minimum: 1`
@@ -412,6 +419,27 @@ fn grammar_type(ty_str: &str) -> &'static str {
         // descriptor honest rather than guessing a scalar.
         "other"
     }
+}
+
+/// Drop path qualifiers from a stringified type, leaving the bare names:
+/// `Vec<crate::spec::expr::SymbolName>` becomes `Vec<SymbolName>`.
+fn strip_paths(ty_str: &str) -> String {
+    let mut out = String::with_capacity(ty_str.len());
+    let mut rest = ty_str;
+    while let Some(at) = rest.find("::") {
+        out.push_str(&rest[..at]);
+        // Drop the segment name just pushed, along with the `::`.
+        while out
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            out.pop();
+        }
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Strip `Option< >` and `Box< >` wrappers (repeatedly) from a stringified type.

@@ -608,7 +608,71 @@ long:
         );
     }
 
-    /// A placeholder standing where a whole expression goes records `Expr`,    /// A placeholder standing where a whole expression goes records `Expr`,
+    /// A hole has to answer with a value its own slot accepts, or the documents
+    /// `check` exists for fail on the stand-in rather than on anything written.
+    ///
+    /// Regression, and a pre-existing one: a `FreqToken` hole answered the
+    /// generic `""`, which reached `resolve_stream` at build and came back
+    /// `invalid frequency ""` — so a document parameterising a cadence could not
+    /// be checked at all. The same rule integers already followed (they answer
+    /// `1`, not `0`, so a `NonZeroUsize` period parses); the refinements only
+    /// needed it applied to them.
+    #[test]
+    fn a_refined_hole_answers_with_a_value_its_own_format_accepts() {
+        for (name, text) in [
+            (
+                "a parameterised cadence",
+                "root: BTC\nlong:\n  enter: !gt\n    \
+                 lhs: !close { source: !pick { freq: !param F } }\n    rhs: !value 0\n",
+            ),
+            (
+                "a parameterised symbol",
+                "root: BTC\nlong:\n  enter: !gt\n    \
+                 lhs: !close { source: !pick { symbol: !param S } }\n    rhs: !value 0\n",
+            ),
+            (
+                "both at once",
+                "root: BTC\nlong:\n  enter: !gt\n    \
+                 lhs: !close { source: !pick { symbol: !param S, freq: !param F } }\n    \
+                 rhs: !value 0\n",
+            ),
+        ] {
+            let c = single(text).unwrap_or_else(|e| panic!("{name}: should have checked: {e:#}"));
+            assert!(
+                c.built,
+                "{name}: nothing left it undetermined, so it must build"
+            );
+        }
+    }
+
+    /// An empty symbol names nothing, so the leaf reads `None` on every bar and
+    /// the run reports a plausible zero-fill instead of failing — the failure
+    /// mode `RootSpec::as_pick` exists to prevent.
+    ///
+    /// Refused at **build**, not at parse, and the second half of this test is
+    /// why: a `check`-mode hole stands in for the value, so a parse-time
+    /// rejection would refuse every document with an unset symbol placeholder.
+    #[test]
+    fn an_empty_symbol_is_refused_but_an_unset_one_is_not() {
+        let err = single(
+            "root: BTC\nlong:\n  enter: !gt\n    \
+             lhs: !close { source: !pick { symbol: \"\" } }\n    rhs: !value 0\n",
+        )
+        .expect_err("an empty symbol names nothing");
+        assert!(
+            format!("{err:#}").contains("`symbol` is empty"),
+            "unexpected: {err:#}"
+        );
+
+        let c = single(
+            "root: BTC\nlong:\n  enter: !gt\n    \
+             lhs: !close { source: !pick { symbol: !param S } }\n    rhs: !value 0\n",
+        )
+        .expect("an unset symbol is a value nobody passed, not a broken document");
+        assert!(c.built);
+    }
+
+    /// A placeholder standing where a whole expression goes records `Expr`,
     /// which is not a *demand* — every scalar a caller can pass is an
     /// expression, so it constrains nothing and contradicts nothing.
     #[test]
@@ -661,6 +725,116 @@ long:
         )
         .expect("checks");
         assert_eq!(c.reads, ["ETH"]);
+    }
+
+    /// The two spellings of the default `root:` are **not** interchangeable to
+    /// a caller with no values, and the difference is `default: null`.
+    ///
+    /// Omitting `root:` splices [`root::default_tree`](super::root::default_tree),
+    /// whose placeholders are *optional* — so they resolve to null, the `!pick`
+    /// collapses to the sole-atom selector, and nothing is a hole. That document
+    /// has always loaded with `params = {}`; it is not what `check` unblocked,
+    /// and a form built on `holes` will not be offered a symbol box for it.
+    ///
+    /// Spelling the same root out in the bare canonical form — `!param SYMBOL`,
+    /// no body — is a *required* placeholder, which `load_document` refuses and
+    /// this reports, typed, as the two holes a caller has to fill.
+    #[test]
+    fn the_two_spellings_of_the_default_root_are_not_the_same_document() {
+        const OMITTED: &str = "long:\n  enter: !value true\n";
+        const SPELLED: &str = "root: !pick { symbol: !param SYMBOL, freq: !param FREQ }\n\
+                               long:\n  enter: !value true\n";
+
+        let omitted = single(OMITTED).expect("checks");
+        assert_eq!(story(&omitted), [], "the spliced placeholders are optional");
+        assert!(!omitted.built, "the sole-atom root is left to the input");
+        // And the ordinary loader takes it too — so this spelling was never the
+        // document `check` exists for.
+        let value = crate::spec::input::parse_value(OMITTED).expect("parses");
+        let value = super::super::root::apply_default(value, StrategyKind::Single);
+        crate::spec::params::substitute(value, &HashMap::new())
+            .expect("an optional placeholder needs no value");
+
+        let spelled = single(SPELLED).expect("checks");
+        assert_eq!(
+            story(&spelled),
+            [
+                ("FREQ", None, vec!["frequency"]),
+                ("SYMBOL", None, vec!["symbol"]),
+            ]
+        );
+        let value = crate::spec::input::parse_value(SPELLED).expect("parses");
+        crate::spec::params::substitute(value, &HashMap::new())
+            .expect_err("the bare spelling is required, and the loader says so");
+    }
+
+    /// An omitted `root:` is defaulted for `Single` **only** — a `root:`-less
+    /// document is structurally a `multi:` one, and `detect_kind` reads it that
+    /// way. `check` inherits that, exactly as `load_document` does: a caller
+    /// that means single-asset has to say which shape it meant.
+    #[test]
+    fn a_rootless_document_is_only_single_if_the_caller_says_so() {
+        const TEXT: &str =
+            "long:\n  enter: !gt { lhs: !sma { period: !param FAST }, rhs: !value 0 }\n";
+        for (kind, built) in [(StrategyKind::Single, false), (StrategyKind::Multi, true)] {
+            let c = check(TEXT, kind).unwrap_or_else(|e| panic!("{kind:?}: {e:#}"));
+            assert_eq!(story(&c), [("FAST", None, vec!["number"])], "{kind:?}");
+            assert_eq!(c.built, built, "{kind:?}: only single has a root to owe");
+        }
+    }
+
+    /// A placeholder carrying a `default:` is *resolved*, not held — so it is
+    /// not a hole and the report does not mention it, whatever it declared.
+    ///
+    /// Worth pinning because it bounds what a caller can build on `holes`: the
+    /// report types the placeholders nobody has a value for, which is exactly
+    /// the set with no default to read a type off. A form that wants every
+    /// knob typed still has to read the defaulted ones from their defaults.
+    #[test]
+    fn a_placeholder_with_a_default_is_not_a_hole() {
+        let c = single(
+            "root: BTC\nlong:\n  enter: !gt\n    \
+             lhs: !sma { period: !param { key: FAST, default: 10, type: integer } }\n    \
+             rhs: !sma { period: !param SLOW }\n",
+        )
+        .expect("checks");
+        assert_eq!(
+            story(&c),
+            [("SLOW", None, vec!["number"])],
+            "the defaulted `FAST` resolved, declaration and all"
+        );
+    }
+
+    /// The guard is thread-local and turning it on for a parse that is not a
+    /// check would make an ordinary load hole-aware. It is RAII, so this holds
+    /// on the error path too — which is the one a caller validating in a loop,
+    /// or a pool worker reused across requests, hits first.
+    #[test]
+    fn check_mode_is_off_again_by_the_time_a_check_returns() {
+        assert!(
+            !undefined::in_check_mode(),
+            "not in check mode to begin with"
+        );
+
+        single(CROSSOVER).expect("checks");
+        assert!(
+            !undefined::in_check_mode(),
+            "left on after a check that passed"
+        );
+
+        let determined =
+            "root: BTC\nlong:\n  enter: !gt { lhs: !sma { period: 20 }, rhs: !value 0 }\n";
+        single(determined).expect("checks and builds");
+        assert!(
+            !undefined::in_check_mode(),
+            "left on after a check that built"
+        );
+
+        single("root: BTC\nlong:\n  enter: !nope {}\n").expect_err("a bad tag");
+        assert!(
+            !undefined::in_check_mode(),
+            "left on after a check that failed"
+        );
     }
 
     /// Every shape goes through the one pass — `check` has no per-shape twin,

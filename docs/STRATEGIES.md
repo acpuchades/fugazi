@@ -78,11 +78,29 @@ two equivalent spellings, and you can mix them freely in one file:
 | **Map form** | `sma: { source: close, period: 20 }` | a single-key mapping — identical meaning |
 | **Bare word** | `close`, `obv` | for a node that takes no parameters |
 | **Scalar** | `!value 100`, `!value true` | for a node that wraps a single value |
+| **Bare scalar** | `70`, `true`, `bull`, `[0.4, 0.6]` | shorthand for the `!value` of that scalar |
 
 The tag form and the single-key-map form are interchangeable because the loader
 normalizes `!tag value` into `{tag: value}` before typing the document. The bare
 word is just the map/tag with no body, used for parameterless leaves (`close`)
 and bar indicators (`obv`, `ad`).
+
+**A bare scalar anywhere a node is expected is that scalar's constant** — so
+`rhs: 70` is `rhs: !value 70`, `enter: true` is the always-true signal, and
+`rhs: bull` is the string constant `bull`. Numbers, bools and number lists can
+never name a leaf, so they are unambiguous. A bare *word* can, and the
+vocabulary wins where it applies: `close` is the `!close` leaf, `never` is
+`!never`, and only a word that names no tag is read as a string. That is what
+lets an equality against an [overlay column](#overlay-columns--get) be written
+without any `!value` boilerplate:
+
+```yaml
+enter: !eq { lhs: !get { key: regime }, rhs: bull }
+```
+
+A misspelled leaf therefore reports a type mismatch rather than a missing tag —
+the error names the word (`` `clse` names no tag, so it was read as a string
+constant ``) so it still reads as the typo it is.
 
 The format is always YAML, in either block or flow (inline) style. JSON is a
 subset of YAML, so a JSON-shaped document still parses — it just lands on the map
@@ -1354,7 +1372,9 @@ Two consequences worth being explicit about:
 ### Constant
 
 `!value <n>` — a constant source. (Tuple form: the scalar is the body, e.g.
-`!value 100`.)
+`!value 100`.) A number is a `Real` source, a bool a signal, a string a `Str`
+source, and a list of numbers a per-child weight vector. Writing the scalar on
+its own is the same thing — see [bare scalars](#format-tags-maps-and-bare-words).
 
 ### Position-anchored sources (bare words)
 
@@ -1655,7 +1675,7 @@ the stream's schema decides what `!get` builds into:
 
 - a numeric column → a source, usable anywhere a source is (`!sma { source: !get { key: funding_rate }, period: 7 }`);
 - a boolean column → a signal, usable directly as an `enter` / `exit` (see [Signals](#signals));
-- a string column → a `Str` source, comparable with `!str_eq` / `!str_ne`.
+- a string column → a `Str` source, comparable with `!eq` / `!ne`.
 
 An unknown key, or a type that doesn't fit the position it's used in, is a
 build-time error. `source:` re-roots the read on another asset, exactly as on the
@@ -1867,9 +1887,15 @@ fires. Write the series out — `!above { source: !rsi {}, level: 70 }`.
 
 ### String comparisons — `{ lhs, rhs }`
 
-`!str_eq`, `!str_ne` — compare a string-typed source (in practice a
-`!get { key: … }` on a string [overlay column](#overlay-columns--get)) against a
-string literal: `!str_eq { lhs: !get { key: session }, rhs: US }`.
+`!eq` and `!ne` are polymorphic: they take `Real` **or** `Str` on both sides and
+dispatch on what the operands actually produce. So comparing a string
+[overlay column](#overlay-columns--get) against a literal needs no special tag —
+`!eq { lhs: !get { key: session }, rhs: US }` — and the `epsilon:` field simply
+has no meaning on the string branch.
+
+There is no separate string-equality tag. `!str_eq` / `!str_ne` existed only
+because a bare string could not be written as a constant, and were removed once
+[bare scalars](#format-tags-maps-and-bare-words) closed that gap.
 
 ### Calendar signals (bare words)
 
@@ -1882,7 +1908,7 @@ for Monday, `!lt { lhs: !hour, rhs: !value 9 }` for a pre-open window.
 
 `!get { key }` used in a signal position reads a **boolean** overlay column
 directly as a signal (a `Real` or `Str` column there is a build-time error — put
-those behind a comparison or `!str_eq` instead). The signal-side form takes only
+those behind a comparison such as `!eq` instead). The signal-side form takes only
 `key`; it reads the strategy's own asset.
 
 ### Boolean logic
@@ -1987,9 +2013,15 @@ string, so declaring one where the other is expected is not a conflict, and
 different refinements *do* conflict — no string is both a ticker and a cadence.
 
 You rarely need to write either. `!pick`'s `symbol:` and `freq:` slots carry
-those types themselves, so a bare `!param SYM` in one is already reported as
-`<symbol>`; the declaration is for narrowing a slot the grammar leaves open, or
-for saying it where no slot does.
+those types themselves — as do the entries of a declared basket `universe:` —
+so a bare `!param SYM` in one is already reported as `<symbol>`; the declaration
+is for narrowing a slot the grammar leaves open, or for saying it where no slot
+does.
+
+An **empty** symbol is a build error (`` `symbol` is empty ``). It is the one
+check a symbol admits, and it earns its place: an empty name matches no bar, so
+the leaf reads nothing for the whole run and the backtest comes back
+plausible-looking and empty rather than failing.
 
 The rules:
 

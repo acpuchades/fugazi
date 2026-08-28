@@ -142,10 +142,7 @@ RETURNS = {
             "week_of_year quarter unix_seconds unix_millis covariance beta"
         ).split()
     },
-    **{
-        n: "Signal"
-        for n in "is_weekday is_weekend every str_eq str_ne get_bool".split()
-    },
+    **{n: "Signal" for n in "is_weekday is_weekend every get_bool".split()},
     **{
         n: "MultiIndicator"
         for n in "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi linreg".split()

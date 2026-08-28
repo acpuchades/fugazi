@@ -186,6 +186,28 @@ const NEWTYPE_DEMANDS: &[(&str, RequiredType)] = &[
     ("FreqToken", RequiredType::Frequency),
 ];
 
+/// What a hole in a refined-string slot answers with.
+///
+/// The same rule integers follow — they answer `1` rather than `0` so a
+/// `NonZeroUsize` period still parses — applied to the refinements: a
+/// placeholder has to satisfy the format its slot promises, or the very
+/// documents `check` exists to validate fail on the stand-in rather than on
+/// anything they wrote. A `""` for a `FreqToken` reached `resolve_stream` at
+/// build and came back `invalid frequency ""`.
+///
+/// Neither value is ever run — a hole is counted and type-reported, and a
+/// document holding one is not driven — so these only have to *parse*.
+fn refined_placeholder(ty: RequiredType) -> &'static str {
+    match ty {
+        // Non-empty, and unmistakable in a message if one ever escapes.
+        RequiredType::Symbol => "__fugazi_hole__",
+        // A canonical token, so `resolve_stream` both accepts it and gets
+        // something to canonicalize.
+        RequiredType::Frequency => "1d",
+        _ => "",
+    }
+}
+
 /// The demand a newtype-struct name stands for, if it is one of the refined
 /// string types. `None` for every other newtype, which deserializes unchanged.
 fn newtype_demand(name: &str) -> Option<RequiredType> {
@@ -669,6 +691,14 @@ impl<'de> Deserializer<'de> for UndefinedDeserializer {
         // less fragile than threading a "don't record" flag down one level.
         if let Some(ty) = newtype_demand(name) {
             observe(&self.0, ty);
+            if is_undefined(&self.0) {
+                // Answer with a value the refinement accepts, not the generic
+                // `""` the inner `String` would otherwise get. Handed on as a
+                // *real* string, so nothing records `Str` on top of the finer
+                // demand already observed above.
+                let filled = Yaml::String(refined_placeholder(ty).to_string());
+                return visitor.visit_newtype_struct(UndefinedDeserializer(filled));
+            }
         }
         visitor.visit_newtype_struct(self)
     }

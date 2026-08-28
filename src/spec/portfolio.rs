@@ -1811,12 +1811,12 @@ mod tests {
         // 1/3 with `rebalance_on: !every 1` should snap the sub-equities
         // toward those weights. The `!value { arg: CHILD_GROUP }`
         // wrapper turns the resolved arg into an `NodeSpec::Value(Str)`
-        // — the position where `!str_eq`'s lhs takes any
+        // — the position where `!eq`'s lhs takes any
         // `Str`-emitting NodeSpec.
         let yaml = r#"
             weights:
               !if_else
-                cond: !str_eq { lhs: !value { arg: CHILD_GROUP }, rhs: momentum }
+                cond: !eq { lhs: !value { arg: CHILD_GROUP }, rhs: momentum }
                 then: !value 2.0
                 otherwise: !value 1.0
             rebalance_on: !every 1

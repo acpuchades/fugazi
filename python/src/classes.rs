@@ -258,13 +258,12 @@ impl PySchemaBuilder {
     }
 
     /// Register `key` as a `Bool` column. A `Bool` overlay reads as a signal
-    /// directly — no `str_eq true` needed.
+    /// directly — no `eq(true)` needed.
     pub(crate) fn add_bool(&mut self, key: &str) -> PyResult<usize> {
         self.with_builder(|b| b.add_bool(key.to_string()))
     }
 
-    /// Register `key` as a `Str` column. Consumed via `get_str(...).eq("...")`
-    /// (or the underlying `str_eq(...)`).
+    /// Register `key` as a `Str` column. Consumed via `get_str(...).eq("...")`.
     pub(crate) fn add_str(&mut self, key: &str) -> PyResult<usize> {
         self.with_builder(|b| b.add_str(key.to_string()))
     }
@@ -1887,7 +1886,7 @@ impl PySignal {
 
 /// A string-valued source (`Arc<str>` output). Produced by `get_str()` for a
 /// `Str`-typed overlay column and `value_str()` for a string literal;
-/// consumed by `str_eq()` / `str_ne()` to build a boolean signal.
+/// consumed by its own `eq()` / `ne()` to build a boolean signal.
 ///
 /// Distinct from `Indicator` because a real-valued signal chain has no notion
 /// of a string output — the only thing you can do with a `StrSource` is

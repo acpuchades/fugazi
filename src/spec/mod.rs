@@ -203,7 +203,6 @@ pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use check::{CheckedSpec, check_value};
 pub use expr::NodeSpec;
 pub use expr::Root;
-pub use expr::StrOperand;
 pub use expr::ValueLit;
 pub use expr::{BoolNode, RealNode};
 pub use grammar::{
@@ -1601,15 +1600,15 @@ mod tests {
     }
 
     #[test]
-    fn str_eq_against_a_str_get_column() {
-        // `!str_eq { lhs: !get { key: regime }, rhs: bull }` fires only when
-        // the current regime cell reads exactly "bull".
+    fn eq_against_a_str_get_column() {
+        // `!eq { lhs: !get { key: regime }, rhs: bull }` fires only when the
+        // current regime cell reads exactly "bull".
         let mut b = Schema::builder();
         b.add_str("regime");
         let schema = b.finish();
 
         let spec: NodeSpec =
-            serde_norway::from_str("!str_eq { lhs: !get { key: regime }, rhs: bull }").unwrap();
+            serde_norway::from_str("!eq { lhs: !get { key: regime }, rhs: bull }").unwrap();
         let mut built = spec
             .build(
                 &Position::new(),
@@ -1754,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    fn str_eq_takes_a_literal_a_value_string_or_a_second_column_as_rhs() {
+    fn eq_takes_a_literal_a_value_string_or_a_second_column_as_rhs() {
         let mut b = Schema::builder();
         b.add_str("regime");
         b.add_str("prev_regime");
@@ -1771,12 +1770,11 @@ mod tests {
             )
             .into_payload()
         };
-        // The bare literal (the original shape), the same constant written the
-        // long way, and a second Str column — "the regime is unchanged".
-        let mut literal = build("!str_eq { lhs: !get { key: regime }, rhs: bull }");
-        let mut constant = build("!str_eq { lhs: !get { key: regime }, rhs: !value bull }");
-        let mut cross =
-            build("!str_eq { lhs: !get { key: regime }, rhs: !get { key: prev_regime } }");
+        // The bare literal, the same constant written the long way, and a
+        // second Str column — "the regime is unchanged".
+        let mut literal = build("!eq { lhs: !get { key: regime }, rhs: bull }");
+        let mut constant = build("!eq { lhs: !get { key: regime }, rhs: !value bull }");
+        let mut cross = build("!eq { lhs: !get { key: regime }, rhs: !get { key: prev_regime } }");
 
         let row = |regime: &str, prev: &str| {
             let ov = OverlayInfo::new(
@@ -1815,15 +1813,101 @@ mod tests {
     }
 
     #[test]
+    fn eq_compares_strings_against_a_bare_literal() {
+        // The point of the bare-scalar rule: `!eq` was already polymorphic —
+        // it demands `REAL_OR_STR` on both slots and dispatches at build — so
+        // all that was missing, before `!str_eq` could be retired, is a bare
+        // word reading as the string constant it looks like.
+        let mut b = Schema::builder();
+        b.add_str("regime");
+        let schema = b.finish();
+
+        let build = |yaml: &str| {
+            let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
+            spec.build(
+                &Position::new(),
+                &Book::new(1.0),
+                None,
+                &schema,
+                Root::sole(),
+            )
+            .into_payload()
+        };
+        let mut eq = build("!eq { lhs: !get { key: regime }, rhs: bull }");
+        let mut ne = build("!ne { lhs: !get { key: regime }, rhs: bull }");
+
+        let row = |regime: &str| {
+            let ov = OverlayInfo::new(
+                schema.clone(),
+                vec![OverlayValue::Str(std::sync::Arc::from(regime))],
+            );
+            Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), ov)))
+        };
+
+        assert_eq!(eq.update(row("bull")), Some(Payload::Bool(true)));
+        assert_eq!(eq.update(row("bear")), Some(Payload::Bool(false)));
+        assert_eq!(ne.update(row("bull")), Some(Payload::Bool(false)));
+        assert_eq!(ne.update(row("bear")), Some(Payload::Bool(true)));
+    }
+
+    #[test]
+    fn a_bare_word_prefers_the_tag_it_names() {
+        // The vocabulary wins where it applies, so every document that spells a
+        // zero-field leaf as a bare word goes on meaning the leaf — the string
+        // constant is only what is left when no tag answers.
+        let spec: NodeSpec = serde_norway::from_str("!sma { source: close, period: 2 }").unwrap();
+        let NodeSpec::Sma { source, .. } = &spec else {
+            panic!("expected !sma, got {spec:?}");
+        };
+        assert!(
+            matches!(**source, NodeSpec::Close { .. }),
+            "bare `close` should stay the !close leaf, got {source:?}"
+        );
+
+        // A unit variant reaches the same place by the other half of the arm.
+        let never: NodeSpec = serde_norway::from_str("never").unwrap();
+        assert!(matches!(never, NodeSpec::Never), "got {never:?}");
+    }
+
+    #[test]
+    fn a_misspelled_bare_word_names_itself_in_the_error() {
+        // The cost of the fallback is serde's `unknown variant` list, which a
+        // typo used to get. `typecheck::bare_word_hint` puts the mistake back
+        // in the message rather than leaving a bare "produces Str".
+        let err = serde_norway::from_str::<NodeSpec>("!sma { source: clse, period: 2 }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`clse` names no tag"),
+            "expected the misspelling to be named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_known_tag_that_is_malformed_keeps_its_own_error() {
+        // The retry is gated on `unknown variant`, so a word the vocabulary
+        // *does* answer never reaches the constant fallback — its own
+        // diagnostic survives instead of being replaced by a type mismatch.
+        let err = serde_norway::from_str::<NodeSpec>("!sma { source: close, period: 0 }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nonzero"),
+            "expected !sma's own period error, got: {err}"
+        );
+        assert!(!err.contains("names no tag"), "got: {err}");
+    }
+
+    #[test]
     fn value_string_survives_the_yaml_to_json_path() {
         // The CLI deserializes through `yaml_to_json` (for `!param`
         // substitution), not straight from YAML — so the string literal and
-        // the `!str_eq` rhs operand have to normalise on that path too.
+        // an `!eq` string operand have to normalise on that path too.
         let yaml = r#"
             root: BTC
             long:
-              enter: !str_eq { lhs: !get { key: regime }, rhs: !value bull }
-              exit: !str_ne { lhs: !get { key: regime }, rhs: bull }
+              enter: !eq { lhs: !get { key: regime }, rhs: !value bull }
+              exit: !ne { lhs: !get { key: regime }, rhs: bull }
         "#;
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
         let json = crate::spec::convert::yaml_to_json(value).unwrap();

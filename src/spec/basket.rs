@@ -32,6 +32,7 @@ use serde_json::Value;
 
 use crate::indicators::{Book, Position};
 use crate::prelude::*;
+use crate::spec::expr::SymbolName;
 use crate::strategies::BasketStrategy;
 use crate::strategies::basket::{
     DynSelection, Everything, Quantile, Selection, Threshold, TopBottom,
@@ -185,13 +186,13 @@ pub enum UniverseSpec {
     /// every bar (absence panics); readiness gates on all listed symbols
     /// scoring `Some`. Wraps [`crate::strategies::basket::AllOf`].
     #[grammar(kind = "universe", output = "none")]
-    AllOf(Vec<String>),
+    AllOf(Vec<SymbolName>),
 
     /// Lax declared universe: restrict to the listed subset but silently
     /// skip absent or still-unready members. Wraps
     /// [`crate::strategies::basket::AnyOf`].
     #[grammar(kind = "universe", output = "none")]
-    AnyOf(Vec<String>),
+    AnyOf(Vec<SymbolName>),
 }
 
 /// A whole `basket.yml`: the ranking rule plus deferred score and sizing
@@ -1008,10 +1009,7 @@ mod tests {
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.universe {
             Some(UniverseSpec::AllOf(v)) => {
-                assert_eq!(
-                    v,
-                    vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]
-                );
+                assert_eq!(v, vec!["BTC", "ETH", "SOL"]);
             }
             other => panic!("expected AllOf, got {other:?}"),
         }
@@ -1028,7 +1026,7 @@ mod tests {
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         match spec.universe {
             Some(UniverseSpec::AnyOf(v)) => {
-                assert_eq!(v, vec!["BTC".to_string(), "ETH".to_string()]);
+                assert_eq!(v, vec!["BTC", "ETH"]);
             }
             other => panic!("expected AnyOf, got {other:?}"),
         }
