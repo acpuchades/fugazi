@@ -660,7 +660,16 @@ fn probe(name: &str, form: &fugazi::spec::grammar::GrammarForm) -> Option<serde_
 ///
 /// Expression slots get `!get { key: probe }`, whose output type is
 /// schema-dependent and therefore admitted everywhere — a probe has to *parse*,
-/// not to typecheck. `None` for `strategy`, a whole embedded document.
+/// not to typecheck.
+///
+/// **`strategy` used to return `None` here**, and a `None` makes
+/// [`probe`] skip the whole form. That silently excluded all five trailing-risk
+/// tags — `!sharpe`, `!sortino`, `!volatility`, `!max_drawdown`, `!calmar` — from
+/// every guard in this file, which is the entire reflected-grammar drift net:
+/// their declared forms were never parsed, their all-optional bodies never
+/// checked, their alternates never cross-checked. A whole embedded document is
+/// only awkward to write, not out of reach — `{root: PROBE}` is a
+/// `SingleStrategySpec` with every field defaulted.
 fn filler(ty: &str) -> Option<serde_json::Value> {
     use serde_json::json;
     Some(match ty {
@@ -672,9 +681,52 @@ fn filler(ty: &str) -> Option<serde_json::Value> {
         "str_list" => json!(["PROBE"]),
         "number_list" => json!([1.0]),
         "bool" => json!(true),
-        // `strategy` — a whole embedded document, out of reach here.
+        // An embedded single-asset document, every field defaulted but the root.
+        "strategy" => json!({ "root": "PROBE" }),
+        // `!pick`'s two selectors. Both are optional keys today, so `probe`
+        // omits them — they are here so the map stays total and a future
+        // *required* one does not silently skip its tag.
+        "symbol" => json!("PROBE"),
+        "frequency" => json!("1d"),
         _ => return None,
     })
+}
+
+/// No grammar type may make [`probe`] give up on a whole **expression** tag.
+///
+/// [`filler`] returning `None` is invisible: the form is skipped, the tag still
+/// looks covered, and every guard below narrows without anything going red.
+/// That is exactly how the five trailing-risk tags went unparsed. This is the
+/// assertion that makes a new grammar type declare itself instead.
+///
+/// Scoped to the `node` group because that is the vocabulary [`probe`] serves;
+/// the document-level groups carry their own types (`symbol`, `frequency`,
+/// `selection`, …) and are exercised by `document_forms_resolve`.
+#[test]
+fn every_expression_grammar_type_has_a_probe_value() {
+    let mut unfillable: BTreeSet<String> = BTreeSet::new();
+    for tag in spec_grammar() {
+        if tag.group != "node" {
+            continue;
+        }
+        for form in &tag.forms {
+            if let Some(payload) = form.payload.as_deref()
+                && filler(payload).is_none()
+            {
+                unfillable.insert(payload.to_string());
+            }
+            for field in &form.fields {
+                if filler(&field.ty).is_none() {
+                    unfillable.insert(field.ty.clone());
+                }
+            }
+        }
+    }
+    assert!(
+        unfillable.is_empty(),
+        "`filler` has no stand-in for these grammar types, so every tag using \
+         one is silently skipped by every form guard in this file: {unfillable:?}",
+    );
 }
 
 /// Whether a JSON-bridge document parses as an expression.
