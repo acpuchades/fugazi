@@ -118,12 +118,12 @@ fn grammar_emits_the_descriptor_document() {
     );
 
     // `scope` is how a consumer learns that `group == "document"` is not a
-    // position claim: `!param` goes anywhere, `!arg` only inside a template.
+    // position claim: `!param` goes anywhere, `!slot` only inside a template.
     assert!(
         by_name("param")["forms"][0].get("scope").is_none(),
         "!param is position-free"
     );
-    assert_eq!(by_name("arg")["forms"][0]["scope"], "template");
+    assert_eq!(by_name("slot")["forms"][0]["scope"], "template");
 }
 
 #[test]

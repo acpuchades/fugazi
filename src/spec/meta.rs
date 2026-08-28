@@ -36,7 +36,7 @@
 //! **One caveat.** `meta:` rides the same load pipeline as the rest of the
 //! document, so `!import` and `!param` resolve inside it — usually what you
 //! want (`meta: !import shared-meta.yml`), but it means a *literal* single-key
-//! map spelled `{param: …}`, `{import: …}`, `{arg: …}` or `{undefined: …}`
+//! map spelled `{param: …}`, `{import: …}`, `{slot: …}` or `{undefined: …}`
 //! inside `meta:` is treated as a placeholder rather than data. Nest external
 //! data one level under a vendor key and the question never comes up.
 

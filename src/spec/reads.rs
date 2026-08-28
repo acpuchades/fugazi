@@ -36,7 +36,7 @@
 //!
 //! The walk runs after `!import` splicing and `!param` substitution, so an
 //! imported subtree and a parameterised symbol are both seen. A `symbol:` still
-//! holding a hole — `!arg SYM` in a basket / multi-asset / portfolio template,
+//! holding a hole — `!slot SYM` in a basket / multi-asset / portfolio template,
 //! or an unresolved `!param` under `check` — is not a string and is skipped:
 //! a template's per-leg symbol is supplied at build time from the universe,
 //! which is in the frame by construction.
@@ -309,7 +309,7 @@ long:
             r#"
 basket:
   select: !top_bottom { top: 1 }
-  score: !rsi { period: 14, source: !close { source: !pick { symbol: !arg SYM } } }
+  score: !rsi { period: 14, source: !close { source: !pick { symbol: !slot SYM } } }
 "#,
         );
         assert!(syms.is_empty(), "got {syms:?}");

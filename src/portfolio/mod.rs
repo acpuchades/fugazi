@@ -990,7 +990,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// of writing the right indicator per child. The
     /// YAML surface (via the `cli` module) exposes this via
     /// `weights: !indicator <template>` where the template is
-    /// instantiated per-child with `!arg SYM` / `!arg CHILD_NAME`
+    /// instantiated per-child with `!slot SYM` / `!slot CHILD_NAME`
     /// substitution.
     ///
     /// The vector must have exactly `children.len()` entries at

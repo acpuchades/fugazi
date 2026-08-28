@@ -411,10 +411,10 @@ Within that constraint it is as strict as it can be. It catches:
   including inside a basket's `score:` / `sizing:`, a multi-asset side's
   `enter:`, and a portfolio's `weights:`. Those are deferred templates that only
   instantiate per-symbol at run time, but their *shape* doesn't depend on the
-  symbol, so each is parsed with its `!arg`s held undefined. Like the type check
+  symbol, so each is parsed with its `!slot`s held undefined. Like the type check
   below, this is **not** exclusive to `check`: it happens on every load, so `run`,
   `optimize` and the library loaders report the same typo before the first bar.
-  The one thing held back is an error a placeholder itself caused — `!value !arg
+  The one thing held back is an error a placeholder itself caused — `!value !slot
   CHILD_GROUP` is a legitimate weight expression, and refusing to load it would
   be a false verdict — so a template body goes unvalidated past such a node.
 - **Input/output type mismatches between tags.** `!sma` needs a `Real` source,
@@ -1660,10 +1660,10 @@ fugazi grammar | jq -r '.tags[] | select(.forms|length > 1)
 
 A form may carry **`scope`**, which narrows where it's legal. Absent (the case
 for every expression tag) means "wherever its `group` is accepted". Otherwise:
-`template` — only inside a deferred template body, which is what `!arg` is, and
+`template` — only inside a deferred template body, which is what `!slot` is, and
 the reason `group == "document"` is a provenance label rather than a position
 claim; `portfolio_weights` — only at the top of a portfolio `weights:`;
-`internal` — never authored by hand (`!undefined`). A tool that offers `!arg`
+`internal` — never authored by hand (`!undefined`). A tool that offers `!slot`
 everywhere `!param` goes emits documents that don't load.
 
 Each expression-holding slot also carries **`node_output`** — what the nested

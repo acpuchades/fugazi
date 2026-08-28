@@ -27,8 +27,8 @@ const TIE_BASKET: &str = "\
 selection: !top_bottom { longs: 3, shorts: 0 }
 score: !if_else
   cond: !gt
-    lhs: !close { source: !pick { symbol: !arg SYM } }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 10 }
+    lhs: !close { source: !pick { symbol: !slot SYM } }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 10 }
   then: !value 1.0
   otherwise: !value 0.0
 sizing: !value 0.3333

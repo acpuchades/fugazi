@@ -4,9 +4,9 @@
 //! First-class YAML type alongside [`NodeSpec`](super::NodeSpec) and
 //! `NodeSpec`. Where those two produce a concrete
 //! indicator eagerly at `spec.build(...)` time, `SpecTemplate<T>` holds a
-//! raw `serde_json::Value` tree that may still contain `!arg NAME`
+//! raw `serde_json::Value` tree that may still contain `!slot NAME`
 //! placeholder leaves, and produces a concrete `T` only when the caller
-//! supplies the missing arguments via [`build(&args)`](SpecTemplate::build).
+//! supplies the missing values via [`build(&slots)`](SpecTemplate::build).
 //!
 //! # Substitution model
 //!
@@ -17,13 +17,13 @@
 //!    [`crate::spec::params::substitute`]. Those values are baked into the
 //!    stored tree; every subsequent `.build()` sees them already-resolved.
 //! 2. **Build-time** — a driver (e.g. `BasketStrategySpec`'s per-symbol
-//!    factory) supplies `!arg NAME` values via
-//!    [`crate::spec::args::substitute`]. This runs on every `.build()` call,
+//!    factory) supplies `!slot NAME` values via
+//!    [`crate::spec::slots::substitute`]. This runs on every `.build()` call,
 //!    so one template can produce many concrete `T` values (one per
-//!    set of driver-supplied args).
+//!    set of driver-supplied slot bindings).
 //!
-//! `!param` and `!arg` never collide because they're keyed on distinct
-//! singleton-object keys (`param` vs. `arg`), so a leftover `!arg` after
+//! `!param` and `!slot` never collide because they're keyed on distinct
+//! singleton-object keys (`param` vs. `slot`), so a leftover `!slot` after
 //! the load-time pass survives untouched.
 //!
 //! # Deferred value, eager shape
@@ -31,7 +31,7 @@
 //! Only the *value* is deferred. A template's shape — which tags, which
 //! fields, which types — does not depend on the symbol (or child index, or
 //! group) the driver eventually binds, so the [`Deserialize`] impl below
-//! typed-parses a probe copy of the body at load, with every `!arg` held as a
+//! typed-parses a probe copy of the body at load, with every `!slot` held as a
 //! hole. A misspelled tag inside a basket's `score:` is therefore a parse error
 //! at load, exactly like one inside a single-asset `enter:` — not a surprise on
 //! the first bar that quotes the symbol which instantiates it.
@@ -45,14 +45,14 @@
 //! ```yaml
 //! score:
 //!   !mul
-//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
-//!     rhs: !adx { source: !current_bar { source: !pick { symbol: !arg SYM } }, period: 14 }
+//!     lhs: !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
+//!     rhs: !adx { source: !current_bar { source: !pick { symbol: !slot SYM } }, period: 14 }
 //! ```
 //!
 //! deserializes as a `SpecTemplate<NodeSpec>` because that's the type of
 //! the `score:` field on its containing spec (e.g.
 //! `BasketStrategySpec`). The same YAML tree under a field typed as
-//! `NodeSpec` would deserialize eagerly and fail on the `!arg` leaves.
+//! `NodeSpec` would deserialize eagerly and fail on the `!slot` leaves.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -62,11 +62,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-use crate::spec::args;
+use crate::spec::slots;
 
-/// A deferred spec: an untyped `serde_json::Value` tree with `!arg`
+/// A deferred spec: an untyped `serde_json::Value` tree with `!slot`
 /// placeholder leaves, resolved into a concrete `T` at build time. See
-/// the module docs for the load-time (`!param`) vs build-time (`!arg`)
+/// the module docs for the load-time (`!param`) vs build-time (`!slot`)
 /// substitution model.
 #[derive(Debug, Clone)]
 pub struct SpecTemplate<T> {
@@ -114,22 +114,22 @@ impl<T: DeserializeOwned> SpecTemplate<T> {
     /// for API consumers assembling a template programmatically. See that impl
     /// for what the probe can and can't decide.
     pub fn checked(tree: Value) -> std::result::Result<Self, String> {
-        let probe = args::substitute_for_check(tree.clone());
+        let probe = slots::substitute_for_check(tree.clone());
         crate::spec::undefined::parse_probe::<T>(probe)?;
         Ok(Self::from_tree(tree))
     }
 
-    /// Resolve `!arg` placeholders against `args` and deserialize into
-    /// `T`. Errors if an `!arg` references a name that isn't in `args`
+    /// Resolve `!slot` placeholders against `bindings` and deserialize into
+    /// `T`. Errors if a `!slot` references a name that isn't in `bindings`
     /// and has no `default`, or if the resulting tree doesn't
     /// deserialize into `T`.
-    pub fn build(&self, args: &HashMap<String, Value>) -> Result<T> {
-        let resolved = args::substitute(self.tree.clone(), args)?;
+    pub fn build(&self, bindings: &HashMap<String, Value>) -> Result<T> {
+        let resolved = slots::substitute(self.tree.clone(), bindings)?;
         Ok(serde_json::from_value(resolved)?)
     }
 }
 
-/// Deserialization stores the raw tree — the `!arg` placeholders inside it have
+/// Deserialization stores the raw tree — the `!slot` placeholders inside it have
 /// to survive the load pass, so what [`build`](SpecTemplate::build) resolves
 /// later is the original — but it **typed-parses a probe copy first**, so a
 /// template body is validated as eagerly as an ordinary slot.
@@ -141,8 +141,8 @@ impl<T: DeserializeOwned> SpecTemplate<T> {
 /// pass `fugazi check`, and then abort a run mid-flight. A template's *shape*
 /// doesn't depend on which symbol (or child index, or group) the driver
 /// eventually binds, so it can be decided here: this parses a copy of the tree
-/// with every `!arg` marked as a hole sentinel
-/// ([`args::substitute_for_check`]) through
+/// with every `!slot` marked as a hole sentinel
+/// ([`slots::substitute_for_check`]) through
 /// [`undefined::parse_probe`](crate::spec::undefined::parse_probe), which
 /// answers each hole with a value of whatever type its position demands.
 ///
@@ -171,7 +171,7 @@ mod tests {
         period: usize,
     }
 
-    fn args(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+    fn bound(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
         pairs
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
@@ -180,9 +180,9 @@ mod tests {
 
     #[test]
     fn deserialize_captures_raw_tree() {
-        let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
+        let value = json!({"symbol": {"slot": "SYM"}, "period": 20});
         let template: SpecTemplate<Toy> = serde_json::from_value(value.clone()).unwrap();
-        // Captured verbatim: the probe parse runs on a *copy*, so the `!arg`
+        // Captured verbatim: the probe parse runs on a *copy*, so the `!slot`
         // leaf is still there for `build` to resolve.
         assert_eq!(template.tree(), &value);
     }
@@ -191,18 +191,18 @@ mod tests {
     fn deserialize_rejects_a_body_that_cannot_typed_parse() {
         // `period` is missing. Deferring the typed parse used to make this a
         // build-time failure — inside the driver, for the per-symbol slots.
-        let value = json!({"symbol": {"arg": "SYM"}});
+        let value = json!({"symbol": {"slot": "SYM"}});
         let err = serde_json::from_value::<SpecTemplate<Toy>>(value)
             .expect_err("a body that can't parse must not load");
         assert!(err.to_string().contains("period"), "{err}");
     }
 
     #[test]
-    fn deserialize_answers_an_arg_hole_with_the_type_its_position_demands() {
+    fn deserialize_answers_a_slot_hole_with_the_type_its_position_demands() {
         // The probe knows nothing about the values a driver will bind, so each
-        // `!arg` answers as whatever its position needs: a string for
+        // `!slot` answers as whatever its position needs: a string for
         // `symbol:`, a number for `period:`. Neither is a parse failure.
-        let value = json!({"symbol": {"arg": "SYM"}, "period": {"arg": "CHILD_INDEX"}});
+        let value = json!({"symbol": {"slot": "SYM"}, "period": {"slot": "CHILD_INDEX"}});
         serde_json::from_value::<SpecTemplate<Toy>>(value).expect("both holes are answerable");
     }
 
@@ -213,7 +213,7 @@ mod tests {
         // that ledger, so a long-lived API consumer loading specs in a loop
         // would grow it without bound — and the next `check` in the process
         // would report placeholders from a document it never read.
-        let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
+        let value = json!({"symbol": {"slot": "SYM"}, "period": 20});
         serde_json::from_value::<SpecTemplate<Toy>>(value).unwrap();
         assert!(!crate::spec::undefined::in_check_mode());
         assert!(
@@ -223,10 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn build_resolves_args_and_typed_parses() {
-        let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
+    fn build_resolves_slots_and_typed_parses() {
+        let value = json!({"symbol": {"slot": "SYM"}, "period": 20});
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
-        let concrete = template.build(&args(&[("SYM", json!("BTC"))])).unwrap();
+        let concrete = template.build(&bound(&[("SYM", json!("BTC"))])).unwrap();
         assert_eq!(
             concrete,
             Toy {
@@ -237,15 +237,15 @@ mod tests {
     }
 
     #[test]
-    fn build_errors_on_missing_arg() {
-        let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
+    fn build_errors_on_missing_slot() {
+        let value = json!({"symbol": {"slot": "SYM"}, "period": 20});
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
         assert!(template.build(&HashMap::new()).is_err());
     }
 
     #[test]
-    fn build_uses_arg_default_when_missing() {
-        let value = json!({"symbol": {"arg": {"key": "SYM", "default": "BTC"}}, "period": 20});
+    fn build_uses_slot_default_when_missing() {
+        let value = json!({"symbol": {"slot": {"key": "SYM", "default": "BTC"}}, "period": 20});
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
         let concrete = template.build(&HashMap::new()).unwrap();
         assert_eq!(concrete.symbol, "BTC");
@@ -254,22 +254,22 @@ mod tests {
     #[test]
     fn build_errors_on_typed_deserialize_failure_after_substitution() {
         // `period` is a number in `Toy`; if we substitute a string via
-        // `!arg`, the typed parse should fail.
-        let value = json!({"symbol": "BTC", "period": {"arg": "P"}});
+        // `!slot`, the typed parse should fail.
+        let value = json!({"symbol": "BTC", "period": {"slot": "P"}});
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
         assert!(
             template
-                .build(&args(&[("P", json!("not a number"))]))
+                .build(&bound(&[("P", json!("not a number"))]))
                 .is_err()
         );
     }
 
     #[test]
     fn one_template_produces_multiple_concrete_specs() {
-        let value = json!({"symbol": {"arg": "SYM"}, "period": 10});
+        let value = json!({"symbol": {"slot": "SYM"}, "period": 10});
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
-        let btc = template.build(&args(&[("SYM", json!("BTC"))])).unwrap();
-        let eth = template.build(&args(&[("SYM", json!("ETH"))])).unwrap();
+        let btc = template.build(&bound(&[("SYM", json!("BTC"))])).unwrap();
+        let eth = template.build(&bound(&[("SYM", json!("ETH"))])).unwrap();
         assert_eq!(btc.symbol, "BTC");
         assert_eq!(eth.symbol, "ETH");
     }
@@ -277,14 +277,14 @@ mod tests {
     #[test]
     fn template_from_yaml_via_serde_norway() {
         // End-to-end: parse from YAML text (through the normal CLI pipeline
-        // via serde_norway), build once with args resolved.
+        // via serde_norway), build once with slots resolved.
         let yaml = r#"
-            symbol: !arg SYM
+            symbol: !slot SYM
             period: 30
         "#;
         let value = crate::spec::input::parse_value(yaml).unwrap();
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
-        let concrete = template.build(&args(&[("SYM", json!("SOL"))])).unwrap();
+        let concrete = template.build(&bound(&[("SYM", json!("SOL"))])).unwrap();
         assert_eq!(concrete.symbol, "SOL");
         assert_eq!(concrete.period, 30);
     }

@@ -1131,7 +1131,7 @@ dict in one call.
 decidably-wrong slot type raises here, not on some later bar. That includes the
 per-symbol templates — a basket's `score:` / `sizing:`, a multi-asset side's
 `enter:`, a portfolio's `weights:` — whose *values* are deferred until the driver
-binds a symbol but whose shape is checked up front, with each `!arg` held as a
+binds a symbol but whose shape is checked up front, with each `!slot` held as a
 placeholder.
 
 ```python

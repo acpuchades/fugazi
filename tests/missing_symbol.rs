@@ -285,7 +285,7 @@ fn discovered_universes_declare_nothing_to_check() {
     // Basket and multi-asset read their universe off the stream, so they have
     // no declaration that can disagree with it.
     let basket = "selection: !top_bottom { longs: 2, shorts: 2 }\n\
-                  score: !roc { period: 20, source: !close { source: !pick { symbol: !arg SYM } } }\n\
+                  score: !roc { period: 20, source: !close { source: !pick { symbol: !slot SYM } } }\n\
                   sizing: !equal_weight 4\n";
     let spec = fugazi::spec::BasketStrategySpec::from_text_with_params_in(
         basket,

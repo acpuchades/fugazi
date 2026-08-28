@@ -1045,7 +1045,7 @@ impl PyStrategySpec {
 /// interchangeable in placement. `!param` and `!import` are genuinely
 /// position-free: their passes rewrite *any* value position, an expression slot
 /// or a scalar field like `period:` or a string field like `symbol:` alike.
-/// `!arg` is `scope: "template"` — it is substituted only inside a deferred
+/// `!slot` is `scope: "template"` — it is substituted only inside a deferred
 /// template body (a basket's `score:` / `sizing:`, a multi-asset side's
 /// `enter:`, a portfolio's `weights:`), and one written anywhere else is a hard
 /// parse error, `check` included. `!undefined` is `scope: "internal"` and
@@ -1091,7 +1091,7 @@ impl PyStrategySpec {
 /// `node` and `selection` are the slot-fillable *expression* grammars; `universe`
 /// (`!all_of`/`!any_of`), `weighting` (portfolio `weights:` sugar
 /// `!fixed`/`!equal_weight`), and `document` (load-time
-/// `!import`/`!param`/`!arg`/`!undefined`) are document-level directives.
+/// `!import`/`!param`/`!slot`/`!undefined`) are document-level directives.
 /// Consumers that filtered on `group == "node"` keep working unchanged.
 ///
 /// **What it does not cover**, by design: the nested config *sub-documents* —
@@ -1163,7 +1163,7 @@ pub(crate) fn spec_document_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// boolean predicates, and string comparisons together), `"selection"` (a
 /// `basket:` document's `selection:` rules), `"universe"` (`!all_of`/`!any_of`),
 /// `"weighting"` (portfolio `weights:` sugar `!fixed`/`!equal_weight`), and
-/// `"document"` (load-time `!import`/`!param`/`!arg`/`!undefined`). Only `node`
+/// `"document"` (load-time `!import`/`!param`/`!slot`/`!undefined`). Only `node`
 /// and `selection` are slot-fillable expressions; the rest are document-level
 /// directives. Names come back without the leading `!`.
 ///

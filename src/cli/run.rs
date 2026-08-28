@@ -1041,7 +1041,7 @@ fn run_universe(
 /// The tradeable **universe is the set of symbols in the frame** — no
 /// explicit declaration in the YAML; the basket rebuilds its
 /// score/sizing chains lazily as symbols appear (see
-/// [`BasketStrategySpec`] for the `!arg SYM` substitution model). A
+/// [`BasketStrategySpec`] for the `!slot SYM` substitution model). A
 /// per-symbol cost bundle is resolved from `--costs` for each symbol
 /// (via [`fugazi::PaperWallet::set_costs_for`]) so a scoped rule like
 /// `BTC:0.001,ETH:0.0005` applies per leg; symbols not scoped fall back

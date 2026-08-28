@@ -1446,8 +1446,8 @@ def spec_tags() -> dict[str, list[str]]:
     boolean predicates, and string comparisons together), `"selection"` (a `basket:`
     document's `selection:` rules), `"universe"` (`!all_of`/`!any_of`),
     `"weighting"` (portfolio `weights:` sugar `!fixed`/`!equal_weight`), and
-    `"document"` (load-time `!import`/`!param`/`!arg`/`!undefined`). Only `node` and
-    `selection` are slot-fillable expressions; the rest are document-level
+    `"document"` (load-time `!import`/`!param`/`!slot`/`!undefined`). Only `node`
+    and `selection` are slot-fillable expressions; the rest are document-level
     directives. Names come back without the leading `!`.
     """
     ...

@@ -17,7 +17,7 @@
 //! * `!get { key }` resolves its type against the overlay [`Schema`](crate::Schema), which
 //!   `check` has no access to (there is no `--series` at check time). Any
 //!   expression rooted in a `!get` is therefore unchecked.
-//! * A `!param` / `!arg` placeholder standing in for a whole expression parses
+//! * A `!param` / `!slot` placeholder standing in for a whole expression parses
 //!   as a hole and could be anything.
 //! * `!unstable` and `!resample` are passthroughs, so they are exactly as known
 //!   as what they wrap.
@@ -564,12 +564,12 @@ pub fn known_selection_tags() -> Vec<String> {
 /// load-time pass rewrites them before the typed parse ever runs.
 ///
 /// `!equal_weight <N>` is sizing sugar lowered to `!value <1/N>` by
-/// `rewrite_sugar_tags`; the rest are the `!import` / `!param` / `!arg` /
+/// `rewrite_sugar_tags`; the rest are the `!import` / `!param` / `!slot` /
 /// `!undefined` placeholders resolved by the load passes. They're legitimately
 /// documented in `fugazi list` without appearing in any variant list — so
 /// anything that cross-checks the catalogue against
 /// `known_node_tags` has to know about them.
-pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "arg"];
+pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "slot"];
 
 /// A tag no variant will ever be named, used to provoke serde's
 /// variant-listing error. The mapping body keeps the shape valid for tags that

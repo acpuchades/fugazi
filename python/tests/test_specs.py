@@ -97,7 +97,7 @@ def test_load_pairs_and_run():
 def test_load_basket_and_run():
     yaml = """
     selection: !top_bottom { longs: 1, shorts: 1 }
-    score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
+    score: !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 2 }
     sizing: !equal_weight 2
     """
     spec = ta.load_spec(yaml)
@@ -119,13 +119,13 @@ def test_load_basket_and_run():
 def test_a_typo_inside_a_per_symbol_template_raises_at_load():
     """A basket's `score:` is deferred per symbol, but its *shape* isn't.
 
-    The template body is typed-parsed at load with `!arg SYM` held as a hole,
+    The template body is typed-parsed at load with `!slot SYM` held as a hole,
     so a misspelled tag raises here — not on the first bar of a `run()` that
     happens to quote a symbol. Same rule for a multi-asset side's `enter:`.
     """
     basket = """
     selection: !top_bottom { longs: 1, shorts: 1 }
-    score: !smaa { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
+    score: !smaa { source: !close { source: !pick { symbol: !slot SYM } }, period: 2 }
     sizing: !value 1.0
     """
     with pytest.raises(Exception, match="smaa"):
@@ -133,7 +133,7 @@ def test_a_typo_inside_a_per_symbol_template_raises_at_load():
 
     multi = """
     long:
-      enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rsh: 50 }
+      enter: !gt { lhs: !close { source: !pick { symbol: !slot SYM } }, rsh: 50 }
     """
     with pytest.raises(Exception, match="rsh"):
         ta.load_spec(multi)
@@ -142,7 +142,7 @@ def test_a_typo_inside_a_per_symbol_template_raises_at_load():
 def test_load_multi_and_run():
     yaml = """
     long:
-      enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rhs: 50 }
+      enter: !gt { lhs: !close { source: !pick { symbol: !slot SYM } }, rhs: 50 }
     """
     spec = ta.load_spec(yaml)
     assert spec.kind == "multi"

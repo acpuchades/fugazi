@@ -844,26 +844,26 @@ fn document_forms_resolve() {
         "the bare spelling has nowhere to put a default, so an unset key is an error",
     );
 
-    // `!arg` — the same two spellings, resolved by the build-time twin.
-    assert_eq!(forms_of("arg").len(), 2, "!arg has two spellings");
+    // `!slot` — the same two spellings, resolved by the build-time twin.
+    assert_eq!(forms_of("slot").len(), 2, "!slot has two spellings");
     let args = HashMap::from([("SYM".to_string(), serde_json::json!("BTC"))]);
     for (doc, want) in [
         (
-            serde_json::json!({ "arg": "SYM" }),
+            serde_json::json!({ "slot": "SYM" }),
             serde_json::json!("BTC"),
         ),
         (
-            serde_json::json!({ "arg": { "key": "SYM" } }),
+            serde_json::json!({ "slot": { "key": "SYM" } }),
             serde_json::json!("BTC"),
         ),
         (
-            serde_json::json!({ "arg": { "key": "OTHER", "default": "ETH" } }),
+            serde_json::json!({ "slot": { "key": "OTHER", "default": "ETH" } }),
             serde_json::json!("ETH"),
         ),
     ] {
-        let got = fugazi::spec::args::substitute(doc.clone(), &args)
-            .unwrap_or_else(|e| panic!("!arg spelling {doc} must resolve: {e}"));
-        assert_eq!(got, want, "!arg {doc}");
+        let got = fugazi::spec::slots::substitute(doc.clone(), &args)
+            .unwrap_or_else(|e| panic!("!slot spelling {doc} must resolve: {e}"));
+        assert_eq!(got, want, "!slot {doc}");
     }
 
     // `!import` — bare path and `{ path, params }`, the second being the only
@@ -914,15 +914,15 @@ fn document_forms_resolve() {
     );
 }
 
-/// `!arg` is a `document` tag but **not** legal in any position — the one place
+/// `!slot` is a `document` tag but **not** legal in any position — the one place
 /// where reading `group` as a position claim goes wrong, which is why
 /// `GrammarForm::scope` exists.
 ///
-/// Nothing substitutes an `!arg` outside a deferred template body, so one
+/// Nothing substitutes an `!slot` outside a deferred template body, so one
 /// written elsewhere reaches the typed parse verbatim and fails. Pin both
 /// halves: the descriptor says `template`, and the parser agrees.
 #[test]
-fn arg_is_scoped_to_templates_and_param_is_not() {
+fn slot_is_scoped_to_templates_and_param_is_not() {
     let grammar = spec_grammar();
     let scopes = |name: &str| -> BTreeSet<Option<String>> {
         grammar
@@ -935,9 +935,9 @@ fn arg_is_scoped_to_templates_and_param_is_not() {
             .collect()
     };
     assert_eq!(
-        scopes("arg"),
+        scopes("slot"),
         BTreeSet::from([Some("template".to_string())]),
-        "every !arg spelling is template-scoped",
+        "every !slot spelling is template-scoped",
     );
     assert_eq!(
         scopes("param"),
@@ -966,8 +966,8 @@ fn arg_is_scoped_to_templates_and_param_is_not() {
         "!param resolves in a scalar slot of an ordinary document",
     );
     assert!(
-        load(&with("!arg N")).is_err(),
-        "!arg outside a template has no pass to resolve it — a tool that offers it \
+        load(&with("!slot N")).is_err(),
+        "!slot outside a template has no pass to resolve it — a tool that offers it \
          wherever !param goes emits documents that do not load",
     );
 }

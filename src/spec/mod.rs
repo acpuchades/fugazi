@@ -40,17 +40,17 @@ pub mod template;
 pub mod trailing;
 pub mod typecheck;
 
-// Load-pass primitives (`!import` / `!param` / `!arg` and the YAML→JSON bridge)
+// Load-pass primitives (`!import` / `!param` / `!slot` and the YAML→JSON bridge)
 // plus the file-vs-inline `Source` input type. Kept at `spec::*` because the
 // spec tree itself is what the passes chew through — but they're independent
 // enough of the tree to live in their own modules.
-pub mod args;
 pub mod convert;
 pub mod dyn_indicator;
 pub mod imports;
 pub mod input;
 pub mod param_type;
 pub mod params;
+pub mod slots;
 pub mod undefined;
 
 // Shape-only validation on top of those passes: the hole-aware parse that backs
@@ -101,7 +101,7 @@ pub mod shrinkage;
 /// The load-time passes every strategy document goes through before typed
 /// deserialization, in order: parse the YAML into an untyped tree, splice in
 /// every `!import`ed document, then resolve every `!param` placeholder against
-/// `params`. (`!arg` is deliberately *not* resolved here — it belongs to a
+/// `params`. (`!slot` is deliberately *not* resolved here — it belongs to a
 /// [`SpecTemplate`] and resolves per-instance at build time.)
 ///
 /// Imports run before params so an imported fragment is a first-class part of
@@ -1274,7 +1274,7 @@ mod tests {
             !sharpe
             strategy:
               selection: !top_bottom { longs: 1, shorts: 1 }
-              score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
+              score: !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 2 }
               sizing: !equal_weight 2
             period: 3
             bars_per_year: 252
@@ -1323,7 +1323,7 @@ mod tests {
             !sharpe
             strategy:
               long:
-                enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rhs: !value 0.0 }
+                enter: !gt { lhs: !close { source: !pick { symbol: !slot SYM } }, rhs: !value 0.0 }
               sizing: !equal_weight 2
             period: 3
             bars_per_year: 252

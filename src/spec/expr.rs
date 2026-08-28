@@ -611,11 +611,11 @@ pub enum ValueLit {
     /// A per-child indexed constant — only meaningful inside a portfolio
     /// weight-share template. `SpecTemplate::build` rewrites this to
     /// `ValueLit::Real(list[CHILD_INDEX])` when `CHILD_INDEX` is present
-    /// in the build args; if it isn't, [`NodeSpec::build`] panics because
+    /// in the build slots; if it isn't, [`NodeSpec::build`] panics because
     /// a list literal has no defined output outside per-child context.
     List(Vec<Real>),
     /// A `check`-mode **hole** standing in for a literal nobody supplied — an
-    /// unset required `!param`, an unbound `!arg`, or an `!undefined`. Carries
+    /// unset required `!param`, an unbound `!slot`, or an `!undefined`. Carries
     /// the placeholder's name for the report only.
     ///
     /// Its [`output_type`](crate::spec::typecheck::output_type) is `None`, so
@@ -623,7 +623,7 @@ pub enum ValueLit {
     /// is a value nobody has chosen yet, and picking a type for it would fail
     /// documents whose only gap is a `--params` value. Only
     /// [`substitute_for_check`](crate::spec::params::substitute_for_check) and
-    /// its `!arg` twin ever produce the sentinel this parses from, so a `run`
+    /// its `!slot` twin ever produce the sentinel this parses from, so a `run`
     /// or `optimize` parse cannot construct one.
     Hole(String),
 }
@@ -1716,7 +1716,7 @@ pub enum NodeSpec {
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
     /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
-    /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
+    /// `!pick { symbol: !slot SYM }` so each leg reads its own asset. See
     /// [`crate::indicators::sizing::vol_target`] /
     /// [`crate::indicators::sizing::vol_target_of`].
     #[grammar(kind = "function")]
@@ -1734,7 +1734,7 @@ pub enum NodeSpec {
     /// Fixed per-trade risk sized by ATR —
     /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
     /// to the single-asset empty-selector `Pick`; in a basket set it to
-    /// `!pick { symbol: !arg SYM }`. See
+    /// `!pick { symbol: !slot SYM }`. See
     /// [`crate::indicators::sizing::atr_risk`] /
     /// [`crate::indicators::sizing::atr_risk_of`].
     #[grammar(kind = "function")]
@@ -2032,7 +2032,7 @@ pub enum NodeSpec {
     ///
     /// Case patterns are homogeneous: either all numeric (dispatching
     /// on a `Real`-output `on`) or all string (dispatching on a
-    /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
+    /// `Str`-output `on`, typically `!value { slot: CHILD_GROUP }`).
     /// Mixed patterns are rejected at build. See
     /// [`crate::indicators::Match`].
     #[grammar(kind = "operator", output = "any")]
@@ -3074,7 +3074,7 @@ enum NodeSpecRaw {
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
     /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
-    /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
+    /// `!pick { symbol: !slot SYM }` so each leg reads its own asset. See
     /// [`crate::indicators::sizing::vol_target`] /
     /// [`crate::indicators::sizing::vol_target_of`].
     VolTarget {
@@ -3087,7 +3087,7 @@ enum NodeSpecRaw {
     /// Fixed per-trade risk sized by ATR —
     /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
     /// to the single-asset empty-selector `Pick`; in a basket set it to
-    /// `!pick { symbol: !arg SYM }`. See
+    /// `!pick { symbol: !slot SYM }`. See
     /// [`crate::indicators::sizing::atr_risk`] /
     /// [`crate::indicators::sizing::atr_risk_of`].
     AtrRisk {
@@ -3260,7 +3260,7 @@ enum NodeSpecRaw {
     ///
     /// Case patterns are homogeneous: either all numeric (dispatching
     /// on a `Real`-output `on`) or all string (dispatching on a
-    /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
+    /// `Str`-output `on`, typically `!value { slot: CHILD_GROUP }`).
     /// Mixed patterns are rejected at build. See
     /// [`crate::indicators::Match`].
     Match {
@@ -4842,7 +4842,7 @@ impl NodeSpec {
                             build pass rewrites it to !value <list[CHILD_INDEX]> \
                             before this arm ever runs. Either it's being used \
                             outside a portfolio, or PortfolioSpec::build failed \
-                            to install the CHILD_INDEX arg."
+                            to install the CHILD_INDEX slot."
                     .to_string());
             }
             Entry => any(anchor.entry::<Snapshot<Symbol>>()),

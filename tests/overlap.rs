@@ -147,7 +147,7 @@ fn a_single_symbol_fetch_says_nothing_about_overlap() {
 const BASKET: &str = "\
 selection: !top_bottom { longs: 1, shorts: 1 }
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: 2
 sizing: !equal_weight 2
 ";
@@ -311,7 +311,7 @@ fn a_fragmented_optimize_universe_warns() {
         "opt_basket.yml",
         "selection: !top_bottom { longs: 1, shorts: 1 }
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: !param P
 sizing: !equal_weight 2
 ",

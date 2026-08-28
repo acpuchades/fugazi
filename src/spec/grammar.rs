@@ -14,7 +14,7 @@
 //! by hand.
 //!
 //! The one exception is the load-time `weighting` / `document` tags
-//! (`!fixed`/`!equal_weight`/`!import`/`!param`/`!arg`/`!undefined`): these are
+//! (`!fixed`/`!equal_weight`/`!import`/`!param`/`!slot`/`!undefined`): these are
 //! never serde variants — a `Value` pass rewrites each away before the typed
 //! parse — so `document_grammar_tags` hand-authors their records. Even there
 //! the *name set* is pinned to the parser's own
@@ -257,8 +257,8 @@ pub struct GrammarForm {
     ///
     /// - `template` — only inside a deferred [`SpecTemplate`](crate::spec::SpecTemplate)
     ///   body (a basket's `score:` / `sizing:`, a multi-asset side's `enter:`, a
-    ///   portfolio's `weights:`). `!arg` is resolved at *build* time by
-    ///   `args::substitute`, which runs nowhere else — outside a template it is
+    ///   portfolio's `weights:`). `!slot` is resolved at *build* time by
+    ///   `slots::substitute`, which runs nowhere else — outside a template it is
     ///   a hard parse error, under `check` too. **`group == "document"` is a
     ///   provenance label, not a position claim**; this is the field that says
     ///   where.
@@ -287,7 +287,7 @@ pub struct GrammarTag {
     /// Which vocabulary the tag belongs to: `node` (the composable expression
     /// enum) · `selection` (a `basket:` document's `selection:` rules) ·
     /// `universe` (`!all_of`/`!any_of`) · `weighting` (portfolio `weights:`
-    /// sugar) · `document` (load-time `!import`/`!param`/`!arg`/`!undefined`).
+    /// sugar) · `document` (load-time `!import`/`!param`/`!slot`/`!undefined`).
     /// Only `node` and `selection` are slot-fillable expressions; the other
     /// three are document-level directives. Consumers that filtered on
     /// `group == "node"` before these were added keep working unchanged.
@@ -365,7 +365,7 @@ impl GrammarTag {
 /// - **Hand-authored** (`document_grammar_tags`) for the load-time tags that
 ///   are *not* serde variants — they're `Value` rewrites resolved before the
 ///   typed parse, so there is no variant for the derive to read. `weighting`
-///   (`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!arg`/
+///   (`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!slot`/
 ///   `!undefined`). Their name set is pinned to the parser's own
 ///   [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS) (plus `fixed`) by
 ///   a test, the same anti-drift guarantee one rung lower.
@@ -629,7 +629,7 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
     ),
     (
         "load-time placeholders",
-        &["param", "arg", "import", "undefined"],
+        &["param", "slot", "import", "undefined"],
     ),
     ("lookback operators", &["lag", "diff", "ratio", "roc"]),
     ("macd", &["macd_line", "macd_signal", "macd_histogram"]),
@@ -724,7 +724,7 @@ fn category_of(name: &str) -> &'static str {
 /// The hand-authored records for the load-time rewrite tags — the one place in
 /// the descriptor that is *not* reflected off a serde variant, because these
 /// tags never reach the typed parse: a `Value` pass rewrites each away first
-/// (`!fixed`/`!equal_weight` → `!value`, `!import`/`!param`/`!arg` → their
+/// (`!fixed`/`!equal_weight` → `!value`, `!import`/`!param`/`!slot` → their
 /// resolved subtree, `!undefined` a check-mode stand-in).
 ///
 /// Their `name` set is pinned to [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS)
@@ -759,7 +759,7 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
                     ty: (*ty).to_owned(),
                     required: *required,
                     // None of the load-time tags defaults a key at all:
-                    // `!param`/`!arg`'s `default:` is an arbitrary value tree
+                    // `!param`/`!slot`'s `default:` is an arbitrary value tree
                     // the *author* supplies, and `!import`'s `params:` is a
                     // table, not an expression.
                     default: None,
@@ -790,8 +790,8 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             host_affecting: false,
         }
     }
-    // The `{ key, default, type }` body `!param` and `!arg` share verbatim —
-    // `spec/args.rs` says so in as many words ("the `!arg` grammar mirrors
+    // The `{ key, default, type }` body `!param` and `!slot` share verbatim —
+    // `spec/slots.rs` says so in as many words ("the `!slot` grammar mirrors
     // `!param`"), and both go through the one `params::placeholder_of` parse,
     // which is what keeps the claim true. The key set is **closed**: an unknown
     // one is an error, so a `typ:` can't silently mean "untyped".
@@ -944,7 +944,7 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
              table by `params::substitute` before the typed parse.",
         ),
         tag(
-            "arg",
+            "slot",
             "document",
             "document",
             vec![
@@ -959,9 +959,9 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
                     ),
                 ),
             ],
-            "Build-time substitution placeholder. `!arg SYM` / `!arg CHILD_NAME` / \
-             `!arg CHILD_INDEX` is substituted per symbol or child by \
-             `args::substitute` when a per-leg template is built. Unlike `!param` \
+            "Build-time substitution placeholder. `!slot SYM` / `!slot CHILD_NAME` / \
+             `!slot CHILD_INDEX` is substituted per symbol or child by \
+             `slots::substitute` when a per-leg template is built. Unlike `!param` \
              it is **not** legal everywhere: nothing substitutes it outside a \
              deferred template body, so one written elsewhere is a parse error.",
         ),
@@ -977,7 +977,7 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
                 scope: Some("internal".to_owned()),
                 doc: None,
             }],
-            "Internal check-mode stand-in for a not-yet-substituted `!arg` / \
+            "Internal check-mode stand-in for a not-yet-substituted `!slot` / \
              `!param`, letting a `SpecTemplate` type-check with its placeholders \
              held undefined. Never authored by hand — a document still carrying \
              one is refused at run.",
@@ -1001,7 +1001,7 @@ pub fn spec_grammar_document() -> serde_json::Value {
 /// `{ "<tag>": { <fields> } }` form that `NodeSpec`'s `TryFrom` normalises to
 /// and that the Python dict path / web form produce — plus the bare-literal
 /// shorthands (`70` → `!value`, `"close"` → `!close`) and the load-time
-/// placeholders an *authored* spec carries (`!arg` / `!param` / `!import` /
+/// placeholders an *authored* spec carries (`!slot` / `!param` / `!import` /
 /// `!undefined` / `!equal_weight`, from `typecheck::REWRITTEN_TAGS`), which the
 /// build resolves before the typed parse. `additionalProperties: false` mirrors
 /// `deny_unknown_fields`. Structure only — the Real/Bool/Str type discipline
@@ -1106,7 +1106,7 @@ fn expression_defs() -> serde_json::Map<String, serde_json::Value> {
     }
 
     // A load-time placeholder in *any* position, including a scalar field like
-    // `!pick { symbol: !arg SYM }`: a single-key object whose key is a rewritten
+    // `!pick { symbol: !slot SYM }`: a single-key object whose key is a rewritten
     // tag. Scalar field schemas accept it (via `or_placeholder`) so authored
     // per-symbol templates validate; the build substitutes it before typing.
     let placeholder_keys: Vec<Value> = crate::spec::typecheck::REWRITTEN_TAGS
@@ -1510,7 +1510,7 @@ fn payload_schema(payload: Option<&str>) -> serde_json::Value {
 }
 
 /// A scalar leaf may instead be a load-time placeholder in an authored template
-/// (`period: !arg P`), so every scalar fragment admits `#/$defs/placeholder`.
+/// (`period: !slot P`), so every scalar fragment admits `#/$defs/placeholder`.
 fn or_placeholder(base: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "anyOf": [base, { "$ref": "#/$defs/placeholder" }] })
 }

@@ -143,7 +143,7 @@ Four rules that bite. The mechanism, the per-context table of who blesses what, 
   symbol in the input, traded or not; the runners carry `traded ∪ !pick`-named and
   nothing else. A named symbol the input lacks is a **hard error**, for the same
   zero-fill reason. See `spec::reads`.
-- **`!arg SYM` is optional in basket/multi templates** — the bare and fully-spelled
+- **`!slot SYM` is optional in basket/multi templates** — the bare and fully-spelled
   forms build the same chain; the explicit one is only for reading a *different* symbol.
 - **`Pick::rooted` falls back through `sole_atom_or_none`, not `_or_panic`** — a 2+
   snapshot in a rooted context means "the blessed leg is absent this bar". The three
@@ -203,7 +203,7 @@ through. Each template is therefore **probed once at build time** against `PROBE
 to the probe.**
 
 **A template defers its value, not its shape.** One step earlier, `SpecTemplate`
-typed-parses a copy of the deferred body at **load** with every `!arg` held as an
+typed-parses a copy of the deferred body at **load** with every `!slot` held as an
 `undefined` hole, so a typo inside a basket's `score:` or a portfolio's `weights:` is an
 ordinary parse error for every consumer of the loader. Preprocessing a tree first? Use
 `SpecTemplate::checked`, **not** `from_tree`, which skips the probe.
@@ -298,7 +298,7 @@ The rationale behind each lives in the item's own doc comment, or in
 | Declared basket universe (strict vs. lax) | `strategies::universe::{Universe, Floating, AllOf, AnyOf}`; `BasketStrategy::{all_of, any_of, universe}`; YAML `universe: !all_of \| !any_of` | `src/strategies/universe.rs`, `src/spec/basket.rs` |
 | Composite strategy over N heterogeneous children on one account | `Portfolio::builder().add(name, s).weights(policy).rebalance_on(sig).build()`, then `backtest::run` (any `Wallet`) or `portfolio.run(snaps)`. Reads: `sub_equity(i)` / `sub_position(i, sym)` / `assert_books_balance(&wallet)`. The account must be the portfolio's **alone** | `src/portfolio/{mod,netting}.rs` |
 | Per-child notional book + the handle a child trades | `portfolio::ledger::{Ledger, LedgerWallet}`; `PortfolioInner::{net_and_submit, attribute_fill, book_crosses, book}` | `src/portfolio/{ledger,netting}.rs` |
-| Portfolio weight policies / adaptive weighting | `portfolio::policy::{WeightPolicy, Fixed, EqualWeight, ChildSample}`; `PortfolioBuilder::weight_shares(...)` — YAML `weights:` is one `SpecTemplate<NodeSpec>` instantiated per child with `!arg SYM`/`CHILD_NAME`/`CHILD_INDEX` | `src/portfolio/{mod,policy}.rs`, `src/spec/portfolio.rs` |
+| Portfolio weight policies / adaptive weighting | `portfolio::policy::{WeightPolicy, Fixed, EqualWeight, ChildSample}`; `PortfolioBuilder::weight_shares(...)` — YAML `weights:` is one `SpecTemplate<NodeSpec>` instantiated per child with `!slot SYM`/`CHILD_NAME`/`CHILD_INDEX` | `src/portfolio/{mod,policy}.rs`, `src/spec/portfolio.rs` |
 | Portfolio two-phase rebalance, and the position-phase policy | `PortfolioBuilder::{rebalance_on, position_rebalancer}`; `rebalance::PositionRebalancer` with `Proportional` (default) / `LargestFirst` | `src/portfolio/{mod,netting,rebalance}.rs` |
 | Aggregate portfolio `Book`; mark a `Book` from outside | `Portfolio::book()`; `Book::mark_equity(v)` (equity + peak + per-bar return only) | `src/portfolio/mod.rs`, `src/indicators/book.rs` |
 | Close every open position **now**, through the cost pipeline | `Wallet::flatten` (`PaperWallet` overrides it synchronously — its queued moves would never settle) | `src/wallet/{mod,paper}.rs` |
@@ -326,8 +326,8 @@ The rationale behind each lives in the item's own doc comment, or in
 | Load whole strategy doc | `spec::load_document(text, &params, base, root, label, kind)` — `load_value` is the same pipeline without the `root::apply_default` splice; `*StrategySpec::from_text_with_params_in` | `src/spec/mod.rs` |
 | Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
 | Load-time `!param` / `!import` substitution | `params::substitute`; `imports::resolve(value, base, root)` — `base` is `input::Source::base_dir()`, the importing file's directory; `root` is the confinement boundary (`--import-root`) it was decoupled from. Partial pass: `params::substitute_partial` | `src/spec/{params,imports,input}.rs` |
-| A `!param` / `!arg` body — its `key`, `default` and optional declared `type` | `params::placeholder_of(tag, body)` → `Placeholder`, `.apply(v)` to coerce; `param_type::{ParamType, parse_declaration}`. Both tags share the one parse, so the key set (**closed** — an unknown key is an error, or `typ:` would silently mean "untyped") and the four names (`string`/`numeric`/`integer`/`bool`) can't drift. No `type:`, or `type: null`, = the pre-existing heuristics, coercion skipped entirely. A declaration also checks the `default:`, and under `check` it is what an unset placeholder reports (`undefined::declare` → `HoleTypes.declared`) | `src/spec/{params,param_type,args}.rs` |
-| Build-time `!arg` substitution; defer a subtree until args are ready | `args::substitute(value, &args)`; `SpecTemplate<T>` + `.build(&args)`. Preprocessed a tree first? `SpecTemplate::checked`, **not** `from_tree` (which skips the probe) | `src/spec/{args,template}.rs` |
+| A `!param` / `!slot` body — its `key`, `default` and optional declared `type` | `params::placeholder_of(tag, body)` → `Placeholder`, `.apply(v)` to coerce; `param_type::{ParamType, parse_declaration}`. Both tags share the one parse, so the key set (**closed** — an unknown key is an error, or `typ:` would silently mean "untyped") and the four names (`string`/`numeric`/`integer`/`bool`) can't drift. No `type:`, or `type: null`, = the pre-existing heuristics, coercion skipped entirely. A declaration also checks the `default:`, and under `check` it is what an unset placeholder reports (`undefined::declare` → `HoleTypes.declared`) | `src/spec/{params,param_type,slots}.rs` |
+| Build-time `!slot` substitution; defer a subtree until its bindings are ready | `slots::substitute(value, &bindings)`; `SpecTemplate<T>` + `.build(&bindings)`. A separate namespace from `!param`: each pass rewrites only its own tag and resolves against its own table, so the same name in both never collides. Preprocessed a tree first? `SpecTemplate::checked`, **not** `from_tree` (which skips the probe) | `src/spec/{slots,template}.rs` |
 | Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` / each `*Spec::try_build` → `Err(String)` with the `!tag > ` breadcrumb; `spec::backtest::{build_error, validated}` | `src/spec/{expr,backtest}.rs` |
 | Validate a document **nobody has bound `!param` values for** — shape only, holes typed from their slots | `spec::check::check_value` → `CheckedSpec { spec, holes, reads, built }`. The one copy behind `fugazi check strategy` *and* Python `ta.check_spec`; `spec` is **not runnable** (holes parse as typed zeros). The `check_mode` guard spans the **build**, not just the parse — a deferred template body re-parses there | `src/spec/check.rs` |
 | Static type check of an expression tree (`check` only) | `typecheck::{output_type, check_immediate}` — a `None` output type means *skip*, never *invalid* | `src/spec/typecheck.rs` |

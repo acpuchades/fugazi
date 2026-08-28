@@ -6,21 +6,21 @@
 //! Snapshot<Symbol>` and `Symbol = Symbol`), but the score and sizing
 //! sources are **per-symbol templates**: they get a fresh
 //! [`NodeSpec`] built for every symbol the incoming snapshots reveal, with
-//! the symbol name available as `!arg SYM` inside the tree.
+//! the symbol name available as `!slot SYM` inside the tree.
 //!
 //! ```yaml
 //! selection: !top_bottom { longs: 3, shorts: 3 }
 //! score:
 //!   !mul
-//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
-//!     rhs: !adx { source: !current { source: !pick { symbol: !arg SYM } }, period: 14 }
+//!     lhs: !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
+//!     rhs: !adx { source: !current { source: !pick { symbol: !slot SYM } }, period: 14 }
 //! sizing: !equal_weight 6
 //! ```
 //!
 //! Both `score` and `sizing` are typed as
-//! [`SpecTemplate<NodeSpec>`](super::SpecTemplate), so a `!arg SYM` leaf
+//! [`SpecTemplate<NodeSpec>`](super::SpecTemplate), so a `!slot SYM` leaf
 //! survives the load pass and gets resolved once per symbol at build
-//! time. See [`crate::spec::args`] for the placeholder grammar.
+//! time. See [`crate::spec::slots`] for the placeholder grammar.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -198,7 +198,7 @@ pub enum UniverseSpec {
 /// A whole `basket.yml`: the ranking rule plus deferred score and sizing
 /// templates, resolved per-symbol at build time.
 ///
-/// See the module doc for the `!arg SYM` substitution convention.
+/// See the module doc for the `!slot SYM` substitution convention.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BasketStrategySpec {
@@ -207,17 +207,17 @@ pub struct BasketStrategySpec {
 
     /// The per-symbol scoring source: a real-valued expression evaluated
     /// once per bar for every symbol in the snapshot. Written as a normal
-    /// `NodeSpec` tree with `!arg SYM` placeholders where the current
+    /// `NodeSpec` tree with `!slot SYM` placeholders where the current
     /// symbol should be substituted.
     pub score: SpecTemplate<NodeSpec>,
 
     /// The per-symbol sizing source: the per-leg `ValueFraction`
     /// magnitude every selected symbol is entered at. Same shape as
-    /// `score` — normal `NodeSpec` with `!arg SYM` placeholders.
+    /// `score` — normal `NodeSpec` with `!slot SYM` placeholders.
     ///
     /// For the equal-weight common case (100% gross across an N-symbol
     /// basket), write `!equal_weight <n_legs>` — the constant `1.0 /
-    /// n_legs` per leg. No `!arg` is needed there since equal-weight
+    /// n_legs` per leg. No `!slot` is needed there since equal-weight
     /// doesn't depend on the symbol.
     pub sizing: SpecTemplate<NodeSpec>,
 
@@ -255,7 +255,7 @@ pub struct BasketStrategySpec {
     pub balance_sides: bool,
 
     /// Per-leg protective levels — same shape as the single-asset
-    /// `long:` / `short:` spec sides but templated (`!arg SYM` for the
+    /// `long:` / `short:` spec sides but templated (`!slot SYM` for the
     /// current symbol). Each side's `stop_loss` and `take_profit` is an
     /// `NodeSpec` template built once per new symbol; `!entry` / `!peak`
     /// / `!trough` inside the template read against *that* symbol's
@@ -297,7 +297,7 @@ pub struct BasketSideSpec {
 
 impl BasketStrategySpec {
     /// Parse a YAML basket document, applying `!param` substitutions
-    /// against `params` before typed deserialization. `!arg` placeholders
+    /// against `params` before typed deserialization. `!slot` placeholders
     /// (which resolve per-symbol at build time) are left alone.
     pub fn from_text_with_params_in(
         text: &str,
@@ -338,7 +338,7 @@ impl BasketStrategySpec {
     ///
     /// The score and sizing templates are cloned into the corresponding
     /// per-symbol factories on the library `BasketStrategy`. Each factory
-    /// resolves `!arg SYM` against the current symbol on invocation
+    /// resolves `!slot SYM` against the current symbol on invocation
     /// (once per new symbol, so the per-bar overhead is a HashMap lookup,
     /// not a re-parse).
     ///
@@ -346,7 +346,7 @@ impl BasketStrategySpec {
     ///
     /// The score/sizing factories panic if a per-symbol template build
     /// fails — a symbol name that trips the typed deserialize on the
-    /// substituted tree, or an `!arg` that isn't `SYM`. Basket YAML
+    /// substituted tree, or an `!slot` that isn't `SYM`. Basket YAML
     /// should be validated up front (best done by dry-running on a
     /// representative symbol set in tests).
     ///
@@ -549,9 +549,9 @@ impl BasketStrategySpec {
 /// score / sizing / protective template reads *that leg's* symbol out of the
 /// snapshot.
 ///
-/// This is what makes `!arg SYM` **optional** rather than required in a basket
+/// This is what makes `!slot SYM` **optional** rather than required in a basket
 /// template — `score: !rsi { period: 14 }` and the fully-spelled
-/// `score: !rsi { period: 14, source: !close { source: !pick { symbol: !arg SYM } } }`
+/// `score: !rsi { period: 14, source: !close { source: !pick { symbol: !slot SYM } } }`
 /// now build the same chain. The explicit form keeps working (it resolves
 /// through [`build_per_symbol`] exactly as before), and stays the way to read
 /// a *different* symbol per leg — a hedge ratio against a common benchmark,
@@ -574,14 +574,14 @@ fn try_build_per_symbol(
     sym: &str,
     slot: &'static str,
 ) -> Result<NodeSpec, String> {
-    let mut args = HashMap::new();
-    args.insert("SYM".to_string(), Value::String(sym.to_string()));
+    let mut slots = HashMap::new();
+    slots.insert("SYM".to_string(), Value::String(sym.to_string()));
     template
-        .build(&args)
+        .build(&slots)
         .map_err(|e| format!("basket {slot} template build failed for symbol {sym:?}: {e}"))
 }
 
-/// The stand-in symbol the build-time probe substitutes for `!arg SYM`.
+/// The stand-in symbol the build-time probe substitutes for `!slot SYM`.
 ///
 /// Deliberately not a plausible ticker: it never matches a real snapshot entry,
 /// so a probe chain is inert even if one were accidentally retained.
@@ -593,7 +593,7 @@ const PROBE_SYMBOL: &str = "__fugazi_probe__";
 /// The per-symbol factories build their chain on **first sight of a symbol**,
 /// inside `BasketStrategy::update` — a context with no error path to return
 /// through, which is why those closures still `panic!`. The only thing that
-/// varies between symbols is the `!arg SYM` substitution and the blessed root
+/// varies between symbols is the `!slot SYM` substitution and the blessed root
 /// selector, and neither can change *which* tags the tree contains or what
 /// types they produce. So a template that builds for one symbol builds for
 /// every symbol, and checking once here is enough to turn the factories'
@@ -755,7 +755,7 @@ mod tests {
     /// eagerly-parsed slot.
     ///
     /// The template's shape doesn't depend on which symbol the driver binds, so
-    /// `SpecTemplate`'s `Deserialize` typed-parses a probe copy with `!arg SYM`
+    /// `SpecTemplate`'s `Deserialize` typed-parses a probe copy with `!slot SYM`
     /// held as a hole. Before that, `score:` was captured as an untyped tree and
     /// a misspelled tag survived the load, `fugazi check`, and everything else
     /// until the first bar that instantiated it.
@@ -763,7 +763,7 @@ mod tests {
     fn a_misspelled_tag_inside_a_template_fails_the_load() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !smaa { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+            score: !smaa { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
             sizing: !value 1.0
         "#;
         let err = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
@@ -778,7 +778,7 @@ mod tests {
     fn an_unknown_field_inside_a_template_fails_the_load() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !sma { source: !close { source: !pick { symbol: !arg SYM } }, perid: 20 }
+            score: !sma { source: !close { source: !pick { symbol: !slot SYM } }, perid: 20 }
             sizing: !value 1.0
         "#;
         let err = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
@@ -788,13 +788,13 @@ mod tests {
     }
 
     /// …and the eager parse must not reject what the driver will happily build:
-    /// `!arg SYM` stands in a `symbol:` (string) position here, and the probe
+    /// `!slot SYM` stands in a `symbol:` (string) position here, and the probe
     /// answers it with a string rather than failing the typed parse.
     #[test]
-    fn a_templated_arg_still_loads() {
+    fn a_templated_slot_still_loads() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+            score: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
             sizing: !value 1.0
         "#;
         BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
@@ -807,7 +807,7 @@ mod tests {
             selection: !top_bottom { longs: 2, shorts: 2 }
             score:
               !roc
-                source: !close { source: !pick { symbol: !arg SYM } }
+                source: !close { source: !pick { symbol: !slot SYM } }
                 period: 5
             sizing: !equal_weight 4
         "#;
@@ -872,7 +872,7 @@ mod tests {
         // it. Proves the `of:` inner actually narrows the pool.
         let yaml = r#"
             selection: !top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 85.0, short_max: 15.0 } }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.2
         "#;
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
@@ -913,13 +913,13 @@ mod tests {
 
     #[test]
     fn build_produces_a_working_strategy_that_ranks_by_score() {
-        // Score = close price (via !close{!pick{!arg SYM}}); rank top-1 long,
+        // Score = close price (via !close{!pick{!slot SYM}}); rank top-1 long,
         // bottom-1 short; sized 50% ValueFraction per leg. Drive two bars —
         // bar 1 to prime, bar 2 to fill. A > C in close, so A should end
         // long and C short.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
         "#;
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
@@ -953,15 +953,15 @@ mod tests {
     }
 
     #[test]
-    fn sym_arg_is_substituted_per_symbol_via_pick() {
-        // If the `!arg SYM` weren't substituted per-symbol, every symbol's
+    fn sym_slot_is_substituted_per_symbol_via_pick() {
+        // If the `!slot SYM` weren't substituted per-symbol, every symbol's
         // score would read the same asset — likely panicking on the
         // multi-entry snapshot inside an empty-selector `Pick`. Verify the
         // per-symbol build by ensuring both symbols get their own score.
         // (A trivial constant sizing keeps the scenario simple.)
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 0 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.25
         "#;
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
@@ -991,7 +991,7 @@ mod tests {
     fn universe_defaults_to_floating_when_omitted() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
         "#;
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
     fn universe_all_of_parses_symbol_list() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             universe: !all_of [BTC, ETH, SOL]
         "#;
@@ -1019,7 +1019,7 @@ mod tests {
     fn universe_any_of_parses_symbol_list() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             universe: !any_of [BTC, ETH]
         "#;
@@ -1038,7 +1038,7 @@ mod tests {
         // must ignore Z at discovery (no chain, no fill).
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             universe: !all_of [X, Y]
         "#;
@@ -1078,7 +1078,7 @@ mod tests {
     fn build_with_all_of_panics_on_missing_symbol() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             universe: !all_of [X, Y]
         "#;
@@ -1096,7 +1096,7 @@ mod tests {
         // basket.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
         "#;
         let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
@@ -1109,7 +1109,7 @@ mod tests {
         // false), a queued order on bar 5, fill on bar 6.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             rebalance_on: !every 5
         "#;
@@ -1152,7 +1152,7 @@ mod tests {
         // `!never` is a ValueBool::false — the basket never rebalances.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             rebalance_on: !never
         "#;
@@ -1174,16 +1174,16 @@ mod tests {
 
     #[test]
     fn vol_target_with_per_symbol_source_survives_multi_symbol_snapshot() {
-        // `!vol_target { source: !pick { symbol: !arg SYM }, ... }` — each
+        // `!vol_target { source: !pick { symbol: !slot SYM }, ... }` — each
         // leg's sizing chain projects its own asset, so the sole-atom panic
         // that the sourceless shortcut would fire on a multi-entry snapshot
         // never fires here. Just proves the build path doesn't blow up.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing:
               !vol_target
-                source: !pick { symbol: !arg SYM }
+                source: !pick { symbol: !slot SYM }
                 target: 0.20
                 window: 3
                 bars_per_year: 252
@@ -1212,10 +1212,10 @@ mod tests {
         // Twin of the vol_target case for the ATR-risk sizing recipe.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing:
               !atr_risk
-                source: !pick { symbol: !arg SYM }
+                source: !pick { symbol: !slot SYM }
                 risk_frac: 0.01
                 period: 3
                 atr_multiple: 2.0
@@ -1243,7 +1243,7 @@ mod tests {
         // here, which is the opt-out rather than the default.
         let base = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
         "#;
         let spec = BasketStrategySpec::from_text_with_params(base, &HashMap::new()).unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
         // the spec parses and builds without panicking.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
-            score: !close { source: !pick { symbol: !arg SYM } }
+            score: !close { source: !pick { symbol: !slot SYM } }
             sizing: !value 0.5
             long:
               stop_loss: !mul { lhs: !entry, rhs: !value 0.95 }
@@ -1283,13 +1283,13 @@ mod tests {
 
     #[test]
     fn params_are_substituted_at_load_time() {
-        // `!param FAST` gets resolved from `--params`, `!arg SYM` remains
+        // `!param FAST` gets resolved from `--params`, `!slot SYM` remains
         // deferred for the per-symbol build.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
             score:
               !roc
-                source: !close { source: !pick { symbol: !arg SYM } }
+                source: !close { source: !pick { symbol: !slot SYM } }
                 period: !param FAST
             sizing: !value 0.5
         "#;
@@ -1297,13 +1297,13 @@ mod tests {
         params.insert("FAST".to_string(), Value::Number(10.into()));
         let spec = BasketStrategySpec::from_text_with_params(yaml, &params).unwrap();
         // The stored tree should carry `period: 10` (resolved) and
-        // `symbol: {arg: "SYM"}` (deferred).
+        // `symbol: {slot: "SYM"}` (deferred).
         let tree = spec.score.tree();
         let period = tree.pointer("/roc/period").unwrap();
         assert_eq!(period, &Value::Number(10.into()));
         let sym = tree
             .pointer("/roc/source/close/source/pick/symbol")
             .unwrap();
-        assert_eq!(sym, &serde_json::json!({"arg": "SYM"}));
+        assert_eq!(sym, &serde_json::json!({"slot": "SYM"}));
     }
 }

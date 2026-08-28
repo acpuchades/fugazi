@@ -4,7 +4,7 @@
 #
 # The universe is **not declared here** — it is whatever symbols the input
 # series carry. The basket builds a fresh score/sizing chain for each symbol
-# it sees, substituting the symbol's name into every `!arg SYM` placeholder,
+# it sees, substituting the symbol's name into every `!slot SYM` placeholder,
 # so this one document works for a 4-symbol universe or a 40-symbol one.
 #
 # Run it with (one --series per symbol, joined on `time`; `basket:` is the
@@ -17,7 +17,7 @@
 #              --crypto -f 1d
 #
 # Tags used below:
-#   !arg SYM      — the current symbol, substituted once per symbol at build time.
+#   !slot SYM      — the current symbol, substituted once per symbol at build time.
 #   !pick         — project one asset's bar out of the multi-symbol snapshot.
 #   !roc          — rate of change over `period` bars (the momentum score).
 #   !top_bottom   — take the N highest-scoring symbols long, the N lowest short.
@@ -29,17 +29,17 @@
 selection: !top_bottom { longs: 2, shorts: 2 }
 
 # The per-symbol score: 20-bar rate of change of that symbol's close. Every
-# atom-input leaf in a basket must be rooted through `!pick { symbol: !arg SYM }`
+# atom-input leaf in a basket must be rooted through `!pick { symbol: !slot SYM }`
 # — a bare `close` would try the sole-atom unpack and panic on a multi-symbol
 # snapshot.
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: 20
 
 # The per-leg position size, as a fraction of equity. 2 longs + 2 shorts = 4
 # legs, so `!equal_weight 4` is 25% per leg and 100% gross exposure. Any
 # real-valued expression fits here instead — e.g. `!vol_target { source: !pick
-# { symbol: !arg SYM }, target: 0.20, window: 20, bars_per_year: 252 }` for
+# { symbol: !slot SYM }, target: 0.20, window: 20, bars_per_year: 252 }` for
 # per-leg inverse-vol weighting (the `source:` is mandatory in a basket — the
 # sourceless shortcut uses the sole-atom `Pick::new()` and panics on a
 # multi-symbol snapshot), or `!drawdown_throttle { max_drawdown: 0.20 }` to

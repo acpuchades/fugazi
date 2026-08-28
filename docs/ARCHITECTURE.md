@@ -353,7 +353,7 @@ symbol via a per-symbol scoring source, applies a `Selection` impl
 - **Per-leg protective.** `.long_stop_loss(|sym, &Position| level)` /
   `.long_take_profit(...)` / `.short_stop_loss(...)` / `.short_take_profit(...)`
   per-symbol factories, plus YAML `long: { stop_loss: ..., take_profit: ... }` /
-  `short: { ... }` using `BasketSideSpec` templates with `!arg SYM` and `!entry` /
+  `short: { ... }` using `BasketSideSpec` templates with `!slot SYM` and `!entry` /
   `!peak` / `!trough` anchored to *that* symbol's Position.
 - **Python**: `ta.BasketStrategy().scored_by(fn).sized_by(fn).top_bottom(l, s)`
   (or `.threshold` / `.quantile`), `.balance_sides(bool)`, `.rebalance_on(sig)`,
@@ -461,8 +461,8 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   ("fixed weights"); `!value 1.0` → any per-child constant normalizes to `1/N`; any
   other expression → dynamic. `!fixed [...]` / `!equal_weight` are load-time sugar
   rewritten to their `!value` equivalents. Per-child instantiation supplies auto-args
-  `!arg CHILD_INDEX` (always), `!arg CHILD_NAME` / `!arg CHILD_GROUP` (when declared),
-  `!arg SYM` (single-asset children). Child names must be unique after defaulting to
+  `!slot CHILD_INDEX` (always), `!slot CHILD_NAME` / `!slot CHILD_GROUP` (when declared),
+  `!slot SYM` (single-asset children). Child names must be unique after defaulting to
   `child_<idx>`. **Book source is explicit via `source:`** — bare `!drawdown` /
   `!equity` / `!fractional_kelly` reads the *child's own* `Book`; `source:
   !portfolio_book` reads the aggregate; `source: !strategy_book` spells the default.
@@ -1220,7 +1220,7 @@ CSV loading, `fugazi get`, progress banners, and CSV/YAML output writers.
 **In `src/spec/`** (library, `spec` feature): `mod.rs`, `expr.rs`, `strategy.rs`,
 `pairs.rs`, `basket.rs`, `multi_asset.rs`, `portfolio.rs`, `preset.rs`, `shape.rs`,
 `trailing.rs`, `template.rs`, `imports.rs`, `params.rs`, `param_type.rs`,
-`undefined.rs`, `args.rs`, `convert.rs`, `input.rs`, `root.rs`, `reads.rs`, `meta.rs`,
+`undefined.rs`, `slots.rs`, `convert.rs`, `input.rs`, `root.rs`, `reads.rs`, `meta.rs`,
 `grammar.rs`, `dyn_indicator.rs`, `calendar.rs`, `costs/`, `backtest.rs`, `metrics.rs`,
 `optimize.rs`, `panel.rs`, `pool.rs`, `runnable.rs`, `overlay.rs`, `montecarlo.rs`,
 `typecheck.rs`.
@@ -1314,8 +1314,8 @@ as "this document is broken" to an author who merely forgot a `--params` term.
 
 Consequences worth stating outright:
 
-- **`!arg SYM` is optional, not required** in basket/multi templates. `score: !rsi
-  { period: 14 }` and the fully-spelled `!pick { symbol: !arg SYM }` build the same
+- **`!slot SYM` is optional, not required** in basket/multi templates. `score: !rsi
+  { period: 14 }` and the fully-spelled `!pick { symbol: !slot SYM }` build the same
   chain; the explicit form is the only way to read a *different* symbol per leg.
 - **Blessing scopes the *default*, never the reachable set.** Any shape may `!pick` any
   symbol in the input, traded or not (a regime gate on BTC inside an ETH document). The
@@ -1354,13 +1354,13 @@ Consequences worth stating outright:
   **Internal `NodeSpec` fields are never newtypes**. The deferred `SpecTemplate<NodeSpec>`
   slots stay plain `NodeSpec`.
 - `template.rs` — `SpecTemplate<T>`: captures raw `serde_json::Value`; `.build(&args)`
-  runs `!arg` then typed-parses. Two-pass: `!param` at load, `!arg` each `.build()`.
+  runs `!slot` then typed-parses. Two-pass: `!param` at load, `!slot` each `.build()`.
   **Deferred value, eager shape**: `Deserialize` (and `SpecTemplate::checked`, for the
   callers that preprocess a tree first) typed-parses a *probe* copy at load with every
-  `!arg` held as an `undefined` hole, so a typo in a deferred body is a parse error like
+  `!slot` held as an `undefined` hole, so a typo in a deferred body is a parse error like
   any other, for every consumer of the loader. A probe error naming a hole sentinel is
   *skipped*, not reported — `!value`'s hand-rolled `TryFrom` has no type demand to answer
-  a hole with, and refusing to load `!value !arg CHILD_GROUP` would be a false verdict
+  a hole with, and refusing to load `!value !slot CHILD_GROUP` would be a false verdict
   (`undefined::parse_probe`).
 - `strategy.rs` — `SideSpec`, `SingleStrategySpec`, `DynSingleStrategy`.
 - `preset.rs` — `StrategyPreset` (`!buy_and_hold`/`!ma_crossover`/`!rsi_reversal`/
@@ -1424,7 +1424,7 @@ Consequences worth stating outright:
   aborted the process instead of reporting anything. Object form `!import { path, params: {...} }`
   resolves the imported subtree's `!param` against the inline table first (via
   `params::substitute_partial`).
-- **`param_type.rs`** — the optional `type:` a `!param` / `!arg` body carries:
+- **`param_type.rs`** — the optional `type:` a `!param` / `!slot` body carries:
   `ParamType::{String, Numeric, Integer, Bool}`, `parse_declaration` (absent or `null`
   ⇒ `None` ⇒ *the heuristics*, which is what every pre-existing placeholder gets), and
   `coerce`. Both tags read their body through the one `params::placeholder_of(tag, body)`
@@ -1449,8 +1449,8 @@ Consequences worth stating outright:
   position demanded *and* the `type:` it declared, drained together as `HoleTypes`.
   `check` validates a spec's **shape**, never building or driving it.
   Gated by a thread-local `check_mode()` RAII guard.
-- **`params.rs`, `args.rs`, `convert.rs`, `list.rs`, `completions.rs`, `pool.rs`,
-  `style.rs`** — auxiliary. `params::substitute` and `args::substitute` share a walker,
+- **`params.rs`, `slots.rs`, `convert.rs`, `list.rs`, `completions.rs`, `pool.rs`,
+  `style.rs`** — auxiliary. `params::substitute` and `slots::substitute` share a walker,
   differ only in sentinel key.
 
 ## Python bindings (`python/src/`)
@@ -1491,7 +1491,7 @@ separate scalar tags** (`macd_line`, `bb_upper`, …), so `output` is `scalar` a
 
 Records carry a **`group`**: `node` / `selection` / `universe` (all reflected off serde) are
 the expression + basket-selection + universe-declaration vocabularies; `weighting`
-(`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!arg`/`!undefined`) are
+(`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!slot`/`!undefined`) are
 **hand-authored** in `grammar::document_grammar_tags`, because these load-time tags are
 `Value` rewrites that never reach the typed parse (there's no variant for the derive to read).
 Their *name set* is still pinned — to `typecheck::REWRITTEN_TAGS` (∪ `fixed`) by
@@ -1518,7 +1518,7 @@ consumer. `category` is a new *field*, so it **did** bump `SCHEMA_VERSION` to 3.
 **A tag is a set of spellings, not one — `forms` (v5, 0.67).** `shape` / `fields` / `payload` /
 `payload_output` sit on a `GrammarForm`, and a record carries a list of them, canonical first.
 The single `shape` the descriptor used to report was silently wrong for eight tags: `!param` /
-`!arg` (`NAME` or `{ key, default }` — only the second can carry a default), `!import` (a path
+`!slot` (`NAME` or `{ key, default }` — only the second can carry a default), `!import` (a path
 or `{ path, params }`), `!equal_weight` (bare in a portfolio `weights:`, `<N>` as sizing —
 different meanings), and the four unary wrappers `!changed` / `!became_true` / `!became_false` /
 `!unstable`, which take their inner bare *or* under a `source:` key. The last four are in the
@@ -1541,7 +1541,7 @@ now share `expr::UNARY_WRAPPERS`.
 **`scope` says where a form is legal, because `group` doesn't.** `document` is a *provenance*
 label — resolved by a `Value` pass before the typed parse — and reading it as a position claim
 is wrong for half of that group. `!param` and `!import` genuinely go anywhere a value goes (an
-expression slot, `period:`, `root:`, a list element). `!arg` is `scope: "template"`: it is
+expression slot, `period:`, `root:`, a list element). `!slot` is `scope: "template"`: it is
 substituted only inside a deferred `SpecTemplate` body (a basket's `score:`/`sizing:`, a
 multi-asset side's `enter:`, a portfolio's `weights:`), and one written elsewhere is a hard
 parse error — `check` included, since no pass touches it. `!undefined` is `scope: "internal"`.

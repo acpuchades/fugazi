@@ -272,7 +272,7 @@ fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
 /// A parsed placeholder body — the shared read of the `{ key, default, type }`
 /// object and the bare-string form.
 ///
-/// One type for both tags: `spec/args.rs` says the `!arg` grammar mirrors
+/// One type for both tags: `spec/slots.rs` says the `!slot` grammar mirrors
 /// `!param`, and this is where that claim is *enforced* rather than restated.
 /// The only difference is which word the messages use, which
 /// [`tag`](Self::tag) carries.
@@ -281,7 +281,7 @@ fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
 /// that isn't one of the three); an unset-but-well-formed key is not an error
 /// here.
 pub(crate) struct Placeholder<'a> {
-    /// `"param"` or `"arg"` — the tag this body was written under, so a message
+    /// `"param"` or `"slot"` — the tag this body was written under, so a message
     /// names the thing the author actually typed.
     pub tag: &'static str,
     /// The `--params` name (or driver binding) this stands for.
@@ -316,10 +316,10 @@ impl Placeholder<'_> {
     }
 
     /// What the user calls this thing: a `--params` value is a *parameter*, a
-    /// driver binding an *argument*.
+    /// driver-bound one a *slot*.
     fn noun(&self) -> &'static str {
-        if self.tag == "arg" {
-            "argument"
+        if self.tag == "slot" {
+            "slot"
         } else {
             "parameter"
         }
@@ -338,8 +338,8 @@ pub(crate) fn placeholder(body: &Value) -> Result<Placeholder<'_>> {
     placeholder_of("param", body)
 }
 
-/// Parse a placeholder body written under `tag` (`"param"` or `"arg"`), which
-/// is used only to word the messages. `spec::args` calls this for `!arg`, so
+/// Parse a placeholder body written under `tag` (`"param"` or `"slot"`), which
+/// is used only to word the messages. `spec::slots` calls this for `!slot`, so
 /// the two tags cannot grow different key sets or different type vocabularies.
 pub(crate) fn placeholder_of<'a>(tag: &'static str, body: &'a Value) -> Result<Placeholder<'a>> {
     match body {

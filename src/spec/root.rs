@@ -167,7 +167,7 @@ impl RootSpec {
     /// instead of a payload round-trip per leaf.
     pub fn as_pick(&self) -> Option<(Option<&str>, Option<&str>)> {
         let body = self.tree.get("pick")?.as_object()?;
-        // Anything that isn't a plain string (an `!arg` hole, a nested
+        // Anything that isn't a plain string (an `!slot` hole, a nested
         // expression) is not a selector this shortcut can answer for.
         let field = |k: &str| match body.get(k) {
             None => Some(None),

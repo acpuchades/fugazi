@@ -77,7 +77,7 @@ fn basket_strategy() -> String {
     let (_, arg) = scratch_file(
         "cadence_basket.yml",
         "selection: !top_bottom { longs: 1, shorts: 0 }\n\
-         score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }\n\
+         score: !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 2 }\n\
          sizing: !equal_weight 1\n",
     );
     format!("basket:{arg}")

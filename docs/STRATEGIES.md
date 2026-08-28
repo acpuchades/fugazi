@@ -670,15 +670,15 @@ An explicit [`universe:`](#universe) field opts the basket into a declared
 symbol list — strict (`!all_of`, errors on absence) or lax (`!any_of`, silently
 skips absent / unready).
 
-### `!arg SYM` — the per-symbol placeholder
+### `!slot SYM` — the per-symbol placeholder
 
 `score` and `sizing` are **templates**: their tree is captured verbatim at load
-and rebuilt once per symbol, with `!arg SYM` resolving to that symbol's name. So
+and rebuilt once per symbol, with `!slot SYM` resolving to that symbol's name. So
 this score…
 
 ```yaml
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: 20
 ```
 
@@ -687,23 +687,26 @@ and so on. As in a pair, every atom-input leaf inside `score` / `sizing` must be
 rooted through a `!pick` — there's no implicit single-asset root in a multi-symbol
 snapshot.
 
-The `!arg` grammar mirrors [`!param`](#parameters--param), and the two are
-resolved in different passes (`!param` once at load from `--params`, `!arg` per
-symbol at build), so they compose freely inside one tree:
+The `!slot` grammar mirrors [`!param`](#parameters--param), and the two are
+resolved in different passes (`!param` once at load from `--params`, `!slot` per
+symbol at build), against **separate namespaces** — each pass rewrites only its
+own tag and looks its names up in its own table, so a `SYM` bound as a slot and a
+`SYM` passed as `--params` never see each other, and the two compose freely
+inside one tree:
 
-- `!arg SYM` — bare-string shorthand;
-- `!arg { key: SYM }` — the same, explicit;
-- `!arg { key: SYM, default: BTC }` — with a fallback;
-- `!arg { key: SYM, type: string }` — with a
+- `!slot SYM` — bare-string shorthand;
+- `!slot { key: SYM }` — the same, explicit;
+- `!slot { key: SYM, default: BTC }` — with a fallback;
+- `!slot { key: SYM, type: string }` — with a
   [declared type](#declaring-a-placeholders-type), checked when the driver binds
   the name rather than at load (that is when the value exists). The build-time
   probe every template goes through means a declaration the binding can't
   satisfy still fails at start-up, not on the first bar that quotes a symbol.
 
-`SYM` is the only argument the basket driver supplies.
+`SYM` is the only slot the basket driver binds.
 
 **Only the value is deferred, not the shape.** A template body is typed-parsed
-at load with each `!arg` held as a placeholder, so a misspelled tag or field
+at load with each `!slot` held as a placeholder, so a misspelled tag or field
 inside `score:` / `sizing:` (or a multi-asset side's `enter:`, or a portfolio's
 `weights:`) is a parse error like any other — reported by `fugazi check`, by
 `fugazi run` before the first bar, and by `load_spec` in Python. What the parse
@@ -775,7 +778,7 @@ overlapping subsets. Omit the field for the default floating behaviour.
 selection: !top_bottom { longs: 2, shorts: 2 }
 
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: 20
 
 sizing: !equal_weight 4
@@ -863,7 +866,7 @@ signals fired).
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `long` | side | omitted | the long side — `enter` + optional `exit` / `stop_loss` / `take_profit`, each templated by `!arg SYM` |
+| `long` | side | omitted | the long side — `enter` + optional `exit` / `stop_loss` / `take_profit`, each templated by `!slot SYM` |
 | `short` | side | omitted | the short side, same shape as `long` |
 | `sizing` | source *(template)* | `!value 1` (1x equity per leg) | the per-leg size, as a multiple of equity — not capped at `1`; see [Sizing](#sizing) |
 | `universe` | universe rule | *floating* (every symbol in the series) | which symbols the portfolio is willing to trade — see [Universe](#universe) (shared with `basket:`) |
@@ -873,9 +876,9 @@ signals fired).
 `long` and `short` mirror the [single-asset side](#single-asset-documents)
 grammar exactly (`enter`, `exit`, `stop_loss`, `take_profit`); the
 difference is that every subtree is a **template** that gets rebuilt per
-symbol with `!arg SYM` substituted, same as `score` / `sizing` in a
+symbol with `!slot SYM` substituted, same as `score` / `sizing` in a
 basket. Every atom-input leaf inside must be rooted through
-`!pick { symbol: !arg SYM }`, since a multi-asset snapshot has no
+`!pick { symbol: !slot SYM }`, since a multi-asset snapshot has no
 implicit "sole atom" to unpack.
 
 ### A complete multi-asset portfolio
@@ -885,21 +888,21 @@ implicit "sole atom" to unpack.
 # Equal-weighted at 25% per leg (4 legs = 100% gross).
 long:
   enter: !crosses_above
-    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+    lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
   exit: !crosses_below
-    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+    lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
   stop_loss: !mul
     lhs: !entry
     rhs: !value 0.95
 short:
   enter: !crosses_below
-    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+    lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
   exit: !crosses_above
-    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+    lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
 sizing: !equal_weight 4
 universe: !all_of [BTC, ETH, SOL, ADA]
 ```
@@ -956,8 +959,8 @@ children:
 ```
 
 `name` is optional but must be unique (it defaults to `child_<index>`); it names
-the child in errors and is available to weight expressions as `!arg CHILD_NAME`.
-`group` is a free-form label, available as `!arg CHILD_GROUP` — the natural
+the child in errors and is available to weight expressions as `!slot CHILD_NAME`.
+`group` is a free-form label, available as `!slot CHILD_GROUP` — the natural
 dispatch key for "up-weight every momentum child when ADX is high".
 
 To reuse one child spec several times with different parameters, use
@@ -984,8 +987,8 @@ policy: a bare book-reading node (`!drawdown`, `!fractional_kelly`, …) reads
 every child down together. `!fixed [...]` and `!equal_weight` are accepted as
 sugar for the `!value` forms.
 
-Per-child instantiation injects `!arg CHILD_INDEX` always, `!arg CHILD_NAME` /
-`!arg CHILD_GROUP` when the child declared them, and `!arg SYM` for single-asset
+Per-child instantiation injects `!slot CHILD_INDEX` always, `!slot CHILD_NAME` /
+`!slot CHILD_GROUP` when the child declared them, and `!slot SYM` for single-asset
 children. Referencing an arg the child didn't declare is a build error.
 
 **A non-constant `weights:` requires a `rebalance_on:`.** The expression is read
@@ -2021,9 +2024,9 @@ fugazi run @strategy.params.yml \
   --series @candles.csv --output-dir out/
 ```
 
-`!param`'s sibling is [`!arg`](#arg-sym--the-per-symbol-placeholder), which a
+`!param`'s sibling is [`!slot`](#arg-sym--the-per-symbol-placeholder), which a
 basket document uses to stamp the current symbol into its per-symbol score and
-sizing chains. The two resolve in different passes — `!param` once at load, `!arg`
+sizing chains. The two resolve in different passes — `!param` once at load, `!slot`
 once per symbol at build — so one tree can carry both.
 
 ### Declaring a placeholder's type
@@ -2098,8 +2101,8 @@ The rules:
   subtree (`--params @sizings/atr.yml`) is a tree substitution, and what
   validates it is the typed parse it feeds.
 
-The same key works on [`!arg`](#arg-sym--the-per-symbol-placeholder), where —
-`!arg` being resolved per build rather than once at load — it is checked when
+The same key works on [`!slot`](#arg-sym--the-per-symbol-placeholder), where —
+`!slot` being resolved per build rather than once at load — it is checked when
 the driver binds the name.
 
 ## Reusing signals — YAML anchors
@@ -2171,7 +2174,7 @@ by 60-bar momentum, short the bottom decile, de-levering as the drawdown deepens
 
 ```yaml
 selection: !quantile { long_q: 0.1, short_q: 0.1 }
-score:  !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 60 }
+score:  !roc { source: !close { source: !pick { symbol: !slot SYM } }, period: 60 }
 sizing: !drawdown_throttle { max_drawdown: 0.25 }
 ```
 

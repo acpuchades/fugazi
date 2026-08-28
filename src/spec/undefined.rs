@@ -10,7 +10,7 @@
 //! isn't visible on the untyped tree.
 //!
 //! Three things deserialize as undefined, all through the same machinery: an
-//! unset required `!param`, an `!arg` the driver has not bound yet, and an
+//! unset required `!param`, an `!slot` the driver has not bound yet, and an
 //! author-written `!undefined`. They differ only in what is reported about
 //! them afterwards — see [`UndefinedOrigin`].
 //!
@@ -47,11 +47,11 @@ use serde_norway::Value as Yaml;
 /// value carries the original `!param` key (for diagnostics, not parsing).
 pub const UNSET_PARAM_KEY: &str = "__fugazi_param_hole__";
 
-/// The `!arg` twin of [`UNSET_PARAM_KEY`]. Kept distinct so the type observations
+/// The `!slot` twin of [`UNSET_PARAM_KEY`]. Kept distinct so the type observations
 /// below can report on `!param` placeholders — the ones a user supplies from
-/// `--params` and might get wrong — without mixing in `!arg`s, which a driver
+/// `--params` and might get wrong — without mixing in `!slot`s, which a driver
 /// supplies and a user never writes a value for.
-pub const UNSET_ARG_KEY: &str = "__fugazi_arg_hole__";
+pub const UNSET_SLOT_KEY: &str = "__fugazi_slot_hole__";
 
 /// The `!undefined` twin of [`UNSET_PARAM_KEY`]. Distinct so the report can say
 /// *where* an author-written hole is (its document path) rather than naming it
@@ -76,11 +76,14 @@ pub fn undefined_sentinel(path: &str) -> Json {
     Json::Object(map)
 }
 
-/// The `!arg` twin of [`sentinel`], for
-/// [`args::substitute_for_check`](crate::spec::args::substitute_for_check).
-pub fn arg_sentinel(arg_key: &str) -> Json {
+/// The `!slot` twin of [`sentinel`], for
+/// [`slots::substitute_for_check`](crate::spec::slots::substitute_for_check).
+pub fn slot_sentinel(slot_key: &str) -> Json {
     let mut map = Map::with_capacity(1);
-    map.insert(UNSET_ARG_KEY.to_string(), Json::String(arg_key.to_string()));
+    map.insert(
+        UNSET_SLOT_KEY.to_string(),
+        Json::String(slot_key.to_string()),
+    );
     Json::Object(map)
 }
 
@@ -97,7 +100,7 @@ fn undefined_parts(value: &Yaml) -> Option<(&str, &str)> {
     if m.len() != 1 {
         return None;
     }
-    for key in [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY] {
+    for key in [UNSET_PARAM_KEY, UNSET_SLOT_KEY, UNDEFINED_KEY] {
         if let Some(Yaml::String(name)) = m.get(Yaml::String(key.to_string())) {
             return Some((key, name.as_str()));
         }
@@ -120,7 +123,7 @@ pub enum UndefinedOrigin {
 }
 
 /// The user-facing identity of a hole node — `None` for a non-hole *and* for an
-/// `!arg` hole, which a driver supplies rather than a user.
+/// `!slot` hole, which a driver supplies rather than a user.
 fn user_hole(value: &Yaml) -> Option<(UndefinedOrigin, &str)> {
     match undefined_parts(value) {
         Some((UNSET_PARAM_KEY, name)) => Some((UndefinedOrigin::Param, name)),
@@ -280,7 +283,7 @@ thread_local! {
     > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
-/// The placeholder name of a hole node, whatever its origin — the `!arg` one
+/// The placeholder name of a hole node, whatever its origin — the `!slot` one
 /// included, which the *report* leaves out (a driver supplies it) but which a parse
 /// still has to stand in for.
 pub fn hole_name(value: &Yaml) -> Option<&str> {
@@ -441,7 +444,7 @@ pub fn in_check_mode() -> bool {
 /// matters.
 ///
 /// [`SpecTemplate`](crate::spec::SpecTemplate)'s `Deserialize` calls this on a
-/// copy of its deferred body with every `!arg` marked as a hole, so a typo
+/// copy of its deferred body with every `!slot` marked as a hole, so a typo
 /// inside a basket's `score:` or a multi-asset side's `enter:` is a parse error
 /// at *load*, exactly as it is for the eagerly-parsed single/pairs slots.
 ///
@@ -496,7 +499,7 @@ pub fn is_hole(value: &Json) -> bool {
             map.len() == 1
                 && map
                     .keys()
-                    .all(|k| [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY].contains(&k.as_str()))
+                    .all(|k| [UNSET_PARAM_KEY, UNSET_SLOT_KEY, UNDEFINED_KEY].contains(&k.as_str()))
         }
         _ => false,
     }
@@ -512,7 +515,7 @@ pub fn contains_hole(value: &Json) -> bool {
     match value {
         Json::Object(map) => {
             map.keys()
-                .any(|k| [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY].contains(&k.as_str()))
+                .any(|k| [UNSET_PARAM_KEY, UNSET_SLOT_KEY, UNDEFINED_KEY].contains(&k.as_str()))
                 || map.values().any(contains_hole)
         }
         Json::Array(items) => items.iter().any(contains_hole),
@@ -546,7 +549,7 @@ pub fn observe_json(value: &Json, ty: RequiredType) {
                 let origin = match k.as_str() {
                     UNSET_PARAM_KEY => Some(UndefinedOrigin::Param),
                     UNDEFINED_KEY => Some(UndefinedOrigin::Undefined),
-                    // `!arg` holes are a driver's to fill, not a user's — the
+                    // `!slot` holes are a driver's to fill, not a user's — the
                     // same exclusion `user_hole` makes.
                     _ => None,
                 };
@@ -566,7 +569,7 @@ pub fn observe_json(value: &Json, ty: RequiredType) {
 /// Does this parse error mention one of the reserved sentinel keys — i.e. did a
 /// placeholder, rather than the document, cause it? See [`parse_probe`].
 fn names_a_hole(message: &str) -> bool {
-    [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY]
+    [UNSET_PARAM_KEY, UNSET_SLOT_KEY, UNDEFINED_KEY]
         .iter()
         .any(|key| message.contains(key))
 }
@@ -1015,7 +1018,7 @@ mod tests {
         // The load-time entry point: no `check` run in flight, holes still
         // answered. This is what lets a template body be validated at load.
         let json = serde_json::json!({
-            "period": arg_sentinel("SYM"),
+            "period": slot_sentinel("SYM"),
             "name": "x",
             "flag": false,
             "ratio": 1.0,
@@ -1045,9 +1048,9 @@ mod tests {
     fn a_probe_skips_an_error_that_only_a_hole_could_have_caused() {
         // `!value`'s hand-rolled `TryFrom` reads the raw tree, so a hole
         // reaches it as the sentinel mapping and it reports a type error. The
-        // document is fine — `!value !arg CHILD_GROUP` is how a portfolio
+        // document is fine — `!value !slot CHILD_GROUP` is how a portfolio
         // dispatches weights by group — so the probe must not report it.
-        let json = serde_json::json!({"value": arg_sentinel("CHILD_GROUP")});
+        let json = serde_json::json!({"value": slot_sentinel("CHILD_GROUP")});
         parse_probe::<crate::spec::NodeSpec>(json)
             .expect("a placeholder-shaped failure is not a verdict");
 
@@ -1059,7 +1062,7 @@ mod tests {
     #[test]
     fn a_probe_outside_check_leaves_no_observations() {
         let json = serde_json::json!({
-            "period": arg_sentinel("SYM"),
+            "period": slot_sentinel("SYM"),
             "name": sentinel("N"),
             "flag": false,
             "ratio": 1.0,

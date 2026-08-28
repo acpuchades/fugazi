@@ -1,4 +1,4 @@
-//! Explicit `type:` on a `!param` / `!arg` placeholder, end to end.
+//! Explicit `type:` on a `!param` / `!slot` placeholder, end to end.
 //!
 //! A placeholder's value used to be typed by whatever heuristic produced it: a
 //! `--params NAME=…` term is JSON-parsed with a bare-string fallback, so
@@ -211,11 +211,11 @@ fn an_omitted_or_null_type_leaves_the_heuristics_in_charge() {
     }
 }
 
-/// `!arg`'s body is parsed by the same code, so the declaration works inside a
+/// `!slot`'s body is parsed by the same code, so the declaration works inside a
 /// deferred template too — where it bites at *build* time, once the driver has
 /// bound the name.
 #[test]
-fn a_basket_template_can_declare_its_arg_type() {
+fn a_basket_template_can_declare_its_slot_type() {
     let bars = "\
 time,symbol,open,high,low,close,volume
 2024-01-01T00:00:00Z,AAA,100,101,99,100,1000
@@ -228,7 +228,7 @@ time,symbol,open,high,low,close,volume
     let (_b, series) = scratch_file("arg_type.csv", bars);
     let template = |ty: &str| {
         format!(
-            "score: !close {{ source: !pick {{ symbol: !arg {{ key: SYM, type: {ty} }} }} }}\n\
+            "score: !close {{ source: !pick {{ symbol: !slot {{ key: SYM, type: {ty} }} }} }}\n\
              selection: !top_bottom {{ longs: 1, shorts: 0 }}\n\
              sizing: !equal_weight 2\n"
         )
@@ -257,7 +257,7 @@ time,symbol,open,high,low,close,volume
         .output_dir("param_types_arg_bad")
         .fails();
     assert!(
-        out.stderr.contains("argument `SYM` is declared `numeric`"),
+        out.stderr.contains("slot `SYM` is declared `numeric`"),
         "expected the probe to name the declaration:\n{}",
         out.stderr
     );

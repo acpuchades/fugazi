@@ -1,4 +1,4 @@
-//! The optional `type:` declaration a `!param` / `!arg` placeholder can carry.
+//! The optional `type:` declaration a `!param` / `!slot` placeholder can carry.
 //!
 //! A placeholder body is `{ key, default, type }`, and `type:` is the only one
 //! of the three that says anything about the *value* rather than about where it
@@ -121,7 +121,7 @@ impl ParamType {
     ///
     /// The error is a *predicate phrase* (`is not a whole number`), not a
     /// sentence: the caller knows whether it is talking about a `--params`
-    /// parameter or a driver-supplied argument, and prefixes accordingly.
+    /// parameter or a driver-bound slot, and prefixes accordingly.
     pub fn coerce(self, value: Value) -> Result<Value, String> {
         match self {
             ParamType::Bool => coerce_bool(value),

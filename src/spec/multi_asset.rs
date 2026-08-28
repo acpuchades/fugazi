@@ -6,18 +6,18 @@
 //! every signal / level / sizing subtree is a **per-symbol template**: a
 //! fresh concrete tree is built for every symbol the incoming snapshots
 //! reveal (or the [`UniverseSpec`] declares), with the symbol name
-//! available as `!arg SYM` inside the tree.
+//! available as `!slot SYM` inside the tree.
 //!
 //! ```yaml
 //! # A short-term reversal per-symbol portfolio: same MA-crossover on every
 //! # coin, equal-weighted 25% per leg.
 //! long:
 //!   enter: !crosses_above
-//!     lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-//!     rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+//!     lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+//!     rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
 //!   exit: !crosses_below
-//!     lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
-//!     rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+//!     lhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
+//!     rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 20 }
 //!   stop_loss: !mul
 //!     lhs: !entry
 //!     rhs: !value 0.95
@@ -26,9 +26,9 @@
 //! ```
 //!
 //! `enter` / `exit` / `stop_loss` / `take_profit` / `sizing` are all
-//! typed as [`SpecTemplate`], so their `!arg SYM`
+//! typed as [`SpecTemplate`], so their `!slot SYM`
 //! leaves survive the load pass and get resolved once per symbol at
-//! build time. See [`crate::spec::args`] for the placeholder grammar.
+//! build time. See [`crate::spec::slots`] for the placeholder grammar.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ use crate::types::Symbol;
 /// One side of a [`MultiAssetStrategySpec`]: the entry condition, an
 /// optional exit, and optional per-leg protective levels. Mirrors
 /// [`SideSpec`](super::strategy::SideSpec) but every subtree is a
-/// [`SpecTemplate`] so `!arg SYM` placeholders survive the load pass.
+/// [`SpecTemplate`] so `!slot SYM` placeholders survive the load pass.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiSideSpec {
@@ -134,7 +134,7 @@ pub struct MultiAssetStrategySpec {
 impl MultiAssetStrategySpec {
     /// Parse a YAML multi-asset document, applying `!param`
     /// substitutions against `params` before typed deserialization.
-    /// `!arg SYM` placeholders (which resolve per-symbol at build time)
+    /// `!slot SYM` placeholders (which resolve per-symbol at build time)
     /// are left alone.
     pub fn from_text_with_params_in(
         text: &str,
@@ -174,7 +174,7 @@ impl MultiAssetStrategySpec {
     ///
     /// Every subtree in `long` / `short` / `sizing` is cloned into the
     /// corresponding per-symbol factory on the library
-    /// [`MultiAssetStrategy`]. Each factory resolves `!arg SYM` against
+    /// [`MultiAssetStrategy`]. Each factory resolves `!slot SYM` against
     /// the current symbol on invocation (once per new symbol, so the
     /// per-bar overhead is a HashMap lookup, not a re-parse).
     ///
@@ -182,7 +182,7 @@ impl MultiAssetStrategySpec {
     ///
     /// The factories panic if a per-symbol template build fails — a
     /// symbol name that trips the typed deserialize on the substituted
-    /// tree, or an `!arg` that isn't `SYM`. Multi-asset YAML should be
+    /// tree, or an `!slot` that isn't `SYM`. Multi-asset YAML should be
     /// validated up front (best done by dry-running on a representative
     /// symbol set in tests).
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynMultiAssetStrategy {
@@ -454,16 +454,16 @@ fn try_build_signal(
     sym: &str,
     slot: &'static str,
 ) -> Result<NodeSpec, String> {
-    let mut args = HashMap::new();
-    args.insert("SYM".to_string(), Value::String(sym.to_string()));
-    template.build(&args).map_err(|e| {
+    let mut slots = HashMap::new();
+    slots.insert("SYM".to_string(), Value::String(sym.to_string()));
+    template.build(&slots).map_err(|e| {
         format!("multi-asset {slot} signal template build failed for symbol {sym:?}: {e}")
     })
 }
 
 /// The blessed series for one leg's chain — every `source:`-omitted leaf in a
 /// per-symbol signal / level / sizing template reads *that leg's* symbol.
-/// Makes `!arg SYM` optional here for the same reason it does in a basket;
+/// Makes `!slot SYM` optional here for the same reason it does in a basket;
 /// see `crate::spec::basket::leg_root`.
 fn leg_root(sym: &str) -> crate::spec::RootSpec {
     crate::spec::RootSpec::for_symbol(sym)
@@ -479,14 +479,14 @@ fn try_build_expr(
     sym: &str,
     slot: &'static str,
 ) -> Result<NodeSpec, String> {
-    let mut args = HashMap::new();
-    args.insert("SYM".to_string(), Value::String(sym.to_string()));
+    let mut slots = HashMap::new();
+    slots.insert("SYM".to_string(), Value::String(sym.to_string()));
     template
-        .build(&args)
+        .build(&slots)
         .map_err(|e| format!("multi-asset {slot} template build failed for symbol {sym:?}: {e}"))
 }
 
-/// The stand-in symbol the build-time probe substitutes for `!arg SYM`. See
+/// The stand-in symbol the build-time probe substitutes for `!slot SYM`. See
 /// [`basket::PROBE_SYMBOL`](crate::spec::basket) for the reasoning.
 const PROBE_SYMBOL: &str = "__fugazi_probe__";
 
@@ -664,7 +664,7 @@ mod tests {
         let yaml = r#"
             long:
               enter: !crosses_abov
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 50
         "#;
         let err = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new())
@@ -678,10 +678,10 @@ mod tests {
         let yaml = r#"
             long:
               enter: !gt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 50
               exit: !lt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 30
             sizing: !equal_weight 2
             universe: !any_of [A, B]
@@ -697,7 +697,7 @@ mod tests {
         let yaml = r#"
             long:
               enter: !gt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 0
             sizing: !value 0.5
         "#;
@@ -712,10 +712,10 @@ mod tests {
         let yaml = r#"
             long:
               enter: !gt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 50
               exit: !lt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 30
             sizing: !value 0.5
         "#;
@@ -823,7 +823,7 @@ mod tests {
         let yaml = r#"
             long:
               enter: !gt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 0
             sizing: !value 0.25
             universe: !all_of [X, Y]
@@ -849,7 +849,7 @@ mod tests {
         let yaml = r#"
             long:
               enter: !gt
-                lhs: !close { source: !pick { symbol: !arg SYM } }
+                lhs: !close { source: !pick { symbol: !slot SYM } }
                 rhs: !value 0
             sizing: !value 0.25
             universe: !all_of [X, Y]
@@ -944,7 +944,7 @@ mod tests {
             long:
               enter: !gt
                 lhs: !sma
-                  source: !close { source: !pick { symbol: !arg SYM } }
+                  source: !close { source: !pick { symbol: !slot SYM } }
                   period: !param FAST
                 rhs: !value 0
             sizing: !value 0.25
@@ -952,7 +952,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("FAST".to_string(), Value::Number(10.into()));
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &params).unwrap();
-        // The stored tree carries `period: 10` (resolved) but `symbol: !arg SYM`
+        // The stored tree carries `period: 10` (resolved) but `symbol: !slot SYM`
         // (deferred) on the enter template.
         let enter_tree = spec.long.as_ref().unwrap().enter.tree();
         let period = enter_tree.pointer("/gt/lhs/sma/period").unwrap();
@@ -960,6 +960,6 @@ mod tests {
         let sym = enter_tree
             .pointer("/gt/lhs/sma/source/close/source/pick/symbol")
             .unwrap();
-        assert_eq!(sym, &serde_json::json!({"arg": "SYM"}));
+        assert_eq!(sym, &serde_json::json!({"slot": "SYM"}));
     }
 }

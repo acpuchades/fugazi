@@ -217,7 +217,7 @@ fn basket_legs_do_not_close_each_other() {
     const SPEC: &str = "\
 selection: !top_bottom { longs: 1, shorts: 1 }
 score: !roc
-  source: !close { source: !pick { symbol: !arg SYM } }
+  source: !close { source: !pick { symbol: !slot SYM } }
   period: 5
 sizing: !equal_weight 2
 ";
@@ -232,11 +232,11 @@ fn multi_asset_legs_do_not_close_each_other() {
     const SPEC: &str = "\
 long:
   enter: !crosses_above
-    lhs: !close { source: !pick { symbol: !arg SYM } }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    lhs: !close { source: !pick { symbol: !slot SYM } }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
   exit: !crosses_below
-    lhs: !close { source: !pick { symbol: !arg SYM } }
-    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    lhs: !close { source: !pick { symbol: !slot SYM } }
+    rhs: !sma { source: !close { source: !pick { symbol: !slot SYM } }, period: 5 }
 sizing: !equal_weight 2
 ";
     let trades = run_shape("multi", "trade_recon_multi", SPEC, &["--flatten"]);
