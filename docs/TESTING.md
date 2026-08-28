@@ -25,7 +25,7 @@ places belongs in the narrower one.
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
 | **End-to-end** | `tests/{run,costs,optimize,optimize_recovery,pooled,overlap,cadence,date_range,examples_validate,…}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
-| **Coverage guard** | `tests/metrics_coverage.rs` | which metrics have a reference at all | `cargo test` (reads key sets only — never skips) |
+| **Coverage guard** | `tests/metrics_coverage.rs`, `tests/tag_semantics.rs` | which metrics have a reference at all; which expression tags are wired to a distinct indicator | `cargo test` (reads key sets / the grammar descriptor — never skips) |
 | **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
 
 Plus **doctests** (~55 of them, mostly in `README.md` and the strategy-shape
@@ -126,7 +126,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 | An indicator's warm-up / settling | `tests/warm_up.rs` — and nothing else; that file is the sole authority |
 | A **new indicator**, on top of the two above | a line in each sweep in `tests/degenerate_inputs.rs` — no non-finite reading on a flat / zero-volume / zero-range / all-zero / gapped series, no `NaN` at `period: 1`, `reset` back to the constructed state, and a bit-identical mid-stream resume. Adding one is a line per sweep, and the file is where a missing `#[state(...)]` annotation actually surfaces |
 | A `pub(crate)` core | a differential unit test beside it |
-| A `NodeSpec` tag | the compiler and the catalogue/parity guards will tell you; add grammar coverage in `tests/spec_grammar.rs` |
+| A `NodeSpec` tag | the compiler and the catalogue/parity guards will tell you; add grammar coverage in `tests/spec_grammar.rs`. `tests/tag_semantics.rs` then picks the tag up for free — it probes the whole vocabulary off the descriptor — unless it needs a `field_value` stand-in the sweep doesn't have |
 | Strategy decision logic | `tests/strategies.rs` (catalogue-wide) or the shape's own file (`pairs.rs`, `portfolio.rs`) |
 | `backtest::run` / `backtest::warm_up` | `tests/driver_contract.rs` |
 | Run resuming (`save_state`/`restore_state`, `RunState`, `--flatten`) | `tests/resume.rs` — chunked-resume-vs-one-shot for **every** shape, at three or more chunks — **and** `python/tests/test_specs.py`, which drives the same property through the bindings |
@@ -203,6 +203,21 @@ matches are exhaustive with no wildcard, so a new `NodeSpec` variant does not
 build until it is classified. `#[derive(SaveState)]`'s default-is-state rule is
 the same trick: forgetting `#[state(source)]` on a new box field fails to
 compile rather than silently losing state on resume.
+
+**Probe a whole vocabulary off its own descriptor.** `tests/spec_grammar.rs`
+proves every declared form *parses*; `tests/tag_semantics.rs` then builds each
+one, drives it over a shared probe stream, and requires that no two tags **in
+the same grammar `category`** read identically. That is what catches a
+component accessor pointing at its sibling's field — `!bb_upper` at the lower
+band, `!plus_di` at `minus_di`, `!aroon_up` at `aroon_down`, `!linreg_slope` at
+the intercept — all of which used to leave the suite green, because 97 of the
+157 node tags appeared in no behavioural test as YAML at all. The category is
+the right scope: within one, an agreement is a wiring mistake; across
+categories it is usually an accident of the fixture. Two exemption lists keep
+it honest, and both are short by design — `UNPROBEABLE` for tags a grammar
+probe cannot reach (the load-time placeholders, the book *selectors*) and
+`ALIASES` for pairs that really are one function, each with the reason and each
+re-checked so a stale entry fails rather than licensing a bug.
 
 **Pin the count when a list can only shrink silently.**
 `strategies.rs::the_catalogue_covers_every_built_in_strategy` turns "someone
