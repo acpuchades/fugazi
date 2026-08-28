@@ -4149,3 +4149,106 @@ def test_set_costs_for_all_refuses_a_repeated_symbol():
         wallet.set_costs_for_all(
             ["BTC", "ETH", "BTC"], {"commission": {"percentage": {"rate": 0.1}}}
         )
+
+
+# ---------------------------------------------------------------------------
+# Pairs protective legs: each of the four setters must arm the leg it names.
+# ---------------------------------------------------------------------------
+
+
+def _never_fires():
+    """A leg-rooted signal that is never true — a pairs leaf must name its series."""
+    return ta.close(ta.pick("BTC")).lt(ta.value(-1e9))
+
+
+def _pairs_with(leg, level, direction):
+    """A pairs strategy holding a spread position, with one protective leg armed.
+
+    `direction` picks which side is opened; `leg` is the setter under test.
+    Entry is a *crossing*, so the side opens once and does not re-enter the bar
+    after a protective exit; the ordinary exit can never fire (a close below
+    -1e9). Between them, nothing but the protective leg can flatten the position — which is what makes the assertions below about
+    that leg and nothing else.
+    """
+    spread = ta.close(ta.pick("BTC")).sub(ta.close(ta.pick("ETH")))
+    strat = ta.PairsStrategy("BTC", "ETH")
+    if direction == "long":
+        strat = strat.long_spread_on(
+            spread.crosses_above(ta.value(1.0)), _never_fires()
+        )
+    else:
+        strat = strat.short_spread_on(
+            spread.crosses_below(ta.value(-1.0)), _never_fires()
+        )
+    return getattr(strat, leg)(ta.value(level))
+
+
+def _btc_units(report):
+    """Signed BTC holding after each fill, replayed from the blotter."""
+    units, out = 0.0, []
+    for fill in report.fills:
+        if fill.order.symbol != "BTC":
+            continue
+        units += fill.order.units if fill.order.side == "buy" else -fill.order.units
+        out.append(units)
+    return out
+
+
+def _flattened(report):
+    """Whether the BTC leg came back to flat by the end of the run."""
+    units = _btc_units(report)
+    return bool(units) and abs(units[-1]) < 1e-9
+
+
+@pytest.mark.parametrize(
+    "leg, direction, closes, level, should_flatten",
+    [
+        # A long spread loses as the spread falls: the stop is *below*.
+        ("long_spread_stop_loss", "long", [100, 103, 103, 97, 97, 97], -2.0, True),
+        # …and the same leg must ignore the spread rising.
+        ("long_spread_stop_loss", "long", [100, 103, 103, 105, 105, 105], -2.0, False),
+        # A long spread profits as it rises: the take-profit is *above*.
+        ("long_spread_take_profit", "long", [100, 103, 103, 106, 106, 106], 5.0, True),
+        ("long_spread_take_profit", "long", [100, 103, 103, 101, 101, 101], 5.0, False),
+        # A short spread profits as the spread falls, so its senses mirror:
+        # the stop is above and the take-profit below.
+        ("short_spread_stop_loss", "short", [100, 97, 97, 103, 103, 103], 2.0, True),
+        ("short_spread_stop_loss", "short", [100, 97, 97, 99, 99, 99], 2.0, False),
+        ("short_spread_take_profit", "short", [100, 97, 97, 94, 94, 94], -5.0, True),
+        ("short_spread_take_profit", "short", [100, 97, 97, 99, 99, 99], -5.0, False),
+    ],
+)
+def test_each_pairs_protective_leg_arms_the_side_it_names(
+    leg, direction, closes, level, should_flatten
+):
+    """Swapping a stop for a take-profit must not pass.
+
+    The only coverage these four setters had asserted `len(equity_curve)`, and
+    only for the long side — so wiring `short_spread_stop_loss` to the
+    take-profit field (and vice versa) left the suite green. Each case here
+    arms exactly one leg and moves the spread the way that leg does, and the
+    other way, so a swapped field fails on both halves of the pair.
+
+    Prices sit near 100 and move by a few units, so the spread crosses each
+    level while the *percentage* move stays small: an all-in spread position
+    plus a violent move exhausts the account, and the buy-back is then refused
+    for insufficient funds — which reads as "never flattened" for entirely the
+    wrong reason. The
+    triggering level is held for two extra bars because a market exit fills at
+    the *next* bar's open — a trigger on the final bar has nothing to fill
+    against and would read as "never flattened".
+    """
+    strat = _pairs_with(leg, level, direction)
+    snaps = _msnaps({"BTC": closes, "ETH": [100] * len(closes)})
+    report = strat.run(ta.PaperWallet(10_000.0), snaps)
+
+    units = _btc_units(report)
+    assert units, f"{leg}: the {direction} spread never opened, so nothing is tested"
+    opened = units[0]
+    assert (opened > 0) == (direction == "long"), (
+        f"{leg}: expected a {direction} spread, got a first BTC fill of {opened}"
+    )
+    assert _flattened(report) is should_flatten, (
+        f"{leg} at {level}: expected flatten={should_flatten} over {closes}, "
+        f"got BTC units {units}"
+    )
