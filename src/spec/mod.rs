@@ -238,7 +238,7 @@ mod tests {
     /// The traded symbol of a single-asset spec, via the root analyser.
     fn sole(spec: &crate::spec::SingleStrategySpec) -> String {
         spec.root
-            .sole_symbol("single-asset")
+            .sole_symbol(crate::spec::root::RootKey::ROOT, "single-asset")
             .expect("root names one symbol")
     }
     use super::*;

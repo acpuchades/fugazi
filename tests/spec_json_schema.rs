@@ -172,20 +172,28 @@ fn document_schema_is_well_formed() {
     // omitting it means. A consumer rendering "defaults to …" reads this;
     // pinning it to `root::default_tree` is what stops the published answer
     // drifting from the one the loader actually splices.
-    let single = &defs["single"];
-    assert!(
-        !single["required"]
-            .as_array()
-            .expect("required list")
-            .iter()
-            .any(|k| k == "root"),
-        "`root:` is optional on the single-asset shape"
-    );
-    assert_eq!(
-        single["properties"]["root"]["default"],
-        fugazi::spec::root::default_tree(),
-        "the schema's published default root must be the one the loader splices"
-    );
+    // Same for a pair's two legs, which default to `LEFT` / `RIGHT` off one
+    // shared `FREQ`.
+    for (shape, key, root_key) in [
+        ("single", "root", fugazi::spec::root::RootKey::ROOT),
+        ("pairs", "left", fugazi::spec::root::RootKey::LEFT),
+        ("pairs", "right", fugazi::spec::root::RootKey::RIGHT),
+    ] {
+        let doc = &defs[shape];
+        assert!(
+            !doc["required"]
+                .as_array()
+                .expect("required list")
+                .iter()
+                .any(|k| k == key),
+            "`{key}:` is optional on the {shape} shape"
+        );
+        assert_eq!(
+            doc["properties"][key]["default"],
+            root_key.default_tree(),
+            "the schema's published default for `{key}:` must be the one the loader splices"
+        );
+    }
 
     // Every $ref resolves.
     let mut refs = Vec::new();

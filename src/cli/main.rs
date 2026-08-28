@@ -1055,13 +1055,27 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             ("parse and validate a strategy spec", detail)
         }
         spec::StrategySpec::Pairs(parsed) => {
-            let detail = match (
-                parsed.left.sole_symbol("pairs"),
-                parsed.right.sole_symbol("pairs"),
-            ) {
-                (Ok(l), Ok(r)) => format!("pair {l} / {r}"),
-                (Err(e), _) | (_, Err(e)) => format!("pair {e}"),
+            use fugazi::spec::root::RootKey;
+            // Each leg reports itself: resolved, the symbol; left to its
+            // `--params` name, that it is pending. The pending case is not the
+            // single-asset one — nothing seeds `LEFT` / `RIGHT` off the frame,
+            // because which of two symbols is the *left* leg is what the
+            // document was supposed to say — so it names the parameter rather
+            // than promising the input will fill it in.
+            let leg = |root: &fugazi::spec::RootSpec, key: RootKey| match root
+                .sole_symbol(key, "pairs")
+            {
+                Ok(sym) => sym,
+                Err(_) if spec::check::is_sole_atom_root(root) || root.has_hole() => {
+                    format!("<{}>", key.symbol_param)
+                }
+                Err(e) => e,
             };
+            let detail = format!(
+                "pair {} / {}",
+                leg(&parsed.left, RootKey::LEFT),
+                leg(&parsed.right, RootKey::RIGHT)
+            );
             ("parse and validate a pairs strategy spec", detail)
         }
         spec::StrategySpec::Basket(parsed) => (

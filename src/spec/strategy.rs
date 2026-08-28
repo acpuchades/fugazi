@@ -14,7 +14,7 @@ use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
-use super::root::RootSpec;
+use super::root::{RootKey, RootSpec};
 use crate::runtime::{AnyChain, any};
 use crate::types::Symbol;
 
@@ -214,7 +214,7 @@ impl SingleStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
         let mut strat = SingleAssetStrategy::with_initial_equity(
-            crate::types::symbol(&self.root.sole_symbol("single-asset")?),
+            crate::types::symbol(&self.root.sole_symbol(RootKey::ROOT, "single-asset")?),
             initial_equity,
         );
         // One position + book per strategy, shared by every `entry`/`peak`/`trough`

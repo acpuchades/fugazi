@@ -1488,6 +1488,12 @@ The five shapes are auto-detected by top-level YAML key:
 Pass `kind="single"` / `"pairs"` / ... to override detection, and
 `params={"NAME": value}` to fill `!param` placeholders in the document.
 
+Detection reads the keys that are *there*, and both root-bearing shapes may
+leave theirs out — a `root:`-less single-asset document and a `left:`/`right:`-less
+pairs one are both a bare mapping, so both detect as `multi`. Spell the keys out,
+or pass `kind=` (which is also what supplies the shape to the default-root splice:
+`kind="pairs"` is what turns an omitted `left:` into `!param LEFT`).
+
 ### Resuming a run, and running against a venue
 
 `.run(wallet, snapshots)` accepts a `PaperWallet`, an `OkxWallet` or a

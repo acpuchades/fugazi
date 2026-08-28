@@ -382,6 +382,12 @@ pub(crate) fn default_cost_config() -> CostConfig {
 
 /// Detect the strategy kind from a resolved (post `!import`/`!param`) YAML
 /// value. Mirrors the CLI's shape-based routing rules.
+///
+/// It reads the keys that are *there*, and the two root-bearing shapes may leave
+/// theirs out: a `root:`-less single document and a `left:`/`right:`-less pairs
+/// one are both a bare mapping, so both land on `multi`. That is why `kind=`
+/// exists — and why it is also what `root::apply_default` is handed, since only
+/// the caller can say which shape an under-keyed document meant to be.
 pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
     // Presets like !buy_and_hold arrive as either a top-level tagged value
     // (serde_norway path) or a single-key mapping (JSON path). In both cases

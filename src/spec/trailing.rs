@@ -90,7 +90,10 @@ impl AnyStrategyRef {
     /// is answered — with an error — when the embedded strategy is built.
     fn fallback_symbol(&self) -> Symbol {
         let sole = |r: &crate::spec::RootSpec| {
-            crate::types::symbol(r.sole_symbol("embedded").unwrap_or_default())
+            crate::types::symbol(
+                r.sole_symbol(crate::spec::root::RootKey::ROOT, "embedded")
+                    .unwrap_or_default(),
+            )
         };
         match self {
             AnyStrategyRef::Single(s) => sole(s.root()),

@@ -36,6 +36,20 @@
 //! closes the last gap by seeding `SYMBOL` from a single-series `--series`
 //! frame, so an omitted `root:` still yields a symbol to route orders through.
 //!
+//! A pairs document's two legs default the same way, one [`RootKey`] each:
+//!
+//! ```yaml
+//! left:  !pick { symbol: !param { key: LEFT  }, freq: !param { key: FREQ } }
+//! right: !pick { symbol: !param { key: RIGHT }, freq: !param { key: FREQ } }
+//! ```
+//!
+//! One `FREQ`, not two — a pair's legs are two series read off one snapshot
+//! stream, and a document that wanted them at different cadences would be
+//! spelling out both roots anyway. Neither leg is seeded from the input: which
+//! of a two-symbol frame's entries is the *left* one is precisely what the
+//! document was supposed to say, so an unset `LEFT` is a build error naming the
+//! parameter rather than a guess off the frame's sort order.
+//!
 //! # How an expression still answers a static question
 //!
 //! Three consumers read the traded symbol out of the document *before* anything
@@ -207,29 +221,28 @@ impl RootSpec {
         super::reads::picked_symbols(&self.tree)
     }
 
-    /// The one symbol a single-instrument shape trades, or a build error.
+    /// The one symbol the [`RootKey`] this root came from names, or a build
+    /// error.
     ///
-    /// `shape` names the document shape for the message. Both errors are values,
-    /// reported with the rest of the `!tag > ` breadcrumb by the caller.
-    pub fn sole_symbol(&self, shape: &'static str) -> Result<String, String> {
+    /// `key` is the document key — it spells itself in the message and knows
+    /// which `--params` name fills it in, so a pair's absent leg says `left:`
+    /// and `LEFT` rather than the single-asset shape's `root:` and `SYMBOL`.
+    /// `shape` names the document shape. Both errors are values, reported with
+    /// the rest of the `!tag > ` breadcrumb by the caller.
+    pub fn sole_symbol(&self, key: RootKey, shape: &'static str) -> Result<String, String> {
         let named = self.named_symbols();
         let mut it = named.into_iter();
         match (it.next(), it.next()) {
             (Some(one), None) => Ok(one),
-            (None, _) => Err(
-                "`root:` names no symbol, so there is nothing to trade or to \
-                 slice the input by — write one (`root: !pick { symbol: BTCUSDT }`), \
-                 pass `--params SYMBOL=…`, or run against a single-series input, \
-                 whose sole symbol the CLI fills in"
-                    .to_string(),
-            ),
+            (None, _) => Err(key.names_nothing()),
             (Some(a), Some(b)) => {
                 let rest: Vec<String> = std::iter::once(a)
                     .chain(std::iter::once(b))
                     .chain(self.named_symbols().into_iter().skip(2))
                     .collect();
                 Err(format!(
-                    "`root:` names {} symbols ({}); a {shape} document trades one",
+                    "`{}:` names {} symbols ({}); a {shape} document trades one there",
+                    key.key,
                     rest.len(),
                     rest.iter()
                         .map(|s| format!("`{s}`"))
@@ -279,8 +292,96 @@ impl Default for RootSpec {
     }
 }
 
-/// Splice the default `root:` into a **single-asset** document tree that omits
-/// one — a full spec map, or a preset tag's payload.
+/// A root-bearing **document key**, and the `--params` names its default
+/// spelling reads out of.
+///
+/// Three of them, because two shapes carry a root and one of those carries two:
+/// [`ROOT`](Self::ROOT) for a single-asset `root:`, [`LEFT`](Self::LEFT) and
+/// [`RIGHT`](Self::RIGHT) for a pair's two legs. Each ties together the key as
+/// written in YAML, the tree [`apply_default`] splices for it, and the error a
+/// root of that key reports when it names no symbol — so those three can not
+/// drift into disagreeing about what to pass.
+///
+/// The **cadence** name is deliberately not per-key. A pair's two legs trade off
+/// one snapshot stream, so they share [`FREQ_PARAM`]; only the symbol differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootKey {
+    /// The YAML key, as written in a document and printed in an error.
+    pub key: &'static str,
+    /// The `--params` name this key's default tree reads its symbol from.
+    pub symbol_param: &'static str,
+    /// Does the CLI fill this key's symbol in from a single-series input?
+    /// True only for [`ROOT`](Self::ROOT) — see `seed_sole_symbol`.
+    seeded_from_input: bool,
+}
+
+impl RootKey {
+    /// A single-asset document's `root:`, reading `SYMBOL` / `FREQ`.
+    pub const ROOT: Self = Self {
+        key: "root",
+        symbol_param: SYMBOL_PARAM,
+        seeded_from_input: true,
+    };
+    /// A pairs document's `left:` leg, reading `LEFT` / `FREQ`.
+    pub const LEFT: Self = Self {
+        key: "left",
+        symbol_param: LEFT_PARAM,
+        seeded_from_input: false,
+    };
+    /// A pairs document's `right:` leg, reading `RIGHT` / `FREQ`.
+    pub const RIGHT: Self = Self {
+        key: "right",
+        symbol_param: RIGHT_PARAM,
+        seeded_from_input: false,
+    };
+
+    /// The untyped tree [`apply_default`] splices for this key. Public so a
+    /// caller can show a user what an omitted key expands to, and so the tests
+    /// and the published JSON Schema assert against the one definition rather
+    /// than a copy of it.
+    ///
+    /// Both placeholders declare their type. The slots they sit in already
+    /// demand it (`symbol:` is a `SymbolName`, `freq:` a `FreqToken`), so this
+    /// adds nothing to a `check` report — what it adds is **coercion**, on the
+    /// path where nothing else can: `--params SYMBOL=123` is parsed as a number
+    /// by `params::scalar` and a numeric ticker stops being a symbol. Spelling
+    /// the root out longhand with `type: string` has always been the fix; an
+    /// implicit one had no way to ask for it. Same for `FREQ=1hh`, which now
+    /// fails at load naming the parameter instead of at the build.
+    pub fn default_tree(self) -> serde_json::Value {
+        serde_json::json!({
+            "pick": {
+                "symbol": { "param": { "key": self.symbol_param, "default": null, "type": "symbol" } },
+                "freq": { "param": { "key": FREQ_PARAM, "default": null, "type": "frequency" } },
+            }
+        })
+    }
+
+    /// The build error a root of this key reports when it names no symbol.
+    ///
+    /// Split by key because the way out differs: an unset `SYMBOL` is something
+    /// a one-symbol `--series` frame can answer, and an unset `LEFT` is not —
+    /// which of a two-symbol frame's entries is the left leg is exactly the
+    /// question the document was supposed to answer.
+    fn names_nothing(self) -> String {
+        let Self {
+            key, symbol_param, ..
+        } = self;
+        let mut message = format!(
+            "`{key}:` names no symbol, so there is nothing to trade or to slice the input \
+             by — write one (`{key}: BTCUSDT`), or pass `--params {symbol_param}=…`"
+        );
+        if self.seeded_from_input {
+            message.push_str(
+                ", or run against a single-series input, whose sole symbol the CLI fills in",
+            );
+        }
+        message
+    }
+}
+
+/// Splice a shape's default root keys into a document tree that omits them — a
+/// full spec map, or a preset tag's payload.
 ///
 /// Runs on the untyped tree *before* `!param` substitution, which is the whole
 /// point: what it splices is the ordinary expression
@@ -289,38 +390,44 @@ impl Default for RootSpec {
 /// !pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }
 /// ```
 ///
-/// so both placeholders resolve out of `--params` exactly like ones the author
-/// wrote, under [`substitute`](super::params::substitute) and
+/// (with `LEFT` / `RIGHT` in place of `SYMBOL` for a pair's two legs), so every
+/// placeholder resolves out of `--params` exactly like ones the author wrote,
+/// under [`substitute`](super::params::substitute) and
 /// [`substitute_for_check`](super::params::substitute_for_check) alike. Each
 /// carries `default: null` rather than being required, and `desugar` drops a
 /// null selector field — that is what makes "leave `SYMBOL` unset" mean *omit
 /// the key* rather than *error*.
 ///
 /// **The shape rule lives here, and only here.** `root:` is a key only the
-/// single-asset shape (and its preset spelling) accepts; every other shape
-/// carries `deny_unknown_fields`, so splicing one into a `basket:` document
-/// would turn a good document into a parse error. And the shape cannot be
-/// recovered from the tree: once `root:` may be absent, a `single:` document is
-/// structurally identical to a `multi:` one — both are a bare `long:` /
-/// `short:` map. Hence the `kind` parameter. Callers pass the kind they already
-/// hold (the CLI's shape prefix, Python's `kind=`) and never re-implement the
-/// policy; [`load_document`](super::load_document) is the loader that does it
-/// for them.
+/// single-asset shape (and its preset spelling) accepts, and `left:` / `right:`
+/// only the pairs shape; every shape carries `deny_unknown_fields`, so splicing
+/// the wrong key would turn a good document into a parse error. And the shape
+/// cannot be recovered from the tree: once `root:` may be absent, a `single:`
+/// document is structurally identical to a `multi:` one — both are a bare
+/// `long:` / `short:` map. Hence the `kind` parameter. Callers pass the kind
+/// they already hold (the CLI's shape prefix, Python's `kind=`) and never
+/// re-implement the policy; [`load_document`](super::load_document) is the
+/// loader that does it for them.
 pub fn apply_default(
     value: serde_json::Value,
     kind: super::input::StrategyKind,
 ) -> serde_json::Value {
-    if !matches!(kind, super::input::StrategyKind::Single) {
-        return value;
-    }
+    let keys: &[RootKey] = match kind {
+        super::input::StrategyKind::Single => &[RootKey::ROOT],
+        super::input::StrategyKind::Pairs => &[RootKey::LEFT, RootKey::RIGHT],
+        _ => return value,
+    };
     let serde_json::Value::Object(mut map) = value else {
         // Not a document map at all (a bare scalar, a list). Whatever it is,
         // the typed parse owns the error message.
         return value;
     };
     // A preset arrives as a single-key map — `{buy_and_hold: {root: …}}` — so
-    // the `root:` to default lives one level down, in the payload.
-    if map.len() == 1
+    // the `root:` to default lives one level down, in the payload. Presets are
+    // a single-asset spelling only, hence the kind check rather than a bare
+    // recursion.
+    if matches!(kind, super::input::StrategyKind::Single)
+        && map.len() == 1
         && let Some(tag) = map.keys().next().cloned()
         && super::preset::PRESET_TAGS.contains(&tag.as_str())
     {
@@ -331,42 +438,33 @@ pub fn apply_default(
         );
         return serde_json::Value::Object(map);
     }
-    if !map.contains_key("root") {
-        map.insert("root".into(), default_tree());
+    for root_key in keys {
+        if !map.contains_key(root_key.key) {
+            map.insert(root_key.key.into(), root_key.default_tree());
+        }
     }
     serde_json::Value::Object(map)
 }
 
-/// The `--params` name the default root reads its symbol from.
+/// The `--params` name the single-asset default root reads its symbol from.
 ///
 /// Exported because it is *ambient*: the CLI seeds it from a single-series
 /// input, so the name has to be spelled identically in two places and this is
 /// the one definition of it.
 pub const SYMBOL_PARAM: &str = "SYMBOL";
 
-/// The `--params` name the default root reads its cadence from. See
-/// [`SYMBOL_PARAM`].
-pub const FREQ_PARAM: &str = "FREQ";
+/// The `--params` name a pairs document's default `left:` reads its symbol
+/// from. See [`SYMBOL_PARAM`].
+pub const LEFT_PARAM: &str = "LEFT";
 
-/// The untyped tree [`apply_default`] splices. Public so a caller can show a
-/// user what an omitted `root:` expands to, and so the tests assert against the
-/// one definition rather than a copy of it.
-pub fn default_tree() -> serde_json::Value {
-    // Both placeholders declare their type. The slots they sit in already
-    // demand it (`symbol:` is a `SymbolName`, `freq:` a `FreqToken`), so this
-    // adds nothing to a `check` report — what it adds is **coercion**, on the
-    // path where nothing else can: `--params SYMBOL=123` is parsed as a number
-    // by `params::scalar` and a numeric ticker stops being a symbol. Spelling
-    // the root out longhand with `type: string` has always been the fix; the
-    // implicit root had no way to ask for it. Same for `FREQ=1hh`, which now
-    // fails at load naming the parameter instead of at the build.
-    serde_json::json!({
-        "pick": {
-            "symbol": { "param": { "key": SYMBOL_PARAM, "default": null, "type": "symbol" } },
-            "freq": { "param": { "key": FREQ_PARAM, "default": null, "type": "frequency" } },
-        }
-    })
-}
+/// The `--params` name a pairs document's default `right:` reads its symbol
+/// from. See [`SYMBOL_PARAM`].
+pub const RIGHT_PARAM: &str = "RIGHT";
+
+/// The `--params` name every default root reads its cadence from — **one** name
+/// across all three keys, because a pair's legs are two series off one stream.
+/// See [`SYMBOL_PARAM`].
+pub const FREQ_PARAM: &str = "FREQ";
 
 /// Captures the untyped tree, then parses the typed node out of it.
 ///
@@ -477,7 +575,7 @@ mod tests {
             r.tree(),
             &serde_json::json!({"pick": {"symbol": "BTCUSDT"}})
         );
-        assert_eq!(r.sole_symbol("single").unwrap(), "BTCUSDT");
+        assert_eq!(r.sole_symbol(RootKey::ROOT, "single").unwrap(), "BTCUSDT");
     }
 
     #[test]
@@ -502,7 +600,9 @@ mod tests {
     fn a_root_naming_nothing_is_an_error() {
         // A bare `!pick {}` is a legal atom source (the sole-entry unpack), but
         // it names nothing for the CLI to slice the frame by.
-        let e = root("!pick {}").sole_symbol("single").unwrap_err();
+        let e = root("!pick {}")
+            .sole_symbol(RootKey::ROOT, "single")
+            .unwrap_err();
         assert!(e.contains("names no symbol"), "{e}");
     }
 
@@ -523,7 +623,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"pick": {"symbol": "BTC"}})).unwrap(),
             ),
         };
-        let e = r.sole_symbol("single").unwrap_err();
+        let e = r.sole_symbol(RootKey::ROOT, "single").unwrap_err();
         assert!(e.contains("names 2 symbols"), "{e}");
         assert!(e.contains("`BTC`") && e.contains("`ETH`"), "{e}");
     }
@@ -561,7 +661,7 @@ mod tests {
     fn an_omitted_root_is_defaulted_from_symbol_and_freq() {
         let doc = super::super::input::parse_value("long:\n  enter: !always\n").unwrap();
         let doc = apply_default(doc, StrategyKind::Single);
-        assert_eq!(doc.get("root"), Some(&default_tree()));
+        assert_eq!(doc.get("root"), Some(&RootKey::ROOT.default_tree()));
 
         let params = [
             ("SYMBOL".to_string(), serde_json::json!("BTCUSDT")),
@@ -622,7 +722,9 @@ mod tests {
         let spec: crate::spec::SingleStrategySpec =
             serde_json::from_value(resolved).expect("parses with a stringified ticker");
         assert_eq!(
-            spec.root.sole_symbol("single-asset").expect("names one"),
+            spec.root
+                .sole_symbol(RootKey::ROOT, "single-asset")
+                .expect("names one"),
             "123"
         );
     }
@@ -683,6 +785,84 @@ mod tests {
         assert_eq!(r.tree(), &serde_json::json!({"pick": {}}));
     }
 
+    /// A pairs document defaults **both** legs, off `LEFT` / `RIGHT` and one
+    /// shared `FREQ`.
+    #[test]
+    fn an_omitted_pair_leg_is_defaulted_from_left_and_right() {
+        let doc = super::super::input::parse_value("enter: !always\n").unwrap();
+        let doc = apply_default(doc, StrategyKind::Pairs);
+        assert_eq!(doc.get("left"), Some(&RootKey::LEFT.default_tree()));
+        assert_eq!(doc.get("right"), Some(&RootKey::RIGHT.default_tree()));
+
+        let params = [
+            ("LEFT".to_string(), serde_json::json!("BTCUSDT")),
+            ("RIGHT".to_string(), serde_json::json!("ETHUSDT")),
+            ("FREQ".to_string(), serde_json::json!("4h")),
+        ]
+        .into_iter()
+        .collect();
+        let doc = super::super::params::substitute(doc, &params).unwrap();
+        let left: RootSpec = serde_json::from_value(doc["left"].clone()).unwrap();
+        let right: RootSpec = serde_json::from_value(doc["right"].clone()).unwrap();
+        // One `FREQ` reaches both: a pair's legs are two series off one stream.
+        assert_eq!(left.as_pick(), Some((Some("BTCUSDT"), Some("4h"))));
+        assert_eq!(right.as_pick(), Some((Some("ETHUSDT"), Some("4h"))));
+    }
+
+    /// Half a pair is still half a pair — the leg that *was* named resolves,
+    /// and the other collapses to the sole-atom root, which `try_build` refuses
+    /// by name rather than trading whatever the snapshot happened to carry.
+    #[test]
+    fn an_unset_leg_leaves_the_sole_atom_root() {
+        let params = [("LEFT".to_string(), serde_json::json!("BTC"))]
+            .into_iter()
+            .collect();
+        let doc = super::super::params::substitute(
+            apply_default(serde_json::json!({}), StrategyKind::Pairs),
+            &params,
+        )
+        .unwrap();
+        let left: RootSpec = serde_json::from_value(doc["left"].clone()).unwrap();
+        let right: RootSpec = serde_json::from_value(doc["right"].clone()).unwrap();
+        assert_eq!(left.as_pick(), Some((Some("BTC"), None)));
+        assert_eq!(right.tree(), &serde_json::json!({"pick": {}}));
+        let e = right.sole_symbol(RootKey::RIGHT, "pairs").unwrap_err();
+        assert!(e.contains("`right:` names no symbol"), "{e}");
+        assert!(e.contains("--params RIGHT=…"), "{e}");
+        // …and *not* the single-asset way out: nothing seeds a leg from the
+        // input, because which of two symbols is the left one is exactly what
+        // the document was supposed to say.
+        assert!(!e.contains("single-series"), "{e}");
+    }
+
+    #[test]
+    fn an_explicit_leg_is_never_overwritten() {
+        let doc = serde_json::json!({"left": "BTC", "right": "ETH", "enter": "always"});
+        assert_eq!(apply_default(doc.clone(), StrategyKind::Pairs), doc);
+        // Only the missing half is filled in.
+        let doc = apply_default(
+            serde_json::json!({"left": "BTC", "enter": "always"}),
+            StrategyKind::Pairs,
+        );
+        assert_eq!(doc["left"], serde_json::json!("BTC"));
+        assert_eq!(doc["right"], RootKey::RIGHT.default_tree());
+    }
+
+    /// The shape rule: every other shape carries `deny_unknown_fields`, so a
+    /// spliced key it does not accept would turn a good document into a parse
+    /// error.
+    #[test]
+    fn no_other_shape_is_spliced() {
+        for kind in [
+            StrategyKind::Basket,
+            StrategyKind::Multi,
+            StrategyKind::Portfolio,
+        ] {
+            let doc = serde_json::json!({"long": {"enter": "always"}});
+            assert_eq!(apply_default(doc.clone(), kind), doc, "{kind:?}");
+        }
+    }
+
     #[test]
     fn an_explicit_root_is_never_overwritten() {
         let doc = serde_json::json!({"root": "BTC", "long": {"enter": "always"}});
@@ -696,14 +876,14 @@ mod tests {
             serde_json::json!({"ma_crossover": {"fast": 3, "slow": 8}}),
             StrategyKind::Single,
         );
-        assert_eq!(doc["ma_crossover"]["root"], default_tree());
+        assert_eq!(doc["ma_crossover"]["root"], RootKey::ROOT.default_tree());
         // …and an unknown single-key map is not a preset, so it is defaulted as
         // the ordinary document map it is.
         let doc = apply_default(
             serde_json::json!({"long": {"enter": "always"}}),
             StrategyKind::Single,
         );
-        assert_eq!(doc["root"], default_tree());
+        assert_eq!(doc["root"], RootKey::ROOT.default_tree());
     }
 
     #[test]

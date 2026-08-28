@@ -831,11 +831,11 @@ pub fn run_pairs(
     // refused before a bar is read.
     let left = spec
         .left
-        .sole_symbol("pairs")
+        .sole_symbol(fugazi::spec::root::RootKey::LEFT, "pairs")
         .map_err(backtest::build_error)?;
     let right = spec
         .right
-        .sole_symbol("pairs")
+        .sole_symbol(fugazi::spec::root::RootKey::RIGHT, "pairs")
         .map_err(backtest::build_error)?;
     let left_series = frame.atoms(&left)?;
     let right_series = frame.atoms(&right)?;

@@ -548,8 +548,8 @@ flattens both.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `left` | string | — (**required**) | the leg bought when long the spread |
-| `right` | string | — (**required**) | the leg sold when long the spread |
+| `left` | source (atom) | `!pick { symbol: !param { key: LEFT }, freq: !param { key: FREQ } }` | the leg bought when long the spread. Like a single-asset `root:`, an expression, so `!param` reaches it; `left: BTC` is sugar for `left: !pick { symbol: BTC }` (see [Omitting the legs](#omitting-the-legs)) |
+| `right` | source (atom) | `!pick { symbol: !param { key: RIGHT }, freq: !param { key: FREQ } }` | the leg sold when long the spread. Same shape as `left` |
 | `long_spread` | side block | none | the long-spread side: `{ enter, exit, stop_loss, take_profit }` |
 | `short_spread` | side block | none | the short-spread side, same shape |
 | `enter` | signal | none | flat spelling of `long_spread.enter` |
@@ -566,9 +566,12 @@ setting both them and a `long_spread:` block is an error.
 
 Two things distinguish a pairs document from a single-asset one:
 
-- **Every atom-input leaf must be rooted through `!pick`.** A bare `close` uses
-  the implicit sole-atom unpack, which panics on a multi-symbol snapshot. Write
-  `!close { source: !pick { symbol: BTC } }` — see [Cross-asset sources](#cross-asset-sources).
+- **Every atom-input leaf must be rooted through `!pick`.** Neither leg is
+  *blessed*: `left` and `right` are peers, so "this series" has no answer and a
+  bare `close` would fall back to the sole-atom unpack, which panics on a
+  multi-symbol snapshot. Write `!close { source: !pick { symbol: BTC } }` — see
+  [Cross-asset sources](#cross-asset-sources). (With the legs left to `LEFT` /
+  `RIGHT`, that is `!close { source: !pick { symbol: !param LEFT } }`.)
 - **`stop_loss` / `take_profit` are levels on the *spread*, not on a price.** The
   strategy's internal spread is always the raw `close(left) − close(right)` diff,
   so a level expression has to land in those units (`spread_ma − 4·spread_sd`,
@@ -1288,6 +1291,52 @@ reported as pending rather than as a failure:
 $ fugazi check strategy @noroot.yml
   status  ok · root from a single-series --series (no SYMBOL param)
 ```
+
+##### Omitting the legs
+
+A pairs document's `left:` and `right:` are roots too, and default the same
+way — off `LEFT` and `RIGHT`, and one shared `FREQ`:
+
+```yaml
+left:  !pick { symbol: !param { key: LEFT  }, freq: !param { key: FREQ } }
+right: !pick { symbol: !param { key: RIGHT }, freq: !param { key: FREQ } }
+```
+
+One `FREQ`, not two: a pair's legs are two series read off one snapshot stream,
+and a document wanting them at different cadences is spelling both roots out
+anyway. So the whole pair is nameable from the command line, and the same
+document points at any two instruments:
+
+```console
+$ fugazi run pairs:@spread.yml -s @panel.csv --params LEFT=BTCUSDT,RIGHT=ETHUSDT
+```
+
+Two differences from the single-asset root, both in the direction of refusing to
+guess:
+
+- **Neither leg is seeded from the input.** Which of a two-symbol frame's
+  entries is the *left* one is exactly what the document was supposed to say,
+  and answering it off the frame's sort order would be a silently wrong
+  backtest, not a convenience.
+- **An unset leg is a build error naming its parameter**, since there is nothing
+  to fall back to:
+
+```console
+$ fugazi run pairs:@spread.yml -s @panel.csv
+error: `left:` names no symbol, so there is nothing to trade or to slice the
+       input by — write one (`left: BTCUSDT`), or pass `--params LEFT=…`
+```
+
+`check`, which has no data either way, reports pending legs rather than failing:
+
+```console
+$ fugazi check strategy pairs:@spread.yml
+  status  ok · pair <LEFT> / <RIGHT>
+```
+
+Note that a `pairs:` **grid** still refuses to sweep the legs — see the batch
+rules above: a pairs run evaluates the inner join of its two legs, so a
+different pair is a different timeline.
 
 The same holds for a root left as an unset **required** `!param` — a value
 nobody passed yet, not a broken document. `check` names the placeholder and the

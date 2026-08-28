@@ -1,4 +1,5 @@
-//! An omitted `root:` — the default evaluation root and how it resolves.
+//! An omitted `root:` — the default evaluation root and how it resolves — and
+//! the pairs shape's twin, an omitted `left:` / `right:`.
 //!
 //! A single-asset document may leave `root:` out, in which case it reads as
 //! `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }`,
@@ -12,6 +13,12 @@
 //! costs `RootSpec::as_pick` its answer and with it `Pick::rooted`'s sole-atom
 //! fallback, and the run then reports a plausible, fully-metricked zero-fill
 //! backtest instead of a message.
+//!
+//! A pairs document defaults both legs the same way, off `LEFT` / `RIGHT` and
+//! one shared `FREQ`. Two things differ, and each has a test below: nothing
+//! seeds a leg from the input (which of two symbols is the *left* one is what
+//! the document was supposed to say), and an unnamed leg is therefore a build
+//! error naming its parameter rather than a resolution deferred to `--series`.
 
 mod common;
 
@@ -307,4 +314,159 @@ fn a_preset_defaults_its_root_too() {
     let fills = fills_of(&out);
     assert!(!fills.is_empty());
     assert!(fills.iter().all(|r| r.contains("BTCUSDT")), "{fills:?}");
+}
+
+// --- the pairs shape: `left:` / `right:` off `LEFT` / `RIGHT` ---------------
+
+/// A pairs document with **no** `left:` / `right:`, reading both legs — in the
+/// roots the loader splices, and in the spread expression — off `--params`.
+const NO_LEGS: &str = "\
+enter: !below
+  source: &spread !sub
+    lhs: !close { source: !pick { symbol: !param LEFT } }
+    rhs: !close { source: !pick { symbol: !param RIGHT } }
+  level: -5.0
+exit: !above { source: *spread, level: 0.0 }
+";
+
+/// Two symbols whose *spread* oscillates: the left leg swings, the right is
+/// flat, so `close_L - close_R` crosses both levels.
+fn pair_csv() -> String {
+    let mut out = String::from("time,symbol,open,high,low,close,volume\n");
+    for i in 0..200u32 {
+        for (sym, px) in [
+            ("BTCUSDT", 100.0 + 10.0 * ((i as f64) / 7.0).sin()),
+            ("ETHUSDT", 100.0),
+        ] {
+            out.push_str(&format!(
+                "2024-01-01T{:02}:{:02}:00Z,{sym},{px:.4},{:.4},{:.4},{px:.4},1000\n",
+                i / 60,
+                i % 60,
+                px + 1.0,
+                px - 1.0,
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_pair_names_its_legs_through_left_and_right() {
+    let (_s, series) = scratch_file("pair.csv", &pair_csv());
+    let (_d, doc) = scratch_file("no_legs.yml", NO_LEGS);
+    let out = Cmd::new("run")
+        .arg(&format!("pairs:{doc}"))
+        .series(&series)
+        .args(&[
+            "--crypto",
+            "--quiet",
+            "--params",
+            "LEFT=BTCUSDT,RIGHT=ETHUSDT",
+        ])
+        .output_dir("default_legs_named")
+        .ok();
+    let fills = fills_of(&out);
+    assert!(!fills.is_empty(), "the defaulted legs must actually trade");
+    assert!(
+        fills.iter().any(|r| r.contains("BTCUSDT")) && fills.iter().any(|r| r.contains("ETHUSDT")),
+        "both legs should fill: {fills:?}"
+    );
+}
+
+/// The identical document with both legs written out must produce the identical
+/// run — the splice is a default, not a different code path.
+#[test]
+fn the_default_legs_match_written_ones() {
+    let (_s, series) = scratch_file("pair.csv", &pair_csv());
+    let (_d, implicit) = scratch_file("no_legs.yml", NO_LEGS);
+    let (_e, explicit) = scratch_file(
+        "legs.yml",
+        &format!("left: BTCUSDT\nright: ETHUSDT\n{NO_LEGS}"),
+    );
+    let defaulted = Cmd::new("run")
+        .arg(&format!("pairs:{implicit}"))
+        .series(&series)
+        .args(&[
+            "--crypto",
+            "--quiet",
+            "--params",
+            "LEFT=BTCUSDT,RIGHT=ETHUSDT",
+        ])
+        .output_dir("default_legs_implicit")
+        .ok();
+    let written = Cmd::new("run")
+        .arg(&format!("pairs:{explicit}"))
+        .series(&series)
+        .args(&[
+            "--crypto",
+            "--quiet",
+            "--params",
+            "LEFT=BTCUSDT,RIGHT=ETHUSDT",
+        ])
+        .output_dir("default_legs_explicit")
+        .ok();
+    assert_eq!(fills_of(&defaulted), fills_of(&written));
+    assert_eq!(defaulted.read("metrics.yml"), written.read("metrics.yml"));
+}
+
+/// Unset, a leg is a build error that **names the parameter** — and, unlike the
+/// single-asset root, does not promise the input will fill it in. Nothing seeds
+/// `LEFT` off a two-symbol frame: which entry is the left leg is exactly what
+/// the document was supposed to say, and guessing it off the frame's sort order
+/// is the silent-wrong-answer failure this whole file guards.
+#[test]
+fn an_unnamed_leg_says_which_param_to_pass() {
+    let (_s, series) = scratch_file("pair.csv", &pair_csv());
+    // No `!param LEFT` in the body either, so the *root* is what reports the
+    // gap rather than a required placeholder failing substitution first.
+    let (_d, doc) = scratch_file("bare_pair.yml", "enter: !value true\nexit: !value false\n");
+    let out = Cmd::new("run")
+        .arg(&format!("pairs:{doc}"))
+        .series(&series)
+        .args(&["--crypto", "--quiet"])
+        .output_dir("default_legs_unnamed")
+        .fails();
+    assert!(
+        out.stderr.contains("`left:` names no symbol") && out.stderr.contains("LEFT"),
+        "stderr should name the leg and its parameter: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("single-series"),
+        "a leg is never inferred from the input: {}",
+        out.stderr
+    );
+}
+
+/// `check` reports a pair whose legs are still pending as *ok*, naming what to
+/// pass — the pairs half of `check_reports_an_unresolved_root_param_rather_than_failing`.
+#[test]
+fn check_reports_pending_legs_as_ok() {
+    let (_d, doc) = scratch_file("no_legs.yml", NO_LEGS);
+    let out = Cmd::new("check")
+        .arg("strategy")
+        .arg(&format!("pairs:{doc}"))
+        .ok();
+    assert!(
+        out.stdout.contains("pair <LEFT> / <RIGHT>"),
+        "check should name the pending legs: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("--params LEFT=<symbol>")
+            && out.stdout.contains("--params RIGHT=<symbol>"),
+        "…and what to pass, typed: {}",
+        out.stdout
+    );
+    // Supplied, there is nothing pending and `check` names the pair.
+    let out = Cmd::new("check")
+        .arg("strategy")
+        .arg(&format!("pairs:{doc}"))
+        .args(&["--params", "LEFT=BTCUSDT,RIGHT=ETHUSDT"])
+        .ok();
+    assert!(
+        out.stdout.contains("pair BTCUSDT / ETHUSDT"),
+        "{}",
+        out.stdout
+    );
 }

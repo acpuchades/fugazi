@@ -110,7 +110,8 @@ driver filters on when the frame carries several symbols.
 A single-asset document may **omit `root:`** entirely, in which case it reads as
 `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` — so
 `--params SYMBOL=…` picks the instrument, and a single-series input needs
-neither (`run` and `optimize` seed `SYMBOL` from a one-symbol frame). See
+neither (`run` and `optimize` seed `SYMBOL` from a one-symbol frame). A pairs
+document's `left:` / `right:` default the same way, off `LEFT` / `RIGHT`. See
 [Omitting the root](STRATEGIES.md#omitting-the-root).
 
 ```
@@ -1912,12 +1913,16 @@ keeps whatever the scalar heuristic gave it, which is how every placeholder
 behaved before this key existed. See
 [Declaring a placeholder's type](STRATEGIES.md#declaring-a-placeholders-type).
 
-Two names are **ambient**: a single-asset document that omits `root:` gets
+Four names are **ambient**: a single-asset document that omits `root:` gets
 `!pick { symbol: !param { key: SYMBOL }, freq: !param { key: FREQ } }` spliced
-in before substitution, so `SYMBOL` and `FREQ` resolve out of `--params` like
-any other. Both are optional — an unset one drops its key — and `run` /
-`optimize` fill `SYMBOL` in from a single-series `--series` frame when you
-didn't. See [Omitting the root](STRATEGIES.md#omitting-the-root).
+in before substitution, and a pairs document that omits `left:` / `right:` gets
+the same tree per leg with `LEFT` / `RIGHT` in place of `SYMBOL` — one shared
+`FREQ`, since a pair's legs are two series off one stream. All of them resolve
+out of `--params` like any other, and all are optional (an unset one drops its
+key). `run` / `optimize` fill `SYMBOL` in from a single-series `--series` frame
+when you didn't; a leg is never guessed. See
+[Omitting the root](STRATEGIES.md#omitting-the-root) and
+[Omitting the legs](STRATEGIES.md#omitting-the-legs).
 
 ### `--costs`
 

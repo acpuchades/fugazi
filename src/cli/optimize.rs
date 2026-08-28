@@ -412,7 +412,7 @@ fn root_key_of(base_value: &Value, params: &HashMap<String, Value>) -> Result<Ro
     Ok(RootKey {
         symbol: spec
             .root
-            .sole_symbol("single-asset")
+            .sole_symbol(fugazi::spec::root::RootKey::ROOT, "single-asset")
             .map_err(backtest::build_error)?,
         freq: spec.root.declared_freq().map(str::to_string),
     })
@@ -955,10 +955,10 @@ fn run_multi_symbol(
                 let spec = build_typed::<PairsStrategySpec>(base_value, params)?;
                 Ok((
                     spec.left
-                        .sole_symbol("pairs")
+                        .sole_symbol(fugazi::spec::root::RootKey::LEFT, "pairs")
                         .map_err(backtest::build_error)?,
                     spec.right
-                        .sole_symbol("pairs")
+                        .sole_symbol(fugazi::spec::root::RootKey::RIGHT, "pairs")
                         .map_err(backtest::build_error)?,
                 ))
             };

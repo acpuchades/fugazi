@@ -201,8 +201,18 @@ fn is_determined(spec: &StrategySpec, holes: &[HoleTypes], reads_overlay: bool) 
     // building here would report a document the run will accept. Same for a root
     // still holding an unset placeholder: every other hole answers its field
     // with a typed zero the build proceeds on, a root cannot.
+    //
+    // A pair's two legs are the same story with a different ending: nothing
+    // fills `LEFT` / `RIGHT` in from the data, so a run *will* refuse an omitted
+    // one. Skipping the build anyway is the conservative half of the rule below
+    // — the placeholder line already reports the gap, and re-reporting it as a
+    // document error would read as "this document is broken" to an author whose
+    // only gap is a value they meant to pass on the command line.
     let root_from_data = match spec {
         StrategySpec::Single(s) => is_sole_atom_root(s.root()) || s.root().has_hole(),
+        StrategySpec::Pairs(s) => [&s.left, &s.right]
+            .iter()
+            .any(|r| is_sole_atom_root(r) || r.has_hole()),
         _ => false,
     };
     !undefined_holes && !expr_holes && !reads_overlay && !root_from_data

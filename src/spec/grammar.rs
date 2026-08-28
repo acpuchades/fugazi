@@ -1243,15 +1243,16 @@ fn root_ref() -> serde_json::Value {
     })
 }
 
-/// The single-asset shape's `root:` — [`root_ref`] carrying its **default**.
+/// A root-bearing document key — [`root_ref`] carrying the **default** its
+/// [`RootKey`](crate::spec::root::RootKey) splices.
 ///
 /// Optional since the loader fills it in, and the filled-in value is published
 /// here rather than left for a consumer to hardcode: it is
-/// [`root::default_tree`](crate::spec::root::default_tree) verbatim, so a tool
-/// that renders "defaults to …" cannot drift from what
+/// [`RootKey::default_tree`](crate::spec::root::RootKey::default_tree)
+/// verbatim, so a tool that renders "defaults to …" cannot drift from what
 /// [`root::apply_default`](crate::spec::root::apply_default) actually splices
 /// (`document_root_publishes_its_default` in `tests/spec_json_schema.rs` pins
-/// the two together).
+/// the two together, for all three keys).
 ///
 /// Note this is the *pre-substitution* value — it still carries the two
 /// `!param` placeholders, because that is what the loader inserts and what the
@@ -1259,25 +1260,30 @@ fn root_ref() -> serde_json::Value {
 /// validate against its own subschema, which is just as well: `!pick`'s
 /// `symbol` is a string, and a placeholder is not one until `--params` resolves
 /// it (to nothing, if unset — the key is then dropped).
-fn single_root_ref() -> serde_json::Value {
+fn defaulted_root_ref(key: crate::spec::root::RootKey) -> serde_json::Value {
     let mut schema = root_ref();
     let map = schema.as_object_mut().expect("root_ref is an object");
-    map.insert("default".into(), crate::spec::root::default_tree());
+    map.insert("default".into(), key.default_tree());
     map.insert(
         "$comment".into(),
-        serde_json::Value::String(
-            "The traded series: a bare symbol, or `!pick { symbol, freq }`. \
-             Optional — omitted, it reads `!pick { symbol: !param SYMBOL, freq: \
-             !param FREQ }`, and an unset placeholder drops its key."
-                .into(),
-        ),
+        serde_json::Value::String(format!(
+            "The traded series: a bare symbol, or `!pick {{ symbol, freq }}`. \
+             Optional — omitted, it reads `!pick {{ symbol: !param {}, freq: \
+             !param {} }}`, and an unset placeholder drops its key.",
+            key.symbol_param,
+            crate::spec::root::FREQ_PARAM,
+        )),
     );
     schema
 }
 
 fn doc_single() -> serde_json::Value {
     object(&[
-        ("root", single_root_ref(), false),
+        (
+            "root",
+            defaulted_root_ref(crate::spec::root::RootKey::ROOT),
+            false,
+        ),
         ("long", def_ref("side"), false),
         ("short", def_ref("side"), false),
         ("sizing", node_ref(), false),
@@ -1288,8 +1294,16 @@ fn doc_single() -> serde_json::Value {
 
 fn doc_pairs() -> serde_json::Value {
     object(&[
-        ("left", root_ref(), true),
-        ("right", root_ref(), true),
+        (
+            "left",
+            defaulted_root_ref(crate::spec::root::RootKey::LEFT),
+            false,
+        ),
+        (
+            "right",
+            defaulted_root_ref(crate::spec::root::RootKey::RIGHT),
+            false,
+        ),
         ("enter", node_ref(), false),
         ("exit", node_ref(), false),
         ("stop_loss", node_ref(), false),

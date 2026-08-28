@@ -22,7 +22,7 @@ use crate::prelude::*;
 use crate::strategies::{SingleAssetStrategy, composite, mean_reversion, trend};
 
 use super::meta::Meta;
-use super::root::RootSpec;
+use super::root::{RootKey, RootSpec};
 use super::strategy::{DynSingleStrategy, SingleStrategySpec};
 
 /// The externally-tagged catalogue of ready-made single-asset strategies.
@@ -129,7 +129,7 @@ impl StrategyPreset {
     /// instrument does this trade" is a question the analysis answers rather
     /// than a field that already holds the answer.
     fn build_strategy(&self) -> Result<SingleAssetStrategy<Symbol>, String> {
-        let sym = crate::types::symbol(&self.root().sole_symbol("preset")?);
+        let sym = crate::types::symbol(&self.root().sole_symbol(RootKey::ROOT, "preset")?);
         Ok(match self {
             StrategyPreset::BuyAndHold { .. } => SingleAssetStrategy::buy_and_hold(sym),
             StrategyPreset::MaCrossover { fast, slow, .. } => {
@@ -181,10 +181,13 @@ impl StrategyRef {
     /// The one instrument this strategy trades, or a build error naming why the
     /// root could not say. See [`RootSpec::sole_symbol`].
     pub fn symbol(&self) -> Result<String, String> {
-        self.root().sole_symbol(match self {
-            StrategyRef::Spec(_) => "single-asset",
-            StrategyRef::Preset(_) => "preset",
-        })
+        self.root().sole_symbol(
+            RootKey::ROOT,
+            match self {
+                StrategyRef::Spec(_) => "single-asset",
+                StrategyRef::Preset(_) => "preset",
+            },
+        )
     }
 
     /// This document's free-form `meta:`, if it set one — the same key in both

@@ -16,7 +16,7 @@ use crate::strategies::PairsStrategy;
 
 use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
-use super::root::RootSpec;
+use super::root::{RootKey, RootSpec};
 use super::strategy::SideSpec;
 use crate::runtime::AnyChain;
 use crate::types::Symbol;
@@ -86,8 +86,21 @@ pub struct PairsStrategySpec {
     /// `!param` reaches it; `left: BTCUSDT` is sugar for
     /// `left: !pick { symbol: BTCUSDT }`. Neither leg is blessed — see
     /// `try_build` — so this names what is traded, not what a bare leaf reads.
+    ///
+    /// **Optional.** Omitted, it defaults to `!pick { symbol: !param { key:
+    /// LEFT }, freq: !param { key: FREQ } }` — spliced in by
+    /// [`root::apply_default`](crate::spec::root::apply_default) before
+    /// substitution, so `--params LEFT=BTCUSDT,RIGHT=ETHUSDT` is all a pair
+    /// needs to name its legs, and one document sweeps over pairs. Each
+    /// placeholder drops its key when unset, so a document supplying neither
+    /// lands on the sole-atom root — which names nothing to trade, and
+    /// [`try_build`](Self::try_build) refuses it saying so.
+    #[serde(default)]
     pub left: RootSpec,
-    /// The right leg's evaluation root. See [`left`](Self::left).
+    /// The right leg's evaluation root, defaulting to `!param { key: RIGHT }`.
+    /// See [`left`](Self::left) — the two share one `FREQ`, since a pair's legs
+    /// are read off one snapshot stream.
+    #[serde(default)]
     pub right: RootSpec,
     /// The long-spread entry, in the flat spelling. Mutually exclusive with
     /// [`long_spread`](Self::long_spread); one of the two (or a
@@ -144,7 +157,9 @@ pub struct PairsStrategySpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairsStrategySpecRaw {
+    #[serde(default)]
     left: RootSpec,
+    #[serde(default)]
     right: RootSpec,
     #[serde(default)]
     enter: Option<BoolNode>,
@@ -334,8 +349,8 @@ impl PairsStrategySpec {
         // Each leg's root names exactly one instrument; interning here means
         // every later clone of it (per bar, per fill) is a refcount bump.
         let strat = PairsStrategy::with_initial_equity(
-            crate::types::symbol(&self.left.sole_symbol("pairs")?),
-            crate::types::symbol(&self.right.sole_symbol("pairs")?),
+            crate::types::symbol(&self.left.sole_symbol(RootKey::LEFT, "pairs")?),
+            crate::types::symbol(&self.right.sole_symbol(RootKey::RIGHT, "pairs")?),
             initial_equity,
         );
         // Anchor level expressions on the left leg's position (see doc note).
@@ -499,11 +514,66 @@ mod tests {
         let spec =
             PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
                 .unwrap();
-        assert_eq!(spec.left.sole_symbol("pairs").unwrap(), "BTC");
-        assert_eq!(spec.right.sole_symbol("pairs").unwrap(), "ETH");
+        assert_eq!(
+            spec.left.sole_symbol(RootKey::LEFT, "pairs").unwrap(),
+            "BTC"
+        );
+        assert_eq!(
+            spec.right.sole_symbol(RootKey::RIGHT, "pairs").unwrap(),
+            "ETH"
+        );
         assert!(spec.stop_loss.is_some());
         assert!(spec.take_profit.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    /// Both legs may be omitted, in which case they read `LEFT` / `RIGHT` off
+    /// `--params` — the pairs twin of the single-asset default `root:`.
+    #[test]
+    fn omitted_legs_resolve_from_left_and_right_params() {
+        let yaml = r#"
+            enter: !below
+              source: !sub
+                lhs: !close { source: !pick { symbol: !param LEFT } }
+                rhs: !close { source: !pick { symbol: !param RIGHT } }
+              level: -1.0
+        "#;
+        let params = [
+            ("LEFT".to_string(), serde_json::json!("BTC")),
+            ("RIGHT".to_string(), serde_json::json!("ETH")),
+        ]
+        .into_iter()
+        .collect();
+        let spec = PairsStrategySpec::from_text_with_params(yaml, &params).unwrap();
+        assert_eq!(
+            spec.left.sole_symbol(RootKey::LEFT, "pairs").unwrap(),
+            "BTC"
+        );
+        assert_eq!(
+            spec.right.sole_symbol(RootKey::RIGHT, "pairs").unwrap(),
+            "ETH"
+        );
+        let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    /// Unset, a leg is not a *parse* error — it collapses to the sole-atom root
+    /// like any unset selector — but building one is refused by name. The
+    /// alternative is the failure this crate goes out of its way to make
+    /// impossible: a pair silently trading whatever single entry a snapshot
+    /// carried.
+    #[test]
+    fn an_unnamed_leg_is_a_build_error_naming_its_param() {
+        let spec = PairsStrategySpec::from_text_with_params(
+            "enter: !value true\n",
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let e = spec
+            .try_build(1_000.0, &Schema::empty())
+            .err()
+            .expect("a leg naming nothing cannot build");
+        assert!(e.contains("`left:` names no symbol"), "{e}");
+        assert!(e.contains("--params LEFT=…"), "{e}");
     }
 
     #[test]

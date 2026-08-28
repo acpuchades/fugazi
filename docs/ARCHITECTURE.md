@@ -1298,8 +1298,19 @@ and a `root:`-less document is structurally a `multi:` one, so Python's
 `seed_sole_symbol` fills `SYMBOL` from a one-symbol `--series` frame, and `check` reports
 the pending resolution instead of building. The shape rule lives **only** in
 `apply_default`, which takes a `StrategyKind`; every caller passes the kind it already
-holds. The published default is `root::default_tree()`, surfaced on the document JSON
-schema as the `single` shape's `root` `default` (pinned by `tests/spec_json_schema.rs`).
+holds. The published default is `RootKey::default_tree()`, surfaced on the document JSON
+schema as each key's `default` (pinned by `tests/spec_json_schema.rs`).
+
+**A pairs document's `left:` and `right:` default the same way**, off `LEFT` and `RIGHT`
+and one shared `FREQ` — a pair's legs are two series off one snapshot stream. The three
+keys are one `RootKey` each (`ROOT` / `LEFT` / `RIGHT`), which is what ties the YAML key,
+the tree `apply_default` splices, and the "names no symbol" error's *way out* together.
+The legs differ from `root:` in that last part: nothing seeds them from the frame, because
+which of two symbols is the *left* leg is precisely what the document was supposed to say,
+so an unset one is a build error naming `LEFT` rather than a resolution deferred to
+`--series`. `check` still reports it as pending (`is_determined`'s `Pairs` arm) — the
+placeholder line already names the gap, and re-reporting it as a document error would read
+as "this document is broken" to an author who merely forgot a `--params` term.
 
 Consequences worth stating outright:
 
