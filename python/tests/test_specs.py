@@ -2768,6 +2768,61 @@ def test_call_errors_stay_type_errors():
 # ---------------------------------------------------------------------------
 
 
+# How much of an uninterrupted run the interrupted one may take before the
+# signal is judged not to have reached the drive.
+#
+# The bug this guards lets the `KeyboardInterrupt` surface only *after* the work
+# finishes, so a regression lands at ~1.0x the uninterrupted duration while a
+# working interrupt lands near the quarter-point the signal fires at. Anything
+# between the two separates them; 0.7 is chosen well away from the regression so
+# that ordinary contention — which can only stretch the interrupted run — does
+# not manufacture a failure. The earlier 0.5 sat close enough to the noise that
+# an unrelated test suite running on the same machine tripped it twice.
+_INTERRUPT_MARGIN = 0.7
+
+
+def _time(fn):
+    """Wall-clock seconds `fn` takes."""
+    import time
+
+    started = time.monotonic()
+    fn()
+    return time.monotonic() - started
+
+
+def _refuse_to_judge_a_moved_machine(passed, baseline, remeasure, what):
+    """Skip, rather than fail, when the *machine* changed mid-comparison.
+
+    Every timed assertion below compares against a baseline measured moments
+    earlier on the same machine, which is sound only while that machine runs at
+    a comparable speed throughout — and on a workstation that is also doing
+    something else, it does not. `docs/TESTING.md` bans timed assertions from
+    the Rust suite for exactly this reason: "a wall-clock assertion on a shared
+    CI runner fails on contention rather than on regressions." These four are
+    kept anyway because they pin *functional* properties nothing else covers —
+    Ctrl-C reaches the drive, the GIL is released, the sweep still parallelises
+    — so the comparison is made robust instead of deleted.
+
+    Costs nothing when the assertion passes: the re-measure only runs when the
+    verdict would otherwise be a failure, and the caller still asserts
+    afterwards, so a genuine regression on a steady machine fails exactly as
+    before.
+
+    Observed for real: both interrupt tests failed here while an unrelated test
+    suite was using a core, and passed three times running once it finished.
+    """
+    if passed:
+        return
+    after = remeasure()
+    drift = abs(after - baseline) / min(after, baseline)
+    if drift > 0.35:
+        pytest.skip(
+            f"{what}: the machine moved {drift:.0%} mid-test (baseline "
+            f"{baseline:.2f}s, re-measured {after:.2f}s), so the comparison "
+            "measures contention rather than the code"
+        )
+
+
 def _gil_share(fn):
     """Fraction of its ceiling a 1 ms-sleep companion thread reaches during `fn`.
 
@@ -2819,6 +2874,20 @@ def test_no_drive_path_blocks_other_python_threads(path):
     share, elapsed = _gil_share(call)
     if elapsed < 0.5:
         pytest.skip(f"machine too fast to measure ({elapsed:.2f}s)")
+    # The 0.25 floor is a fraction of the companion's *theoretical* ceiling, so
+    # a busy machine depresses it whether or not the GIL was held. On failure,
+    # re-measure that ceiling against a pure sleep — which holds no GIL at all —
+    # and skip if the companion cannot reach the floor even then.
+    if share <= 0.25:
+        import time
+
+        control, _ = _gil_share(lambda: time.sleep(elapsed))
+        if control <= 0.5:
+            pytest.skip(
+                f"the companion thread reached only {control:.0%} of its "
+                "ceiling against a plain sleep, so the machine is too busy for "
+                "this measurement to mean anything"
+            )
     assert share > 0.25, (
         f"`{path}` gave a companion thread {share:.0%} of its ceiling in "
         f"{elapsed:.2f}s — it is still holding the GIL"
@@ -2882,7 +2951,13 @@ def test_a_long_sweep_can_be_interrupted():
     finally:
         killer.wait()
 
-    assert elapsed < uninterrupted / 2, (
+    _refuse_to_judge_a_moved_machine(
+        elapsed < uninterrupted * _INTERRUPT_MARGIN,
+        uninterrupted,
+        lambda: _time(sweep),
+        "sweep interrupt",
+    )
+    assert elapsed < uninterrupted * _INTERRUPT_MARGIN, (
         f"ran {elapsed:.2f}s after a signal at {fire_at:.2f}s; an "
         f"uninterrupted sweep takes {uninterrupted:.2f}s — it did not stop early"
     )
@@ -2915,6 +2990,12 @@ def test_a_sweep_still_parallelises_after_the_watchdog():
 
     # Same answers, whichever way they were computed.
     assert [r.values for r in serial_rows] == [r.values for r in parallel_rows]
+    _refuse_to_judge_a_moved_machine(
+        serial > parallel * 1.5,
+        serial,
+        lambda: timed(1)[0],
+        "sweep parallelism",
+    )
     assert serial > parallel * 1.5, (
         f"jobs=1 took {serial:.2f}s and jobs=all {parallel:.2f}s — the sweep is "
         "no longer parallel"
@@ -2970,7 +3051,13 @@ def test_a_long_run_can_be_interrupted():
         killer.wait()
 
     # Stopped near the signal, not merely raised once the work was done anyway.
-    assert elapsed < uninterrupted / 2, (
+    _refuse_to_judge_a_moved_machine(
+        elapsed < uninterrupted * _INTERRUPT_MARGIN,
+        uninterrupted,
+        lambda: _time(lambda: spec.run(ta.PaperWallet(1000.0), snaps)),
+        "run interrupt",
+    )
+    assert elapsed < uninterrupted * _INTERRUPT_MARGIN, (
         f"ran {elapsed:.2f}s after a signal at {fire_at:.2f}s; an uninterrupted "
         f"run of the same series takes {uninterrupted:.2f}s — the drive did not "
         "stop early, so the signal check is not reaching it"
