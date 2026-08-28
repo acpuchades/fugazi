@@ -508,4 +508,5 @@ conformance!(
     flatten_cancels_the_resting_orders_and_closes_the_position,
     a_non_positive_protective_trigger_is_refused_locally,
     a_protective_leg_rested_before_the_first_bar_sizes_at_its_trigger,
+    a_dust_sized_target_never_reaches_the_venue,
 );

@@ -862,6 +862,65 @@ pub fn a_non_positive_protective_trigger_is_refused_locally<V: LiveVenue>() {
     );
 }
 
+/// **A dust move never reaches the venue.**
+///
+/// `set_position` floors the requested delta onto the venue's size step and
+/// drops it when what is left is below the instrument's minimum or has rounded
+/// away to nothing (`InstrumentGrid::below_minimum`). Without that guard a
+/// strategy re-asserting a target it already holds — which a book-anchored
+/// sizer does on every bar, at floating-point precision — POSTs an order the
+/// venue rejects, every bar, forever.
+///
+/// The equivalent guard on the **protective** legs is pinned per venue (see
+/// `live_okx.rs`); this is the *entry* half, and it went untested. The probe is
+/// a delta far below any of the three venues' size steps rather than below a
+/// stated minimum, because two of the three declare no minimum at all — the
+/// rounds-away-to-nothing clause is what every venue shares.
+///
+/// A no-op, not a refusal: nothing was wrong with the request, there was simply
+/// nothing to send.
+pub fn a_dust_sized_target_never_reaches_the_venue<V: LiveVenue>() {
+    let fx = V::fixture();
+    let sym = intern(fx.symbol);
+    let base = 3.0 * fx.contract_multiplier;
+    let mock = mount::<V>(MockPlan::new(Account {
+        quote: 10_000.0,
+        base_units: base,
+    }));
+    let mut w = V::build(mock.uri());
+    tick(&mut w, &sym, 27_000.0);
+    let placed_before = mock.orders();
+    let held = w.position(&sym).amount;
+    assert!(
+        (held - base).abs() < 1e-9,
+        "{}: the fixture must start from a known position, got {held}",
+        fx.name
+    );
+
+    let ack = w.set_position(fugazi::wallet::Units {
+        symbol: sym.clone(),
+        amount: held + 1e-12,
+    });
+    assert!(
+        ack.is_ok(),
+        "{}: a dust move is a no-op, not an error: {ack:?}",
+        fx.name
+    );
+    assert_eq!(
+        mock.orders(),
+        placed_before,
+        "{}: a delta that rounds to nothing must not be POSTed — the venue \
+         would reject it on every bar. Error log: {:?}",
+        fx.name,
+        w.error_log(),
+    );
+    assert!(
+        w.take_rejections().is_empty(),
+        "{}: …and it is not a rejection either, since nothing was refused",
+        fx.name
+    );
+}
+
 /// A protective leg rested **before the first bar** sizes against its own
 /// trigger.
 ///
