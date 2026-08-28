@@ -311,6 +311,40 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         *self.state.lock().expect("Book lock poisoned") = BookState::seed(seed);
     }
 
+    /// The signed units this book believes **the strategy** holds, per leg —
+    /// non-flat legs only, in the leg map's canonical (sorted) order.
+    ///
+    /// The strategy-side answer to [`Wallet::positions`](crate::Wallet::positions),
+    /// and the distinction is the point: the wallet reports what the *account*
+    /// holds, which may include positions the strategy never opened — the user's
+    /// own book, or another strategy sharing the venue. This reports only what
+    /// this book's own fills built up. Subtracting one from the other is how a
+    /// resumed run works out which of the account's positions are external, so
+    /// a [`SleeveWallet`](crate::wallet::SleeveWallet) carve-out doesn't hide
+    /// the strategy's own position from it. See
+    /// [`external_baseline_net_of`](crate::wallet::external_baseline_net_of).
+    ///
+    /// Sorted so two books holding the same legs answer in the same order
+    /// regardless of the hash map's layout — the same rule `remark` follows,
+    /// and for the same reason: this feeds a baseline that decides trades.
+    pub fn owned_positions(&self) -> Vec<crate::wallet::Units<Sym>>
+    where
+        Sym: Ord,
+    {
+        let state = self.state.lock().expect("Book lock poisoned");
+        let mut open: Vec<crate::wallet::Units<Sym>> = state
+            .legs
+            .iter()
+            .filter(|(_, leg)| !leg.is_flat())
+            .map(|(symbol, leg)| crate::wallet::Units {
+                symbol: symbol.clone(),
+                amount: leg.units,
+            })
+            .collect();
+        open.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        open
+    }
+
     /// Serialize the whole book state for run resuming — cash, per-leg units,
     /// marked equity, running peak, per-bar return, and the closed-trade
     /// bookkeeping. The strategy serializes this once (not the per-field
@@ -664,6 +698,58 @@ mod tests {
         assert_eq!(eq.value(), Some(1_000.0));
         assert_eq!(dd.value(), Some(0.0));
         assert_eq!(ret.value(), None);
+    }
+
+    /// `owned_positions` reports the legs the *strategy* holds — the answer a
+    /// resuming run nets an external baseline against. Flat legs are omitted
+    /// (a leg registers on its first fill and stays registered after it closes,
+    /// so "registered" is not "held"), and the order is by symbol regardless of
+    /// the order the fills arrived in.
+    #[test]
+    fn owned_positions_reports_open_legs_in_symbol_order() {
+        let book: Book<&str> = Book::new(1_000.0);
+        assert!(
+            book.owned_positions().is_empty(),
+            "a fresh book holds nothing"
+        );
+
+        book.apply_fill(&"Z", Side::Buy, 4.0, 10.0);
+        book.apply_fill(&"A", Side::Sell, 3.0, 20.0);
+        book.apply_fill(&"M", Side::Buy, 2.0, 30.0);
+        let held: Vec<(&str, Real)> = book
+            .owned_positions()
+            .into_iter()
+            .map(|u| (u.symbol, u.amount))
+            .collect();
+        assert_eq!(held, vec![("A", -3.0), ("M", 2.0), ("Z", 4.0)]);
+
+        // Closing a leg deregisters it from the answer, not from the book.
+        book.apply_fill(&"M", Side::Sell, 2.0, 30.0);
+        let held: Vec<&str> = book
+            .owned_positions()
+            .into_iter()
+            .map(|u| u.symbol)
+            .collect();
+        assert_eq!(held, vec!["A", "Z"], "a closed leg is no longer held");
+    }
+
+    /// The legs survive a state round-trip, which is the only reason this
+    /// accessor is useful: the caller asking is a *resumed* run, and it asks
+    /// after `restore_state`.
+    #[test]
+    fn owned_positions_survive_a_state_round_trip() {
+        let book: Book<String> = Book::new(1_000.0);
+        book.apply_fill(&"X".to_string(), Side::Buy, 7.0, 100.0);
+        let state = book.snapshot_state();
+
+        let restored: Book<String> = Book::new(1_000.0);
+        restored.restore_state(&state).expect("restore");
+        let held: Vec<(String, Real)> = restored
+            .owned_positions()
+            .into_iter()
+            .map(|u| (u.symbol, u.amount))
+            .collect();
+        assert_eq!(held, vec![("X".to_string(), 7.0)]);
     }
 
     #[test]

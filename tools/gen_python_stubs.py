@@ -103,6 +103,7 @@ BY_PARAM = {
     "snapshots": "Sequence[Snapshot | Mapping[str, Atom | Candle]]",
     "resume": "str | None",
     "flatten": "bool",
+    "hold": "Mapping[str, float] | None",
     "report": "RunReport",
     "equity_curve": SERIES,
     "returns": SERIES,

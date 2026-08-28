@@ -198,6 +198,7 @@ impl MultiAssetStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynMultiAssetStrategy, String> {
+        crate::spec::runnable::check_seed(initial_equity)?;
         let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(initial_equity);
         let book = strat.book();
 

@@ -1541,6 +1541,44 @@ migration between state versions, so regenerate by re-running the history.
 cost pipeline, so it moves cash and pays commission — and books the closing legs into
 the report. The state it returns holds a genuinely flat book.
 
+`hold={"BTC": 0.0, "ETH": 1.5}` is the same thing per symbol: a mapping of symbol to
+**signed target units**, applied on the last bar through the same order path, where
+`0.0` closes and any symbol not named trades exactly as the document says. It is the
+operator override — *close this one position*, *hold this one at this size* — applied
+after the strategy has had its say, so it wins for that chunk:
+
+```python
+always_long = ta.load_spec("""
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+sizing: !value 0.4
+""", kind="multi")
+two = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0), "ETH": ta.Candle(v, v, v, v, 1.0)})
+    for v in prices
+]
+
+# Close BTC and pin ETH at 1.5 units, whatever the signal wanted.
+account = ta.PaperWallet(10_000.0)
+rep, state = always_long.run_resumable(account, two, hold={"BTC": 0.0, "ETH": 1.5})
+assert account.position("BTC") == 0.0
+assert abs(account.position("ETH") - 1.5) < 1e-9
+```
+
+The targets are **absolute, not deltas**, so passing the same mapping again on the
+next chunk holds the position there rather than moving it further — which is how a
+standing instruction outlives the bar it was issued on. A named symbol the account has
+no price for is refused into `report.rejections` rather than silently skipped, so an
+instruction that could not be carried out is visible rather than lost. `flatten=True`
+is `hold` at `0.0` for every open position, so passing both raises `ValueError`
+instead of applying a precedence rule.
+
+Resuming against an account that holds **more than this strategy's positions** works
+the way you would hope: the state says what the strategy itself owns, and only the
+remainder is treated as the user's own and left alone. A fully-invested strategy —
+the ordinary state of one at the default all-in sizing — resumes against its own book
+rather than against the zero cash sitting beside it.
+
 Against a **live** wallet the state's `wallet` field is `null`: the venue owns the
 positions and the cash, so only the strategy's own indicator state is carried and the
 account is re-read on resume. (`.evaluate(...)`'s Monte Carlo pass re-drives the spec

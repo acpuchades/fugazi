@@ -16,6 +16,8 @@ use crate::strategy::*;
 // See `errors.rs`: a document that will not load or build is a `SpecError`,
 // which subclasses `ValueError`. Argument validation of this module's own
 // kwargs (`grid=`, `smooth=`, `windowed=`) stays a bare `ValueError`.
+use std::collections::HashMap;
+
 use crate::errors::SpecError;
 
 // ---------------------------------------------------------------------------
@@ -583,7 +585,7 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&fugazi_core::spec::RunState>,
-    flatten: bool,
+    closeout: &Closeout,
 ) -> PyResult<(RunReport<Symbol>, fugazi_core::spec::RunState)> {
     // Cold starts only: on a resume, a chunk in which a symbol never quotes is
     // legitimate — the state carrying it came from an earlier chunk.
@@ -594,7 +596,50 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     // Built with the GIL held — per-symbol factories may be Python callables.
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
-    py.detach(|| fugazi_core::spec::drive_over(&mut *built, snapshots, wallet, resume, flatten))
+    py.detach(|| fugazi_core::spec::drive_over(&mut *built, snapshots, wallet, resume, closeout))
+        .map_err(build_err)
+}
+
+/// Resolve the `flatten` / `hold` pair into the one [`Closeout`] the driver
+/// takes.
+///
+/// The two arguments are one concept at the Rust boundary — `flatten` is `hold`
+/// at zero for everything open — so the combination is refused here rather than
+/// given a precedence rule nobody would remember. A `hold` mapping that is
+/// present but empty is not the same as no `hold` at all in Python's eyes, but
+/// it means the same thing here: touch nothing.
+fn closeout_from(flatten: bool, hold: Option<HashMap<String, Real>>) -> PyResult<Closeout> {
+    match (flatten, hold) {
+        (true, Some(h)) if !h.is_empty() => Err(PyValueError::new_err(
+            "flatten=True and hold=... are the same instruction — flatten is hold at 0.0 for \
+             every open position. Pass one or the other.",
+        )),
+        (true, _) => Ok(Closeout::Flatten),
+        (false, Some(h)) if !h.is_empty() => Ok(Closeout::Hold(
+            h.into_iter()
+                .map(|(sym, target)| (fugazi_core::types::symbol(&sym), target))
+                .collect(),
+        )),
+        (false, _) => Ok(Closeout::Carry),
+    }
+}
+
+/// What the strategy behind `loaded` already holds, if `resume` walks it back
+/// in holding anything — the exclusion the wallet seam nets its external
+/// baseline against.
+///
+/// Thin wrapper over [`StrategySpec::positions_at_resume`] that supplies the
+/// schema from the snapshots, so the two resumable arms of the seam read as one
+/// line each. See the seam's own doc in `strategy.rs` for why this has to be
+/// answered before the account is touched.
+fn owned_at_resume(
+    loaded: &CoreStrategySpec,
+    snapshots: &[Snapshot<Symbol>],
+    resume: Option<&fugazi_core::spec::RunState>,
+) -> PyResult<Vec<fugazi_core::wallet::Units<Symbol>>> {
+    let schema = spec_backtest::schema_from_snapshots(snapshots);
+    loaded
+        .positions_at_resume(&schema, resume)
         .map_err(build_err)
 }
 
@@ -790,7 +835,10 @@ impl PyStrategySpec {
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        over_any_wallet!(wallet, py, _seed, w => {
+        // No resume seam here: a `run` always starts from a freshly built
+        // strategy holding nothing, so every position in the account is the
+        // user's own.
+        over_any_wallet!(wallet, py, None::<&fugazi_core::spec::RunState>, &[], _seed, w => {
             let report = run_spec(py, &self.inner, &snaps, w)?;
             Ok(PyRunReport { inner: report })
         })
@@ -798,30 +846,48 @@ impl PyStrategySpec {
 
     /// Drive the spec with **run resuming**: optionally restore `resume` (a JSON
     /// string previously returned here) before the run, optionally close out
-    /// open positions with `flatten`, and return `(report, state_json)` — the
-    /// run report plus the final state to persist and resume from later.
+    /// open positions with `flatten` or `hold`, and return `(report,
+    /// state_json)` — the run report plus the final state to persist and resume
+    /// from later.
     ///
     /// `flatten=True` closes every open position **in the account**, through
     /// the normal cost pipeline, so the returned state holds a genuinely flat
     /// book and passing it to a later `resume` continues from flat.
     ///
+    /// `hold={"BTCUSDT": 0.0, "ETHUSDT": 1.5}` is the per-symbol form: a
+    /// mapping of symbol to **signed target units**, applied on the last bar
+    /// through the same order path `flatten` uses — `0.0` closes that one
+    /// position, a non-zero target resizes it, and any symbol not named trades
+    /// exactly as the document says. It is the operator override: "close this
+    /// position", "hold this one here", applied after the strategy has had its
+    /// say, so it wins for that chunk. Because it is an absolute target rather
+    /// than a delta, passing the same mapping again on the next chunk holds the
+    /// position there rather than moving it further — which is how a standing
+    /// instruction outlives the bar it was issued on.
+    ///
+    /// `flatten=True` is `hold` at `0.0` for every open symbol, so passing both
+    /// is a `ValueError` rather than a silent precedence rule.
+    ///
     /// Takes the same three wallet types as [`Self::run`]. Against a live
     /// wallet the returned state's `wallet` field is `null`: the venue owns the
     /// positions and cash, so only the strategy's own state is carried and the
     /// account is re-read on resume.
-    #[pyo3(signature = (wallet, snapshots, *, resume = None, flatten = false))]
+    #[pyo3(signature = (wallet, snapshots, *, resume = None, flatten = false, hold = None))]
     pub(crate) fn run_resumable(
         &self,
         wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
         resume: Option<String>,
         flatten: bool,
+        hold: Option<HashMap<String, Real>>,
     ) -> PyResult<(PyRunReport, String)> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = parse_resume(resume)?;
-        over_any_wallet!(wallet, py, _seed, w => {
+        let closeout = closeout_from(flatten, hold)?;
+        let owned = owned_at_resume(&self.inner, &snaps, resume_state.as_ref())?;
+        over_any_wallet!(wallet, py, resume_state.as_ref(), &owned, _seed, w => {
             let (report, state) =
-                run_spec_resumable(py, &self.inner, &snaps, w, resume_state.as_ref(), flatten)?;
+                run_spec_resumable(py, &self.inner, &snaps, w, resume_state.as_ref(), &closeout)?;
             Ok((PyRunReport { inner: report }, state_json(&state)?))
         })
     }
@@ -851,7 +917,8 @@ impl PyStrategySpec {
     ) -> PyResult<String> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = parse_resume(resume)?;
-        over_any_wallet!(wallet, py, _seed, w => {
+        let owned = owned_at_resume(&self.inner, &snaps, resume_state.as_ref())?;
+        over_any_wallet!(wallet, py, resume_state.as_ref(), &owned, _seed, w => {
             let state = warm_up_spec(py, &self.inner, &snaps, w, resume_state.as_ref())?;
             state_json(&state)
         })

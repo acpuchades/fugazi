@@ -396,21 +396,36 @@ on real fills, never on intent, which is what keeps it true;
 > **Caveat — the account must be the portfolio's alone.** The ledgers only
 > balance against it if nothing else writes to it.
 
-## 7. Flattening — closing out at the end
+## 7. Closing out at the end
 
-`Wallet::flatten`, via `backtest::flatten_open_positions` (the CLI's
-`--flatten`). `close` alone cannot finish a run: it *queues*, and a queued move
-settles at the next bar's open — of which, at the end, there is none. So
-`PaperWallet` overrides the trait default with a synchronous form that goes
-straight to `fill_at`. Costs, commission and the blotter all apply exactly as
-they would to a strategy-issued exit, and each leg mints a real `OrderId` so
-trade reconstruction pairs it like any other close.
+`backtest::apply_closeout` applies a `backtest::Closeout` once the last
+bar is driven — `Carry` (leave it, the default), `Flatten` (the CLI's
+`--flatten`, via `Wallet::flatten`), or `Hold(map)` (drive named symbols to
+signed unit targets, via `Wallet::settle_position`, `0.0` being a close).
+
+`close` alone cannot finish a run: it *queues*, and a queued move settles at the
+next bar's open — of which, at the end, there is none. So `PaperWallet`
+overrides both trait defaults with a synchronous form that goes straight to
+`fill_at`. Costs, commission and the blotter all apply exactly as they would to
+a strategy-issued exit, and each leg mints a real `OrderId` so trade
+reconstruction pairs it like any other close. `flatten` *is* `settle_position`
+at `0.0` for every open symbol — one body, so the two cannot price a close
+differently.
+
+A settle that only shrinks a position is classified **reducing**, which exempts
+it from the leverage cap exactly as an exit is exempt everywhere else in this
+document (§5): a cap that could refuse a way out is a cap that traps a position.
+One that grows a position, flips its side, or opens from flat is an ordinary
+sized fill and meets the account's solvency rules in full, so an unaffordable
+target is refused rather than booked. So is a symbol the wallet has never been
+priced for — refused into the rejection log rather than skipped, because a
+close somebody asked for and did not get has to be visible.
 
 The final equity point is **overwritten, not appended**: each leg closes at the
 same mark that point was computed from, so only the realized cost drag changes,
 and `equity_curve.len() == snapshots.len()` is an invariant every downstream
-consumer relies on. The zero-cost gross twin used for cost attribution is
-flattened alongside the priced run, or it would have no counterpart fills to
+consumer relies on. The zero-cost gross twin used for cost attribution takes the
+same closeout as the priced run, or it would have no counterpart fills to
 pair against.
 
 ## 8. Trades — how fills become the numbers

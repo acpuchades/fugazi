@@ -278,13 +278,49 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
 /// [`SleeveWallet`] — the positions to treat as the user's own and leave
 /// untouched. Reads through the [`Wallet`] trait, so it needs
 /// [`positions`](Wallet::positions) to enumerate.
+///
+/// Right for a **cold start**, where nothing in the account can be ours yet.
+/// A run that is *resuming* already owns some of what it sees, and must use
+/// [`external_baseline_net_of`] instead.
 pub fn external_baseline<Sym: Clone + Eq + Hash>(wallet: &dyn Wallet<Sym>) -> HashMap<Sym, Real> {
-    wallet
+    external_baseline_net_of(wallet, &[])
+}
+
+/// [`external_baseline`] less the positions the strategy already knows are
+/// **its own** — what a resuming run must use.
+///
+/// "Everything the account holds when the run starts is the user's own" is only
+/// true of a cold start. A resumed strategy walks back in holding whatever the
+/// previous chunk left it, and that is exactly what its restored
+/// [`Book`](crate::indicators::Book) reports through
+/// [`owned_positions`](crate::indicators::Book::owned_positions). Counting
+/// those as external would be doubly wrong: the strategy's own equity would be
+/// measured net of its own position (a fully-invested account reads as having
+/// no capital at all), and [`SleeveWallet::set_position`] would offset every
+/// order by the position it is trying to move — so a close would resolve to the
+/// position it started from and submit nothing.
+///
+/// The residual is per symbol and signed, so an account holding 5 where we own
+/// 3 leaves an external 2. A residual within [`POSITION_EPSILON`] is dropped:
+/// the account is ours down to dust. Where the two disagree in a way that
+/// cannot be reconciled — a venue that liquidated under us, leaving less than
+/// our book claims — the residual comes out on the *opposite* side, which is
+/// the honest reading of "the account is not where we left it" and keeps the
+/// arithmetic total.
+pub fn external_baseline_net_of<Sym: Clone + Eq + Hash>(
+    wallet: &dyn Wallet<Sym>,
+    owned: &[Units<Sym>],
+) -> HashMap<Sym, Real> {
+    let mut baseline: HashMap<Sym, Real> = wallet
         .positions()
         .into_iter()
-        .filter(|u| u.amount.abs() > POSITION_EPSILON)
         .map(|u| (u.symbol, u.amount))
-        .collect()
+        .collect();
+    for units in owned {
+        *baseline.entry(units.symbol.clone()).or_insert(0.0) -= units.amount;
+    }
+    baseline.retain(|_, amount| amount.abs() > POSITION_EPSILON);
+    baseline
 }
 
 /// The strategy's **own** opening equity given an external `baseline`: the
@@ -364,6 +400,83 @@ mod tests {
              strategy's own equity: got {}",
             sleeve.equity().0,
         );
+    }
+
+    /// A resuming strategy's **own** position must not land in the baseline.
+    ///
+    /// The account here holds one symbol and it is the strategy's — the state
+    /// it is resuming says so. Netting it out leaves nothing external, so no
+    /// sleeve is wrapped at all and the strategy resumes seeing the position it
+    /// opened. Netted the other way (an empty `owned`) the very same account
+    /// yields a baseline of the whole position, and the strategy's own equity
+    /// collapses to the cash sitting beside it.
+    #[test]
+    fn a_resumed_strategys_own_position_is_not_external() {
+        let (account, _) = account_with_an_external_position();
+        let owned = [Units {
+            symbol: "C",
+            amount: EXTERNAL_UNITS,
+        }];
+
+        let baseline = external_baseline_net_of(&account, &owned);
+        assert!(
+            baseline.is_empty(),
+            "a position the strategy itself holds is not an external one: {baseline:?}"
+        );
+        assert!(
+            (own_equity(&account, &baseline) - (CASH + EXTERNAL_UNITS * MARK)).abs() < 1e-9,
+            "resumed own equity must include the resumed position, got {}",
+            own_equity(&account, &baseline),
+        );
+
+        // The unnetted reading, for contrast: this is what the seam used to do
+        // on every resume, and what drove a fully-invested account's seed to
+        // zero.
+        let unnetted = external_baseline(&account);
+        assert_eq!(unnetted.len(), 1);
+        assert!((own_equity(&account, &unnetted) - CASH).abs() < 1e-9);
+    }
+
+    /// A **partial** overlap: the account holds more than the strategy does, so
+    /// the residual is external and the sleeve stays in play. This is the case
+    /// that says the netting is arithmetic rather than a flag — a `contains`
+    /// check would wrongly hand the user's extra units to the strategy.
+    #[test]
+    fn only_the_residual_of_a_shared_symbol_is_external() {
+        let (account, _) = account_with_an_external_position();
+        let ours = EXTERNAL_UNITS - 1.0;
+
+        let baseline = external_baseline_net_of(
+            &account,
+            &[Units {
+                symbol: "C",
+                amount: ours,
+            }],
+        );
+        assert_eq!(baseline.len(), 1);
+        assert!((baseline[&"C"] - 1.0).abs() < 1e-9, "{baseline:?}");
+        assert!(
+            (own_equity(&account, &baseline) - (CASH + ours * MARK)).abs() < 1e-9,
+            "own equity should cover our units and no more",
+        );
+    }
+
+    /// An account that drifted **below** what our book claims — a venue
+    /// liquidation, a manual close — leaves the residual on the opposite side
+    /// rather than clamping it away. Silently dropping it would tell the sleeve
+    /// the account is flat when it is short of us, and every subsequent order
+    /// would be offset by nothing.
+    #[test]
+    fn a_shortfall_against_our_book_shows_up_as_an_opposite_residual() {
+        let (account, _) = account_with_an_external_position();
+        let baseline = external_baseline_net_of(
+            &account,
+            &[Units {
+                symbol: "C",
+                amount: EXTERNAL_UNITS + 2.0,
+            }],
+        );
+        assert!((baseline[&"C"] + 2.0).abs() < 1e-9, "{baseline:?}");
     }
 
     /// `own_equity` is the standalone spelling of the same arithmetic — what a

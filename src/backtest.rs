@@ -379,17 +379,63 @@ where
     }
 }
 
-/// Close every position still open at the end of a run — **in the wallet**, not
-/// only in the report — so a `--flatten` run finalizes its open trades into the
-/// blotter (and thus the trade-level metrics via
+/// What to do with the account's open positions once a run's last bar has been
+/// driven — the terminal half of [`apply_closeout`].
+///
+/// [`Carry`](Closeout::Carry) is the backtest's answer and the default: an open
+/// position at the end of a chunk is simply still open, and the next chunk
+/// resumes holding it. The other two exist for a *deployment*, where a chunk
+/// boundary is a real moment in time and somebody may need the book somewhere
+/// other than where the strategy's signal would leave it.
+///
+/// The three are one knob rather than two because
+/// [`Flatten`](Closeout::Flatten) *is* [`Hold`](Closeout::Hold) at `0.0` for
+/// every open symbol — combining them could only ever mean one overriding the
+/// other, and an enum makes that unsayable instead of a runtime error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Closeout {
+    /// Leave the book exactly as the strategy left it. Positions stay open and
+    /// unrealized; a state captured after this resumes holding them.
+    #[default]
+    Carry,
+    /// Close **every** open position in the account, through the normal cost
+    /// pipeline — what `run --flatten` asks for. A state captured after this
+    /// holds a genuinely flat book.
+    Flatten,
+    /// Drive the named symbols to these **signed unit targets** and leave every
+    /// other symbol alone: `0.0` closes one position, a non-zero target resizes
+    /// it, and a symbol absent from the map trades exactly as the document
+    /// says.
+    ///
+    /// The operator override — "close this one position", "hold this one at
+    /// this size" — applied after the strategy has had its say on the last bar,
+    /// so it wins for that chunk. It is an absolute target rather than a delta,
+    /// so passing the same map again on the next chunk holds the position there
+    /// instead of moving it again; that is how a standing instruction outlives
+    /// the bar it was issued on, without the driver having to carry a clock.
+    Hold(std::collections::HashMap<Symbol, crate::types::Real>),
+}
+
+impl Closeout {
+    /// Whether this leaves the book untouched — the fast path, and what a
+    /// backtest always asks for.
+    pub fn is_carry(&self) -> bool {
+        matches!(self, Closeout::Carry)
+    }
+}
+
+/// Apply a [`Closeout`] to the account a run has just finished driving —
+/// **in the wallet**, not only in the report — so a `--flatten` run finalizes
+/// its open trades into the blotter (and thus the trade-level metrics via
 /// [`reconstruct_trades`](crate::metrics::reconstruct_trades)).
 ///
-/// Delegates to [`Wallet::flatten`], so each leg goes through the account's
-/// normal execution path: costs and commission apply, cash and positions move,
-/// and a real [`OrderId`](crate::wallet::OrderId) is minted per leg. The fills
-/// are routed to [`Strategy::on_fill`] and appended to the report at the final
-/// bar's index, and any refusal (a live venue declining a close) to
-/// [`Strategy::on_reject`] and `report.rejections`.
+/// Delegates to [`Wallet::flatten`] / [`Wallet::settle_position`], so each leg
+/// goes through the account's normal execution path: costs and commission
+/// apply, cash and positions move, and a real
+/// [`OrderId`](crate::wallet::OrderId) is minted per leg. The fills are routed
+/// to [`Strategy::on_fill`] and appended to the report at the final bar's
+/// index, and any refusal (a live venue declining a close, a target the account
+/// cannot fund) to [`Strategy::on_reject`] and `report.rejections`.
 ///
 /// The **final equity point is overwritten**, not appended. Each leg closes at
 /// the same mark that point was computed from, so the only change is the
@@ -407,20 +453,38 @@ where
 /// and overwriting the final equity point would replace the pinned `0.0` with
 /// the account's true negative balance, un-bounding every metric derived from
 /// it.
-pub fn flatten_open_positions<S, W>(
+pub fn apply_closeout<S, W>(
     strategy: &mut S,
     wallet: &mut W,
     snapshots: &[Snapshot<Symbol>],
     report: &mut RunReport<Symbol>,
+    closeout: &Closeout,
 ) where
     S: Strategy<Symbol = Symbol, Input = Snapshot<Symbol>> + ?Sized,
     W: Wallet<Symbol>,
 {
-    if report.ruin_bar.is_some() {
+    if report.ruin_bar.is_some() || closeout.is_carry() {
         return;
     }
     let bar = snapshots.len().saturating_sub(1);
-    for order in wallet.flatten() {
+    let fills = match closeout {
+        // Unreachable — returned above — but spelled out rather than
+        // `unreachable!()`, so a future variant is a compile error here.
+        Closeout::Carry => Vec::new(),
+        Closeout::Flatten => wallet.flatten(),
+        Closeout::Hold(targets) => {
+            // Sorted, so a multi-symbol instruction books its legs in the same
+            // order every run regardless of the map's layout — the same rule
+            // `PaperWallet::flatten` follows, and for the same reason.
+            let mut named: Vec<(&Symbol, &crate::types::Real)> = targets.iter().collect();
+            named.sort_by(|a, b| a.0.cmp(b.0));
+            named
+                .into_iter()
+                .flat_map(|(symbol, &target)| wallet.settle_position(symbol.clone(), target))
+                .collect()
+        }
+    };
+    for order in fills {
         strategy.on_fill(&order);
         report.fills.push(Fill { bar, order });
     }

@@ -2009,6 +2009,221 @@ def test_warm_up_advances_state_without_trading():
     ), "a warmed resume should differ from a cold start over the same bars"
 
 
+_ALL_IN_YAML = """
+root: X
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+"""
+
+
+def _all_in_state(snaps, seed=10_000.0):
+    """Run to a fully-invested book and return (wallet, state)."""
+    wallet = ta.PaperWallet(seed)
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps)
+    return wallet, state
+
+
+@pytest.mark.parametrize("seed", [0.0, 10_000.0])
+@pytest.mark.parametrize("warm_first", [False, True])
+def test_a_fully_invested_state_resumes_whatever_the_wallet_was_seeded_with(
+    seed, warm_first
+):
+    """A resumed run is seeded from the account it restores, not from the number
+    the caller happened to construct the wallet with.
+
+    Both of these used to abort the interpreter. The seed reaches `Book::new`,
+    whose "strictly positive" assert is a `panic!` — and a `PanicException` is a
+    `BaseException`, so it walks straight past every `except Exception` in the
+    calling application rather than failing one deployment.
+
+    The trigger is ordinary, not exotic: sizing defaults to all-in, so a
+    fully-invested single-asset strategy has exactly zero cash, and the
+    `warm_up` -> `run_resumable` handoff a pause gap produces re-presents that
+    book to a wallet whose own positions look, from the outside, like somebody
+    else's.
+    """
+    spec = ta.load_spec(_ALL_IN_YAML)
+    snaps = _snaps_single("X", _wobbly(12))
+    _, state = _all_in_state(snaps[:6])
+
+    wallet = ta.PaperWallet(seed)
+    if warm_first:
+        state = spec.warm_up(wallet, snaps[6:7], resume=state)
+        rep, _ = spec.run_resumable(wallet, snaps[7:], resume=state)
+    else:
+        rep, _ = spec.run_resumable(wallet, snaps[6:], resume=state)
+
+    # Not merely "did not crash": the resumed curve is the one an uninterrupted
+    # run would have produced over those same bars.
+    whole, _ = ta.load_spec(_ALL_IN_YAML).run_resumable(ta.PaperWallet(10_000.0), snaps)
+    assert rep.equity_curve[-1] == pytest.approx(whole.equity_curve[-1])
+
+
+def test_a_resumed_strategy_is_not_told_its_own_position_is_somebody_elses():
+    """The account a resumed run is handed already holds what it opened last
+    chunk. Counted as an external holding, the strategy resumes reading itself
+    as flat and its own equity as the cash beside the position — which is zero
+    for an all-in book.
+    """
+    spec = ta.load_spec(_ALL_IN_YAML)
+    snaps = _snaps_single("X", _wobbly(12))
+    wallet, state = _all_in_state(snaps[:6])
+    held = wallet.position("X")
+    assert held > 0.0 and wallet.funds == 0.0
+
+    # Continue against that very wallet — the shape a live deployment has.
+    spec.run_resumable(wallet, snaps[6:], resume=state)
+    assert wallet.position("X") == pytest.approx(held), (
+        "a resumed all-in strategy must not re-enter a position it already holds"
+    )
+
+
+def test_a_users_own_position_is_still_carved_out_on_a_resume():
+    """...and the netting subtracts only what is ours. A position the strategy
+    never opened stays the user's across a resume, or the fix above would hand
+    them their own holdings to trade.
+    """
+    spec = ta.load_spec(_ALL_IN_YAML)
+    snaps = _snaps_single("X", _wobbly(12))
+
+    wallet = ta.PaperWallet(10_000.0)
+    wallet.update("U", ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0))
+    wallet.set_position("U", 10.0)
+    wallet.update("U", ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0))
+    assert wallet.position("U") == pytest.approx(10.0)
+
+    _rep, state = spec.run_resumable(wallet, snaps[:6])
+    spec.run_resumable(wallet, snaps[6:], resume=state)
+    assert wallet.position("U") == pytest.approx(10.0), (
+        "the user's own position was traded by the strategy"
+    )
+
+
+def test_a_capital_less_account_is_a_catchable_error_not_a_panic():
+    """A cold start against an account with nothing in it is bad input, and bad
+    input is reported. The distinction that matters is catchability: this must
+    be reachable by `except Exception`.
+    """
+    with pytest.raises(Exception, match="initial equity must be strictly positive"):
+        ta.load_spec(_ALL_IN_YAML).run_resumable(
+            ta.PaperWallet(0.0), _snaps_single("X", _wobbly(6))
+        )
+
+
+def test_warming_over_no_bars_still_returns_a_resumable_state():
+    """Restoring a book without advancing it — an empty pause gap, or a look at
+    what a deployment is holding — must hand back a state you can resume from.
+
+    Recomputing `last_bar` from an empty chunk answers `None`, which drops a
+    position in time the state already knew.
+    """
+    import json
+
+    spec = ta.load_spec(_ALL_IN_YAML)
+    # Timestamped, so `last_bar` has something to carry in the first place.
+    snaps = [
+        ta.Snapshot({"X": ta.Atom(ta.Candle(v, v, v, v, 1000.0), None, i * 86_400_000)})
+        for i, v in enumerate(_wobbly(12))
+    ]
+    _wallet, state = _all_in_state(snaps[:6])
+    assert json.loads(state)["last_bar"] is not None
+
+    wallet = ta.PaperWallet(10_000.0)
+    warmed = spec.warm_up(wallet, [], resume=state)
+    assert json.loads(warmed)["last_bar"] == json.loads(state)["last_bar"]
+
+    # And it round-trips: the state is a real resume point, not a dead end.
+    spec.run_resumable(wallet, snaps[6:], resume=warmed)
+
+
+# ---------------------------------------------------------------------------
+# `hold=`: per-symbol closeout targets.
+# ---------------------------------------------------------------------------
+
+
+def test_hold_at_zero_closes_one_position_like_flatten():
+    """`hold={sym: 0.0}` is `flatten` scoped to one symbol, so on a one-symbol
+    book the two must land on exactly the same account."""
+    snaps = _snaps_single("X", _wobbly(40))
+
+    flat_wallet = ta.PaperWallet(1000.0)
+    flat, _ = ta.load_spec(_ALL_IN_YAML).run_resumable(flat_wallet, snaps, flatten=True)
+    held_wallet = ta.PaperWallet(1000.0)
+    held, _ = ta.load_spec(_ALL_IN_YAML).run_resumable(
+        held_wallet, snaps, hold={"X": 0.0}
+    )
+
+    assert held_wallet.position("X") == 0.0
+    assert held_wallet.funds == pytest.approx(flat_wallet.funds)
+    assert len(held.fills) == len(flat.fills)
+    assert held.equity_curve == flat.equity_curve
+
+
+def test_hold_resizes_to_a_target_and_pins_it_across_chunks():
+    """A non-zero target resizes rather than closes, and re-issuing it holds the
+    position there — an absolute target, not a delta. That is what makes a
+    standing operator instruction expressible without the driver owning a clock.
+    """
+    spec = ta.load_spec(_ALL_IN_YAML)
+    snaps = _snaps_single("X", _wobbly(24))
+
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = spec.run_resumable(wallet, snaps[:8], hold={"X": 3.0})
+    assert wallet.position("X") == pytest.approx(3.0)
+
+    # The strategy would re-enter all-in on every one of these bars; the
+    # standing instruction wins each time.
+    for lo in range(8, 24, 4):
+        _rep, state = spec.run_resumable(
+            wallet, snaps[lo : lo + 4], resume=state, hold={"X": 3.0}
+        )
+        assert wallet.position("X") == pytest.approx(3.0)
+
+    # Nothing about the strategy changed underneath: with the instruction
+    # dropped and the book allowed to move again, the same document sizes
+    # itself back up to a full position.
+    unheld = ta.PaperWallet(10_000.0)
+    spec.run_resumable(unheld, snaps)
+    assert unheld.position("X") > 3.0
+
+
+def test_hold_leaves_symbols_it_does_not_name_alone():
+    """Only the named symbols move; everything else trades as the document says."""
+    yaml = """
+    long:
+      enter: !gt { lhs: !close, rhs: !value 0.0 }
+    sizing: !value 0.4
+    """
+    snaps = _two_symbol_snaps(20)
+
+    carried_wallet = ta.PaperWallet(10_000.0)
+    ta.load_spec(yaml, kind="multi").run_resumable(carried_wallet, snaps)
+    held_wallet = ta.PaperWallet(10_000.0)
+    ta.load_spec(yaml, kind="multi").run_resumable(held_wallet, snaps, hold={"A": 1.5})
+
+    assert held_wallet.position("A") == pytest.approx(1.5)
+    assert held_wallet.position("B") == pytest.approx(carried_wallet.position("B"))
+
+
+def test_hold_and_flatten_together_are_refused():
+    """They are one instruction — `flatten` is `hold` at zero for everything
+    open — so the combination gets an error rather than a precedence rule."""
+    snaps = _snaps_single("X", _wobbly(10))
+    with pytest.raises(ValueError, match="same instruction"):
+        ta.load_spec(_ALL_IN_YAML).run_resumable(
+            ta.PaperWallet(1000.0), snaps, flatten=True, hold={"X": 0.0}
+        )
+
+
+def test_an_empty_hold_is_the_same_as_none():
+    """Nothing named, nothing touched — and in particular not an error, so a
+    caller can pass its instruction map through unconditionally."""
+    snaps = _snaps_single("X", _wobbly(20))
+    wallet = ta.PaperWallet(1000.0)
+    ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps, hold={})
+    assert wallet.position("X") > 0.0
+
+
 def test_run_resumable_rejects_a_stale_format_version():
     """A state file from another build is refused, not mis-parsed."""
     import json

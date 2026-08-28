@@ -377,6 +377,7 @@ impl BasketStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynBasketStrategy, String> {
+        crate::spec::runnable::check_seed(initial_equity)?;
         let strat = BasketStrategy::<Symbol>::with_initial_equity(initial_equity);
         let book = strat.book();
 

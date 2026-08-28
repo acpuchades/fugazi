@@ -20,14 +20,16 @@
 mod common;
 
 use common::bars;
+use fugazi::backtest::Closeout;
 use fugazi::backtest::Fill;
 use fugazi::market::{Real, Schema};
 use fugazi::spec::{
     BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, RunState,
-    RunnableStrategy, SingleStrategySpec,
+    RunnableStrategy, SingleStrategySpec, StrategySpec,
 };
 use fugazi::types::{Atom, Snapshot};
 use fugazi::types::{Symbol, symbol as intern};
+use fugazi::wallet::Wallet;
 
 /// A price series with enough swings to trigger crossovers in every chunk.
 fn prices(n: usize) -> Vec<Real> {
@@ -128,7 +130,7 @@ where
 
     let mut whole = build();
     let (whole_report, whole_state) = whole
-        .drive_resumable(snaps, CASH, &[], None, false)
+        .drive_resumable(snaps, CASH, &[], None, &Closeout::Carry)
         .expect("uninterrupted run");
 
     let bounds: Vec<usize> = std::iter::once(0)
@@ -145,7 +147,13 @@ where
         // object, only a document plus a state blob.
         let mut strat = build();
         let (report, state) = strat
-            .drive_resumable(&snaps[start..end], CASH, &[], carried.as_ref(), false)
+            .drive_resumable(
+                &snaps[start..end],
+                CASH,
+                &[],
+                carried.as_ref(),
+                &Closeout::Carry,
+            )
             .unwrap_or_else(|e| panic!("chunk {chunk} ({start}..{end}) failed: {e}"));
 
         chunk_equity.extend_from_slice(&report.equity_curve);
@@ -714,14 +722,14 @@ fn flatten_closes_the_position_in_the_wallet_not_just_the_report() {
     // closing fill for it in the blotter).
     let mut carried = buy_and_hold_spec().build(CASH, &sch);
     let (carried_report, carried_state) = carried
-        .drive_resumable(&snaps, CASH, &[], None, false)
+        .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
         .expect("carried run");
 
     // With --flatten: the open position is closed at the last bar, so the
     // blotter gains exactly one more fill...
     let mut flattened = buy_and_hold_spec().build(CASH, &sch);
     let (flattened_report, flattened_state) = flattened
-        .drive_resumable(&snaps, CASH, &[], None, true)
+        .drive_resumable(&snaps, CASH, &[], None, &Closeout::Flatten)
         .expect("flattened run");
 
     assert_eq!(
@@ -771,14 +779,14 @@ fn resuming_a_flattened_run_continues_from_a_flat_book() {
 
     let mut flattened = buy_and_hold_spec().build(CASH, &sch);
     let (_, state) = flattened
-        .drive_resumable(&snaps[..20], CASH, &[], None, true)
+        .drive_resumable(&snaps[..20], CASH, &[], None, &Closeout::Flatten)
         .expect("flattened first chunk");
 
     // A resume from a flattened state starts flat, so it must re-enter — i.e.
     // book an opening fill — rather than silently continuing to hold.
     let mut resumed = buy_and_hold_spec().build(CASH, &sch);
     let (report, _) = resumed
-        .drive_resumable(&snaps[20..], CASH, &[], Some(&state), false)
+        .drive_resumable(&snaps[20..], CASH, &[], Some(&state), &Closeout::Carry)
         .expect("resumed chunk");
     assert!(
         !report.fills.is_empty(),
@@ -807,7 +815,7 @@ fn resuming_a_mismatched_shape_is_rejected() {
     // Capture a single-asset state...
     let mut single = buy_and_hold_spec().build(CASH, &sch);
     let (_, state) = single
-        .drive_resumable(&single_snaps(20), CASH, &[], None, false)
+        .drive_resumable(&single_snaps(20), CASH, &[], None, &Closeout::Carry)
         .expect("single run");
     assert_eq!(state.kind, "single");
 
@@ -815,7 +823,7 @@ fn resuming_a_mismatched_shape_is_rejected() {
     // `!resume >` message, not a silent mis-parse.
     let mut pair_strat = pairs_spec().build(CASH, &sch);
     let err = pair_strat
-        .drive_resumable(&multi_snaps(20), CASH, &[], Some(&state), false)
+        .drive_resumable(&multi_snaps(20), CASH, &[], Some(&state), &Closeout::Carry)
         .expect_err("cross-shape resume must fail");
     assert!(err.contains("!resume"), "unexpected error: {err}");
     assert!(
@@ -829,13 +837,13 @@ fn resuming_a_stale_format_version_is_rejected() {
     let sch = schema();
     let mut single = buy_and_hold_spec().build(CASH, &sch);
     let (_, mut state) = single
-        .drive_resumable(&single_snaps(20), CASH, &[], None, false)
+        .drive_resumable(&single_snaps(20), CASH, &[], None, &Closeout::Carry)
         .expect("single run");
     state.format_version += 1; // pretend it was written by an older/newer build
 
     let mut fresh = buy_and_hold_spec().build(CASH, &sch);
     let err = fresh
-        .drive_resumable(&single_snaps(20), CASH, &[], Some(&state), false)
+        .drive_resumable(&single_snaps(20), CASH, &[], Some(&state), &Closeout::Carry)
         .expect_err("stale version must fail");
     assert!(err.contains("format version"), "unexpected error: {err}");
 }
@@ -856,7 +864,7 @@ fn warming_up_over_a_mismatched_or_stale_state_is_rejected_too() {
     let sch = schema();
     let mut single = buy_and_hold_spec().build(CASH, &sch);
     let (_, state) = single
-        .drive_resumable(&single_snaps(20), CASH, &[], None, false)
+        .drive_resumable(&single_snaps(20), CASH, &[], None, &Closeout::Carry)
         .expect("single run");
     assert_eq!(state.kind, "single");
 
@@ -915,7 +923,7 @@ fn state_size_does_not_grow_with_run_length() {
     let measure = |bars: usize| -> (usize, usize) {
         let mut strat = single_ema_spec().build(CASH, &sch);
         let (report, state) = strat
-            .drive_resumable(&single_snaps(bars), CASH, &[], None, false)
+            .drive_resumable(&single_snaps(bars), CASH, &[], None, &Closeout::Carry)
             .expect("run");
         let size = serde_json::to_string(&state)
             .expect("serialize state")
@@ -958,7 +966,7 @@ fn a_resumed_wallet_reports_only_its_own_fills() {
     let mut first = single_ema_spec().build(CASH, &sch);
     let mut wallet = fugazi::PaperWallet::new(CASH);
     let (first_report, state) = first
-        .drive_resumable_with(&snaps[..cut], &mut wallet, None, false)
+        .drive_resumable_with(&snaps[..cut], &mut wallet, None, &Closeout::Carry)
         .expect("first chunk");
     assert_eq!(
         wallet.orders().len(),
@@ -973,7 +981,7 @@ fn a_resumed_wallet_reports_only_its_own_fills() {
     let mut second = single_ema_spec().build(CASH, &sch);
     let mut resumed = fugazi::PaperWallet::new(CASH);
     let (second_report, _) = second
-        .drive_resumable_with(&snaps[cut..], &mut resumed, Some(&state), false)
+        .drive_resumable_with(&snaps[cut..], &mut resumed, Some(&state), &Closeout::Carry)
         .expect("resumed chunk");
     assert!(
         !second_report.fills.is_empty(),
@@ -1003,7 +1011,7 @@ fn a_state_carrying_legacy_history_keys_still_resumes() {
 
     let mut cold = single_ema_spec().build(CASH, &sch);
     let (_, mut state) = cold
-        .drive_resumable(&snaps[..30], CASH, &[], None, false)
+        .drive_resumable(&snaps[..30], CASH, &[], None, &Closeout::Carry)
         .expect("first chunk");
 
     // Re-attach the keys a pre-change build wrote.
@@ -1020,13 +1028,19 @@ fn a_state_carrying_legacy_history_keys_still_resumes() {
 
     let mut legacy = single_ema_spec().build(CASH, &sch);
     let (legacy_report, _) = legacy
-        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), &Closeout::Carry)
         .expect("a legacy state must still resume");
 
     // And it resumes to the same place a current state does.
     let mut current = single_ema_spec().build(CASH, &sch);
     let (current_report, _) = current
-        .drive_resumable(&snaps[30..], CASH, &[], Some(&state.clone()), false)
+        .drive_resumable(
+            &snaps[30..],
+            CASH,
+            &[],
+            Some(&state.clone()),
+            &Closeout::Carry,
+        )
         .expect("current state");
     assert_eq!(
         legacy_report.equity_curve.len(),
@@ -1062,7 +1076,7 @@ fn resuming_into_a_changed_document_is_refused_rather_than_silently_hybridised()
 
     let mut original = single_ema_spec().build(CASH, &sch);
     let (_, state) = original
-        .drive_resumable(&snaps[..30], CASH, &[], None, false)
+        .drive_resumable(&snaps[..30], CASH, &[], None, &Closeout::Carry)
         .expect("first chunk");
 
     // The same document with one period changed — a plausible edit between two
@@ -1082,7 +1096,7 @@ fn resuming_into_a_changed_document_is_refused_rather_than_silently_hybridised()
     );
     let err = edited
         .build(CASH, &sch)
-        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), &Closeout::Carry)
         .expect_err("a state from a different document must not resume");
     let msg = err.to_string();
     assert!(
@@ -1093,7 +1107,7 @@ fn resuming_into_a_changed_document_is_refused_rather_than_silently_hybridised()
     // The unchanged document still resumes, so the check is not blanket.
     single_ema_spec()
         .build(CASH, &sch)
-        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), &Closeout::Carry)
         .expect("the original document must still resume");
 }
 
@@ -1159,4 +1173,378 @@ fn a_config_field_from_a_different_build_is_refused() {
         v20.load_state(&blob).is_err(),
         "Vwap accepted a foreign period"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Resuming into an account that is not exclusively ours
+// ---------------------------------------------------------------------------
+//
+// A caller driving a spec against a wallet it supplies (`drive_resumable_with`,
+// and every `StrategySpec.run_resumable` in the Python bindings) has to decide
+// which of that account's positions are the strategy's and which are the
+// user's. On a cold start the answer is trivial. On a resume it is not, and
+// getting it wrong is silent: the strategy resumes blind to the position it
+// opened last chunk.
+
+/// Drive `spec` over `snaps` against `account` exactly as the bindings' wallet
+/// seam does — work out what is already ours, carve the rest out as external,
+/// seed the book with what is left, run, and hand the account back.
+fn drive_through_the_seam(
+    spec: &StrategySpec,
+    snaps: &[Snapshot<Symbol>],
+    account: fugazi::PaperWallet<Symbol>,
+    resume: Option<&RunState>,
+) -> (fugazi::PaperWallet<Symbol>, RunState, Real) {
+    use fugazi::spec::RunnableStrategyExt;
+    use fugazi::wallet::{SleeveWallet, external_baseline_net_of, own_equity};
+
+    let sch = schema();
+    let owned = spec
+        .positions_at_resume(&sch, resume)
+        .expect("positions at resume");
+    let baseline = external_baseline_net_of(&account, &owned);
+    let seed = own_equity(&account, &baseline);
+    let mut built = spec.try_build(seed, &sch, None).expect("build");
+    let mut sleeve = SleeveWallet::new(account, baseline);
+    let (_report, state) = built
+        .drive_resumable_with(snaps, &mut sleeve, resume, &Closeout::Carry)
+        .expect("drive");
+    (sleeve.into_inner(), state, seed)
+}
+
+/// A spec that goes all-in on the first bar and stays there — the default
+/// sizing, so the ordinary state of a fully-invested single-asset strategy, and
+/// the one that leaves the account with no cash at all.
+fn all_in_spec() -> StrategySpec {
+    StrategySpec::Single(Box::new(parse!(
+        fugazi::spec::StrategyRef,
+        r#"
+        root: X
+        long:
+          enter: !gt { lhs: !close, rhs: !value 0.0 }
+    "#
+    )))
+}
+
+/// **The reported bug.** A fully-invested run, resumed against the account it
+/// left behind, must seed its book with its own *equity* — not with the cash
+/// sitting beside its position, which is zero.
+///
+/// Getting this wrong was not a slow leak: the seed reaches `Book::new`, whose
+/// "strictly positive" assert aborts. Across the Python boundary that surfaces
+/// as a `PanicException` — a `BaseException`, which walks straight past every
+/// `except Exception` in the calling application.
+#[test]
+fn a_fully_invested_resume_seeds_its_book_with_equity_not_leftover_cash() {
+    let spec = all_in_spec();
+    let snaps = single_snaps(10);
+
+    let (account, state, seed) =
+        drive_through_the_seam(&spec, &snaps[..5], fugazi::PaperWallet::new(CASH), None);
+    assert_eq!(seed, CASH, "a cold start seeds with the whole account");
+    assert!(
+        account.funds().0.abs() < 1e-9 && !account.positions().is_empty(),
+        "the fixture must actually be fully invested: {:?} cash, {:?}",
+        account.funds().0,
+        account.positions(),
+    );
+
+    // Resume against that same account. Its cash is zero and its one position
+    // is ours, so our equity is the whole account's.
+    let equity = account.equity().0;
+    let (_account, _state, seed) =
+        drive_through_the_seam(&spec, &snaps[5..], account, Some(&state));
+    assert!(
+        (seed - equity).abs() < 1e-9,
+        "a resumed run's own equity is the account's, not its {} of cash: got {seed}",
+        0.0,
+    );
+}
+
+/// The other half of the same mistake, and the one that survives a positive
+/// seed: a strategy whose own position has been carved out as "external" reads
+/// itself as flat, so it re-enters a position it already holds — and cannot
+/// exit, since a sleeve resolves a close to *its* share of the baseline.
+#[test]
+fn a_resumed_strategy_still_sees_the_position_it_opened() {
+    let spec = all_in_spec();
+    let snaps = single_snaps(10);
+
+    let (account, state, _) =
+        drive_through_the_seam(&spec, &snaps[..5], fugazi::PaperWallet::new(CASH), None);
+    let held = account.position(&intern("X")).amount;
+    assert!(held > 0.0);
+
+    let owned = spec
+        .positions_at_resume(&schema(), Some(&state))
+        .expect("positions at resume");
+    assert_eq!(
+        owned.iter().map(|u| u.amount).collect::<Vec<_>>(),
+        vec![held],
+        "the restored book must report the position the account is holding"
+    );
+
+    // Continue, and the run must book no second entry: it is already long.
+    let (account, _state, _) = drive_through_the_seam(&spec, &snaps[5..], account, Some(&state));
+    assert!(
+        (account.position(&intern("X")).amount - held).abs() < 1e-9,
+        "a resumed all-in strategy re-entered a position it already held: {} vs {held}",
+        account.position(&intern("X")).amount,
+    );
+}
+
+/// A **genuinely** external position stays external across a resume. The
+/// netting subtracts what is ours and no more — otherwise the fix for the above
+/// would hand the user's own holdings to the strategy, which is the failure the
+/// sleeve exists to prevent in the first place.
+#[test]
+fn a_users_own_position_stays_external_across_a_resume() {
+    let spec = all_in_spec();
+    let snaps = single_snaps(10);
+
+    // An account holding the user's own `U`, which this spec never trades.
+    let mut account = fugazi::PaperWallet::<Symbol>::new(CASH);
+    account.update(intern("U"), bars::banded(100.0));
+    account
+        .set_position(fugazi::wallet::Units {
+            symbol: intern("U"),
+            amount: 10.0,
+        })
+        .expect("seed the user's own position");
+    account.update(intern("U"), bars::banded(100.0));
+    let user_units = account.position(&intern("U")).amount;
+    assert!(user_units > 0.0);
+
+    let (account, state, seed) = drive_through_the_seam(&spec, &snaps[..5], account, None);
+    assert!(
+        (seed - (CASH - user_units * 100.0)).abs() < 1e-9,
+        "the strategy's seed must exclude the user's position: {seed}"
+    );
+
+    let (account, _state, _) = drive_through_the_seam(&spec, &snaps[5..], account, Some(&state));
+    assert!(
+        (account.position(&intern("U")).amount - user_units).abs() < 1e-9,
+        "the user's own position was traded: {} vs {user_units}",
+        account.position(&intern("U")).amount,
+    );
+}
+
+/// `Closeout::Hold` drives named symbols to given targets and leaves the rest
+/// alone — the operator override. `0.0` is a close, so a one-symbol run's
+/// `Hold` and `Flatten` must land on exactly the same book.
+#[test]
+fn holding_a_symbol_at_zero_matches_flattening_it() {
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(20);
+
+    let run = |closeout: &Closeout| {
+        let mut built = spec.try_build(CASH, &sch, None).expect("build");
+        built
+            .drive_resumable(&snaps, CASH, &[], None, closeout)
+            .expect("drive")
+    };
+
+    let (flat_report, flat_state) = run(&Closeout::Flatten);
+    let (held_report, held_state) =
+        run(&Closeout::Hold([(intern("X"), 0.0)].into_iter().collect()));
+
+    assert_eq!(flat_report.fills.len(), held_report.fills.len());
+    assert_eq!(flat_report.equity_curve, held_report.equity_curve);
+    assert!(
+        wallet_positions(&flat_state)
+            .iter()
+            .all(|(_, u)| u.abs() <= 1e-12)
+    );
+    assert!(
+        wallet_positions(&held_state)
+            .iter()
+            .all(|(_, u)| u.abs() <= 1e-12),
+        "hold at 0.0 must close the position: {:?}",
+        wallet_positions(&held_state)
+    );
+}
+
+/// A non-zero target **resizes** rather than closes, and a symbol the map does
+/// not name is left exactly where the strategy put it.
+#[test]
+fn holding_resizes_the_named_symbol_and_leaves_the_rest_alone() {
+    let sch = schema();
+    let snaps = multi_snaps(20);
+    // Always-long in both legs, so "what was open at the end" is not hostage to
+    // where the price path happened to leave a crossover.
+    let spec = StrategySpec::Multi(Box::new(parse!(
+        MultiAssetStrategySpec,
+        r#"
+        long:
+          enter: !gt { lhs: !close, rhs: !value 0.0 }
+        sizing: !value 0.4
+    "#
+    )));
+
+    let mut carried = spec.try_build(CASH, &sch, None).expect("build");
+    let (_, carried_state) = carried
+        .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
+        .expect("drive");
+    let carried_positions: Vec<(String, Real)> = wallet_positions(&carried_state);
+    assert!(
+        carried_positions.iter().any(|(s, u)| s == "A" && *u > 0.0),
+        "fixture must leave A open: {carried_positions:?}"
+    );
+
+    let mut held = spec.try_build(CASH, &sch, None).expect("build");
+    let (_, held_state) = held
+        .drive_resumable(
+            &snaps,
+            CASH,
+            &[],
+            None,
+            &Closeout::Hold([(intern("A"), 1.5)].into_iter().collect()),
+        )
+        .expect("drive");
+    let held_positions: Vec<(String, Real)> = wallet_positions(&held_state);
+
+    let a = held_positions.iter().find(|(s, _)| s == "A").expect("A");
+    assert!((a.1 - 1.5).abs() < 1e-9, "A must be held at 1.5: {a:?}");
+
+    let before = carried_positions
+        .iter()
+        .find(|(s, _)| s == "B")
+        .map(|p| p.1);
+    let after = held_positions.iter().find(|(s, _)| s == "B").map(|p| p.1);
+    assert_eq!(before, after, "an unnamed symbol must be untouched");
+}
+
+/// Re-issuing the same instruction on the next chunk **holds** the position
+/// there rather than moving it again — an absolute target, not a delta. This is
+/// what lets a standing operator instruction outlive the bar it was issued on
+/// without the driver carrying a clock.
+#[test]
+fn re_issuing_a_hold_pins_the_position_across_chunks() {
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(20);
+    let hold = Closeout::Hold([(intern("X"), 3.0)].into_iter().collect());
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut state = None;
+    for chunk in snaps.chunks(5) {
+        let (_, next) = built
+            .drive_resumable(chunk, CASH, &[], state.as_ref(), &hold)
+            .expect("drive");
+        state = Some(next);
+        let held = wallet_positions(state.as_ref().unwrap());
+        assert!(
+            held.iter().any(|(s, u)| s == "X" && (u - 3.0).abs() < 1e-9),
+            "the standing instruction must pin X at 3.0, got {held:?}"
+        );
+    }
+}
+
+/// A `Closeout` that names a symbol the account has no price for is **refused**
+/// into the report rather than silently doing nothing. An instruction that
+/// quietly evaporated would leave a deployment trading a position its owner had
+/// closed, with the operator's own records saying otherwise.
+#[test]
+fn holding_an_unquoted_symbol_is_reported_as_a_rejection() {
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(20);
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let (report, _) = built
+        .drive_resumable(
+            &snaps,
+            CASH,
+            &[],
+            None,
+            &Closeout::Hold([(intern("NOT_IN_THE_FEED"), 0.0)].into_iter().collect()),
+        )
+        .expect("drive");
+    assert!(
+        !report.rejections.is_empty(),
+        "an unfillable instruction must surface as a rejection"
+    );
+}
+
+/// An account with no capital of its own is bad *input*, and a build error is
+/// how this crate reports bad input. It used to be an abort.
+#[test]
+fn a_non_positive_seed_is_a_build_error_not_an_abort() {
+    let spec = all_in_spec();
+    let sch = schema();
+
+    for seed in [0.0, -1.0, Real::NAN] {
+        let err = spec
+            .try_build(seed, &sch, None)
+            .err()
+            .expect("a non-positive seed must not build");
+        assert!(
+            err.contains("initial equity must be strictly positive"),
+            "unhelpful message for seed {seed}: {err}"
+        );
+    }
+    assert!(spec.try_build(1.0, &sch, None).is_ok());
+}
+
+/// A chunk with **no bars** must still be a valid resume point. Warming over an
+/// empty gap, or restoring a book just to look at it, would otherwise recompute
+/// `last_bar` from nothing and answer `None` — throwing away a position in time
+/// the state already knew and handing back something that cannot be resumed
+/// from.
+#[test]
+fn a_bar_less_chunk_keeps_the_states_place_in_time() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(10);
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let (_, state) = built
+        .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
+        .expect("drive");
+    let stamped = state.last_bar.expect("the fixture carries timestamps");
+
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let warmed = built
+        .warm_up_over(&[], &mut wallet, Some(&state))
+        .expect("warm over nothing");
+    assert_eq!(
+        warmed.last_bar,
+        Some(stamped),
+        "a zero-bar warm-up must carry the state's timestamp, not drop it"
+    );
+
+    // …and the state it hands back is genuinely resumable.
+    built
+        .drive_resumable_with(&snaps, &mut wallet, Some(&warmed), &Closeout::Carry)
+        .expect("resume from the bar-less state");
+}
+
+/// `positions_at_resume` applies the same version / shape guards as a drive, so
+/// a caller preparing an account gets the real diagnosis rather than a restore
+/// failure from a throwaway probe.
+#[test]
+fn probing_a_mismatched_state_reports_the_mismatch() {
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(6);
+
+    let (_account, mut state, _) =
+        drive_through_the_seam(&spec, &snaps, fugazi::PaperWallet::new(CASH), None);
+    assert!(spec.positions_at_resume(&sch, Some(&state)).is_ok());
+
+    state.format_version += 1;
+    let err = spec
+        .positions_at_resume(&sch, Some(&state))
+        .expect_err("a stale format version must be refused");
+    assert!(err.contains("format version"), "{err}");
+
+    state.format_version -= 1;
+    state.kind = "portfolio".to_string();
+    let err = spec
+        .positions_at_resume(&sch, Some(&state))
+        .expect_err("a foreign shape must be refused");
+    assert!(err.contains("portfolio"), "{err}");
 }

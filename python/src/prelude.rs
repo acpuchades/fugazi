@@ -15,7 +15,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use fugazi_core::Indicator;
 // The symbol type the whole spec/runtime layer keys assets by. Python hands us
 // `str`; `intern` is the single boundary where that becomes a `Symbol`.
-pub(crate) use fugazi_core::backtest::{Fill, Rejected, RunReport};
+pub(crate) use fugazi_core::backtest::{Closeout, Fill, Rejected, RunReport};
 pub(crate) use fugazi_core::indicators::ValueBool;
 pub(crate) use fugazi_core::indicators::compare::{
     EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp,
@@ -53,7 +53,7 @@ pub(crate) use fugazi_core::types::{
 pub(crate) use fugazi_core::types::{Symbol, symbol as intern};
 pub(crate) use fugazi_core::wallet::{
     Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, SleeveWallet, Units,
-    Wallet, WalletError, external_baseline, own_equity,
+    Wallet, WalletError, external_baseline_net_of, own_equity,
 };
 // Spec-driven surface: YAML load, evaluate, optimize.
 pub(crate) use fugazi_core::montecarlo::ResampleScheme;

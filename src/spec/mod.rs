@@ -223,8 +223,8 @@ pub use portfolio::{PortfolioChildSpec, PortfolioChildStrategy, PortfolioSpec};
 pub use preset::{StrategyPreset, StrategyRef};
 pub use root::RootSpec;
 pub use runnable::{
-    RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, RunnableStrategyExt, StrategySpec,
-    drive_over,
+    RESUME_PROBE_SEED, RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, RunnableStrategyExt,
+    StrategySpec, drive_over,
 };
 pub use strategy::SingleStrategySpec;
 pub use strategy::{DynSingleStrategy, SideSpec};

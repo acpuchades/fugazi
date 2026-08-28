@@ -28,6 +28,7 @@ use std::num::NonZeroUsize;
 
 use crate::prelude::*;
 
+use crate::backtest::Closeout;
 use crate::spec::calendar::Frequency;
 use crate::spec::costs::CostConfig;
 use crate::spec::metrics;
@@ -430,7 +431,7 @@ pub fn measured_report_any(
         ctx.warmup_bars.unwrap_or(0),
         &mut wallet,
         None,
-        false,
+        &Closeout::Carry,
     )?;
     Ok(report)
 }
@@ -574,27 +575,27 @@ pub fn run_iteration_any(
     snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
 ) -> Result<IterationResult, String> {
-    Ok(run_iteration_resumable(spec, bars, snapshots, ctx, None, false)?.0)
+    Ok(run_iteration_resumable(spec, bars, snapshots, ctx, None, &Closeout::Carry)?.0)
 }
 
 /// The resumable superset of [`run_iteration_any`]: optionally restore `resume`
-/// state before the priced run, optionally finalize open positions with
-/// `flatten`, and surface the run's final [`RunState`](crate::spec::runnable::RunState) alongside the
+/// state before the priced run, apply `closeout` to whatever is still open when
+/// it ends, and surface the run's final [`RunState`](crate::spec::runnable::RunState) alongside the
 /// metrics so the CLI can persist it (`--save-state`).
 ///
 /// The zero-cost gross twin is never *resumed* — it is a costs-attribution
-/// shadow of the priced run, not a run in its own right — but it is flattened
-/// alongside it. `costs_section` pairs net fills against gross fills, so a
-/// flatten leg with no gross counterpart would contribute nothing to
+/// shadow of the priced run, not a run in its own right — but it takes the same
+/// `closeout` alongside it. `costs_section` pairs net fills against gross fills,
+/// so a closing leg with no gross counterpart would contribute nothing to
 /// `total_slippage_cost` and silently understate the drag, while `cost_drag_pct`
-/// compared a flattened curve against an unflattened one.
+/// compared a closed-out curve against an untouched one.
 pub fn run_iteration_resumable(
     spec: &StrategySpec,
     bars: Vec<String>,
     snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
     resume: Option<&crate::spec::runnable::RunState>,
-    flatten: bool,
+    closeout: &Closeout,
 ) -> Result<(IterationResult, crate::spec::runnable::RunState), String> {
     assert_eq!(
         bars.len(),
@@ -641,7 +642,7 @@ pub fn run_iteration_resumable(
     )?;
     let mut wallet = ctx.account(&per_symbol_costs);
     let (report, final_state) =
-        priced.drive_warmed_over(snapshots, warmup, &mut wallet, resume, flatten)?;
+        priced.drive_warmed_over(snapshots, warmup, &mut wallet, resume, closeout)?;
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;
@@ -650,7 +651,7 @@ pub fn run_iteration_resumable(
         let mut gross_wallet = ctx.account(&[]);
         Some(
             gross
-                .drive_warmed_over(snapshots, warmup, &mut gross_wallet, None, flatten)?
+                .drive_warmed_over(snapshots, warmup, &mut gross_wallet, None, closeout)?
                 .0,
         )
     } else {

@@ -576,7 +576,7 @@ fn a_portfolio_spec_runs_against_a_live_wallet() {
 
     let mut w = wallet(mock.uri.clone());
     let (report, state) = built
-        .drive_resumable_with(&snaps, &mut w, None, false)
+        .drive_resumable_with(&snaps, &mut w, None, &fugazi::backtest::Closeout::Carry)
         .expect("live spec run");
 
     assert_eq!(report.equity_curve.len(), snaps.len());

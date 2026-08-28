@@ -13,6 +13,7 @@
 //! The first is ordinary and must not fail; the second is bad input and must
 //! fail once, up front, by name.
 
+use fugazi::backtest::Closeout;
 use fugazi::spec::backtest::{
     EvalContext, run_iteration_any, run_iteration_resumable, validate_universe,
 };
@@ -246,9 +247,15 @@ fn a_resumed_chunk_may_not_quote_the_symbol() {
 
     // Chunk 1: bars LISTS_AT.. — the symbol quotes, so this is a valid cold start.
     let warm: Vec<Snapshot<Symbol>> = full[LISTS_AT..].to_vec();
-    let (_, state) =
-        run_iteration_resumable(&spec, labels(warm.len()), &warm, &ctx(&costs), None, false)
-            .expect("cold chunk runs");
+    let (_, state) = run_iteration_resumable(
+        &spec,
+        labels(warm.len()),
+        &warm,
+        &ctx(&costs),
+        None,
+        &Closeout::Carry,
+    )
+    .expect("cold chunk runs");
 
     // Chunk 2: bars in which S8USDT does not appear at all.
     let quiet: Vec<Snapshot<Symbol>> = full[..LISTS_AT].to_vec();
@@ -259,7 +266,7 @@ fn a_resumed_chunk_may_not_quote_the_symbol() {
             &quiet,
             &ctx(&costs),
             Some(&state),
-            false
+            &Closeout::Carry,
         )
         .is_ok(),
         "a resumed chunk is not required to quote the symbol"
@@ -273,7 +280,7 @@ fn a_resumed_chunk_may_not_quote_the_symbol() {
             &quiet,
             &ctx(&costs),
             None,
-            false
+            &Closeout::Carry,
         )
         .is_err(),
         "cold, that chunk never sees the declared symbol"

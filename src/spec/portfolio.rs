@@ -586,6 +586,7 @@ impl PortfolioSpec {
         // sub-wallet to bake them into. Kept for call-site symmetry.
         _costs: Option<TradingCosts>,
     ) -> Result<DynPortfolio, String> {
+        crate::spec::runnable::check_seed(total_initial_equity)?;
         if self.children.is_empty() {
             return Err(
                 "PortfolioSpec::build: `children:` must have at least one entry".to_string(),
@@ -951,6 +952,22 @@ impl DynPortfolio {
     /// [`Portfolio::assert_books_balance`].
     pub fn assert_books_balance(&self, wallet: &dyn Wallet<Symbol>) {
         self.inner.assert_books_balance(wallet);
+    }
+
+    /// The portfolio's aggregate [`Book`] — the equity curve every child nets
+    /// into, and the one `!portfolio_book`-sourced leaves read. Mark-driven:
+    /// its per-leg positions are always empty (see
+    /// [`Portfolio::book`](crate::portfolio::Portfolio::book)); for those, ask
+    /// [`owned_positions`](Self::owned_positions).
+    pub fn book(&self) -> Book<Symbol> {
+        self.inner.book()
+    }
+
+    /// The signed units this portfolio holds, per symbol, summed across its
+    /// children's ledgers — see
+    /// [`Portfolio::owned_positions`](crate::portfolio::Portfolio::owned_positions).
+    pub fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        self.inner.owned_positions()
     }
 
     /// The aggregate stable-period across every child, captured at build.

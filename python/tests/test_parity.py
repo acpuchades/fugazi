@@ -378,6 +378,10 @@ WALLET_NOT_BOUND = {
         "terminal by design — reachable as StrategySpec.run_resumable(flatten=True), "
         "which books the closing legs into the report as well as the account"
     ),
+    "settle_position": (
+        "the per-symbol half of the same pair, and terminal for the same reason — "
+        "reachable as StrategySpec.run_resumable(hold={sym: units})"
+    ),
     "snapshot_state": (
         "reached as the state JSON StrategySpec.run_resumable / .warm_up return; "
         "a raw snapshot with no run around it has no use from Python"

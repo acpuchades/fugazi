@@ -413,7 +413,13 @@ fn flatten_does_not_resurrect_a_ruined_curve() {
     let before = report.equity_curve.clone();
     let fills_before = report.fills.len();
 
-    fugazi::backtest::flatten_open_positions(&mut strategy, &mut wallet, &snaps, &mut report);
+    fugazi::backtest::apply_closeout(
+        &mut strategy,
+        &mut wallet,
+        &snaps,
+        &mut report,
+        &fugazi::backtest::Closeout::Flatten,
+    );
 
     // The book was already liquidated at ruin, so there is nothing to finalize
     // — and overwriting the final point would replace the pinned `0.0` with the

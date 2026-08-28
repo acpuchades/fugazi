@@ -745,7 +745,7 @@ regions of an `optimize` grid a genuinely positive Sharpe. Bounding the curve
 where it is produced makes `drawdown.max_pct <= 100` true *by construction*,
 makes CAGR `-100%` instead of silently `None`, and leaves `--best-by`,
 `--smooth`, the walk-forward composite and the Monte Carlo bootstrap correct
-with no code of their own. `flatten_open_positions` (`--flatten`) returns early
+with no code of their own. `apply_closeout` (`--flatten`) returns early
 on a ruined report for the same reason — the book is already closed, and
 overwriting the final point would un-pin the curve. **Only the account's own
 equity counts**: a portfolio is an ordinary strategy trading the wallet it was
@@ -857,16 +857,16 @@ ever booked.
 
 **Driving.** `RunnableStrategy::{save_state, restore_state, drive_resumable}` +
 `RunState { format_version, kind, last_bar, bars_seen, strategy, wallet }`.
-`drive_resumable(snaps, cash, costs, resume: Option<&RunState>, flatten: bool)`
-restores before the run (rejecting a `format_version` / `kind` mismatch), optionally
-flattens open positions at the end, and surfaces the final `RunState`. `drive` is
-the thin `(…, None, false).0` wrapper. `backtest::run_iteration_resumable` is the
-CLI/spec-shape entry.
+`drive_resumable(snaps, cash, costs, resume: Option<&RunState>, closeout: &Closeout)`
+restores before the run (rejecting a `format_version` / `kind` mismatch), applies
+`closeout` to whatever is still open at the end, and surfaces the final `RunState`.
+`drive` is the thin `(…, None, &Closeout::Carry).0` wrapper.
+`backtest::run_iteration_resumable` is the CLI/spec-shape entry.
 
 `RunnableStrategy` is object-safe (`try_build` hands back a `Box<dyn …>`), so its
 driving methods build a `PaperWallet` internally. To supply the account — a primed
 paper wallet, or a live venue — use **`RunnableStrategyExt::drive_resumable_with(snaps,
-wallet, resume, flatten)`**, blanket-impl'd over every `RunnableStrategy` including
+wallet, resume, closeout)`**, blanket-impl'd over every `RunnableStrategy` including
 `?Sized` ones. Both spellings share one body, `runnable::drive_over`. Against a live
 wallet `RunState.wallet` is `Null` and the venue is re-read on resume.
 
@@ -900,18 +900,35 @@ assertion that the state blob itself round-trips.
   wallet + `prev_equity` + the rolling window; their `Indicator` impls therefore
   require `Sym: Serialize + DeserializeOwned`.
 
-**Flatten toggle.** `backtest::flatten_open_positions` delegates to `Wallet::flatten`,
-which closes every open position **in the account** at the last bar — through the
-normal execution path, so costs and commission apply and a real `OrderId` is minted
-per leg — then routes the fills to `on_fill` and the report. `PaperWallet` overrides
-the trait default because its queued moves settle at the *next* bar's open and there
-isn't one; it goes straight to `fill_at`, the engine every other fill uses. The final
-equity point is **overwritten, not appended** (each leg closes at the mark that point
-was computed from, so only the cost drag changes, and
-`equity_curve.len() == snapshots.len()` is an invariant every consumer relies on).
-The zero-cost gross twin is flattened alongside the priced run, or `costs_section`
-would pair net fills against gross fills it doesn't have. The captured `RunState` then
-holds a genuinely flat book, so resuming from a flattened run continues from flat.
+**Closeout.** `backtest::Closeout` says what happens to open positions once the last
+bar is driven: `Carry` (nothing — the backtest's answer and the default), `Flatten`
+(close everything, the CLI's `--flatten`), or `Hold(map)` (drive named symbols to
+signed unit targets, leave the rest alone). One knob rather than two, because
+`Flatten` *is* `Hold` at `0.0` for every open symbol — combining them could only mean
+one overriding the other, so an enum makes it unsayable.
+
+`backtest::apply_closeout` applies it, through `Wallet::flatten` /
+`Wallet::settle_position` — the normal execution path, so costs and commission apply
+and a real `OrderId` is minted per leg — then routes the fills to `on_fill` and the
+report. `PaperWallet` overrides both trait defaults because its queued moves settle at
+the *next* bar's open and there isn't one; it goes straight to `fill_at`, the engine
+every other fill uses. A `settle_position` that only shrinks a position is classified
+reducing (a leverage cap must never refuse a way out); one that grows, flips or opens
+meets the account's solvency rules in full. The final equity point is **overwritten,
+not appended** (each leg closes at the mark that point was computed from, so only the
+cost drag changes, and `equity_curve.len() == snapshots.len()` is an invariant every
+consumer relies on). The zero-cost gross twin takes the same closeout as the priced
+run, or `costs_section` would pair net fills against gross fills it doesn't have. The
+captured `RunState` then holds the book the closeout left, so a resume continues from
+it.
+
+`Hold` targets are **absolute and signed**, not deltas, so re-issuing the same map on
+the next chunk pins the position there instead of moving it again — which is how a
+standing operator instruction ("close this one position", "hold it at this size")
+outlives the bar it was issued on without the driver owning a clock. A named symbol
+the account has no price for is refused into `report.rejections` rather than skipped:
+an instruction that quietly evaporated would leave a deployment trading a position its
+owner had closed.
 
 **Warming without trading.** `backtest::warm_up` is `run` with the `trade` step gated
 (`DriveMode::WarmUpOnly` — one loop, one branch), surfaced as
@@ -923,10 +940,29 @@ resting order left from before) still route to `on_fill`, or the strategy's posi
 would drift from the account's.
 
 **Surfaces.** CLI `fugazi run … --save-state <file>` / `--resume <file>` /
-`--flatten`. Python `spec.run_resumable(wallet, snapshots, resume=None, flatten=False)
+`--flatten` (the whole-account arm only — a backtest owns its wallet outright, so the
+per-symbol arm has no meaning there). Python
+`spec.run_resumable(wallet, snapshots, resume=None, flatten=False, hold=None)
 -> (report, state_json)` and `spec.warm_up(wallet, snapshots, resume=None)
 -> state_json`, both taking a `PaperWallet`, an `OkxWallet`, a `CoinbaseWallet` or
-a `KrakenWallet`.
+a `KrakenWallet`. `flatten=True` together with a non-empty `hold` is a `ValueError`.
+
+**Resuming into a shared account.** A run driven against a wallet the caller supplies
+has to work out which of the account's positions are *its own*. On a cold start the
+answer is trivially none, and the `SleeveWallet` rule — everything already there is
+externally managed — is right. On a resume it is not: the position last chunk opened
+is sitting in the account looking exactly like the user's own holdings, and counted
+as external it takes the strategy's own equity with it (a fully-invested book resumes
+reading its equity as the zero cash beside its position, which used to reach
+`Book::new`'s assert and *abort*). `StrategySpec::positions_at_resume` answers it —
+building a throwaway strategy, restoring the state into it, and reading the book back
+out — and `wallet::external_baseline_net_of` subtracts that from the account, leaving
+only the genuinely foreign residual. The Python wallet seam restores the account's
+half of the state *before* measuring, so what it measures is the account the run will
+actually see rather than whatever the caller happened to construct.
+
+A portfolio answers from its **child ledgers**, not its aggregate `Book`: that book is
+mark-driven and never sees a fill, so its legs are permanently empty.
 
 **Adding a stateful indicator ⇒ add `#[derive(SaveState)]` + field annotations + the
 two `impl Indicator` forwarding lines**, or its state is silently lost on resume.

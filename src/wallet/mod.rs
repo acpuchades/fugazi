@@ -13,7 +13,7 @@ mod sleeve;
 mod types;
 
 pub use paper::{DEFAULT_RETENTION, PaperWallet};
-pub use sleeve::{SleeveWallet, external_baseline, own_equity};
+pub use sleeve::{SleeveWallet, external_baseline, external_baseline_net_of, own_equity};
 pub use types::{
     Ack, CASH_EPSILON, MATERIALLY_FITTED, Order, OrderId, OrderKind, POSITION_EPSILON,
     PRICE_EPSILON, Reference, Rejection, Side, Size, Units, WalletError,
@@ -156,33 +156,55 @@ pub trait Wallet<Sym> {
         })
     }
 
-    /// Close **every** open position immediately, returning the fills booked.
+    /// Drive `symbol` to `target` signed units **immediately**, returning the
+    /// fills booked.
     ///
-    /// The terminal twin of [`close`](Wallet::close), and the difference is the
-    /// whole reason it exists: `close` *queues*, and a queued-fill wallet like
-    /// [`PaperWallet`] settles at the next bar's `open`.
-    /// At the end of a run there is no next bar, so `close` alone would leave
-    /// the position open forever. This finalizes it against the last known
-    /// price instead.
+    /// The terminal twin of [`set_position`](Wallet::set_position), and the
+    /// difference is the whole reason it exists: `set_position` *queues*, and a
+    /// queued-fill wallet like [`PaperWallet`] settles at the next bar's `open`.
+    /// A caller standing at the end of a chunk has no next bar to settle
+    /// against, so a queued move would simply never happen — which is why
+    /// "close this position now" cannot be spelled with `close` alone. This
+    /// finalizes against the last known price instead.
     ///
     /// Implementors must route through the same execution path as any other
-    /// fill — costs, commission and blotter included — so a flattened run's
-    /// numbers are comparable with the rest of it. The default body suits a
+    /// fill — costs, commission and blotter included — so a settled position's
+    /// numbers are comparable with the rest of the run. The default body suits a
     /// venue that fills synchronously or reports asynchronously: cancel the
-    /// resting legs, submit a close per position, then drain
-    /// [`poll_fills`](Wallet::poll_fills). A wallet that cannot enumerate its
-    /// positions (the [`positions`](Wallet::positions) default) flattens
-    /// nothing.
+    /// symbol's resting legs, submit the move, then drain
+    /// [`poll_fills`](Wallet::poll_fills).
+    ///
+    /// `target` is signed: negative is short, and `0.0` is a close. It is an
+    /// absolute target rather than a delta, so re-issuing the same one is a
+    /// no-op — which is what lets a caller hold a position at a level across
+    /// successive chunks without ratcheting it.
+    fn settle_position(&mut self, symbol: Sym, target: Real) -> Vec<Order<Sym>> {
+        let _ = self.cancel_protective(&symbol);
+        let _ = self.cancel_limit(&symbol);
+        let _ = self.set_position(Units {
+            symbol,
+            amount: target,
+        });
+        self.poll_fills()
+    }
+
+    /// Close **every** open position immediately, returning the fills booked —
+    /// [`settle_position`](Wallet::settle_position) at `0.0` for each, which is
+    /// exactly what the default body does.
+    ///
+    /// At the end of a run there is no next bar, so a queued
+    /// [`close`](Wallet::close) would leave every position open forever. A
+    /// wallet that cannot enumerate its positions (the
+    /// [`positions`](Wallet::positions) default) flattens nothing.
     fn flatten(&mut self) -> Vec<Order<Sym>> {
+        let mut fills = Vec::new();
         for units in self.positions() {
             if units.amount.abs() <= POSITION_EPSILON {
                 continue;
             }
-            let _ = self.cancel_protective(&units.symbol);
-            let _ = self.cancel_limit(&units.symbol);
-            let _ = self.close(units.symbol);
+            fills.extend(self.settle_position(units.symbol, 0.0));
         }
-        self.poll_fills()
+        fills
     }
 
     /// Rest a **stop-loss** on `symbol` at `trigger`: an adverse level the wallet

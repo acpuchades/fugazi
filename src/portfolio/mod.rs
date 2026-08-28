@@ -325,6 +325,41 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         self.inner.lock().expect("portfolio lock poisoned").ledgers[idx].position(symbol)
     }
 
+    /// The signed units this portfolio holds, per symbol — the **sum over its
+    /// children's ledgers**, which is the same quantity
+    /// [`assert_books_balance`](Self::assert_books_balance) checks against the
+    /// account.
+    ///
+    /// Not read off [`book`](Self::book), and that is the whole note worth
+    /// leaving here: the aggregate book is driven by `mark_equity` rather than
+    /// by routed fills (see there), so its legs are permanently empty and it
+    /// would answer "nothing" for a portfolio holding a full book. The ledgers
+    /// are where a portfolio's positions actually live.
+    ///
+    /// Sorted by symbol, so the answer does not depend on a hash map's layout.
+    /// Symbols netting to within [`POSITION_EPSILON`](crate::wallet::POSITION_EPSILON)
+    /// across children — one child long what another is short — are omitted:
+    /// the account holds nothing of them.
+    pub fn owned_positions(&self) -> Vec<crate::wallet::Units<Sym>>
+    where
+        Sym: Ord,
+    {
+        let inner = self.inner.lock().expect("portfolio lock poisoned");
+        let mut netted: std::collections::HashMap<Sym, Real> = std::collections::HashMap::new();
+        for ledger in &inner.ledgers {
+            for (symbol, &amount) in &ledger.positions {
+                *netted.entry(symbol.clone()).or_insert(0.0) += amount;
+            }
+        }
+        let mut open: Vec<crate::wallet::Units<Sym>> = netted
+            .into_iter()
+            .filter(|(_, amount)| amount.abs() > crate::wallet::POSITION_EPSILON)
+            .map(|(symbol, amount)| crate::wallet::Units { symbol, amount })
+            .collect();
+        open.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        open
+    }
+
     /// Assert the core netting identity against `wallet` (the account the
     /// portfolio was driven with): per symbol Σ ledger positions == account
     /// position, and Σ ledger cash == account cash.

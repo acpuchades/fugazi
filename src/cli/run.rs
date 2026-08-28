@@ -214,8 +214,17 @@ fn iterate(
         return backtest::run_iteration_any(spec, bars, snapshots, inputs)
             .map_err(backtest::build_error);
     }
+    // The CLI's `--flatten` is the whole-account arm of `Closeout`. The
+    // per-symbol arm is a deployment's concern — an operator overriding one
+    // position on a live book — and has no meaning for a backtest, which owns
+    // its wallet outright.
+    let closeout = if opts.flatten {
+        fugazi::backtest::Closeout::Flatten
+    } else {
+        fugazi::backtest::Closeout::Carry
+    };
     let (iter, state) =
-        backtest::run_iteration_resumable(spec, bars, snapshots, inputs, opts.resume, opts.flatten)
+        backtest::run_iteration_resumable(spec, bars, snapshots, inputs, opts.resume, &closeout)
             .map_err(backtest::build_error)?;
     if let Some(path) = opts.save_state {
         let json = serde_json::to_string_pretty(&state).context("serializing run state")?;

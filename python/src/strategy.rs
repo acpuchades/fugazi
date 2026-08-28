@@ -20,26 +20,56 @@ use crate::errors::WalletError as PyWalletError;
 // ---------------------------------------------------------------------------
 // Wallet-preparation seam — the one place the "external positions" concern lives.
 //
-// Every `.run(...)` treats whatever the wallet *already holds at run start* as
-// the user's own, externally-managed book: it is snapshotted as a baseline and
-// left untouched, and the strategy sizes against its **own** capital (cash + only
-// what it opens). A flat wallet has an empty baseline, so this collapses to the
-// fast path — drive the wallet directly, no offset, no move — behaving byte for
-// byte as before. A non-flat wallet is driven through an [`SleeveWallet`].
+// Every `.run(...)` treats whatever the wallet holds that is *not already the
+// strategy's own* as the user's externally-managed book: it is snapshotted as a
+// baseline and left untouched, and the strategy sizes against its **own**
+// capital (cash + only the positions it opened). An empty baseline collapses to
+// the fast path — drive the wallet directly, no offset, no move — behaving byte
+// for byte as before. Anything else is driven through a [`SleeveWallet`].
 // Neither the strategy nor the portfolio run code decides any of this; they call
 // one of the two seams below.
+//
+// "Not already the strategy's own" is the whole subtlety, and it is why every
+// seam takes an `owned` set. On a cold start nothing in the account can be ours,
+// so `owned` is empty and the baseline is simply everything there. A *resuming*
+// run is the opposite case: the position it opened last chunk is sitting in the
+// account, indistinguishable from the user's own holdings unless the restored
+// book is asked (`StrategySpec::positions_at_resume`). Left unasked, a
+// fully-invested strategy resumes against a sleeve that hides its own position
+// from it and reports its own equity as the cash beside it — zero — which is
+// both a meaningless book and a `Book::new` that used to abort the interpreter.
 // ---------------------------------------------------------------------------
 
 /// Run `$body` over one already type-resolved wallet cell, with `$w` bound to
-/// the wallet to trade. Snapshots the baseline, binds `$seed` to *our* opening
-/// equity (account minus the external value — identical to plain equity when
-/// flat), and either lends out the wallet in place (flat, the fast path) or
-/// moves it into an [`SleeveWallet`] for the duration and back afterward
-/// (non-flat). `$body` may also use `py`, where it is in scope.
+/// the wallet to trade. Restores `$resume`'s account half, snapshots the
+/// baseline net of `$owned` (the positions the strategy already holds — `&[]` on
+/// a cold start), binds `$seed` to *our* opening equity (account minus the
+/// external value — identical to plain equity against a flat account), and
+/// either lends out the wallet in place (empty baseline, the fast path) or moves
+/// it into a [`SleeveWallet`] for the duration and back afterward. `$body` may
+/// also use `py`, where it is in scope.
+///
+/// **The restore comes first, and has to.** What the baseline must measure is
+/// the account *the run will see*, and for a paper wallet that is whatever the
+/// resume state says — not whatever the caller happened to hand over. A caller
+/// resuming through a freshly constructed wallet (the natural spelling, and the
+/// one the bindings' own docs show) presents a flat account that is about to be
+/// restored into a fully-invested one; measured before that, every position the
+/// state carries would come out as a *negative* residual and the sleeve would
+/// offset each order by a position that was never external. Restoring here is
+/// free of consequence: `drive_over` restores the same blob again, a paper
+/// wallet's restore is a wholesale replace and a live venue's is the documented
+/// no-op, so doing it twice lands in exactly the same place.
 macro_rules! over_prepared_wallet {
-    ($cell:expr, $placeholder:expr, $seed:ident, $w:ident => $body:expr) => {{
+    ($cell:expr, $placeholder:expr, $resume:expr, $owned:expr, $seed:ident, $w:ident => $body:expr) => {{
+        let owned = $owned;
         let mut guard = $cell.borrow_mut();
-        let baseline = external_baseline(&guard.inner);
+        if let Some(state) = $resume {
+            fugazi_core::wallet::Wallet::restore_state(&mut guard.inner, &state.wallet).map_err(
+                |e| crate::errors::SpecError::new_err(format!("!resume > wallet > {e}")),
+            )?;
+        }
+        let baseline = external_baseline_net_of(&guard.inner, owned);
         let $seed = own_equity(&guard.inner, &baseline);
         if baseline.is_empty() {
             let $w = &mut guard.inner;
@@ -70,11 +100,11 @@ macro_rules! over_prepared_wallet {
 /// a live venue: `backtest::run` is generic over the wallet, so each arm
 /// monomorphizes the body for its own concrete type.
 macro_rules! over_any_wallet {
-    ($wallet:expr, $py:ident, $seed:ident, $w:ident => $body:expr) => {{
+    ($wallet:expr, $py:ident, $resume:expr, $owned:expr, $seed:ident, $w:ident => $body:expr) => {{
         let wallet = $wallet;
         let $py = wallet.py();
         if let Ok(cell) = wallet.cast::<PyWallet>() {
-            over_prepared_wallet!(cell, PaperWallet::new(0.0), $seed, $w => $body)
+            over_prepared_wallet!(cell, PaperWallet::new(0.0), $resume, $owned, $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyOkxWallet>() {
             cell.borrow_mut()
                 .inner
@@ -82,7 +112,7 @@ macro_rules! over_any_wallet {
                 // Fully qualified: this macro also expands inside `spec.rs`,
                 // which has no `PyWalletError` alias in scope.
                 .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
-            over_prepared_wallet!(cell, OkxWallet::demo("", "", ""), $seed, $w => $body)
+            over_prepared_wallet!(cell, OkxWallet::demo("", "", ""), $resume, $owned, $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyCoinbaseWallet>() {
             cell.borrow_mut()
                 .inner
@@ -90,7 +120,7 @@ macro_rules! over_any_wallet {
                 // Fully qualified: this macro also expands inside `spec.rs`,
                 // which has no `PyWalletError` alias in scope.
                 .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
-            over_prepared_wallet!(cell, CoinbaseWallet::placeholder(), $seed, $w => $body)
+            over_prepared_wallet!(cell, CoinbaseWallet::placeholder(), $resume, $owned, $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyKrakenWallet>() {
             cell.borrow_mut()
                 .inner
@@ -98,7 +128,7 @@ macro_rules! over_any_wallet {
                 // Fully qualified: this macro also expands inside `spec.rs`,
                 // which has no `PyWalletError` alias in scope.
                 .map_err(|e| crate::errors::WalletError::new_err(e.to_string()))?;
-            over_prepared_wallet!(cell, KrakenWallet::placeholder(), $seed, $w => $body)
+            over_prepared_wallet!(cell, KrakenWallet::placeholder(), $resume, $owned, $seed, $w => $body)
         } else {
             Err(PyTypeError::new_err(
                 "wallet must be a PaperWallet, an OkxWallet, a CoinbaseWallet, or a KrakenWallet",
@@ -111,7 +141,10 @@ macro_rules! over_any_wallet {
 /// original shape, kept so the five hand-built call sites read unchanged.
 macro_rules! run_over_wallet {
     ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {
-        over_any_wallet!($wallet, $py, $seed, wallet => {
+        // The hand-built strategy surface has no resume seam: there is no state
+        // to restore, and nothing in the account can be this run's own, so the
+        // baseline is everything there.
+        over_any_wallet!($wallet, $py, None::<&fugazi_core::spec::RunState>, &[], $seed, wallet => {
             // Built with the GIL held — a basket's per-symbol factories are
             // Python callables, and this is where they run.
             let mut strat = $strat;

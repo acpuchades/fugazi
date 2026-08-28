@@ -346,6 +346,7 @@ impl PairsStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynPairsStrategy, String> {
+        crate::spec::runnable::check_seed(initial_equity)?;
         // Each leg's root names exactly one instrument; interning here means
         // every later clone of it (per bar, per fill) is a refcount bump.
         let strat = PairsStrategy::with_initial_equity(

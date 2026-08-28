@@ -213,6 +213,7 @@ impl SingleStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
+        crate::spec::runnable::check_seed(initial_equity)?;
         let mut strat = SingleAssetStrategy::with_initial_equity(
             crate::types::symbol(&self.root.sole_symbol(RootKey::ROOT, "single-asset")?),
             initial_equity,

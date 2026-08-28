@@ -693,9 +693,9 @@ endpoints, its envelopes, its request bodies, and its signing.
    not say", and a wrong name is worse than no name.
 
    Two of those reads are load-bearing beyond their own answer.
-   **`positions()`** is what makes the trait's `flatten` default work and lets a
-   [`SleeveWallet`] snapshot a baseline; a venue that can't enumerate flattens
-   nothing, silently. **`equity()`** on a venue that values its own multi-leg
+   **`positions()`** is what makes the trait's `flatten` / `settle_position`
+   defaults work and lets a [`SleeveWallet`] snapshot a baseline; a venue that
+   can't enumerate flattens nothing, silently. **`equity()`** on a venue that values its own multi-leg
    book must go through `wallet::marked_sum`, or the sum varies by a ULP between
    processes — see `CoinbaseWallet::equity`.
 

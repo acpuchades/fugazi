@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::backtest::Closeout;
 use crate::costs::TradingCosts;
 use crate::market::{Real, Schema};
 use crate::types::Snapshot;
@@ -130,7 +131,7 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
     ) -> RunReport<Symbol> {
         // Resume-free path: no state to restore, no state to surface. `None` can
         // never produce a restore error, so the unwrap is unreachable.
-        self.drive_resumable(snapshots, cash, per_symbol_costs, None, false)
+        self.drive_resumable(snapshots, cash, per_symbol_costs, None, &Closeout::Carry)
             .expect("drive with no resume state cannot fail")
             .0
     }
@@ -150,15 +151,40 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
         Ok(())
     }
 
+    /// The signed units **this strategy** believes it holds, per symbol — its
+    /// [`Book`](crate::indicators::Book)'s non-flat legs.
+    ///
+    /// Not the same question as [`Wallet::positions`], and the gap between the
+    /// two answers is what it is for: an account may hold positions this
+    /// strategy never opened, and a
+    /// [`SleeveWallet`](crate::wallet::SleeveWallet) exists to keep those out
+    /// of its sight. Deciding *which* of the account's positions are foreign
+    /// means asking the strategy what is already its own — trivially nothing on
+    /// a cold start, but not after
+    /// [`restore_state`](Self::restore_state) has walked a resumed strategy
+    /// back in holding last chunk's position. See
+    /// [`external_baseline_net_of`](crate::wallet::external_baseline_net_of),
+    /// which is the caller this exists for.
+    ///
+    /// Required rather than defaulted: a sixth shape that answered "nothing"
+    /// by omission would resume into a sleeve that hid its own position from
+    /// it, which is a silently wrong backtest rather than a loud one.
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>>;
+
     /// Drive this strategy against a fresh [`PaperWallet`], optionally restoring
     /// `resume` state first and surfacing the final [`RunState`] after — the
     /// resumable superset of [`drive`](Self::drive).
     ///
     /// With `resume = Some(state)`, the wallet and strategy are restored from it
-    /// before the first bar. With `flatten = true`, any position still open at
-    /// the end is closed at the last bar — in the wallet, not just the report —
-    /// so `reconstruct_trades`/metrics count it and the returned state holds a
-    /// flat book that a later resume continues from.
+    /// before the first bar. `closeout` says what to do with whatever is still
+    /// open once the last bar has been driven — nothing
+    /// ([`Carry`](crate::backtest::Closeout::Carry), the backtest's answer),
+    /// close everything
+    /// ([`Flatten`](crate::backtest::Closeout::Flatten)), or drive named
+    /// symbols to given targets ([`Hold`](crate::backtest::Closeout::Hold)).
+    /// Anything but `Carry` acts on the wallet, not just the report, so
+    /// `reconstruct_trades`/metrics count the closing legs and the returned
+    /// state is the book a later resume actually continues from.
     ///
     /// [`RunnableStrategyExt::drive_resumable_with`] is the same thing over a
     /// wallet you supply.
@@ -168,9 +194,9 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String> {
-        self.drive_resumable_warmed(snapshots, 0, cash, per_symbol_costs, resume, flatten)
+        self.drive_resumable_warmed(snapshots, 0, cash, per_symbol_costs, resume, closeout)
     }
 
     /// [`drive_resumable`](Self::drive_resumable) with the first `warmup`
@@ -195,13 +221,13 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String> {
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
             let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
         }
-        drive_warmed_over_wallet(self, snapshots, warmup, &mut wallet, resume, flatten)
+        drive_warmed_over_wallet(self, snapshots, warmup, &mut wallet, resume, closeout)
     }
 
     /// The shape's name, used to stamp and validate a [`RunState`]. Mirrors
@@ -226,25 +252,13 @@ pub fn drive_over<W>(
     snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&RunState>,
-    flatten: bool,
+    closeout: &Closeout,
 ) -> Result<(RunReport<Symbol>, RunState), String>
 where
     W: Wallet<Symbol>,
 {
     if let Some(state) = resume {
-        if state.format_version != RUN_STATE_FORMAT_VERSION {
-            return Err(format!(
-                "!resume > state format version {} does not match this build's {}",
-                state.format_version, RUN_STATE_FORMAT_VERSION
-            ));
-        }
-        if state.kind != strategy.spec_kind() {
-            return Err(format!(
-                "!resume > state is for a `{}` strategy but this document is `{}`",
-                state.kind,
-                strategy.spec_kind()
-            ));
-        }
+        check_resumable(state, strategy.spec_kind())?;
         strategy
             .restore_state(&state.strategy)
             .map_err(|e| format!("!resume > strategy > {e}"))?;
@@ -255,13 +269,8 @@ where
             .map_err(|e| format!("!resume > wallet > {e}"))?;
     }
     let mut report = crate::backtest::run(strategy, wallet, snapshots.iter().cloned());
-    if flatten {
-        crate::backtest::flatten_open_positions(strategy, wallet, snapshots, &mut report);
-    }
-    let last_bar = snapshots
-        .last()
-        .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
-        .map(|t| t.0);
+    crate::backtest::apply_closeout(strategy, wallet, snapshots, &mut report, closeout);
+    let last_bar = last_bar_of(snapshots, resume);
     let final_state = RunState {
         format_version: RUN_STATE_FORMAT_VERSION,
         kind: strategy.spec_kind().to_string(),
@@ -282,11 +291,12 @@ where
 /// a `Box<dyn RunnableStrategy>`:
 ///
 /// ```no_run
+/// # use fugazi::backtest::Closeout;
 /// # use fugazi::spec::{RunnableStrategyExt, StrategySpec};
 /// # use fugazi::types::Symbol;
 /// # fn go(spec: &StrategySpec, snaps: &[fugazi::Snapshot<Symbol>], wallet: &mut fugazi::PaperWallet<Symbol>) -> Result<(), String> {
 /// let mut built = spec.try_build(10_000.0, &fugazi::market::Schema::empty(), None)?;
-/// let (report, state) = built.drive_resumable_with(snaps, wallet, None, false)?;
+/// let (report, state) = built.drive_resumable_with(snaps, wallet, None, &Closeout::Carry)?;
 /// # let _ = (report, state);
 /// # Ok(())
 /// # }
@@ -309,7 +319,7 @@ pub trait RunnableStrategyExt: RunnableStrategy {
         snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String>;
 
     /// Advance this strategy over `snapshots` **without trading**, returning the
@@ -356,7 +366,7 @@ pub trait RunnableStrategyExt: RunnableStrategy {
         warmup: usize,
         wallet: &mut W,
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String>;
 }
 
@@ -366,9 +376,9 @@ impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
         snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String> {
-        drive_over(self, snapshots, wallet, resume, flatten)
+        drive_over(self, snapshots, wallet, resume, closeout)
     }
 
     fn warm_up_over<W: Wallet<Symbol>>(
@@ -386,9 +396,9 @@ impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
         warmup: usize,
         wallet: &mut W,
         resume: Option<&RunState>,
-        flatten: bool,
+        closeout: &Closeout,
     ) -> Result<(RunReport<Symbol>, RunState), String> {
-        drive_warmed_over_wallet(self, snapshots, warmup, wallet, resume, flatten)
+        drive_warmed_over_wallet(self, snapshots, warmup, wallet, resume, closeout)
     }
 }
 
@@ -402,16 +412,16 @@ fn drive_warmed_over_wallet<W: Wallet<Symbol>>(
     warmup: usize,
     wallet: &mut W,
     resume: Option<&RunState>,
-    flatten: bool,
+    closeout: &Closeout,
 ) -> Result<(RunReport<Symbol>, RunState), String> {
     let (warm, evaluated) = snapshots.split_at(warmup.min(snapshots.len()));
     if warm.is_empty() {
-        return drive_over(strategy, evaluated, wallet, resume, flatten);
+        return drive_over(strategy, evaluated, wallet, resume, closeout);
     }
     warm_up_over_wallet(strategy, warm, wallet, resume)?;
     // `resume` is already applied — restoring it a second time would rewind
     // the state the warm-up just advanced.
-    drive_over(strategy, evaluated, wallet, None, flatten)
+    drive_over(strategy, evaluated, wallet, None, closeout)
 }
 
 /// The body behind [`RunnableStrategyExt::warm_up_over`]; see there.
@@ -422,19 +432,7 @@ fn warm_up_over_wallet<W: Wallet<Symbol>>(
     resume: Option<&RunState>,
 ) -> Result<RunState, String> {
     if let Some(state) = resume {
-        if state.format_version != RUN_STATE_FORMAT_VERSION {
-            return Err(format!(
-                "!resume > state format version {} does not match this build's {}",
-                state.format_version, RUN_STATE_FORMAT_VERSION
-            ));
-        }
-        if state.kind != strategy.spec_kind() {
-            return Err(format!(
-                "!resume > state is for a `{}` strategy but this document is `{}`",
-                state.kind,
-                strategy.spec_kind()
-            ));
-        }
+        check_resumable(state, strategy.spec_kind())?;
         strategy
             .restore_state(&state.strategy)
             .map_err(|e| format!("!resume > strategy > {e}"))?;
@@ -443,10 +441,7 @@ fn warm_up_over_wallet<W: Wallet<Symbol>>(
             .map_err(|e| format!("!resume > wallet > {e}"))?;
     }
     crate::backtest::warm_up(strategy, wallet, snapshots.iter().cloned());
-    let last_bar = snapshots
-        .last()
-        .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
-        .map(|t| t.0);
+    let last_bar = last_bar_of(snapshots, resume);
     Ok(RunState {
         format_version: RUN_STATE_FORMAT_VERSION,
         kind: strategy.spec_kind().to_string(),
@@ -473,6 +468,9 @@ impl RunnableStrategy for DynSingleStrategy {
     fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         DynSingleStrategy::restore_state(self, state)
     }
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        DynSingleStrategy::book(self).owned_positions()
+    }
 }
 
 impl RunnableStrategy for DynPairsStrategy {
@@ -491,6 +489,9 @@ impl RunnableStrategy for DynPairsStrategy {
     fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         DynPairsStrategy::restore_state(self, state)
     }
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        DynPairsStrategy::book(self).owned_positions()
+    }
 }
 
 impl RunnableStrategy for DynBasketStrategy {
@@ -508,6 +509,9 @@ impl RunnableStrategy for DynBasketStrategy {
     }
     fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         DynBasketStrategy::restore_state(self, state)
+    }
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        DynBasketStrategy::book(self).owned_positions()
     }
     // Basket lazy-builds per-symbol chains on first sight, so restore also
     // restores per-symbol state as each symbol reappears — see
@@ -530,6 +534,9 @@ impl RunnableStrategy for DynMultiAssetStrategy {
     fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         DynMultiAssetStrategy::restore_state(self, state)
     }
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        DynMultiAssetStrategy::book(self).owned_positions()
+    }
 }
 
 impl RunnableStrategy for DynPortfolio {
@@ -547,6 +554,13 @@ impl RunnableStrategy for DynPortfolio {
     }
     fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         DynPortfolio::restore_state(self, state)
+    }
+    /// Off the child **ledgers**, not off the aggregate book: a portfolio's
+    /// book is mark-driven and never sees a fill, so its legs stay empty no
+    /// matter what the portfolio is holding. See
+    /// [`Portfolio::owned_positions`](crate::portfolio::Portfolio::owned_positions).
+    fn owned_positions(&self) -> Vec<crate::wallet::Units<Symbol>> {
+        DynPortfolio::owned_positions(self)
     }
     // Uses the default `drive`/`drive_resumable`: a portfolio is now an ordinary
     // strategy that trades the wallet it is handed, so it takes the same
@@ -566,6 +580,79 @@ pub enum StrategySpec {
     Basket(Box<BasketStrategySpec>),
     Multi(Box<MultiAssetStrategySpec>),
     Portfolio(Box<PortfolioSpec>),
+}
+
+/// The timestamp to stamp a captured [`RunState`] with: this chunk's last
+/// timestamped bar, or — if it had none — whatever the state being resumed
+/// already said.
+///
+/// The fallback is what makes a **zero-bar** chunk a valid resume point. That is
+/// not a hypothetical: replaying a pause gap that turned out to be empty, or
+/// restoring a book to inspect it, hands `warm_up` an empty slice, and
+/// recomputing `last_bar` from nothing would answer `None` — throwing away a
+/// position in time the state already knew and leaving behind a state that
+/// cannot be resumed from. Nothing was processed, so nothing about *when* we
+/// are changed.
+fn last_bar_of(snapshots: &[Snapshot<Symbol>], resume: Option<&RunState>) -> Option<i64> {
+    snapshots
+        .last()
+        .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
+        .map(|t| t.0)
+        .or_else(|| resume.and_then(|r| r.last_bar))
+}
+
+/// The seed [`StrategySpec::positions_at_resume`] builds its throwaway probe
+/// with.
+///
+/// Any strictly-positive number does: the probe exists only to have
+/// [`RunnableStrategy::restore_state`] write a book into it, and a restore
+/// replaces the book whole — `initial_equity` and all. It is *not* a fallback
+/// for a real run's seed, which is checked (see `check_seed`).
+pub const RESUME_PROBE_SEED: Real = 1.0;
+
+/// Reject a [`RunState`] this build or this document cannot continue — a
+/// format version from another build, or a state captured from a different
+/// shape.
+///
+/// One body, called by every entry point that takes a `resume`, so the two
+/// checks cannot drift apart or be forgotten by a third.
+fn check_resumable(state: &RunState, kind: &str) -> Result<(), String> {
+    if state.format_version != RUN_STATE_FORMAT_VERSION {
+        return Err(format!(
+            "!resume > state format version {} does not match this build's {}",
+            state.format_version, RUN_STATE_FORMAT_VERSION
+        ));
+    }
+    if state.kind != kind {
+        return Err(format!(
+            "!resume > state is for a `{}` strategy but this document is `{}`",
+            state.kind, kind
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a seed a [`Book`](crate::indicators::Book) could not be built from,
+/// as a *value* rather than an abort.
+///
+/// Every shape seeds its book with the capital the strategy is deemed to start
+/// with, and `Book::new` asserts that is strictly positive — a real invariant,
+/// since equity, drawdown and every book-anchored sizing recipe divide by it.
+/// But the number reaching it comes from the caller's account, so a flat wallet,
+/// a wallet whose whole balance is already deployed, or a
+/// [`SleeveWallet`](crate::wallet::SleeveWallet) carve-out with nothing in it
+/// all arrive here as zero. That is bad input, and input is reported.
+///
+/// `NaN` is spelled out rather than left to `<=`, which it reads false against:
+/// a `NaN` seed would otherwise sail through and poison every equity reading
+/// downstream of it.
+pub(crate) fn check_seed(cash: Real) -> Result<(), String> {
+    if cash.is_nan() || cash <= 0.0 {
+        return Err(format!(
+            "initial equity must be strictly positive, but the account reports {cash}"
+        ));
+    }
+    Ok(())
 }
 
 impl StrategySpec {
@@ -601,12 +688,21 @@ impl StrategySpec {
     /// `costs` is vestigial: every shape now takes its costs from the wallet it
     /// is driven with (see [`RunnableStrategy::drive`]), portfolio included, so
     /// all five arms ignore it. Kept for call-site symmetry.
+    ///
+    /// A non-positive `cash` is reported here, as an ordinary build error. It is
+    /// the seed for the strategy's [`Book`](crate::indicators::Book), whose
+    /// constructor asserts on it — and that assert is an internal invariant, not
+    /// a diagnostic: it aborts, which across the Python boundary is a
+    /// `PanicException` no `except Exception` can catch. An account with no
+    /// capital to trade is *input*, so it gets the same treatment as any other
+    /// bad document.
     pub fn try_build(
         &self,
         cash: Real,
         schema: &Arc<Schema>,
         costs: Option<TradingCosts>,
     ) -> Result<Box<dyn RunnableStrategy>, String> {
+        check_seed(cash)?;
         Ok(match self {
             StrategySpec::Single(s) => Box::new(s.try_build(cash, schema)?),
             StrategySpec::Pairs(s) => Box::new(s.try_build(cash, schema)?),
@@ -614,6 +710,62 @@ impl StrategySpec {
             StrategySpec::Multi(s) => Box::new(s.try_build(cash, schema)?),
             StrategySpec::Portfolio(s) => Box::new(s.try_build(cash, schema, costs)?),
         })
+    }
+
+    /// The positions a run resuming from `resume` walks back in **already
+    /// holding** — empty for a cold start, which owns nothing yet.
+    ///
+    /// Answer this *before* seeding the account, or a shared account is
+    /// mis-split. The rule a
+    /// [`SleeveWallet`](crate::wallet::SleeveWallet) carve-out is built on —
+    /// "whatever the account holds at run start is the user's own" — is only
+    /// true the first time. Resume, and the position last chunk opened is
+    /// sitting right there in the account looking exactly like somebody else's,
+    /// so a baseline snapshotted naively hides the strategy's own position from
+    /// it and nets its own equity down to the cash beside it. Feed this to
+    /// [`external_baseline_net_of`](crate::wallet::external_baseline_net_of)
+    /// and the residual is the genuinely foreign part:
+    ///
+    /// ```no_run
+    /// # use fugazi::spec::{RunnableStrategyExt, StrategySpec, RunState};
+    /// # use fugazi::wallet::{SleeveWallet, external_baseline_net_of, own_equity};
+    /// # fn go(spec: &StrategySpec, schema: &std::sync::Arc<fugazi::market::Schema>,
+    /// #       snaps: &[fugazi::Snapshot<fugazi::types::Symbol>],
+    /// #       account: fugazi::PaperWallet<fugazi::types::Symbol>,
+    /// #       state: Option<&RunState>) -> Result<(), String> {
+    /// let owned = spec.positions_at_resume(schema, state)?;
+    /// let baseline = external_baseline_net_of(&account, &owned);
+    /// let mut sleeve = SleeveWallet::new(account, baseline);
+    /// let seed = own_equity(&sleeve, &Default::default());
+    /// let mut built = spec.try_build(seed, schema, None)?;
+    /// built.drive_resumable_with(snaps, &mut sleeve, state, &fugazi::backtest::Closeout::Carry)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// It builds a throwaway strategy and restores `resume` into it purely to
+    /// read the book back out, because only the restored book knows. That build
+    /// is seeded with [`RESUME_PROBE_SEED`] rather than the account's equity —
+    /// the number this call exists to make computable — and nothing reads it: a
+    /// restore replaces the book, `initial_equity` included. The throwaway is
+    /// deliberate. Restoring into the strategy that is about to be *driven*
+    /// would leave it restored twice, once here and once inside
+    /// [`drive_over`], and betting the run on that being idempotent buys
+    /// nothing but one JSON parse.
+    pub fn positions_at_resume(
+        &self,
+        schema: &Arc<Schema>,
+        resume: Option<&RunState>,
+    ) -> Result<Vec<crate::wallet::Units<Symbol>>, String> {
+        let Some(state) = resume else {
+            return Ok(Vec::new());
+        };
+        check_resumable(state, self.kind())?;
+        let mut probe = self.try_build(RESUME_PROBE_SEED, schema, None)?;
+        probe
+            .restore_state(&state.strategy)
+            .map_err(|e| format!("!resume > strategy > {e}"))?;
+        Ok(probe.owned_positions())
     }
 
     /// Build with this run's costs applied the way the shape needs them.

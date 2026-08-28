@@ -2202,6 +2202,54 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     ///
     /// Terminal: every queued move, resting bracket and resting limit is
     /// dropped, since none of them can fill after this.
+    /// Fills **synchronously**, at `symbol`'s last close, rather than queueing
+    /// for the next bar's open the way [`set_position`](Wallet::set_position)
+    /// does — the whole point of the method, since its callers stand at the end
+    /// of a chunk where no next bar is coming.
+    ///
+    /// A move that only shrinks the position (an exit, a partial trim) is
+    /// classified as reducing, which exempts it from the leverage cap the way
+    /// every other exit path is: a cap must never be able to refuse a close.
+    /// Anything that grows the position, flips its side, or opens one from flat
+    /// is an ordinary sized fill and meets the account's solvency rules in full,
+    /// so an unaffordable target is refused rather than booked.
+    fn settle_position(&mut self, symbol: Sym, target: Real) -> Vec<Order<Sym>> {
+        self.pending.remove(&symbol);
+        self.protective.remove(&symbol);
+        self.limits.remove(&symbol);
+
+        let Some(price) = self.bars.get(&symbol).map(|c| c.close) else {
+            // No price ever fed for this symbol: nothing to value the move at,
+            // and inventing one would poison the equity curve. Refused rather
+            // than skipped, so a caller who asked for a close can tell that it
+            // did not happen.
+            let _ = self.reject_submission(&symbol, WalletError::UnknownPrice);
+            return Vec::new();
+        };
+        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
+        // Reducing means "same side, no further from flat" — a sign flip is an
+        // opening trade in the other direction, however small.
+        let reducing = target.abs() <= current.abs() && target * current >= 0.0;
+        let ctx = if reducing {
+            FillContext::reducing(target)
+        } else {
+            FillContext::exact(
+                target,
+                self.rest_of_book(&symbol, |s| self.bars.get(s).map_or(0.0, |c| c.close)),
+            )
+        };
+
+        let id = self.mint();
+        match self.fill_at(symbol.clone(), target, price, OrderKind::Market, id, ctx) {
+            Ok(Some(order)) => vec![order],
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                let _ = self.reject_submission(&symbol, e);
+                Vec::new()
+            }
+        }
+    }
+
     fn flatten(&mut self) -> Vec<Order<Sym>> {
         // Sorted so a multi-symbol flatten books its legs in a stable order
         // regardless of `positions`' hash seed.
@@ -2215,27 +2263,10 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 
         let mut fills = Vec::new();
         for symbol in open {
-            let Some(price) = self.bars.get(&symbol).map(|c| c.close) else {
-                // No price ever fed for this symbol: nothing to value the close
-                // at, and inventing one would poison the final equity point.
-                continue;
-            };
-            let id = self.mint();
-            match self.fill_at(
-                symbol.clone(),
-                0.0,
-                price,
-                OrderKind::Market,
-                id,
-                FillContext::reducing(0.0),
-            ) {
-                Ok(Some(order)) => fills.push(order),
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = self.reject_submission(&symbol, e);
-                }
-            }
+            fills.extend(self.settle_position(symbol, 0.0));
         }
+        // Every symbol's own legs went with it above; this catches the rest —
+        // a resting order on a symbol that was already flat.
         self.pending.clear();
         self.protective.clear();
         self.limits.clear();
@@ -3284,6 +3315,131 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(w.position(&"X").amount, 0.0);
         assert!(w.take_rejections().is_empty(), "flatten was refused");
+    }
+
+    /// `settle_position` is `flatten`'s per-symbol twin: it fills **now**, at
+    /// the last close, instead of queueing for a next bar that is not coming.
+    /// A queued `set_position` on the same account settles nothing.
+    #[test]
+    fn settle_position_fills_now_where_set_position_only_queues() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+
+        // Queued: nothing has moved until a bar arrives.
+        w.set_position(Units {
+            symbol: "X",
+            amount: 10.0,
+        })
+        .unwrap();
+        assert_eq!(w.position(&"X").amount, 0.0, "set_position must queue");
+
+        let fills = w.settle_position("X", 10.0);
+        assert_eq!(fills.len(), 1, "settle_position must fill immediately");
+        assert!((w.position(&"X").amount - 10.0).abs() < 1e-9);
+        assert!(
+            (w.funds().0 - 9_000.0).abs() < 1e-9,
+            "cash moved: {}",
+            w.funds().0
+        );
+    }
+
+    /// The target is **absolute and signed**, so re-issuing one is a no-op and
+    /// a caller can hold a position at a level across chunks without ratcheting
+    /// it. `0.0` closes; a sign flip reverses.
+    #[test]
+    fn settle_position_targets_are_absolute_and_signed() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+
+        w.settle_position("X", 10.0);
+        assert!(
+            w.settle_position("X", 10.0).is_empty(),
+            "re-issuing the same target must book nothing"
+        );
+        assert!((w.position(&"X").amount - 10.0).abs() < 1e-9);
+
+        w.settle_position("X", -4.0);
+        assert!(
+            (w.position(&"X").amount + 4.0).abs() < 1e-9,
+            "a flip reverses"
+        );
+
+        w.settle_position("X", 0.0);
+        assert_eq!(w.position(&"X").amount, 0.0, "0.0 closes");
+    }
+
+    /// A target the account cannot fund is **refused**, not booked — the fill
+    /// goes through the same solvency rules as any other opening trade, since
+    /// growing a position on demand is not an exit.
+    #[test]
+    fn settle_position_meets_the_accounts_solvency_rules_when_it_opens() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", bar(100.0));
+
+        assert!(
+            w.settle_position("X", 1_000.0).is_empty(),
+            "100,000 of stock on 1,000 of cash must be refused"
+        );
+        assert_eq!(w.position(&"X").amount, 0.0);
+        assert!(
+            !w.take_rejections().is_empty(),
+            "the refusal must be visible"
+        );
+    }
+
+    /// …and an *exit* is exempt from the leverage cap, exactly as `flatten` is:
+    /// a cap that could refuse a way out is a cap that traps a position.
+    #[test]
+    fn settle_position_can_always_reduce() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        // The short doubles against the account, putting the book over the cap.
+        w.update("X", bar(200.0));
+        assert!(w.position(&"X").amount.abs() * 200.0 > w.equity().0);
+        let _ = w.take_rejections();
+
+        let fills = w.settle_position("X", -50.0);
+        assert_eq!(fills.len(), 1, "trimming an over-cap short must book");
+        assert!((w.position(&"X").amount + 50.0).abs() < 1e-9);
+        assert!(w.take_rejections().is_empty(), "a reduction was refused");
+    }
+
+    /// A symbol the wallet has never been given a price for cannot be settled,
+    /// and says so. `flatten` used to skip it silently, which is fine for a
+    /// terminal sweep and wrong for an instruction somebody issued: a caller
+    /// who asked for a close must be able to tell it did not happen.
+    #[test]
+    fn settling_an_unpriced_symbol_is_refused_rather_than_skipped() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        assert!(w.settle_position("NEVER_QUOTED", 0.0).is_empty());
+        let refusals = w.take_rejections();
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(refusals[0].error, WalletError::UnknownPrice);
+    }
+
+    /// `flatten` is `settle_position` at `0.0` for every open symbol, and it
+    /// still clears the resting legs of symbols that were already flat — those
+    /// have no position to sweep, so nothing else would reach them.
+    #[test]
+    fn flatten_is_settle_position_at_zero_and_still_clears_stale_legs() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("A", bar(100.0));
+        w.update("B", bar(50.0));
+        w.settle_position("A", 10.0);
+
+        // A resting limit on `B`, which the account is flat in.
+        w.set_limit("B", Side::Buy, Size::units(1.0), Reference(10.0))
+            .unwrap();
+
+        let fills = w.flatten();
+        assert_eq!(fills.len(), 1, "only the open leg books a closing fill");
+        assert_eq!(w.position(&"A").amount, 0.0);
+
+        // The stale limit is gone: a later bar through 10.0 must not fill it.
+        w.update("B", bar(5.0));
+        assert_eq!(w.position(&"B").amount, 0.0, "a cancelled limit filled");
     }
 
     /// `with_leverage` is the knob that makes an **unedited** document trade

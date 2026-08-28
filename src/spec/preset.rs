@@ -216,6 +216,7 @@ impl StrategyRef {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
+        crate::spec::runnable::check_seed(initial_equity)?;
         match self {
             StrategyRef::Spec(s) => s.try_build(initial_equity, schema),
             StrategyRef::Preset(p) => Ok(DynSingleStrategy::from_single(p.build_strategy()?)),
