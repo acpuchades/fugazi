@@ -302,3 +302,134 @@ pub fn own_equity<Sym: Clone + Eq + Hash>(
         .sum();
     wallet.equity().0 - external
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PaperWallet;
+    use crate::types::Candle;
+
+    const EXTERNAL_UNITS: Real = 3.0;
+    const MARK: Real = 100.0;
+    const CASH: Real = 2_000.0;
+
+    fn bar(px: Real) -> Candle {
+        Candle::new(px, px, px, px, 1.0)
+    }
+
+    /// An account already holding [`EXTERNAL_UNITS`] of `C` at [`MARK`], plus
+    /// [`CASH`], and the baseline snapshotted off it.
+    fn account_with_an_external_position()
+    -> (PaperWallet<&'static str>, HashMap<&'static str, Real>) {
+        let mut account = PaperWallet::new(CASH + EXTERNAL_UNITS * MARK);
+        account.update("C", bar(MARK));
+        account
+            .set_position(Units {
+                symbol: "C",
+                amount: EXTERNAL_UNITS,
+            })
+            .expect("the account can take the external position");
+        // The queued move fills at the next bar's open, which is the same mark.
+        account.update("C", bar(MARK));
+        assert!((account.position(&"C").amount - EXTERNAL_UNITS).abs() < 1e-9);
+        let baseline = external_baseline(&account);
+        (account, baseline)
+    }
+
+    /// **The carve-out is what the sleeve exists for.** Equity must exclude the
+    /// external position at its current mark, or every `value_frac` order the
+    /// strategy sends is sized against capital that is not its own.
+    ///
+    /// Asserted at two marks, because a sleeve that merely subtracted the
+    /// baseline's *opening* value would pass at the first.
+    #[test]
+    fn equity_excludes_the_external_position_at_its_current_mark() {
+        let (account, baseline) = account_with_an_external_position();
+        let mut sleeve = SleeveWallet::new(account, baseline.clone());
+
+        assert!(
+            (sleeve.equity().0 - CASH).abs() < 1e-9,
+            "the sleeve's equity is the cash it was handed, not the account's \
+             {}: got {}",
+            CASH + EXTERNAL_UNITS * MARK,
+            sleeve.equity().0,
+        );
+
+        // The external position doubles in value. The account's equity moves;
+        // the sleeve's must not.
+        sleeve.update("C", bar(2.0 * MARK));
+        assert!(
+            (sleeve.equity().0 - CASH).abs() < 1e-9,
+            "a mark change on an externally-held symbol must not move the \
+             strategy's own equity: got {}",
+            sleeve.equity().0,
+        );
+    }
+
+    /// `own_equity` is the standalone spelling of the same arithmetic — what a
+    /// caller seeds a strategy's `Book` with before wrapping. The two must agree
+    /// or a book-anchored sizing recipe reads a different capital base from the
+    /// wallet it trades.
+    #[test]
+    fn own_equity_agrees_with_the_sleeve_view() {
+        let (account, baseline) = account_with_an_external_position();
+        let seeded = own_equity(&account, &baseline);
+        let sleeve = SleeveWallet::new(account, baseline);
+        assert!((seeded - sleeve.equity().0).abs() < 1e-9, "{seeded}");
+    }
+
+    /// A **same-symbol overlap**: the strategy opens its own units of the very
+    /// symbol the account already holds. Position, equity and a whole-position
+    /// protective leg must all read the strategy's share alone.
+    ///
+    /// This is the case where a missing baseline subtraction is worst — a
+    /// `position_frac(1.0)` stop would rest over the user's units as well as
+    /// ours and liquidate their book on a trigger.
+    #[test]
+    fn a_whole_position_stop_covers_only_the_sleeves_own_units() {
+        const OWN_UNITS: Real = 2.0;
+        let (account, baseline) = account_with_an_external_position();
+        let mut sleeve = SleeveWallet::new(account, baseline);
+
+        sleeve
+            .set_position(Units {
+                symbol: "C",
+                amount: OWN_UNITS,
+            })
+            .expect("the sleeve can open its own leg");
+        sleeve.update("C", bar(MARK));
+        assert!(
+            (sleeve.position(&"C").amount - OWN_UNITS).abs() < 1e-9,
+            "the sleeve reports its own units, not the account's: {}",
+            sleeve.position(&"C").amount,
+        );
+
+        // A stop for the whole position, expressed as a fraction. A resting
+        // leg's `Ack` carries only an id, so the size it resolved to is read
+        // off the fill it produces when the bar trades through the trigger.
+        sleeve
+            .set_stop("C", Reference(MARK * 0.9), Size::position_frac(1.0))
+            .expect("the stop rests");
+        let fills = sleeve.update("C", Candle::new(MARK, MARK, MARK * 0.8, MARK * 0.85, 1.0));
+        let stop = fills
+            .iter()
+            .find(|o| o.kind == crate::OrderKind::Stop)
+            .expect("the bar traded through the trigger");
+        assert!(
+            (stop.units - OWN_UNITS).abs() < 1e-9,
+            "a whole-position stop must cover the sleeve's {OWN_UNITS} units, \
+             not the account's {}: got {}",
+            OWN_UNITS + EXTERNAL_UNITS,
+            stop.units,
+        );
+
+        // …and the external leg is still there afterwards, so the number above
+        // is a carve-out rather than an accident of nothing else being held.
+        let account = sleeve.into_inner();
+        assert!(
+            (account.position(&"C").amount - EXTERNAL_UNITS).abs() < 1e-9,
+            "the stop took our leg and left the external one: {}",
+            account.position(&"C").amount,
+        );
+    }
+}

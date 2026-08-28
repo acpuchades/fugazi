@@ -118,7 +118,8 @@ fn median(mut xs: Vec<f64>) -> f64 {
 }
 
 #[test]
-#[ignore]
+#[ignore = "a development probe, not a gate: prints timings, asserts nothing — \
+           `cargo test --release --test perf_bench -- --ignored --nocapture`"]
 fn bench_macd_crossover_components() {
     let candles = synth_candles(BARS);
     eprintln!("bars={} reps={}", BARS, REPS);
@@ -202,7 +203,8 @@ fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<fugazi::types::Snapshot
 }
 
 #[test]
-#[ignore]
+#[ignore = "a development probe, not a gate: prints timings, asserts nothing — \
+           `cargo test --release --test perf_bench -- --ignored --nocapture`"]
 fn bench_snapshot_clone_scaling() {
     use fugazi::strategies::MultiAssetStrategy;
 
@@ -271,7 +273,8 @@ fn bench_snapshot_clone_scaling() {
 /// See `docs/PERFORMANCE.md` (F1, F2) and `benches/tree.rs`, which isolates
 /// `is_ready` from `update`.
 #[test]
-#[ignore]
+#[ignore = "a development probe, not a gate: prints timings, asserts nothing — \
+           `cargo test --release --test perf_bench -- --ignored --nocapture`"]
 fn bench_yaml_vs_rust_macd_crossover() {
     use fugazi::spec::SingleStrategySpec;
     let candles = synth_candles(BARS);

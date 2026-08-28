@@ -840,6 +840,56 @@ fn resuming_a_stale_format_version_is_rejected() {
     assert!(err.contains("format version"), "unexpected error: {err}");
 }
 
+/// `warm_up_over` restores a state too, and carries its **own copy** of both
+/// resume guards — `warm_up_over_wallet` in `src/spec/runnable.rs` repeats the
+/// format-version and shape checks that `drive_over` makes.
+///
+/// The two tests above only reach the `drive_over` copy. A guard that exists
+/// twice and is tested once is a guard that can be deleted from one of its
+/// homes without anything going red, and the pause-gap path is the one where a
+/// mis-restore is least visible: it books no trades, so a silently wrong
+/// restore surfaces only in the run that follows it.
+#[test]
+fn warming_up_over_a_mismatched_or_stale_state_is_rejected_too() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let sch = schema();
+    let mut single = buy_and_hold_spec().build(CASH, &sch);
+    let (_, state) = single
+        .drive_resumable(&single_snaps(20), CASH, &[], None, false)
+        .expect("single run");
+    assert_eq!(state.kind, "single");
+
+    // Wrong shape.
+    let mut pair_strat = pairs_spec().build(CASH, &sch);
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let err = pair_strat
+        .warm_up_over(&multi_snaps(20), &mut wallet, Some(&state))
+        .expect_err("cross-shape warm-up must fail");
+    assert!(
+        err.contains("!resume") && err.contains("single") && err.contains("pairs"),
+        "unexpected error: {err}"
+    );
+
+    // Stale format.
+    let mut stale = state.clone();
+    stale.format_version += 1;
+    let mut fresh = buy_and_hold_spec().build(CASH, &sch);
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let err = fresh
+        .warm_up_over(&single_snaps(20), &mut wallet, Some(&stale))
+        .expect_err("stale version must fail");
+    assert!(err.contains("format version"), "unexpected error: {err}");
+
+    // …and the matching state is accepted, so neither assertion above passes
+    // because `warm_up_over` refuses everything.
+    let mut fresh = buy_and_hold_spec().build(CASH, &sch);
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    fresh
+        .warm_up_over(&single_snaps(20), &mut wallet, Some(&state))
+        .expect("a matching state warms up");
+}
+
 // ---------------------------------------------------------------------------
 // The resume file holds *state*, not history
 // ---------------------------------------------------------------------------
