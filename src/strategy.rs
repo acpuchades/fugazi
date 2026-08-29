@@ -6,6 +6,7 @@
 //! built-in in-memory [`PaperWallet`](crate::PaperWallet)) live in
 //! [`crate::wallet`].
 
+use crate::attribution::Attribution;
 use crate::wallet::{Order, Rejection, Wallet};
 
 /// An incremental trading strategy — the *decision* layer above indicators and
@@ -104,6 +105,29 @@ pub trait Strategy {
     /// and opting out is an explicit act.
     fn is_ready(&self) -> bool {
         true
+    }
+
+    /// **Take** this strategy's per-child run decomposition, leaving nothing
+    /// behind — `None` for every strategy that is not a composite.
+    ///
+    /// A composite ([`Portfolio`](crate::portfolio::Portfolio)) nets its
+    /// children's intents before anything reaches the account, so its fill
+    /// stream alone cannot say which child asked for which unit. It therefore
+    /// retains the split it already computes to move each child's ledger, and
+    /// hands it over here; the driver folds the result into
+    /// [`RunReport::attribution`](crate::RunReport::attribution). See
+    /// [`Attribution`] for what reconciles and what a `ChildFill` is not.
+    ///
+    /// **Draining is the point.** The buffers grow with the run, exactly as the
+    /// report's own `fills` and `equity_curve` do, and are scoped to it the same
+    /// way. A caller driving one long-lived composite over repeated
+    /// [`backtest::run`](crate::backtest::run) calls without taking the result
+    /// would accumulate across all of them; the driver takes it on every run, so
+    /// this only bites a caller reaching past the driver.
+    ///
+    /// Default: `None`, taking nothing.
+    fn take_attribution(&mut self) -> Option<Attribution<Self::Symbol>> {
+        None
     }
 
     /// Arm or clear a **one-shot override of this strategy's rebalance gate**,

@@ -316,6 +316,15 @@ MEMBER_RETURNS = {
     ("RunReport", "equity_curve"): "list[float]",
     ("RunReport", "equity_array"): "Any",
     ("RunReport", "ruin_bar"): "int | None",
+    ("RunReport", "attribution"): "Attribution | None",
+    # The per-child decomposition of a composite run.
+    ("Attribution", "fills"): "list[ChildFill]",
+    ("Attribution", "equity"): "list[list[float]]",
+    ("Attribution", "child_count"): "int",
+    ("Attribution", "child_equity"): "list[float]",
+    ("ChildFill", "child"): "int",
+    ("ChildFill", "crossed"): "bool",
+    ("ChildFill", "order"): "Order",
     # --- value types --------------------------------------------------------
     ("Candle", "open"): "float",
     ("Candle", "high"): "float",

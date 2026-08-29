@@ -416,6 +416,7 @@ fn windowed_report(bars: usize) -> fugazi::RunReport<fugazi::types::Symbol> {
         initial_equity: 10_000.0,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     }
 }
 

@@ -1067,6 +1067,65 @@ new portfolio.
 Not bound: live accounts (`substrate`) and per-child weight *expressions* — for
 those, write the portfolio as a `portfolio:` YAML document and use `load_spec`.
 
+#### Which child stopped working — `report.attribution`
+
+Netting is what makes a portfolio worth running and also what hides its children:
+`report.fills` is a stream of *account* fills, and when two children trade the
+same symbol nothing in it says who asked for which unit. `report.attribution`
+carries the split the portfolio already made in order to move each child's
+ledger — `None` for every non-composite shape, `Some` for any portfolio run,
+however it was built.
+
+```python
+import math
+
+# Two speeds on one symbol, so the children's orders overlap and net — the
+# case where the account blotter alone cannot say who asked for what.
+wave = [100.0 * (1.0 + 0.25 * math.sin(i / 6.0)) for i in range(120)]
+snaps = [ta.Snapshot({"BTC": ta.Candle(p, p * 1.01, p * 0.99, p, 100.0)}) for p in wave]
+btc = ta.close(source=ta.pick("BTC"))
+
+pf = (ta.Portfolio()
+        .add("fast", ta.Strategy("BTC").long_on(btc.crosses_above(ta.ema(btc, 3)),
+                                                btc.crosses_below(ta.ema(btc, 3))))
+        .add("slow", ta.Strategy("BTC").long_on(btc.crosses_above(ta.ema(btc, 20)),
+                                                btc.crosses_below(ta.ema(btc, 20)))))
+
+report = pf.run(ta.PaperWallet(10_000.0), snaps)
+a = report.attribution
+
+for i, name in enumerate(a.names):
+    curve = a.child_equity(i)          # one column of a.equity
+    print(f"{name}: {curve[-1] / curve[0] - 1.0:+.2%}")
+# fast: +53.42%
+# slow: +47.46%
+```
+
+`a.equity` is `equity[bar][child]`, one row per bar, **each row summing to that
+bar's `report.equity_curve` entry**. That is the portfolio's own
+`Σ ledgers == account` invariant sampled per bar, and it is what attributes
+*risk* rather than realized P&L: a child's share of variance comes from its
+equity path, not from its fills, and a child that quietly stopped taking risk
+shows up here and nowhere else.
+
+`a.fills` is the per-child blotter — one `ChildFill` per child per booked
+movement, each carrying that child's own units at *its own* effective price and
+its pro-rata share of the commission. Group by `.child` and hand a group to
+`fugazi.metrics.reconstruct_trades` to get one child's round trips.
+
+Two things to know about it. It is **not** a breakdown of `report.fills`: one
+account fill splits across the children that asked for it, and internally
+crossed flow — where one child's sell is absorbed by another's buy, so nothing
+is submitted and no fill ever arrives — appears here with `.crossed` set and no
+account fill behind it at all. And `len(a.fills)` is therefore generally neither
+the account's fill count nor a multiple of it.
+
+**Don't decompose by re-running the children standalone.** It looks equivalent
+and is not: children on one account share cash, netting removes flow that would
+otherwise cross the spread twice, and a rebalance moves capital between them.
+The difference is small but it is *wrong rather than imprecise*, and it does not
+distribute evenly — it lands on whichever child the netting actually touched.
+
 ### Multi-symbol strategies
 
 `PairsStrategy`, `MultiAssetStrategy` and `BasketStrategy` mirror their Rust

@@ -726,6 +726,7 @@ fn reduce_curve(
         initial_equity: 10_000.0,
         ruin_bar,
         carry_coverage: None,
+        attribution: None,
     };
     metrics::from_report(&report, 252.0, 0.0, None)
 }

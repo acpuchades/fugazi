@@ -163,6 +163,7 @@ fn matches_empyrical_reference() {
         initial_equity: INITIAL_CASH,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     };
     let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE, None);
 

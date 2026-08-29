@@ -1674,6 +1674,7 @@ where
                 rejections: rejections[m].clone(),
                 initial_equity: cash,
                 carry_coverage: None,
+                attribution: None,
             };
             MemberComposite {
                 member: axis.members[m].name.clone(),
@@ -1964,6 +1965,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         PanelMetrics::new(name, metrics::from_report(&report, 252.0, 0.0, None))
     }

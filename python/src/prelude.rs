@@ -15,6 +15,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use fugazi_core::Indicator;
 // The symbol type the whole spec/runtime layer keys assets by. Python hands us
 // `str`; `intern` is the single boundary where that becomes a `Symbol`.
+pub(crate) use fugazi_core::attribution::{Attribution, ChildFill};
 pub(crate) use fugazi_core::backtest::{Closeout, Fill, Rejected, RunReport};
 pub(crate) use fugazi_core::indicators::ValueBool;
 pub(crate) use fugazi_core::indicators::compare::{

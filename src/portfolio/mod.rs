@@ -177,6 +177,7 @@ use std::hash::Hash;
 
 use std::sync::{Arc, Mutex};
 
+use crate::attribution::{Attribution, ChildFill};
 use crate::backtest::RunReport;
 use crate::indicator::Indicator;
 use crate::indicators::{Book, ValueBool};
@@ -274,6 +275,57 @@ pub struct Portfolio<Sym> {
     /// The portfolio's total cash budget, kept so the inherent
     /// [`run`](Self::run) can seed a fresh [`PaperWallet`] at it.
     initial_equity: Real,
+    /// Retained per-child decomposition of the run in progress: each child's
+    /// own share of every booked movement, and per-bar per-child equity.
+    ///
+    /// The portfolio computes both of these anyway — the fill split to move the
+    /// ledgers and feed each child's `on_fill`, the equity row to mark
+    /// [`agg_book`](Self::book) and feed the weight policy. Retaining them costs
+    /// the memory and nothing else, and it is the only place the composite's
+    /// per-child answer exists: once the synthetics are dispatched they are
+    /// gone, and the netted account fill cannot be split after the fact.
+    ///
+    /// **Drained** by [`Strategy::take_attribution`], which the driver calls at
+    /// the end of every run — so this is scoped to one run exactly as the
+    /// report's own `fills` and `equity_curve` are, and never accumulates
+    /// across them. Deliberately **not** serialized: it is a record of the bars
+    /// this process drove, not strategy state, and a resumed chunk describes its
+    /// own bars.
+    attribution: RunAttribution<Sym>,
+}
+
+/// The portfolio's in-progress attribution buffers — see
+/// [`Portfolio::attribution`].
+#[derive(Debug)]
+struct RunAttribution<Sym> {
+    /// Per-child shares of booked movements, in the order they were booked.
+    fills: Vec<ChildFill<Sym>>,
+    /// `equity[bar][child]`, one row per `update`.
+    equity: Vec<Vec<Real>>,
+}
+
+impl<Sym> RunAttribution<Sym> {
+    /// The bar index **within the current run** — which is the number of equity
+    /// rows booked so far, since one row is pushed per `update` and a bar's
+    /// fills are always recorded before that bar's row.
+    ///
+    /// Deliberately not [`Portfolio::bars_seen`], which counts cumulatively and
+    /// is *restored* on a resumed chunk: the report these indices have to line
+    /// up with is stamped by the driver's own per-run counter, so on the second
+    /// chunk of a deployment `bars_seen` would be an offset into a run that no
+    /// longer exists. Draining resets this for free.
+    fn bar(&self) -> usize {
+        self.equity.len()
+    }
+}
+
+impl<Sym> Default for RunAttribution<Sym> {
+    fn default() -> Self {
+        Self {
+            fills: Vec::new(),
+            equity: Vec::new(),
+        }
+    }
 }
 
 impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
@@ -599,6 +651,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
                 .owners
                 .remove(&order.id);
             if let Some(idx) = owner {
+                // Crossed against a sibling: netted to zero, so no order was
+                // ever submitted and no account fill exists for this movement.
+                self.attribution.fills.push(ChildFill {
+                    child: idx,
+                    bar: self.attribution.bar(),
+                    order: order.clone(),
+                    crossed: true,
+                });
                 self.children[idx].strategy.on_fill(&order);
             }
         }
@@ -614,6 +674,12 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // reading via `Portfolio::book()` see the marked value on this bar.
         let samples = self.sample_children();
         let agg_equity: Real = samples.iter().map(|s| s.equity).sum();
+        // Retain the row this bar's marking already produced. Pushed before
+        // `bars_seen` advances, so row `i` is bar `i` — the same index the
+        // driver stamps on `RunReport::equity_curve[i]`, which this row sums to.
+        self.attribution
+            .equity
+            .push(samples.iter().map(|s| s.equity).collect());
         self.agg_book.mark_equity(agg_equity);
         // Advance each per-child weight-share indicator (when installed)
         // so they warm on the same schedule as the children. Runs after
@@ -650,6 +716,15 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             && self.children.iter().all(|c| c.strategy.is_ready())
     }
 
+    fn take_attribution(&mut self) -> Option<Attribution<Sym>> {
+        let taken = std::mem::take(&mut self.attribution);
+        Some(Attribution::new(
+            self.children.iter().map(|c| c.name.clone()).collect(),
+            taken.fills,
+            taken.equity,
+        ))
+    }
+
     fn on_fill(&mut self, order: &Order<Sym>) {
         // The driver hands us the RAW account fill (from `wallet.update` /
         // `poll_fills`). Attribute it across the children whose netted flow
@@ -669,6 +744,12 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
                 .owners
                 .remove(&synth.id);
             if let Some(idx) = owner {
+                self.attribution.fills.push(ChildFill {
+                    child: idx,
+                    bar: self.attribution.bar(),
+                    order: synth.clone(),
+                    crossed: false,
+                });
                 self.children[idx].strategy.on_fill(&synth);
             }
         }
@@ -785,6 +866,10 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         self.agg_book.reset();
         self.inner.lock().expect("portfolio lock poisoned").reset();
         self.bars_seen = 0;
+        // A reset portfolio describes no bars, so it has nothing to attribute.
+        // Left behind, the stale rows would be handed to the *next* run's
+        // report and break the per-bar sum against its equity curve.
+        self.attribution = RunAttribution::default();
     }
 }
 
@@ -1173,6 +1258,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             position_rebalancer,
             agg_book,
             initial_equity,
+            attribution: RunAttribution::default(),
         }
     }
 }

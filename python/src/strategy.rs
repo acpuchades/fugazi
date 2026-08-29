@@ -3533,6 +3533,9 @@ impl PyRunReport {
                 // charges, so a hand-built report has nothing to report and
                 // says so — `None` is "does not say", not "fully covered".
                 carry_coverage: None,
+                // Only a composite produces one, and only by running: there is
+                // nothing for a caller to reconstruct a per-child split from.
+                attribution: None,
             },
         }
     }
@@ -3583,6 +3586,23 @@ impl PyRunReport {
             .cloned()
             .map(|inner| PyFill { inner })
             .collect()
+    }
+
+    /// The run's **per-child decomposition** (an [`Attribution`](PyAttribution)),
+    /// or `None` for a run that was not a composite.
+    ///
+    /// `Some` for a `Portfolio` run — whether driven through `Portfolio.run` or
+    /// `StrategySpec.run` on a `portfolio` document — and `None` for every other
+    /// shape and for any hand-built report.
+    ///
+    /// This is the only place a portfolio's per-child answer exists. The netted
+    /// `fills` above cannot be split after the fact, and re-running each child
+    /// standalone does not reproduce the composite. See `Attribution`.
+    #[getter]
+    pub(crate) fn attribution(&self) -> Option<PyAttribution> {
+        self.inner.attribution.as_ref().map(|inner| PyAttribution {
+            inner: inner.clone(),
+        })
     }
 
     /// Every refused order (a [`Rejected`](PyRejected)), in refusal order. Empty

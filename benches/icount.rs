@@ -431,6 +431,7 @@ fn metrics_report(bars: usize) -> fugazi::backtest::RunReport<Symbol> {
         initial_equity: candles[0].close * 100.0,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     }
 }
 

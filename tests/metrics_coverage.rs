@@ -143,6 +143,7 @@ fn every_metric_is_cross_validated_or_exempt() {
         initial_equity: 100.0,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     };
     let sample = metrics::from_report(&empty, 252.0, 0.0, None);
 
@@ -183,6 +184,7 @@ fn no_exemption_names_a_field_that_no_longer_exists() {
         initial_equity: 100.0,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     };
     let sample = metrics::from_report(&empty, 252.0, 0.0, None);
     let known: HashSet<&str> = metrics::flatten(&sample)

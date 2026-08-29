@@ -35,6 +35,7 @@
 //! for the single-series shortcut, or [`Snapshot::push`](crate::types::Snapshot::push)
 //! for multi-asset).
 
+use crate::attribution::Attribution;
 use crate::types::Snapshot;
 use crate::types::Symbol;
 use crate::wallet::Rejection;
@@ -117,6 +118,19 @@ pub struct RunReport<Sym> {
     /// and charged **nothing** on the difference, which is indistinguishable
     /// from carry being free — the exact failure that leg exists to remove.
     pub carry_coverage: Option<(usize, usize)>,
+    /// The run's **per-child decomposition**, for a composite strategy that
+    /// has one — `Some` for a [`Portfolio`](crate::portfolio::Portfolio),
+    /// `None` for every other shape.
+    ///
+    /// A portfolio nets its children's intents into one order per symbol before
+    /// anything reaches the account, so [`fills`](Self::fills) above is a stream
+    /// of *account* fills that cannot be split after the fact — which child
+    /// asked for a given unit is not recoverable from it. This carries the split
+    /// the portfolio already made in order to move each child's ledger, so
+    /// "which of my children stopped contributing?" is answerable from the
+    /// report rather than by re-running each child standalone (which does not
+    /// reproduce the composite — see [`Attribution`]).
+    pub attribution: Option<Attribution<Sym>>,
 }
 
 impl<Sym> RunReport<Sym> {
@@ -444,6 +458,12 @@ where
         initial_equity,
         ruin_bar,
         carry_coverage: wallet.carry_coverage(),
+        // Taken, not read: the composite's buffers are scoped to this run the
+        // same way `fills` and `equity_curve` are, so draining here is what
+        // keeps a long-lived portfolio driven over repeated runs from
+        // accumulating every previous run's rows. `None` for every shape that
+        // is not a composite.
+        attribution: strategy.take_attribution(),
     }
 }
 

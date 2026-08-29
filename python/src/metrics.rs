@@ -85,6 +85,172 @@ impl PyFill {
     }
 }
 
+/// One child's share of a single booked movement inside a `Portfolio` run —
+/// see `Attribution`.
+///
+/// A full `Order` rather than a bare unit count, because a child's own
+/// execution price differs from the account's whenever part of its flow was
+/// crossed against a sibling instead of reaching the market.
+#[pyclass(name = "ChildFill", module = "fugazi", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyChildFill {
+    pub(crate) inner: ChildFill<Symbol>,
+}
+
+#[pymethods]
+impl PyChildFill {
+    /// Zero-based index of the child, in `Portfolio.add` order. The index is
+    /// the identity; `Attribution.names[child]` is its label.
+    #[getter]
+    pub(crate) fn child(&self) -> usize {
+        self.inner.child
+    }
+
+    /// Zero-based bar index into the run, on the same axis as `Fill.bar`.
+    #[getter]
+    pub(crate) fn bar(&self) -> usize {
+        self.inner.bar
+    }
+
+    /// This child's share: its own signed units at its own effective price,
+    /// carrying its pro-rata slice of the account fill's commission.
+    #[getter]
+    pub(crate) fn order(&self) -> PyOrder {
+        PyOrder {
+            inner: self.inner.order.clone(),
+        }
+    }
+
+    /// Whether this movement was booked against a sibling rather than the
+    /// market — flow that netted to zero, so **no account fill exists for it**
+    /// and it appears nowhere in `RunReport.fills`.
+    ///
+    /// Crossed flow costs no spread and no commission, so a child whose exits
+    /// are routinely absorbed by a sibling's entries is being subsidised by the
+    /// composite in a way a standalone run of it would never show.
+    #[getter]
+    pub(crate) fn crossed(&self) -> bool {
+        self.inner.crossed
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "ChildFill(child={}, bar={}, crossed={}, order=Order(symbol='{}', side='{}', units={}, price={}))",
+            self.inner.child,
+            self.inner.bar,
+            if self.inner.crossed { "True" } else { "False" },
+            self.inner.order.symbol,
+            side_str(self.inner.order.side),
+            self.inner.order.units,
+            self.inner.order.price,
+        )
+    }
+}
+
+/// The **per-child decomposition** of a `Portfolio` run, reached through
+/// `RunReport.attribution`.
+///
+/// A portfolio nets its children's intents into one order per symbol before
+/// anything reaches the account, so `RunReport.fills` is a stream of *account*
+/// fills that cannot be split after the fact — which child asked for a given
+/// unit is not recoverable from it. This carries the split the portfolio
+/// already made in order to move each child's ledger.
+///
+/// Two identities hold by construction, and both are pinned by tests:
+///
+/// - summing `side * units` over `fills` gives exactly what the same sum over
+///   `RunReport.fills` gives;
+/// - `equity[bar]` sums to `RunReport.equity_curve[bar]`, on **every** bar.
+///
+/// The tempting alternative — running each child standalone over the same bars
+/// and differencing — does not reproduce the composite. Children on one account
+/// share cash, netting removes flow that would otherwise cross the spread
+/// twice, and a rebalance moves capital between them. The error does not
+/// distribute evenly; it lands on whichever child the netting actually touched.
+///
+/// ```python
+/// report = portfolio.run(fugazi.PaperWallet(10_000.0), snaps)
+/// attribution = report.attribution
+/// for i, name in enumerate(attribution.names):
+///     curve = attribution.child_equity(i)
+///     print(name, curve[-1] / curve[0] - 1.0)
+/// ```
+#[pyclass(name = "Attribution", module = "fugazi", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyAttribution {
+    pub(crate) inner: Attribution<Symbol>,
+}
+
+#[pymethods]
+impl PyAttribution {
+    /// The children's names, in `Portfolio.add` order — index `i` names child `i`.
+    #[getter]
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.inner.names().to_vec()
+    }
+
+    /// How many children the composite ran.
+    #[getter]
+    pub(crate) fn child_count(&self) -> usize {
+        self.inner.child_count()
+    }
+
+    /// Every per-child movement (a `ChildFill`), in the order the
+    /// portfolio booked them.
+    ///
+    /// Rebuilt on every access — one fresh object per entry. Bind it once.
+    ///
+    /// Note this is generally **neither** the account's fill count nor a
+    /// multiple of it: one account fill splits across the children that asked
+    /// for it, and internally-crossed flow appears here with no account fill at
+    /// all (`ChildFill.crossed`).
+    #[getter]
+    pub(crate) fn fills(&self) -> Vec<PyChildFill> {
+        self.inner
+            .fills()
+            .iter()
+            .cloned()
+            .map(|inner| PyChildFill { inner })
+            .collect()
+    }
+
+    /// Per-bar per-child mark-to-market equity: `equity[bar][child]`.
+    ///
+    /// One row per bar, each summing to that bar's `RunReport.equity_curve`
+    /// entry. This is what attributes **risk** rather than realized P&L — a
+    /// child's share of variance comes from its equity path, not from its
+    /// fills, and a child that quietly stopped taking risk shows up here and
+    /// nowhere else.
+    ///
+    /// Rebuilt on every access; bind it once.
+    #[getter]
+    pub(crate) fn equity(&self) -> Vec<Vec<f64>> {
+        self.inner.equity().to_vec()
+    }
+
+    /// Child `index`'s equity across the run — the `index` column of `equity`.
+    ///
+    /// Raises `IndexError` if `index` is out of range.
+    pub(crate) fn child_equity(&self, index: usize) -> PyResult<Vec<f64>> {
+        if index >= self.inner.child_count() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "child index {index} out of range (portfolio has {} children)",
+                self.inner.child_count()
+            )));
+        }
+        Ok(self.inner.child_equity(index))
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "Attribution(children=[{}], bars={}, fills={})",
+            self.inner.names().join(", "),
+            self.inner.equity().len(),
+            self.inner.fills().len(),
+        )
+    }
+}
+
 /// A closed round-trip trade reconstructed from the fill blotter by
 /// [`reconstruct_trades`](core_metrics::reconstruct_trades). Frozen; all fields
 /// are read-only.

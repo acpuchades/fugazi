@@ -412,12 +412,38 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   by a fill, so several symbols in one bar resolve against the same number, and it's
   the one size the wallet will `fit_to_account`). Sells and short targets use
   `set_position`. **The blotter (`report.fills`) is account-level**; per-child truth
-  stays in the ledgers and each child's own `on_fill`.
+  stays in the ledgers, each child's own `on_fill`, and `report.attribution`.
 - **Crossing.** Two children on opposite sides of a symbol in one bar net down:
   only the imbalance reaches the market; the offsetting part is crossed internally
   at the bar's **open** and **pays no commission**. A crossing-heavy portfolio
   therefore books slightly lower costs than it would live — the documented price of
   netting rather than grossing up.
+- **Per-child attribution (`RunReport::attribution`).** The split `attribute_fill`
+  computes to move the ledgers used to be dispatched to each child's `on_fill` and
+  dropped; it is now also **retained** and handed to the driver through
+  `Strategy::take_attribution` (default `None`; only a composite overrides). One
+  `ChildFill` per child per booked movement — that child's own units at *its own*
+  effective price, with its pro-rata commission — plus `equity[bar][child]`, the
+  per-bar row `sample_children()` already builds to mark the aggregate book. Two
+  identities hold and are asserted: signed units sum to the account's own, and
+  every equity row sums to that bar's `equity_curve` entry (the `Σ ledgers ==
+  account` invariant, sampled per bar).
+  - **Not a breakdown of `report.fills`.** Internally crossed flow has *no account
+    fill* (nothing was submitted), so it appears only here, flagged `crossed`.
+    That is why this is a stream rather than a `[(child, units)]` field on `Order`
+    — and why `Order` stays free of a portfolio concept it would carry into every
+    wallet and live venue.
+  - **Scoped to one run, and drained.** `take_attribution` takes rather than reads,
+    the driver calls it at the end of every run, and `reset` clears it. The bar
+    index is `attribution.equity.len()` — the per-run row count — **not**
+    `bars_seen`, which counts cumulatively and is *restored* on a resumed chunk;
+    using it made chunk 2's indices offsets into a run that no longer existed.
+    Deliberately **not** serialized: it records the bars this process drove, not
+    strategy state.
+  - **`DynPortfolio` must forward it.** The wrapper delegates `Strategy` method by
+    method, so an unforwarded hook silently takes the trait default — which made
+    every *spec-built* portfolio (i.e. every one the CLI and Python can reach)
+    report `None` while the hand-built one worked. Same trap as `on_reject`.
 - **Per-child stops.** Protective legs carry a `Size`, so a child's stop takes off
   only its own share. The account holds one bracket per symbol, so each bar the
   portfolio rests whichever child leg is **nearest to triggering**; two hitting in

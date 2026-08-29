@@ -49,6 +49,7 @@ fn report(bars: usize) -> RunReport<Symbol> {
         initial_equity: candles[0].close * 100.0,
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     }
 }
 
@@ -133,6 +134,7 @@ fn linear_filter<Sym: Clone>(
         },
         ruin_bar: None,
         carry_coverage: None,
+        attribution: None,
     }
 }
 

@@ -323,6 +323,7 @@ fn metrics_from_returns(returns: &[Real], initial: Real, ctx: &EvalContext) -> M
         rejections: Vec::new(),
         initial_equity: initial,
         carry_coverage: None,
+        attribution: None,
     };
     ctx.reduce(&report)
 }

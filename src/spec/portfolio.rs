@@ -917,6 +917,13 @@ impl Strategy for DynPortfolio {
     fn force_rebalance(&mut self, hold: Option<&[Symbol]>) {
         self.inner.force_rebalance(hold);
     }
+    fn take_attribution(&mut self) -> Option<crate::attribution::Attribution<Symbol>> {
+        // Forwarded explicitly for the same reason `on_reject` above is: the
+        // CLI and Python only ever see a `DynPortfolio`, so without this every
+        // spec-driven portfolio run reports `attribution = None` and the whole
+        // per-child decomposition is invisible to exactly the callers it is for.
+        self.inner.take_attribution()
+    }
     fn reset(&mut self) {
         self.inner.reset();
     }
@@ -2094,5 +2101,54 @@ mod tests {
                 .any(|r| r.rejection.kind == OrderKind::Stop),
             "a refused protective leg must reach the report through DynPortfolio",
         );
+    }
+
+    #[test]
+    fn dyn_portfolio_surfaces_its_per_child_attribution() {
+        // Same wrapper trap as the rejection above, and it bit: `DynPortfolio`
+        // delegates `Strategy` method by method, so a hook it does not forward
+        // silently takes the trait default. Without the `take_attribution`
+        // forward, every *spec-built* portfolio — which is every portfolio the
+        // CLI and Python can reach — reported `attribution: None` while the
+        // hand-built `Portfolio` in tests/portfolio.rs attributed correctly.
+        let yaml = r#"
+            children:
+              - name: a
+                strategy:
+                  root: A
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: b
+                strategy:
+                  root: A
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let snaps: Vec<Snapshot<Symbol>> = vec![
+            snap_of(&[("A", 100.0)]),
+            snap_of(&[("A", 101.0)]),
+            snap_of(&[("A", 102.0)]),
+        ];
+        let mut wallet = PaperWallet::new(1_000.0);
+        let report = crate::backtest::run(&mut portfolio, &mut wallet, snaps.iter().cloned());
+
+        let attribution = report
+            .attribution
+            .as_ref()
+            .expect("a spec-built portfolio must attribute through DynPortfolio");
+        assert_eq!(attribution.names(), ["a", "b"]);
+        assert_eq!(attribution.equity().len(), snaps.len());
+        for (bar, row) in attribution.equity().iter().enumerate() {
+            let sum: crate::Real = row.iter().sum();
+            assert!(
+                (sum - report.equity_curve[bar]).abs() < 1e-9,
+                "bar {bar}: {sum} != {}",
+                report.equity_curve[bar]
+            );
+        }
     }
 }

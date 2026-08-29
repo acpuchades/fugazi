@@ -16,6 +16,7 @@
 
 use std::path::Path;
 
+use crate::attribution::{Attribution, ChildFill};
 use crate::backtest::RunReport;
 use crate::prelude::*;
 use crate::{Fill, Rejected};
@@ -592,6 +593,19 @@ pub fn report_slice<Sym: Clone>(
             rejection: r.rejection.clone(),
         })
         .collect();
+    // Sliced on the same axis as everything above, rather than dropped: a
+    // window's per-child equity rows have to keep summing to *that window's*
+    // equity curve, which they do only if both are cut at the same bars.
+    let attribution = report.attribution.as_ref().map(|a| {
+        let fills = booked_within(a.fills(), |f| f.bar, &bars)
+            .iter()
+            .map(|f| ChildFill {
+                bar: f.bar - bars.start,
+                ..(*f).clone()
+            })
+            .collect();
+        Attribution::new(a.names().to_vec(), fills, a.equity()[bars.clone()].to_vec())
+    });
     RunReport {
         equity_curve: report.equity_curve[bars.clone()].to_vec(),
         fills,
@@ -605,6 +619,7 @@ pub fn report_slice<Sym: Clone>(
             .ruin_bar
             .filter(|&r| r < bars.end)
             .map(|r| r.saturating_sub(bars.start)),
+        attribution,
         // Deliberately **not** sliced. The counters are cumulative over the
         // whole run and carry no bar index, so there is nothing to attribute to
         // this window; carrying them through unchanged says "the run this slice
@@ -1188,6 +1203,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         from_report(&report, 252.0, 0.0, None)
     }
@@ -1285,6 +1301,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
 
         for start in 0..=BARS {
@@ -1319,6 +1336,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         let windows = windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 3);
@@ -1387,6 +1405,7 @@ mod tests {
                 initial_equity: 10_000.0,
                 ruin_bar: None,
                 carry_coverage: None,
+                attribution: None,
             };
 
             // 37 bars, window 9 → 9,9,9,9,1: uneven, with a one-bar tail whose
@@ -1457,6 +1476,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         let windows = rolling_from_report(&report, 3, 252.0, 0.0, None);
         assert_eq!(
@@ -1489,6 +1509,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         assert!(rolling_from_report(&report, 3, 252.0, 0.0, None).is_empty());
     }
@@ -1521,6 +1542,7 @@ mod tests {
             initial_equity: 100.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
 
         let threads = rayon::current_num_threads();

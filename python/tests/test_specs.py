@@ -3661,3 +3661,162 @@ def test_an_empty_symbol_is_refused_but_an_unset_one_is_not():
         "root: BTC\nlong:\n  enter: !gt\n"
         "    lhs: !close { source: !pick { symbol: !param S } }\n    rhs: !value 0\n"
     ).built
+
+
+# ---------------------------------------------------------------------------
+# Per-child attribution — `RunReport.attribution`.
+#
+# A portfolio nets its children's intents into one order per symbol, so the
+# account's fill stream cannot be split after the fact. These pin the surface
+# and the two identities the decomposition promises.
+# ---------------------------------------------------------------------------
+
+_ATTRIBUTION_YAML = """
+children:
+  - name: fast
+    strategy:
+      root: !pick { symbol: AAA, freq: 1d }
+      long:
+        enter: !crosses_above { lhs: !close, rhs: !ema { period: 3, source: !close } }
+        exit:  !crosses_below { lhs: !close, rhs: !ema { period: 3, source: !close } }
+  - name: slow
+    strategy:
+      root: !pick { symbol: AAA, freq: 1d }
+      long:
+        enter: !crosses_above { lhs: !close, rhs: !ema { period: 10, source: !close } }
+        exit:  !crosses_below { lhs: !close, rhs: !ema { period: 10, source: !close } }
+"""
+
+
+def _overlapping_wave(n=200):
+    """One symbol both children trade at different speeds — so their intents
+    overlap and net, which is the case attribution exists for."""
+    import math
+
+    out, price = [], 100.0
+    for i in range(n):
+        price *= 1.0 + 0.02 * math.sin(0.6 * i) + 0.004 * math.sin(0.11 * i)
+        candle = ta.Candle(price, price * 1.01, price * 0.99, price, 1000.0)
+        out.append(
+            ta.Snapshot({"AAA": ta.Atom(candle, None, 1735689600000 + i * 86400000)})
+        )
+    return out
+
+
+def _run_attributed(n=200):
+    spec = ta.load_spec(_ATTRIBUTION_YAML, kind="portfolio")
+    snaps = _overlapping_wave(n)
+    report = spec.run(ta.PaperWallet(10_000.0), snaps)
+    return report, report.attribution
+
+
+def test_attribution_is_none_for_a_non_composite_shape():
+    """Only a composite has children to attribute to."""
+    spec = ta.load_spec(
+        """
+        root: !pick { symbol: AAA, freq: 1d }
+        long:
+          enter: !crosses_above { lhs: !close, rhs: !ema { period: 3, source: !close } }
+          exit:  !crosses_below { lhs: !close, rhs: !ema { period: 3, source: !close } }
+        """,
+        kind="single",
+    )
+    report = spec.run(ta.PaperWallet(10_000.0), _overlapping_wave(50))
+    assert report.attribution is None
+
+
+def test_attribution_names_children_in_add_order():
+    _, attribution = _run_attributed()
+    assert attribution.names == ["fast", "slow"]
+    assert attribution.child_count == 2
+
+
+def test_attributed_units_sum_to_the_netted_account_fills():
+    """The identity that makes the split trustworthy: the per-child stream nets
+    to exactly what the account's own fills net to."""
+    report, attribution = _run_attributed()
+    account = sum(f.order.signed_units for f in report.fills)
+    attributed = sum(f.order.signed_units for f in attribution.fills)
+    assert abs(attributed - account) < 1e-9
+
+
+def test_per_child_equity_sums_to_the_account_curve_on_every_bar():
+    """Not just at the end — every bar. This is the portfolio's own
+    `sum(ledgers) == account` invariant, sampled per bar."""
+    report, attribution = _run_attributed()
+    equity = attribution.equity
+    assert len(equity) == len(report.equity_curve)
+    for bar, row in enumerate(equity):
+        assert len(row) == 2
+        assert abs(sum(row) - report.equity_curve[bar]) < 1e-8, f"bar {bar}"
+
+
+def test_child_equity_column_answers_which_child_stopped_contributing():
+    """The question the whole surface exists for."""
+    _, attribution = _run_attributed()
+    fast = attribution.child_equity(0)
+    slow = attribution.child_equity(1)
+    assert len(fast) == len(slow) == 200
+    # The two children did not contribute identically — and the slower one,
+    # whipsawed by this fixture, did materially worse.
+    assert slow[-1] < fast[-1]
+    # Columns agree with the rows they were taken from.
+    assert fast == [row[0] for row in attribution.equity]
+
+
+def test_child_equity_rejects_an_out_of_range_child():
+    _, attribution = _run_attributed()
+    with pytest.raises(IndexError):
+        attribution.child_equity(2)
+
+
+def test_child_fill_fields_are_readable():
+    report, attribution = _run_attributed()
+    assert attribution.fills, "the fixture must trade"
+    for f in attribution.fills:
+        assert 0 <= f.child < 2
+        assert 0 <= f.bar < len(report.equity_curve)
+        assert isinstance(f.crossed, bool)
+        assert f.order.units > 0.0
+    assert "ChildFill(" in repr(attribution.fills[0])
+    assert "Attribution(" in repr(attribution)
+
+
+def test_attribution_covers_flow_the_account_blotter_cannot():
+    """One child long 5 A and one short 5 A fully cross: nothing is submitted,
+    so A never appears in the account blotter — but both ledgers moved, and
+    that movement is real per-child exposure carrying no commission.
+
+    This is why attribution is a stream rather than a breakdown hung off an
+    account fill: there is no account fill to hang it on."""
+    spec = ta.load_spec(
+        """
+        children:
+          - name: long_a
+            strategy: !buy_and_hold { root: A }
+          - name: short_a
+            strategy:
+              root: A
+              short:
+                enter: !value true
+                exit: !value false
+        """,
+        kind="portfolio",
+    )
+    snaps = _snaps_single("A", [100.0, 100.0, 100.0, 100.0])
+    report = spec.run(ta.PaperWallet(2_000.0), snaps)
+    attribution = report.attribution
+    crossed = [f for f in attribution.fills if f.crossed]
+    assert crossed, "the fixture must produce internally-crossed flow"
+    for f in crossed:
+        assert f.order.commission == 0.0, "crossed flow pays no commission"
+
+
+def test_attribution_is_scoped_to_its_own_run():
+    """Each run's report describes that run, not every run the spec ever drove."""
+    spec = ta.load_spec(_ATTRIBUTION_YAML, kind="portfolio")
+    first = spec.run(ta.PaperWallet(10_000.0), _overlapping_wave(100))
+    second = spec.run(ta.PaperWallet(10_000.0), _overlapping_wave(60))
+    assert len(first.attribution.equity) == 100
+    assert len(second.attribution.equity) == 60
+    assert all(f.bar < 60 for f in second.attribution.fills)

@@ -36,6 +36,7 @@ fn report(initial: Real, curve: &[Real], ruin_bar: Option<usize>) -> RunReport<S
         initial_equity: initial,
         ruin_bar,
         carry_coverage: None,
+        attribution: None,
     }
 }
 
@@ -267,6 +268,7 @@ fn no_trade_metric_reports_a_non_finite_value_on_a_degenerate_blotter() {
             initial_equity: 10_000.0,
             ruin_bar: None,
             carry_coverage: None,
+            attribution: None,
         };
         let m = metrics::from_report(&r, 252.0, 0.0, Some(86_400.0));
         for (key, value) in metrics::flatten(&m) {

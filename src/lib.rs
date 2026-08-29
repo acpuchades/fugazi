@@ -67,6 +67,7 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+pub mod attribution;
 pub mod backtest;
 pub mod costs;
 // A fast non-cryptographic hasher for the crate's internal symbol-keyed maps.

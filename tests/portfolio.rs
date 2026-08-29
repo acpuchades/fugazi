@@ -2362,3 +2362,244 @@ fn a_forced_portfolio_rebalance_never_trims_a_held_symbol() {
         w_held.position(&"A"),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-child attribution — `RunReport::attribution`.
+//
+// The overlapping case is the one that matters: two children trading the *same*
+// symbol net into one order per bar, so the account's fill stream cannot be
+// split after the fact. These pin the two identities the decomposition
+// promises, plus the crossed-flow case that has no account fill at all.
+// ---------------------------------------------------------------------------
+
+use fugazi::indicators::{Close, Ema, Pick};
+
+/// One symbol on a wave both children trade, at different speeds — so their
+/// intents overlap, cross, and net.
+fn one_symbol_wave(n: usize) -> Vec<Snapshot<&'static str>> {
+    let mut out = Vec::new();
+    let mut price = 100.0_f64;
+    for i in 0..n {
+        price *= 1.0 + 0.02 * (0.6 * i as Real).sin() + 0.004 * (0.11 * i as Real).sin();
+        let mut snap = Snapshot::new();
+        snap.push(Some("AAA"), None, Atom::new(flat_bar(price)));
+        out.push(snap);
+    }
+    out
+}
+
+/// A close/EMA crossover child on `AAA`, seeded at half of a 10k portfolio.
+fn ema_cross_child(period: usize) -> SingleAssetStrategy<&'static str> {
+    let close = || Close::of(Pick::<&'static str>::new());
+    SingleAssetStrategy::<&'static str>::with_initial_equity("AAA", 5_000.0).long_on(
+        close().crosses_above(Ema::new(close(), period)),
+        close().crosses_below(Ema::new(close(), period)),
+    )
+}
+
+fn two_child_overlapping_portfolio() -> Portfolio<&'static str> {
+    PortfolioBuilder::default()
+        .with_initial_equity(10_000.0)
+        .add("fast", ema_cross_child(3))
+        .add("slow", ema_cross_child(10))
+        .weights(EqualWeight)
+        .build()
+}
+
+#[test]
+fn attribution_is_absent_for_a_non_composite_shape() {
+    let mut strategy = SingleAssetStrategy::<&'static str>::buy_and_hold("A");
+    let mut wallet = PaperWallet::new(1_000.0);
+    let report = backtest::run(&mut strategy, &mut wallet, a_rising_b_flat_snapshots());
+    assert!(
+        report.attribution.is_none(),
+        "a single-asset strategy has no children to attribute to"
+    );
+}
+
+#[test]
+fn attribution_names_its_children_in_add_order() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(200));
+    let attribution = report.attribution.expect("a portfolio attributes");
+    assert_eq!(attribution.names(), ["fast", "slow"]);
+    assert_eq!(attribution.child_count(), 2);
+}
+
+#[test]
+fn attributed_units_sum_to_the_netted_account_fills() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(200));
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+
+    let account: Real = report
+        .fills
+        .iter()
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    // Only the flow that reached the market has an account fill behind it;
+    // crossed flow never was submitted, so it is excluded from this identity.
+    let attributed: Real = attribution
+        .fills()
+        .iter()
+        .filter(|f| !f.crossed)
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    assert!(
+        (attributed - account).abs() < 1e-9,
+        "attributed {attributed} != account {account}"
+    );
+    // And the whole stream — crossed included — nets to the account's own
+    // net traded units, because a cross moves one child against another.
+    let all: Real = attribution
+        .fills()
+        .iter()
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    assert!((all - account).abs() < 1e-9, "{all} != {account}");
+}
+
+#[test]
+fn per_child_equity_sums_to_the_account_curve_on_every_bar() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(200));
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+
+    assert_eq!(
+        attribution.equity().len(),
+        report.equity_curve.len(),
+        "one attribution row per bar"
+    );
+    for (bar, row) in attribution.equity().iter().enumerate() {
+        assert_eq!(row.len(), 2);
+        let sum: Real = row.iter().sum();
+        assert!(
+            (sum - report.equity_curve[bar]).abs() < 1e-9,
+            "bar {bar}: Σ children {sum} != account {}",
+            report.equity_curve[bar]
+        );
+    }
+    // The children diverge — which is the whole point of asking.
+    let fast = attribution.child_equity(0);
+    let slow = attribution.child_equity(1);
+    assert!(
+        (fast[fast.len() - 1] - slow[slow.len() - 1]).abs() > 1.0,
+        "the two children should not have contributed identically"
+    );
+}
+
+#[test]
+fn attribution_matches_the_ledgers_it_was_booked_from() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(200));
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    let last = attribution.equity().last().expect("bars were driven");
+    for (idx, &equity) in last.iter().enumerate() {
+        assert!(
+            (equity - portfolio.sub_equity(idx)).abs() < 1e-9,
+            "child {idx}: attribution {equity} != ledger {}",
+            portfolio.sub_equity(idx)
+        );
+    }
+    portfolio.assert_books_balance(&wallet);
+}
+
+#[test]
+fn crossed_flow_is_attributed_though_no_account_fill_exists() {
+    // One child long 5 A, one short 5 A: the net reaching the account is zero,
+    // so nothing is submitted and the blotter never mentions A — but both
+    // ledgers moved, and that movement is real per-child exposure. This is the
+    // flow a `[(child, units)]` breakdown hung off an account fill could not
+    // carry, because there is no account fill to hang it on.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("long_a", HoldUnits::new("A", 5.0))
+        .add("short_a", HoldUnits::new("A", -5.0))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
+
+    assert!(
+        report.fills.iter().all(|f| f.order.symbol != "A"),
+        "the fixture must fully cross, leaving A out of the blotter"
+    );
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    let crossed: Vec<_> = attribution
+        .fills()
+        .iter()
+        .filter(|f| f.crossed && f.order.symbol == "A")
+        .collect();
+    assert_eq!(
+        crossed.len(),
+        2,
+        "both children's halves of the cross are attributed, with no account \
+         fill behind either"
+    );
+    // Opposite sides, equal size, and free — they never touched the market.
+    let net: Real = crossed
+        .iter()
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    assert!(
+        net.abs() < 1e-9,
+        "the two halves must net to zero, got {net}"
+    );
+    for f in &crossed {
+        assert!((f.order.units - 5.0).abs() < 1e-9, "each half is 5 units");
+        assert_eq!(f.order.commission, 0.0, "crossed flow pays no commission");
+    }
+    // The decisive count: more per-child movements than account fills.
+    assert!(
+        attribution.fills().len() > report.fills.len(),
+        "{} child movements vs {} account fills",
+        attribution.fills().len(),
+        report.fills.len()
+    );
+}
+
+#[test]
+fn attribution_bars_index_the_same_axis_as_the_report() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(200));
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    for f in attribution.fills() {
+        assert!(
+            f.bar < report.equity_curve.len(),
+            "bar {} outside the run",
+            f.bar
+        );
+        assert!(f.child < 2, "child {} out of range", f.child);
+    }
+    // Booked in bar order, like the report's own blotter.
+    let bars: Vec<usize> = attribution.fills().iter().map(|f| f.bar).collect();
+    assert!(bars.windows(2).all(|w| w[0] <= w[1]), "not in bar order");
+}
+
+#[test]
+fn attribution_is_drained_so_a_reused_portfolio_does_not_accumulate() {
+    let mut portfolio = two_child_overlapping_portfolio();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let first = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(100));
+    let first_rows = first.attribution.as_ref().unwrap().equity().len();
+    assert_eq!(first_rows, 100);
+
+    // The same portfolio driven again: the second report describes the second
+    // run only, not both concatenated.
+    let second = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(60));
+    let second_attr = second.attribution.as_ref().unwrap();
+    assert_eq!(
+        second_attr.equity().len(),
+        60,
+        "the second run must not carry the first run's rows"
+    );
+    assert!(
+        second_attr.fills().iter().all(|f| f.bar < 60),
+        "a retained fill from the first run leaked into the second"
+    );
+}
