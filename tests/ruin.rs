@@ -461,6 +461,35 @@ fn a_portfolio_is_ruined_on_the_accounts_equity_not_a_childs() {
     assert!(report.equity_curve[ruin..].iter().all(|&e| e == 0.0));
     assert!(report.fills.iter().all(|f| f.bar <= ruin));
     assert!(reduce(&report).drawdown.max_pct <= 100.0);
+
+    // The pin reaches the per-child decomposition too. The ledgers behind those
+    // rows are *correct* — they still sum to an account whose short goes on
+    // losing — but they are the same shape of curve as the one above, so
+    // `(e - prev) / prev` inverts sign on them at exactly the same crossing.
+    // Leaving them unpinned would have reintroduced this whole file's defect one
+    // level down, and broken `Attribution`'s per-bar sum along the way.
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    for (bar, row) in attribution.equity().iter().enumerate() {
+        let sum: Real = row.iter().sum();
+        assert!(
+            (sum - report.equity_curve[bar]).abs() < 1e-9,
+            "bar {bar}: Σ children {sum} != account {}",
+            report.equity_curve[bar]
+        );
+    }
+    assert!(
+        attribution.equity()[ruin..]
+            .iter()
+            .all(|row| row.iter().all(|&e| e == 0.0)),
+        "no child equity is recorded past ruin"
+    );
+    // And the bars before it are untouched — the pin is terminal, not a wipe.
+    assert!(
+        attribution.equity()[..ruin]
+            .iter()
+            .any(|row| row.iter().any(|&e| e != 0.0)),
+        "the solvent bars must still carry their decomposition"
+    );
 }
 
 // ---------------------------------------------------------------------------

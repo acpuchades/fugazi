@@ -428,6 +428,23 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   identities hold and are asserted: signed units sum to the account's own, and
   every equity row sums to that bar's `equity_curve` entry (the `Σ ledgers ==
   account` invariant, sampled per bar).
+  - **A net buy is submitted as a fraction of equity, so it can fill *more* units
+    than were netted.** `submit_symbol` re-spells the imbalance that way on
+    purpose (it preserves a child's intent through a price move, and it is the
+    form the account will `shrink_buy_to_fit`), which means the account resolves
+    it at the fill price while `market_delta` was counted at the previous bar's
+    mark. `attribute_market`'s fraction is therefore **not capped at 1** — capping
+    it left the excess units, and the cash they cost, in the account and in no
+    ledger, and the gap then floated with the mark for the length of the hold.
+    The fraction scales the **market part only**: crossed units never reached the
+    market, so they cannot fill differently than counted, and booking them whole
+    is what makes the legs sum to exactly what filled in both directions.
+  - **Ruin pins the rows, not just the curve.** `backtest::run` calls
+    `Attribution::pin_from(ruin_bar)` — the portfolio pushes each row inside its
+    own `update`, which runs before the driver's ruin check and knows nothing
+    about it, so an unpinned row would go on tracking a ruined account's moving
+    marks against a curve reading `0.0`. Same sign-inversion defect `ruin_bar`
+    exists to prevent, one level down.
   - **Not a breakdown of `report.fills`.** Internally crossed flow has *no account
     fill* (nothing was submitted), so it appears only here, flagged `crossed`.
     That is why this is a stream rather than a `[(child, units)]` field on `Order`

@@ -38,8 +38,16 @@
 //!   [`RunReport::fills`](crate::RunReport::fills) gives.
 //! - **[`Attribution::equity`] sums to the account curve, bar by bar.** Not
 //!   just at the end — every row sums to that bar's
-//!   [`RunReport::equity_curve`](crate::RunReport::equity_curve) entry. This is
-//!   the portfolio's core `Σ ledgers == account` invariant, sampled per bar.
+//!   [`RunReport::equity_curve`](crate::RunReport::equity_curve) entry, for
+//!   every bar of every run. This is the portfolio's core
+//!   `Σ ledgers == account` invariant, sampled per bar.
+//!
+//!   The one thing that is *not* a residual to render: from a
+//!   [`ruin_bar`](crate::RunReport::ruin_bar) onward both sides read `0.0`,
+//!   because the account curve is pinned there and these rows are pinned with
+//!   it. The children did not simultaneously go to zero — the account did, and
+//!   nothing past it is recorded on either side. See
+//!   [`RunReport::ruin_bar`](crate::RunReport::ruin_bar).
 //!
 //! # A `ChildFill` is not a breakdown of an account fill
 //!
@@ -112,6 +120,23 @@ impl<Sym> Attribution<Sym> {
             names,
             fills,
             equity,
+        }
+    }
+
+    /// Pin every row from `bar` onward to zero, mirroring the driver's own
+    /// post-[ruin](crate::RunReport::ruin_bar) pin on
+    /// [`equity_curve`](crate::RunReport::equity_curve).
+    ///
+    /// Not cosmetic, and not only for the sum's sake. A ruined account's marks
+    /// keep moving — a short's loss is unbounded above, so the ledgers behind
+    /// these rows go on tracking it — and a per-child curve allowed below zero
+    /// reports further losses as *gains*, since `(e - prev) / prev` inverts sign
+    /// once `prev < 0`. That is the whole reason the account curve is pinned;
+    /// [`child_equity`](Self::child_equity) is a curve people take returns off
+    /// in exactly the same way, so it is pinned in exactly the same place.
+    pub(crate) fn pin_from(&mut self, bar: usize) {
+        for row in self.equity.iter_mut().skip(bar) {
+            row.iter_mut().for_each(|e| *e = 0.0);
         }
     }
 

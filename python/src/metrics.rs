@@ -160,7 +160,15 @@ impl PyChildFill {
 ///
 /// - summing `side * units` over `fills` gives exactly what the same sum over
 ///   `RunReport.fills` gives;
-/// - `equity[bar]` sums to `RunReport.equity_curve[bar]`, on **every** bar.
+/// - `equity[bar]` sums to `RunReport.equity_curve[bar]`, on **every** bar of
+///   **every** run — there is no residual belonging to the parent rather than to
+///   a child, and nothing to absorb or render alongside.
+///
+/// The one case worth knowing about is not a residual: from `RunReport.ruin_bar`
+/// onward, both sides read `0.0`. The account curve is pinned there (a curve
+/// allowed below zero reports further losses as gains) and these rows are pinned
+/// with it, so the sum still holds — but the children did not all go to zero at
+/// once; the account did, and nothing past it is recorded on either side.
 ///
 /// The tempting alternative — running each child standalone over the same bars
 /// and differencing — does not reproduce the composite. Children on one account

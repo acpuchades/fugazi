@@ -1522,6 +1522,139 @@ fn opposite_sides_cross_internally_and_only_the_imbalance_trades() {
     portfolio.assert_books_balance(&wallet);
 }
 
+/// Bars on A whose price is `prices[i]`, plus a flat B — so a fill at bar
+/// `i + 1`'s open happens at a *different* price from the mark the portfolio
+/// netted against at bar `i`'s close.
+fn stepped_a_snapshots(prices: &[Real]) -> Vec<Snapshot<&'static str>> {
+    prices
+        .iter()
+        .map(|&px| {
+            let mut s = Snapshot::new();
+            s.push(Some("A"), None, Atom::new(flat_bar(px)));
+            s.push(Some("B"), None, Atom::new(flat_bar(50.0)));
+            s
+        })
+        .collect()
+}
+
+#[test]
+fn a_net_buy_filling_below_its_mark_is_attributed_in_full() {
+    // A net buy is submitted as a *fraction of equity* (see `submit_symbol`), so
+    // a price that falls between the mark it was netted at and the open it fills
+    // at buys **more** units than the netted `market_delta` counted. Those extra
+    // units are as much the children's as the counted ones: capping the split at
+    // the count would leave them — and the cash they cost — in the account and
+    // in no ledger, and the gap would then float with the mark for as long as
+    // the position was held.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("a1", HoldUnits::new("A", 3.0))
+        .add("a2", HoldUnits::new("A", 2.0))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(2_000.0);
+    // Netted at 100 on bar 0, filled at 75 on bar 1, then marked down to 50 —
+    // the last step is what makes a units gap visible as an equity gap.
+    let report = backtest::run(
+        &mut portfolio,
+        &mut wallet,
+        stepped_a_snapshots(&[100.0, 75.0, 75.0, 50.0]),
+    );
+
+    // The fixture is only a regression test if it actually over-fills.
+    let account_units: Real = report
+        .fills
+        .iter()
+        .filter(|f| f.order.symbol == "A")
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    assert!(
+        account_units > 5.0 + 1e-9,
+        "fixture must over-fill the netted 5 units, got {account_units}"
+    );
+
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    let attributed: Real = attribution
+        .fills()
+        .iter()
+        .filter(|f| f.order.symbol == "A")
+        .map(|f| f.order.side.sign() * f.order.units)
+        .sum();
+    assert!(
+        (attributed - account_units).abs() < 1e-9,
+        "attributed {attributed} != account {account_units}"
+    );
+    // Split pro rata by what each child asked for: 3:2 of whatever filled.
+    assert!(
+        (portfolio.sub_position(0, &"A") - account_units * 0.6).abs() < 1e-9,
+        "child 0 holds {}",
+        portfolio.sub_position(0, &"A")
+    );
+    assert!(
+        (portfolio.sub_position(1, &"A") - account_units * 0.4).abs() < 1e-9,
+        "child 1 holds {}",
+        portfolio.sub_position(1, &"A")
+    );
+    portfolio.assert_books_balance(&wallet);
+    for (bar, row) in attribution.equity().iter().enumerate() {
+        let sum: Real = row.iter().sum();
+        assert!(
+            (sum - report.equity_curve[bar]).abs() < 1e-9,
+            "bar {bar}: Σ children {sum} != account {}",
+            report.equity_curve[bar]
+        );
+    }
+}
+
+#[test]
+fn an_over_fill_scales_the_market_part_and_leaves_the_cross_whole() {
+    // The same over-fill with a cross underneath it. Only the imbalance was
+    // submitted, so only the imbalance can fill differently than counted: the
+    // crossed units never reached the market and are booked whole. The seller
+    // therefore still sells exactly what it asked for, while the buyer absorbs
+    // the whole of the market side's surprise.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("long_a", HoldUnits::new("A", 10.0))
+        .add("short_a", HoldUnits::new("A", -4.0))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(
+        &mut portfolio,
+        &mut wallet,
+        stepped_a_snapshots(&[100.0, 75.0, 75.0, 50.0]),
+    );
+
+    // 6 units netted out at a mark of 100; the open at 75 fills 8.
+    let account_units = wallet.position(&"A").amount;
+    assert!(
+        (account_units - 8.0).abs() < 1e-9,
+        "expected the value-framed net buy to fill 8 units, got {account_units}"
+    );
+    assert!(
+        (portfolio.sub_position(1, &"A") + 4.0).abs() < 1e-9,
+        "the crossed seller sells exactly its 4 units, got {}",
+        portfolio.sub_position(1, &"A")
+    );
+    assert!(
+        (portfolio.sub_position(0, &"A") - 12.0).abs() < 1e-9,
+        "the buyer takes its 4 crossed units plus the 8 that filled, got {}",
+        portfolio.sub_position(0, &"A")
+    );
+    portfolio.assert_books_balance(&wallet);
+
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+    for (bar, row) in attribution.equity().iter().enumerate() {
+        let sum: Real = row.iter().sum();
+        assert!(
+            (sum - report.equity_curve[bar]).abs() < 1e-9,
+            "bar {bar}: Σ children {sum} != account {}",
+            report.equity_curve[bar]
+        );
+    }
+}
+
 #[test]
 fn crossed_flow_pays_no_commission() {
     // The documented cost of netting rather than grossing up: the offsetting
@@ -2488,6 +2621,53 @@ fn per_child_equity_sums_to_the_account_curve_on_every_bar() {
     assert!(
         (fast[fast.len() - 1] - slow[slow.len() - 1]).abs() > 1.0,
         "the two children should not have contributed identically"
+    );
+}
+
+/// An EMA/EMA crossover child on `AAA`, seeded at half of a 10k portfolio.
+///
+/// Deliberately *not* `close`-against-an-EMA: two smoothed legs cross far less
+/// often, so the child holds for long stretches — which is what turns a units
+/// gap opened at an entry into an equity gap that compounds for the length of
+/// the hold. It is also the ordinary shape a portfolio renderer emits.
+fn ema_vs_ema_child(fast: usize, slow: usize) -> SingleAssetStrategy<&'static str> {
+    let close = || Close::of(Pick::<&'static str>::new());
+    SingleAssetStrategy::<&'static str>::with_initial_equity("AAA", 5_000.0).long_on(
+        Ema::new(close(), fast).crosses_above(Ema::new(close(), slow)),
+        Ema::new(close(), fast).crosses_below(Ema::new(close(), slow)),
+    )
+}
+
+#[test]
+fn per_child_equity_sums_to_the_account_curve_across_a_long_hold() {
+    // The identity has to survive the case that gives it the most room to drift:
+    // slow children that enter rarely and hold for a hundred bars, so any units
+    // an entry failed to attribute stay unattributed while the mark moves away
+    // from the price they were bought at. This shape used to leave a residual
+    // that was zero on the entry bar and grew monotonically from there.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(10_000.0)
+        .add("a", ema_vs_ema_child(10, 30))
+        .add("b", ema_vs_ema_child(5, 40))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(10_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, one_symbol_wave(400));
+    let attribution = report.attribution.as_ref().expect("a portfolio attributes");
+
+    for (bar, row) in attribution.equity().iter().enumerate() {
+        let sum: Real = row.iter().sum();
+        assert!(
+            (sum - report.equity_curve[bar]).abs() < 1e-9,
+            "bar {bar}: Σ children {sum} != account {}",
+            report.equity_curve[bar]
+        );
+    }
+    // The fixture has to actually hold, or it proves nothing about holding.
+    assert!(
+        report.fills.len() < 60,
+        "fixture should trade rarely, got {} fills",
+        report.fills.len()
     );
 }
 

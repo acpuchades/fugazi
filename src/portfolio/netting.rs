@@ -485,7 +485,8 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
                         market_delta,
                     };
                     let filled = order.side.sign() * order.units;
-                    let fraction = (filled / market_delta).clamp(0.0, 1.0);
+                    // Uncapped above, for the reason `attribute_market` gives.
+                    let fraction = (filled / market_delta).max(0.0);
                     self.book(&flow, fraction, order.price, order.price, order.commission);
                     return;
                 }
@@ -675,10 +676,20 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             return self.attribute_unmatched(symbol, fill);
         };
         let signed = fill.side.sign() * fill.units;
-        // Partial fills scale the whole bar's flow proportionally, which keeps
-        // `Σ ledger delta == substrate delta` exactly.
+        // How much of the *market* leg of this bar's flow the account actually
+        // moved. Scales the market part of every leg in `book`, which is what
+        // keeps `Σ ledger delta == account delta` exactly.
+        //
+        // **Not clamped above 1.** A net buy goes out as a fraction of equity
+        // (see `submit_symbol`), so the account resolves it into units at the
+        // fill price while `market_delta` was counted at the previous bar's
+        // mark: a price that fell in between buys *more* units than were
+        // counted, and this is legitimately > 1. Capping it would leave those
+        // units — and the cash they cost — in the account and in no ledger at
+        // all, and the gap would then float with the mark for as long as the
+        // position was held.
         let fraction = if flow.market_delta.abs() > POSITION_EPSILON {
-            (signed / flow.market_delta).clamp(0.0, 1.0)
+            (signed / flow.market_delta).max(0.0)
         } else {
             1.0
         };
@@ -690,10 +701,18 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.book(&flow, fraction, open, fill.price, fill.commission)
     }
 
-    /// Move ledgers for `fraction` of `flow`, splitting each child's share into
-    /// the part that crossed internally (settled at `crossed_price`, free) and
-    /// the part that reached the market (settled at `market_price`, carrying a
-    /// pro-rata slice of `commission`).
+    /// Move ledgers for `flow`, splitting each child's share into the part that
+    /// crossed internally (settled at `crossed_price`, free) and the part that
+    /// reached the market (settled at `market_price`, carrying a pro-rata slice
+    /// of `commission`).
+    ///
+    /// `fraction` scales the **market part only**. The crossed part is booked in
+    /// full whatever the account did with the netted order, because no account
+    /// order was ever placed for it: it is one child's units moving to another
+    /// at a price both are marked at, needing no cash the account did not
+    /// already hold. That is also what makes the identity exact in both
+    /// directions — the crossed parts net to zero across the legs, so the legs
+    /// sum to `fraction * market_delta`, which is precisely what filled.
     fn book(
         &mut self,
         flow: &PendingFlow<Sym>,
@@ -734,23 +753,31 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             .map(|l| l.delta.abs() * market_share)
             .sum();
 
+        // What the account moved of the market leg, which the commission is
+        // shared out across.
+        let filled_market_units = market_units * fraction;
+
         let mut out = Vec::new();
         for leg in &flow.legs {
-            let delta = leg.delta * fraction;
-            if delta.abs() <= POSITION_EPSILON {
-                continue;
-            }
             let on_majority = (leg.delta > 0.0) == majority_is_buy;
-            // The minority side is entirely crossed; the majority side splits.
+            // The minority side is entirely crossed; the majority side splits,
+            // and only its market half follows the fill.
             let market_part = if on_majority {
-                delta * market_share
+                leg.delta * market_share * fraction
             } else {
                 0.0
             };
-            let crossed_part = delta - market_part;
-            let comm = if market_units > POSITION_EPSILON {
-                commission * (market_part.abs() * fraction)
-                    / (market_units * fraction).max(POSITION_EPSILON)
+            let crossed_part = if on_majority {
+                leg.delta * (1.0 - market_share)
+            } else {
+                leg.delta
+            };
+            let delta = market_part + crossed_part;
+            if delta.abs() <= POSITION_EPSILON {
+                continue;
+            }
+            let comm = if filled_market_units > POSITION_EPSILON {
+                commission * market_part.abs() / filled_market_units
             } else {
                 0.0
             };

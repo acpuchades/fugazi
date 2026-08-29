@@ -451,6 +451,22 @@ where
         equity_curve.push(equity);
     }
 
+    // Taken, not read: the composite's buffers are scoped to this run the same
+    // way `fills` and `equity_curve` are, so draining here is what keeps a
+    // long-lived portfolio driven over repeated runs from accumulating every
+    // previous run's rows. `None` for every shape that is not a composite.
+    let mut attribution = strategy.take_attribution();
+    // Ruin pins the per-child rows exactly as it pins the curve they sum to.
+    // The portfolio pushed each row inside its own `update`, which runs before
+    // this loop's ruin check and knows nothing about it — so a ruined account
+    // whose marks keep moving (a short's loss is unbounded above) would
+    // otherwise leave the rows tracking it against a curve reading `0.0`, and a
+    // per-child return taken off one would invert sign the moment it crossed
+    // zero. Same defect, same fix, one bar index apart.
+    if let (Some(a), Some(bar)) = (attribution.as_mut(), ruin_bar) {
+        a.pin_from(bar);
+    }
+
     RunReport {
         equity_curve,
         fills,
@@ -458,12 +474,7 @@ where
         initial_equity,
         ruin_bar,
         carry_coverage: wallet.carry_coverage(),
-        // Taken, not read: the composite's buffers are scoped to this run the
-        // same way `fills` and `equity_curve` are, so draining here is what
-        // keeps a long-lived portfolio driven over repeated runs from
-        // accumulating every previous run's rows. `None` for every shape that
-        // is not a composite.
-        attribution: strategy.take_attribution(),
+        attribution,
     }
 }
 

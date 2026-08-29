@@ -3751,6 +3751,38 @@ def test_per_child_equity_sums_to_the_account_curve_on_every_bar():
         assert abs(sum(row) - report.equity_curve[bar]) < 1e-8, f"bar {bar}"
 
 
+_SLOW_ATTRIBUTION_YAML = """
+children:
+  - name: a
+    strategy:
+      root: !pick { symbol: AAA, freq: 1d }
+      long:
+        enter: !crosses_above { lhs: !ema { period: 10, source: !close }, rhs: !ema { period: 30, source: !close } }
+        exit:  !crosses_below { lhs: !ema { period: 10, source: !close }, rhs: !ema { period: 30, source: !close } }
+  - name: b
+    strategy:
+      root: !pick { symbol: AAA, freq: 1d }
+      long:
+        enter: !crosses_above { lhs: !ema { period: 5, source: !close }, rhs: !ema { period: 40, source: !close } }
+        exit:  !crosses_below { lhs: !ema { period: 5, source: !close }, rhs: !ema { period: 40, source: !close } }
+"""
+
+
+def test_per_child_equity_sums_to_the_account_curve_across_a_long_hold():
+    """The identity has to survive the case with the most room to drift: two
+    smoothed legs cross far less often than a close against one, so the children
+    hold for long stretches. Any units an entry failed to attribute then stay
+    unattributed while the mark moves away from the price they were bought at —
+    a residual that is zero on the entry bar and compounds from there."""
+    spec = ta.load_spec(_SLOW_ATTRIBUTION_YAML, kind="portfolio")
+    report = spec.run(ta.PaperWallet(10_000.0), _overlapping_wave(400))
+    attribution = report.attribution
+    for bar, row in enumerate(attribution.equity):
+        assert abs(sum(row) - report.equity_curve[bar]) < 1e-8, f"bar {bar}"
+    # The fixture has to actually hold, or it proves nothing about holding.
+    assert len(report.fills) < 60
+
+
 def test_child_equity_column_answers_which_child_stopped_contributing():
     """The question the whole surface exists for."""
     _, attribution = _run_attributed()
