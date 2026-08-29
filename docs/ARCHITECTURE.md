@@ -845,7 +845,11 @@ instantiations are open-ended). The *structure* is rebuilt from the spec; only t
   stateful core that carries its own configuration (`WindowStats`, `EmaState`,
   …). **Default-is-state is deliberate:** forgetting
   `#[state(source)]` on a new box field is a **compile error** (a box isn't
-  `Serialize`), not silent loss.
+  `Serialize`), not silent loss. `#[state(skip)]` is the one annotation with no
+  such backstop, so it is the one to justify: it belongs on `PhantomData`, on a
+  shared handle, and on a value `update` recomputes before the next read — never
+  on something the next bar's answer depends on. "The type is generic so it
+  cannot be serialized" is not a reason; add the bound (see *Run resuming*).
   - **Why `window` is its own role.** A `Ring` serializes as a bare
     oldest-first array — the shape the `VecDeque` it replaced produced, so old
     run-state files still load — and that array does **not** record the capacity.
@@ -1050,10 +1054,31 @@ mark-driven and never sees a fill, so its legs are permanently empty.
 two `impl Indicator` forwarding lines**, or its state is silently lost on resume.
 tests/resume.rs is the acceptance gate.
 
-**Bounded, documented limitations:** the generic-typed prior of `Change` and the held
-value of `Latch` are skipped (their `S::Output` is unbounded) → a one-bar re-warm at
-the resume boundary; `Shared`/`SharedComponent` are no-op (the spec layer never uses
+**`S::Output` being an unbounded associated type is not a reason to skip a field.**
+`Change`'s prior and `Latch`'s held value were both `#[state(skip)]` on that
+reasoning, described as a one-bar re-warm. They were not: `Change` *is* its prior, so
+a restored one read `None` on its first bar and the transition **into** that bar
+vanished — and since the spec layer builds `!crosses_above` as `cmp.and(cmp.changed())`
+and every cadence sugar (`!daily`, `!weekly`, `!monthly`, …) as
+`!changed { source: !day }`, a resumed run silently dropped every crossing and every
+rollover that landed on a chunk's first bar. A live deployment is a chunked resumed
+run by construction, so the loss rate was set by the scheduler's cadence rather than
+by anything in the strategy, and nothing surfaced it. `Latch` was worse: it held
+`None` until the inner source next emitted, so a `!resample`d leg sat out the rest of
+its bucket. Both now carry an explicit `Serialize + DeserializeOwned` bound on
+`S::Output` and are saved like any other state. **Fixed in 0.94.0.**
+
+The remaining no-op: `Shared`/`SharedComponent` (the spec layer never uses
 `.shared()`).
+
+**A fixed split list is not a resume test.** Anything defined against the previous
+bar's value only diverges when a seam lands on a bar it cared about, and
+`tests/resume.rs`'s `SPLITS` (20, 40) hit none of this price path's crossings — the
+crossover resume test passed for nine releases over a broken detector. The
+`*_with_a_seam_on_every_bar` tests sweep every interior bar as a chunk's first bar,
+cutting at `[cut, cut + 1]` so the three-chunk restore → re-save rule still holds.
+`assert_chunked_state_matches` cannot cover this either: a *skipped* field is absent
+from both blobs, so the two states compare equal.
 
 Config drift *is* guarded, per field, by `#[state(config)]` / `#[state(core)]`
 (above) on top of the `kind` + `format_version` checks — but the guard is only as

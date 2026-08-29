@@ -26,6 +26,8 @@
 //! ```
 
 use fugazi_derive::SaveState;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::indicator::Indicator;
 use crate::indicators::component::Component;
@@ -267,29 +269,36 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
 /// delay, and (crucially) doesn't mask an unsettled inner value into looking
 /// stable to `Stable` or the CLI's gate.
 #[derive(Clone, SaveState)]
-pub struct Latch<S: Indicator> {
+pub struct Latch<S: Indicator>
+where
+    S::Output: Serialize + DeserializeOwned,
+{
     #[state(source)]
     inner: S,
     /// The last emitted output; `None` until the inner source has produced one.
     ///
-    /// `S::Output` is an unbounded associated type, so the held value can't be
-    /// serialized in general and is skipped. A resumed `Latch` therefore holds
-    /// `None` until the inner source next emits `Some` — between higher-timeframe
-    /// boundaries it re-warms rather than re-emitting the pre-resume value. This
-    /// is the one bounded, self-healing fidelity gap in the resume path (shared
-    /// with the generic `Change` toggle detector).
-    #[state(skip)]
+    /// Saved, not skipped — the held value *is* the latch. Skipping it made a
+    /// resumed `Latch` read `None` until the inner source next emitted, so a
+    /// higher-timeframe chain sat out the rest of its bucket (up to a whole
+    /// week on `!resample { freq: 1w }`) on every resume. `S::Output` is an
+    /// unbounded associated type, hence the explicit serde bound.
     pub value: Option<S::Output>,
 }
 
-impl<S: Indicator> Latch<S> {
+impl<S: Indicator> Latch<S>
+where
+    S::Output: Serialize + DeserializeOwned,
+{
     /// Wrap `inner`, latching its most recent output.
     pub fn new(inner: S) -> Self {
         Self { inner, value: None }
     }
 }
 
-impl<S: Indicator> Indicator for Latch<S> {
+impl<S: Indicator> Indicator for Latch<S>
+where
+    S::Output: Serialize + DeserializeOwned,
+{
     type Input = S::Input;
     type Output = S::Output;
 
@@ -460,6 +469,39 @@ mod tests {
         latch.reset();
         assert!(latch.value.is_none());
         assert!(latch.update(bar(3.0).into()).is_none());
+    }
+
+    /// A resumed `Latch` must still be holding what it held.
+    ///
+    /// `value` used to be `#[state(skip)]`, so a restored latch read `None`
+    /// until its inner source next emitted — on `!resample { freq: 1w }` that
+    /// is the rest of the week, during which the whole higher-timeframe leg
+    /// silently reports nothing and the strategy sits out. Every seam is swept
+    /// because the gap only shows *between* boundaries.
+    #[test]
+    fn a_restored_latch_still_holds_its_value_between_boundaries() {
+        let build = || Latch::new(Resample::new(Current::candle(), 3));
+        let series: Vec<Candle> = (1..=10).map(|i| bar(i as Real)).collect();
+
+        let mut whole = build();
+        let want: Vec<_> = series
+            .iter()
+            .map(|c| whole.update((*c).into()).map(|b| b.close))
+            .collect();
+
+        for cut in 1..series.len() {
+            let mut first = build();
+            for c in &series[..cut] {
+                first.update((*c).into());
+            }
+            let mut second = build();
+            second.load_state(&first.save_state()).expect("restore");
+            let got: Vec<_> = series[cut..]
+                .iter()
+                .map(|c| second.update((*c).into()).map(|b| b.close))
+                .collect();
+            assert_eq!(got, want[cut..], "seam at bar {cut}");
+        }
     }
 
     // ---- Composition-order regression ----

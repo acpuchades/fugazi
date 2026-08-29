@@ -1,6 +1,6 @@
 [package]
 name = "fugazi-derive"
-version = "0.93.1"
+version = "0.94.0"
 edition = "2024"
 license = "MIT"
 description = "Internal derive macros for the fugazi crate (SaveState — run-state serialization)."

@@ -58,6 +58,15 @@
 //! Default-is-state is deliberate: forgetting `#[state(source)]` on a new child
 //! field makes the derive try to `serde_json::to_value` a non-`Serialize`
 //! trait-object box, which is a **compile error** — not a silent state loss.
+//!
+//! `#[state(skip)]` is the one role with no such backstop, and the one to
+//! justify in a comment. It is for `PhantomData`, for shared `Arc<Mutex>`
+//! handles, and for a cache `update` recomputes before the next read — never
+//! for a field the *next* bar's answer depends on. "The field's type is a
+//! generic associated type, so it isn't `Serialize` in general" is not a
+//! reason to skip: it is a reason to bound it. `Change::prev` and
+//! `Latch::value` were both skipped on exactly that argument, and both
+//! silently dropped signals at every resume boundary until 0.94.0.
 
 use proc_macro::TokenStream;
 use quote::quote;

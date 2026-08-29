@@ -10,6 +10,8 @@
 use std::marker::PhantomData;
 
 use fugazi_derive::SaveState;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::indicator::Indicator;
 use crate::indicators::ops::{BinaryOp, Combine};
@@ -141,25 +143,24 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
 #[derive(Debug, Clone, SaveState)]
 pub struct Change<S: Indicator>
 where
-    S::Output: PartialEq + Clone,
+    S::Output: PartialEq + Clone + Serialize + DeserializeOwned,
 {
     #[state(source)]
     inner: S,
-    // `S::Output` is an unbounded associated type, so it can't be serialized in
-    // general. `prev` is therefore skipped: on resume, a change/toggle detector
-    // re-warms for a single bar (it emits `None` on the first post-resume bar,
-    // then resumes normally), so a transition landing exactly on the resume
-    // boundary can be missed. The dedicated crossover primitives
-    // (`CrossesAbove`/`CrossesBelow`) carry concrete-typed prev slots and do not
-    // have this artifact.
-    #[state(skip)]
+    // Saved, not skipped. `prev` *is* the detector: without it a resumed
+    // `Change` emits `None` on its first post-resume bar, so a transition
+    // landing exactly on a chunk boundary is silently missed — and since the
+    // spec layer builds `!crosses_above` as `cmp.and(cmp.changed())`, that
+    // dropped every crossing that coincided with a resume seam. `S::Output` is
+    // an unbounded associated type, hence the explicit serde bound; every
+    // output `changed()` is reachable on is `Real` or `bool`.
     prev: Option<S::Output>,
     value: Option<bool>,
 }
 
 impl<S: Indicator> Change<S>
 where
-    S::Output: PartialEq + Clone,
+    S::Output: PartialEq + Clone + Serialize + DeserializeOwned,
 {
     pub(crate) fn new(inner: S) -> Self {
         Self {
@@ -172,7 +173,7 @@ where
 
 impl<S: Indicator> Indicator for Change<S>
 where
-    S::Output: PartialEq + Clone,
+    S::Output: PartialEq + Clone + Serialize + DeserializeOwned,
 {
     type Input = S::Input;
     type Output = bool;
@@ -528,5 +529,98 @@ mod every_tests {
     #[should_panic(expected = "period must be > 0")]
     fn every_rejects_zero_period() {
         let _: Every<()> = Every::new(0);
+    }
+}
+
+#[cfg(test)]
+mod change_state_tests {
+    use crate::Indicator;
+    use crate::indicators::{Identity, IndicatorExt};
+    use crate::types::Real;
+
+    /// Feed `head`, save, rebuild from scratch, restore, then feed `tail` —
+    /// the way a resumed run reaches its first bar.
+    fn across_a_seam(head: &[Real], tail: &[Real]) -> Vec<Option<bool>> {
+        let mut first = Identity::<Real>::new().changed();
+        for &x in head {
+            first.update(x);
+        }
+        let blob = first.save_state();
+
+        let mut second = Identity::<Real>::new().changed();
+        second.load_state(&blob).expect("restore");
+        tail.iter().map(|&x| second.update(x)).collect()
+    }
+
+    /// The bug this guards: `prev` used to be `#[state(skip)]`, so a restored
+    /// `Change` reported `None` on its first bar and the transition *into* that
+    /// bar vanished. The spec layer builds `!crosses_above` as
+    /// `cmp.and(cmp.changed())` and every cadence sugar (`!daily`, `!monthly`,
+    /// …) as `!changed { source: !day }`, so that one skipped field dropped
+    /// every crossing and every rollover landing on a resume seam.
+    #[test]
+    fn a_transition_onto_the_first_bar_after_a_restore_still_fires() {
+        // Uninterrupted: 1,1,2 → the third update is the change.
+        let mut whole = Identity::<Real>::new().changed();
+        let whole_out: Vec<_> = [1.0, 1.0, 2.0].iter().map(|&x| whole.update(x)).collect();
+        assert_eq!(whole_out, vec![None, Some(false), Some(true)]);
+
+        // Cut so the change is the first bar of the resumed chunk.
+        assert_eq!(
+            across_a_seam(&[1.0, 1.0], &[2.0]),
+            vec![Some(true)],
+            "the change into the first post-resume bar must still fire",
+        );
+    }
+
+    /// A seam that is *not* a transition must stay `Some(false)` — restoring
+    /// `prev` must not manufacture an edge either.
+    #[test]
+    fn a_steady_value_across_a_restore_does_not_fire() {
+        assert_eq!(
+            across_a_seam(&[1.0, 1.0], &[1.0, 3.0]),
+            vec![Some(false), Some(true)]
+        );
+    }
+
+    /// Every cut point of one series reproduces the uninterrupted readings.
+    #[test]
+    fn a_restore_at_any_bar_reproduces_the_uninterrupted_readings() {
+        let series: Vec<Real> = [1.0, 1.0, 2.0, 2.0, 2.0, 5.0, 5.0, 1.0, 1.0].to_vec();
+        let mut whole = Identity::<Real>::new().changed();
+        let want: Vec<_> = series.iter().map(|&x| whole.update(x)).collect();
+
+        for cut in 1..series.len() {
+            let got = across_a_seam(&series[..cut], &series[cut..]);
+            assert_eq!(got, want[cut..], "seam at bar {cut}");
+        }
+    }
+
+    /// The bool side of the same detector — `changed()` over a predicate is
+    /// what a crossover composes.
+    #[test]
+    fn the_bool_toggle_detector_carries_prev_across_a_seam_too() {
+        use crate::indicators::{BoolIndicatorExt, Value};
+
+        let build = || {
+            Identity::<Real>::new()
+                .gt(Value::<Real>::new(3.0))
+                .changed()
+        };
+        let series: Vec<Real> = [1.0, 2.0, 4.0, 5.0, 1.0].to_vec();
+
+        let mut whole = build();
+        let want: Vec<_> = series.iter().map(|&x| whole.update(x)).collect();
+
+        for cut in 1..series.len() {
+            let mut first = build();
+            for &x in &series[..cut] {
+                first.update(x);
+            }
+            let mut second = build();
+            second.load_state(&first.save_state()).expect("restore");
+            let got: Vec<_> = series[cut..].iter().map(|&x| second.update(x)).collect();
+            assert_eq!(got, want[cut..], "seam at bar {cut}");
+        }
     }
 }

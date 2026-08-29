@@ -1961,6 +1961,53 @@ def test_run_resumable_matches_uninterrupted_run_across_three_chunks(case, yaml,
     _assert_chunked_resume(case, yaml, snaps, [20, 40])
 
 
+def test_a_crossover_resumes_with_a_seam_on_every_bar():
+    """Every bar in turn is a resumed chunk's *first* bar.
+
+    A fixed split list only fails when a seam happens to land on a bar the
+    strategy cared about. A crossover is defined against the **previous** bar's
+    comparison, so a resume that drops that state is invisible unless a seam
+    coincides with a crossing — which [20, 40] does not on this path. It is
+    exactly how a resumed `!crosses_above` silently skipped every crossing that
+    landed on a chunk boundary, which in a live deployment (one chunk per
+    scheduler tick) is a signal loss set by the cadence, not by the strategy.
+
+    Cutting at [cut, cut + 1] makes both bars a chunk's first bar and keeps the
+    three-chunk restore-then-re-save rule.
+    """
+    snaps = _snaps_single("X", _wobbly(60))
+    for cut in range(1, len(snaps) - 1):
+        _assert_chunked_resume(
+            f"single/ema seam@{cut}", _RESUME_YAML, snaps, [cut, cut + 1]
+        )
+
+
+def test_a_wall_clock_cadence_resumes_with_a_seam_on_every_bar():
+    """`!weekly` lowers to `!changed { source: !week_of_year }`.
+
+    Every cadence sugar rides the same previous-bar slot a crossover does, so a
+    rollover landing on a tick boundary must still fire. Gating entry on it
+    makes a dropped rollover a missed trade rather than something the next bar
+    might paper over. These snapshots carry timestamps — the calendar
+    accessors have nothing to read without them.
+    """
+    yaml = """
+    root: X
+    long:
+      enter: !all
+        - !gt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+        - !weekly
+      exit: !lt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+    """
+    day = 86_400_000
+    snaps = [
+        ta.Snapshot({"X": ta.Atom(ta.Candle(v, v, v, v, 1000.0), None, i * day)})
+        for i, v in enumerate(_wobbly(60))
+    ]
+    for cut in range(1, len(snaps) - 1):
+        _assert_chunked_resume(f"single/weekly seam@{cut}", yaml, snaps, [cut, cut + 1])
+
+
 def test_flatten_closes_the_position_in_the_wallet():
     """`flatten=True` must leave a genuinely flat book, not just a flat report."""
     hold = """

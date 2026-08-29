@@ -478,6 +478,125 @@ fn single_asset_ema_crossover_resumes_across_three_chunks() {
     );
 }
 
+/// A `!daily` rebalance cadence: the wall-clock sugar lowers to
+/// `!changed { source: !day }`, so its rollover rides the same previous-bar
+/// slot a crossover does. On daily bars every bar is a rollover, which makes a
+/// dropped `prev` immediately visible as a skipped rebalance.
+fn multi_daily_cadence_spec() -> MultiAssetStrategySpec {
+    parse!(
+        MultiAssetStrategySpec,
+        r#"
+        long:
+          enter: !gt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+          exit: !lt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+        sizing: !value 0.5
+        rebalance_on: !weekly
+    "#
+    )
+}
+
+/// Every interior bar is made a resumed chunk's *first* bar, in turn.
+///
+/// A fixed split list can only fail when a seam happens to land on a bar the
+/// strategy cared about. Anything defined against the **previous** bar's value
+/// — a crossover, `!changed`, and every cadence sugar that lowers to it — is
+/// therefore invisible to `SPLITS` unless one of 20/40 coincides with an edge,
+/// which on this price path they do not. That is how `Change::prev` stayed
+/// `#[state(skip)]` for nine releases while a resumed `!crosses_above` dropped
+/// every crossing that landed on a chunk boundary.
+///
+/// Cutting at `[cut, cut + 1]` makes both `cut` and `cut + 1` a chunk's first
+/// bar while keeping this module's three-chunk restore → re-save rule.
+#[track_caller]
+fn assert_resumes_with_a_seam_on_every_bar<S, B>(case: &str, build: B, snaps: &[Snapshot<Symbol>])
+where
+    S: RunnableStrategy,
+    B: Fn() -> S,
+{
+    for cut in 1..snaps.len() - 1 {
+        assert_chunked_resume_matches(
+            &format!("{case} seam@{cut}"),
+            &build,
+            snaps,
+            &[cut, cut + 1],
+        );
+    }
+}
+
+#[test]
+fn a_crossover_resumes_with_a_seam_on_every_bar() {
+    let spec = single_ema_spec();
+    let sch = schema();
+    assert_resumes_with_a_seam_on_every_bar(
+        "single/ema",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+    );
+}
+
+#[test]
+fn a_changed_gate_resumes_with_a_seam_on_every_bar() {
+    // `!changed` named directly, over a Bool inner — the shape a crossover
+    // composes (`cmp.and(cmp.changed())`) and the one the sugar expands to.
+    let spec = parse!(
+        SingleStrategySpec,
+        r#"
+        root: X
+        long:
+          enter: !and
+            lhs: !gt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+            rhs: !changed { source: !gt { lhs: !close, rhs: !sma { period: 5, source: !close } } }
+          exit: !and
+            lhs: !lt { lhs: !close, rhs: !sma { period: 5, source: !close } }
+            rhs: !changed { source: !gt { lhs: !close, rhs: !sma { period: 5, source: !close } } }
+    "#
+    );
+    let sch = schema();
+    assert_resumes_with_a_seam_on_every_bar(
+        "single/changed",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+    );
+}
+
+#[test]
+fn a_latched_higher_timeframe_leg_resumes_with_a_seam_on_every_bar() {
+    // `!latch` holds the finished HTF value between `!resample` boundaries.
+    // Skipping that held value made a resumed run read `None` for the rest of
+    // the bucket — the whole leg silently absent, and on a real `1w` bucket
+    // that is days of sitting out.
+    let spec = parse!(
+        SingleStrategySpec,
+        r#"
+        root: X
+        long:
+          enter: !gt
+            lhs: !close
+            rhs: !latch { source: !resample { every: 5, inner: !ema { period: 3, source: !close } } }
+          exit: !lt
+            lhs: !close
+            rhs: !latch { source: !resample { every: 5, inner: !ema { period: 3, source: !close } } }
+    "#
+    );
+    let sch = schema();
+    assert_resumes_with_a_seam_on_every_bar(
+        "single/latched-htf",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+    );
+}
+
+#[test]
+fn a_wall_clock_rebalance_cadence_resumes_with_a_seam_on_every_bar() {
+    let spec = multi_daily_cadence_spec();
+    let sch = schema();
+    assert_resumes_with_a_seam_on_every_bar(
+        "multi/weekly-cadence",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+    );
+}
+
 #[test]
 fn single_asset_rsi_reversal_with_atr_stop_resumes_across_three_chunks() {
     // Exercises IIR RSI + ATR (Wilder state) + a position-anchored trailing

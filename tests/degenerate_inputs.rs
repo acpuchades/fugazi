@@ -454,68 +454,54 @@ fn every_indicator_resumes_bit_identically_from_a_mid_stream_save() {
     check("cum_max", || CumMax::new(Current::close()));
     check("lag", || Current::close().lag(3));
     check("rolling_max", || Current::close().rolling_max(10));
-    // `Latch` is deliberately **absent**. Its held value is `S::Output`, an
-    // unbounded associated type, so it is `#[state(skip)]` and a resumed
-    // `Latch` re-warms until the inner source next emits — the one bounded,
-    // documented fidelity gap in the resume path (see `docs/ARCHITECTURE.md`,
-    // *Run resuming*, and the field comment on `Latch::value`). It shares that
-    // gap with the generic `Change` toggle detector. Pinned as behaviour by
-    // `a_latch_re_warms_across_a_resume_rather_than_re_emitting` below rather
-    // than asserted away here.
+    // `Latch` used to be excluded here: its held value is `S::Output`, an
+    // unbounded associated type, and it was `#[state(skip)]` on that argument.
+    // It is now bounded and saved, so it is held to the same standard as
+    // everything else — see
+    // `a_latch_resumes_holding_exactly_what_it_held` below, which covers the
+    // `Resample` composition this sweep's `Current`-rooted builders cannot.
 }
 
-/// The documented `Latch` gap, pinned as *behaviour* so it stays bounded.
+/// A resumed `Latch` holds exactly what it held — no gap at all.
 ///
-/// A resumed `Latch` holds nothing until its inner source next emits `Some`.
-/// Over a `Resample`, that is up to `every - 1` bars of `None` where the
-/// never-paused twin re-emits the held bucket — and then the two agree forever.
-/// This test exists to fail if that window ever grows, or if the two stop
-/// converging at the next boundary.
+/// This used to assert the opposite: `Latch::value` was `#[state(skip)]`, so a
+/// resumed latch reported `None` until its inner source next emitted, and the
+/// window was pinned here as "bounded" rather than fixed. It was not bounded in
+/// any way that mattered — on `!resample { freq: 1w }` it is the rest of the
+/// week with the entire higher-timeframe leg silently absent. The held value is
+/// now saved, so the resumed run and its never-paused twin must agree on
+/// **every** bar, from a cut at any offset within a bucket.
 #[test]
-fn a_latch_re_warms_across_a_resume_rather_than_re_emitting() {
+fn a_latch_resumes_holding_exactly_what_it_held() {
     let bars = gapped();
     let every = 4;
     let build = || Latch::new(Resample::new(Current::candle(), every).close());
-    // Cut one bar *after* a bucket boundary, so the held value is the thing
-    // being lost.
-    let cut = 41;
-    assert_eq!(cut % every, 1, "the cut must land mid-bucket");
 
-    let (mut paused, mut twin) = (build(), build());
-    for c in &bars[..cut] {
-        paused.update(Atom::from(*c));
-        twin.update(Atom::from(*c));
-    }
-    assert!(twin.value().is_some(), "precondition: a value is held");
+    // Sweep every offset within a bucket: the old gap only showed mid-bucket.
+    for cut in 40..40 + every {
+        let (mut paused, mut twin) = (build(), build());
+        for c in &bars[..cut] {
+            paused.update(Atom::from(*c));
+            twin.update(Atom::from(*c));
+        }
+        assert!(twin.value().is_some(), "precondition: a value is held");
 
-    let mut resumed = build();
-    resumed
-        .load_state(&paused.save_state())
-        .expect("round trip");
-    assert!(
-        resumed.value().is_none(),
-        "precondition: the held value is not restored"
-    );
+        let mut resumed = build();
+        resumed
+            .load_state(&paused.save_state())
+            .expect("round trip");
+        assert_eq!(
+            resumed.value(),
+            twin.value(),
+            "cut {cut}: the held value must survive the round trip"
+        );
 
-    let mut disagreed = 0usize;
-    for (i, c) in bars[cut..].iter().enumerate() {
-        let a = resumed.update(Atom::from(*c));
-        let b = twin.update(Atom::from(*c));
-        if a != b {
-            disagreed += 1;
-            assert!(
-                a.is_none() && b.is_some(),
-                "the gap must only ever be a missing reading, never a wrong one"
-            );
-        } else {
-            assert!(
-                a.is_none() || i + 1 >= every - (cut % every),
-                "the two must agree from the next boundary onward"
+        for (i, c) in bars[cut..].iter().enumerate() {
+            assert_eq!(
+                resumed.update(Atom::from(*c)),
+                twin.update(Atom::from(*c)),
+                "cut {cut}: diverged {i} bars after the resume"
             );
         }
     }
-    assert!(
-        disagreed < every,
-        "the re-warm must be bounded by one bucket, saw {disagreed} bars"
-    );
 }
