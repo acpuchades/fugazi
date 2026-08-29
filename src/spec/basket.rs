@@ -655,6 +655,9 @@ impl Strategy for DynBasketStrategy {
         self.inner.is_ready()
     }
 
+    fn force_rebalance(&mut self, hold: Option<&[Symbol]>) {
+        self.inner.force_rebalance(hold);
+    }
     fn reset(&mut self) {
         self.inner.reset();
     }

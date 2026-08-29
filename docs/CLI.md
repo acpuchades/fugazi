@@ -351,6 +351,15 @@ restartable, and what lets a paper run roll forward one batch of bars at a time.
 | `--save-state FILE` | After the run, write strategy + wallet state to `FILE` as JSON. Open positions are **kept**, not flattened. |
 | `--resume FILE` | Restore from a `--save-state` file, then continue over this invocation's series. The document must be the same strategy shape the state was captured from, and the file must come from this build (see below). |
 | `--flatten` | **Close** every still-open position at the final bar — a real order through the cost pipeline, so it moves cash, pays commission, and lands in `fills.csv` / `trades.csv` and the trade metrics. The final equity point absorbs the realized cost; the curve keeps one point per bar. Without it, open positions are carried unrealized. |
+| `--rebalance` | Force the document's own `rebalance_on:` gate on the final bar, so the book re-sizes to whatever its `sizing:` chooses against the account as it now stands. The answer to *"I changed this account's leverage — apply it"*: with the default `rebalance_on: !never` a document re-reads its sizing only when it next trades of its own accord. Requires `--save-state` and is mutually exclusive with `--flatten`. |
+
+`--rebalance` needs `--save-state` because the resulting order **queues** for the
+next chunk's open, exactly as every other rebalance does — nothing fills on the bar
+that caused it. Within a self-contained backtest there is no next chunk, so the
+instruction would be a silent no-op; requiring the state file makes that impossible
+to write by accident. What "force the gate" does is the shape's own definition of it:
+a resize on `single:` / `pairs:` / `multi:`, a re-**rank** on `basket:` (whose gate
+wraps selection), and one cash-then-position cycle on `portfolio:`.
 
 `--save-state` and `--flatten` are mutually exclusive: flattening ends the run,
 saving continues it. (Flattening does leave a genuinely flat book, so a state

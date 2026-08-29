@@ -182,6 +182,10 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
     /// close everything
     /// ([`Flatten`](crate::backtest::Closeout::Flatten)), or drive named
     /// symbols to given targets ([`Hold`](crate::backtest::Closeout::Hold)).
+    /// [`Rebalance`](crate::backtest::Closeout::Rebalance) is the odd one and
+    /// the only non-terminal arm: it forces the document's own rebalance gate
+    /// on the final bar, so the book re-sizes to what the strategy would
+    /// choose against the account as it now stands.
     /// Anything but `Carry` acts on the wallet, not just the report, so
     /// `reconstruct_trades`/metrics count the closing legs and the returned
     /// state is the book a later resume actually continues from.
@@ -268,7 +272,14 @@ where
             .restore_state(&state.wallet)
             .map_err(|e| format!("!resume > wallet > {e}"))?;
     }
-    let mut report = crate::backtest::run(strategy, wallet, snapshots.iter().cloned());
+    // `Closeout::Rebalance` is the one arm the driver applies itself, around the
+    // final bar's `trade` rather than after it — see `backtest::run_rebalancing`
+    // for why a rebalance cannot be settled the way the terminal arms are. Its
+    // `hold` map is still handled below by `apply_closeout`, like `Hold`'s.
+    let mut report = match closeout.forced_rebalance_hold() {
+        Some(hold) => crate::backtest::run_rebalancing(strategy, wallet, snapshots, &hold),
+        None => crate::backtest::run(strategy, wallet, snapshots.iter().cloned()),
+    };
     crate::backtest::apply_closeout(strategy, wallet, snapshots, &mut report, closeout);
     let last_bar = last_bar_of(snapshots, resume);
     let final_state = RunState {

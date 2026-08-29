@@ -191,6 +191,10 @@ pub struct SingleAssetStrategy<Sym> {
     /// to the current sizing target. Default is `ValueBool::new(false)` —
     /// sizing is only read on transitions.
     rebalance: RebalanceSignal<Sym>,
+    /// One-shot override of the gate above, armed by
+    /// [`force_rebalance`](Strategy::force_rebalance) for a single `trade` call
+    /// and never serialized. See [`ForcedRebalance`](super::ForcedRebalance).
+    forced_rebalance: super::ForcedRebalance<Sym>,
     position: Position,
     book: Book<Sym>,
     bars_seen: usize,
@@ -252,6 +256,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            forced_rebalance: None,
             position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
@@ -615,7 +620,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
                 enter_short: self.short.is_true(),
                 close_long: self.close_long.is_true(),
                 close_short: self.close_short.is_true(),
-                rebalancing: self.rebalance.value().unwrap_or(false),
+                rebalancing: self.rebalance.value().unwrap_or(false)
+                    || super::forced_for(&self.forced_rebalance, &self.symbol),
                 long_stop: level_value(&self.long_stop),
                 long_target: level_value(&self.long_target),
                 short_stop: level_value(&self.short_stop),
@@ -623,6 +629,13 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
             },
             wallet,
         );
+    }
+
+    /// Arms the gate for the one symbol this strategy trades — unless the
+    /// caller's `hold` names it, in which case there is nothing left for the
+    /// override to do.
+    fn force_rebalance(&mut self, hold: Option<&[Sym]>) {
+        super::arm_rebalance(&mut self.forced_rebalance, hold);
     }
 
     fn reset(&mut self) {
@@ -644,6 +657,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
         }
         self.sizing.reset();
         self.rebalance.reset();
+        self.forced_rebalance = None;
         self.position.reset();
         self.book.reset();
         self.bars_seen = 0;
@@ -687,6 +701,120 @@ mod tests {
         let strat = SingleAssetStrategy::buy_and_hold("X");
         let level = strat.position().entry().mul(Value::new(1.0 - frac));
         strat.long_stop_loss(level)
+    }
+
+    /// A half-invested buy-and-hold whose sizing target moves with equity —
+    /// the fixture the three forced-rebalance tests share. Entering at 100 on
+    /// 1000 cash takes 5 units and leaves 500; once the price doubles, equity is
+    /// 1500 and `value_frac(0.5)` wants 3.75 units instead. A `!never` gate
+    /// never asks, which is exactly the reported behaviour.
+    fn half_invested() -> SingleAssetStrategy<&'static str> {
+        SingleAssetStrategy::buy_and_hold("X").position_sizing(Value::new(0.5))
+    }
+
+    /// Feed one bar: price the wallet, advance the strategy, then trade — the
+    /// driver's own per-bar order, with the latch armed around `trade` the way
+    /// `backtest::drive` arms it.
+    fn step(
+        strat: &mut SingleAssetStrategy<&'static str>,
+        wallet: &mut PaperWallet<&'static str>,
+        price: Real,
+        force: Option<&[&'static str]>,
+    ) {
+        let c = flat_bar(price);
+        for fill in wallet.update("X", c) {
+            strat.on_fill(&fill);
+        }
+        strat.update(Snapshot::of_atom(c.into()));
+        if force.is_some() {
+            strat.force_rebalance(force);
+        }
+        strat.trade(wallet);
+        strat.force_rebalance(None);
+    }
+
+    /// **The reported shape.** A document with the default `!never` gate holds
+    /// its entry size however far equity moves away from it; one forced
+    /// gate-fire re-sizes it to what its own `sizing:` now wants. The document
+    /// is untouched — which is the whole point, since rewriting `rebalance_on`
+    /// is what a resumed run refuses.
+    #[test]
+    fn forcing_the_gate_resizes_a_never_rebalancing_position() {
+        let mut strat = half_invested();
+        let mut wallet = PaperWallet::new(1_000.0);
+        step(&mut strat, &mut wallet, 100.0, None); // queue the entry
+        step(&mut strat, &mut wallet, 100.0, None); // fills at 100: 5 units, 500 cash
+        assert!(
+            (wallet.position(&"X").amount - 5.0).abs() < 1e-9,
+            "fixture: {:?}",
+            wallet.position(&"X"),
+        );
+
+        step(&mut strat, &mut wallet, 200.0, None); // equity 1500, gate never fires
+        assert!(
+            (wallet.position(&"X").amount - 5.0).abs() < 1e-9,
+            "a !never document must not resize on its own",
+        );
+
+        step(&mut strat, &mut wallet, 200.0, Some(&[])); // force one gate-fire
+        assert_eq!(
+            wallet.orders().len(),
+            1,
+            "the resize must queue, not settle — nothing fills on the bar that caused it",
+        );
+
+        step(&mut strat, &mut wallet, 200.0, None); // the queued move fills here
+        assert!(
+            (wallet.position(&"X").amount - 3.75).abs() < 1e-9,
+            "the forced rebalance must take the document's own target (0.5 x 1500 / 200): {:?}",
+            wallet.position(&"X"),
+        );
+    }
+
+    /// The latch is spent by the one `trade` it was armed for. A driver that
+    /// left it set would turn a `!never` document into a rebalancer for the
+    /// rest of the chunk.
+    #[test]
+    fn a_forced_gate_does_not_survive_its_own_bar() {
+        let mut strat = half_invested();
+        let mut wallet = PaperWallet::new(1_000.0);
+        step(&mut strat, &mut wallet, 100.0, None);
+        step(&mut strat, &mut wallet, 100.0, None);
+        step(&mut strat, &mut wallet, 200.0, Some(&[]));
+        step(&mut strat, &mut wallet, 200.0, None); // the forced resize fills
+        let after_forced = wallet.orders().len();
+
+        // Equity keeps moving, so a gate still stuck open would resize again on
+        // each of these bars.
+        for price in [300.0, 400.0, 500.0] {
+            step(&mut strat, &mut wallet, price, None);
+        }
+        assert_eq!(
+            wallet.orders().len(),
+            after_forced,
+            "the latch must not persist past the bar it was armed for",
+        );
+    }
+
+    /// A symbol the caller is holding at a target of its own sits out the
+    /// override entirely — so there is nothing for the hold to undo, and on a
+    /// live venue no round trip to pay for.
+    #[test]
+    fn a_held_symbol_is_left_out_of_a_forced_rebalance() {
+        let mut strat = half_invested();
+        let mut wallet = PaperWallet::new(1_000.0);
+        step(&mut strat, &mut wallet, 100.0, None);
+        step(&mut strat, &mut wallet, 100.0, None);
+        let before = wallet.orders().len();
+
+        step(&mut strat, &mut wallet, 200.0, Some(&["X"]));
+        step(&mut strat, &mut wallet, 200.0, None);
+        assert_eq!(
+            wallet.orders().len(),
+            before,
+            "the only symbol was held back, so the override had nothing to do",
+        );
+        assert!((wallet.position(&"X").amount - 5.0).abs() < 1e-9);
     }
 
     #[test]

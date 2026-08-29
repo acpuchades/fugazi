@@ -900,12 +900,14 @@ assertion that the state blob itself round-trips.
   wallet + `prev_equity` + the rolling window; their `Indicator` impls therefore
   require `Sym: Serialize + DeserializeOwned`.
 
-**Closeout.** `backtest::Closeout` says what happens to open positions once the last
-bar is driven: `Carry` (nothing — the backtest's answer and the default), `Flatten`
-(close everything, the CLI's `--flatten`), or `Hold(map)` (drive named symbols to
-signed unit targets, leave the rest alone). One knob rather than two, because
-`Flatten` *is* `Hold` at `0.0` for every open symbol — combining them could only mean
-one overriding the other, so an enum makes it unsayable.
+**Closeout.** `backtest::Closeout` is the operator's override at a chunk boundary:
+`Carry` (nothing — the backtest's answer and the default), `Flatten` (close
+everything, the CLI's `--flatten`), `Hold(map)` (drive named symbols to signed unit
+targets, leave the rest alone), or `Rebalance { hold }` (below). One knob rather than
+several, because they contradict each other in pairs — `Flatten` *is* `Hold` at `0.0`
+for every open symbol, and `Rebalance` would only be undone by a `Flatten` — so an
+enum makes the contradictions unsayable rather than a precedence rule nobody
+remembers.
 
 `backtest::apply_closeout` applies it, through `Wallet::flatten` /
 `Wallet::settle_position` — the normal execution path, so costs and commission apply
@@ -930,6 +932,39 @@ the account has no price for is refused into `report.rejections` rather than ski
 an instruction that quietly evaporated would leave a deployment trading a position its
 owner had closed.
 
+**Rebalance on demand.** `Closeout::Rebalance { hold }` is the odd arm: the only one
+`apply_closeout` does *not* implement, because it is not terminal. A document whose
+`rebalance_on:` is `!never` — the default for `single:`, `pairs:`, `multi:` and
+`portfolio:` — re-reads its `sizing:` only on a transition, so a change to the account
+underneath it (new leverage, a deposit) reaches the *book* only when the strategy next
+trades of its own accord, which may be never. `Rebalance` forces one gate-fire so the
+document re-sizes to what it would choose against the account as it stands. Nothing
+about the document changes, which is the point: rewriting `rebalance_on` to a
+fires-now signal and resuming the same run is *refused*, since a `!never` document
+saved no gate state for a rebalancing one to restore.
+
+The mechanism is `Strategy::force_rebalance(Option<&[Sym]>)`, a one-shot latch armed
+by `backtest::drive` immediately before **the final bar's** `trade` and cleared
+immediately after — so it is deliberately absent from `save_state`, and a resumed run
+cannot re-fire an instruction issued for a bar that has gone by. The final bar and not
+the first: the point is to size against current equity and price, and arming the head
+of a catch-up chunk would resize against stale equity and then drift. It rides on the
+trade step, so an unready strategy or a ruined run is not forced either.
+`backtest::run_rebalancing` is the driver entry point; `drive_over` picks it via
+`Closeout::forced_rebalance_hold`.
+
+Arming means what the shape's own gate means, inherited rather than redefined: a
+resize on `single:` / `multi:` / `pairs:`, a re-*rank* on `basket:` (whose gate wraps
+selection, so it opens and closes legs but does not resize one already on its side),
+and one cash-then-position cycle on `portfolio:`. The orders go out through the
+ordinary path — `Wallet::set`, not `settle_position` — so a `PaperWallet` queues them
+and fills at the next chunk's `open` like any other rebalance, and a live venue routes
+them to the broker now. Nothing fills on the bar that caused it, here as everywhere
+else. `hold` names symbols to leave out of the forced pass; they are then driven to
+their absolute targets exactly as `Hold` does. The narrower instruction wins, and wins
+without moving anything twice — free to get wrong on paper (`settle_position` drops
+the queued move) but a real round trip on a live venue.
+
 **Warming without trading.** `backtest::warm_up` is `run` with the `trade` step gated
 (`DriveMode::WarmUpOnly` — one loop, one branch), surfaced as
 `RunnableStrategyExt::warm_up_over` and Python `spec.warm_up(...) -> state_json`. It
@@ -940,12 +975,16 @@ resting order left from before) still route to `on_fill`, or the strategy's posi
 would drift from the account's.
 
 **Surfaces.** CLI `fugazi run … --save-state <file>` / `--resume <file>` /
-`--flatten` (the whole-account arm only — a backtest owns its wallet outright, so the
-per-symbol arm has no meaning there). Python
-`spec.run_resumable(wallet, snapshots, resume=None, flatten=False, hold=None)
--> (report, state_json)` and `spec.warm_up(wallet, snapshots, resume=None)
--> state_json`, both taking a `PaperWallet`, an `OkxWallet`, a `CoinbaseWallet` or
-a `KrakenWallet`. `flatten=True` together with a non-empty `hold` is a `ValueError`.
+`--flatten` / `--rebalance` (the whole-account arms only — a backtest owns its wallet
+outright, so the per-symbol `Hold` arm has no meaning there; `--rebalance` requires
+`--save-state`, since a queued resize means nothing unless the state is carried
+forward). Python
+`spec.run_resumable(wallet, snapshots, resume=None, flatten=False, hold=None,
+rebalance=False) -> (report, state_json)` and
+`spec.warm_up(wallet, snapshots, resume=None) -> state_json`, both taking a
+`PaperWallet`, an `OkxWallet`, a `CoinbaseWallet` or a `KrakenWallet`.
+`flatten=True` with a non-empty `hold`, or with `rebalance=True`, is a `ValueError`;
+`rebalance=True` with `hold` is the one composition that is meant.
 
 **Resuming into a shared account.** A run driven against a wallet the caller supplies
 has to work out which of the account's positions are *its own*. On a cold start the

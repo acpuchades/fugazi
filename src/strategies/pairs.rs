@@ -180,6 +180,10 @@ pub struct PairsStrategy<Sym> {
     /// sizing target. Default is `ValueBool::new(false)` (never rebalance),
     /// preserving pre-refactor behavior.
     rebalance: RebalanceSignal<Sym>,
+    /// One-shot override of the gate above, armed by
+    /// [`force_rebalance`](Strategy::force_rebalance) for a single `trade` call
+    /// and never serialized. See [`ForcedRebalance`](super::ForcedRebalance).
+    forced_rebalance: super::ForcedRebalance<Sym>,
     left_position: Position,
     right_position: Position,
     book: Book<Sym>,
@@ -228,6 +232,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            forced_rebalance: None,
             left_position: Position::new(),
             right_position: Position::new(),
             book: Book::new(initial_equity),
@@ -734,6 +739,19 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
             // when the target already matches, so no spurious fills.
             if self.rebalance.value().unwrap_or(false) {
                 open_pair(wallet, side);
+            } else if self.forced_rebalance.is_some() {
+                // The one-shot override resizes the same two legs, minus any
+                // the caller is holding at a target of its own. It cannot use
+                // `open_pair`, which is leg-blind: a hedge is two symbols, and
+                // holding one of them back is a coherent instruction even
+                // though it leaves the pair off its dollar-neutral ratio until
+                // the next real rebalance.
+                let (left_side, right_side) = side.legs();
+                for (symbol, leg_side) in [(&self.left, left_side), (&self.right, right_side)] {
+                    if super::forced_for(&self.forced_rebalance, symbol) {
+                        let _ = wallet.set(symbol.clone(), leg_side, Size::value_frac(leg_frac));
+                    }
+                }
             }
             return;
         }
@@ -746,6 +764,12 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         } else if self.short_enter.is_true() {
             open_pair(wallet, Direction::ShortSpread);
         }
+    }
+
+    /// Arms the gate for both legs of the pair, minus any the caller's `hold`
+    /// names.
+    fn force_rebalance(&mut self, hold: Option<&[Sym]>) {
+        super::arm_rebalance(&mut self.forced_rebalance, hold);
     }
 
     fn reset(&mut self) {
@@ -767,6 +791,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         }
         self.sizing.reset();
         self.rebalance.reset();
+        self.forced_rebalance = None;
         self.left_position.reset();
         self.right_position.reset();
         self.book.reset();
@@ -814,6 +839,80 @@ mod tests {
             strat.trade(&mut wallet);
         }
         wallet
+    }
+
+    /// Both legs of the hedge are resized by one forced gate-fire — and a
+    /// `hold` naming one of them takes just that leg out.
+    ///
+    /// Holding half a pair leaves the spread off its dollar-neutral ratio until
+    /// the next real rebalance. That is a coherent thing for an operator to
+    /// ask for, and the alternative — moving the leg and letting the hold undo
+    /// it — costs a round trip on a live venue to reach the same book.
+    #[test]
+    fn a_forced_rebalance_resizes_both_legs_unless_one_is_held() {
+        let step = |strat: &mut PairsStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    lp: Real,
+                    rp: Real,
+                    force: Option<&[&'static str]>| {
+            let s = snap(lp, rp);
+            for (sym, p) in [("L", lp), ("R", rp)] {
+                for fill in wallet.update(sym, Candle::new(p, p, p, p, 0.0)) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            if force.is_some() {
+                strat.force_rebalance(force);
+            }
+            strat.trade(wallet);
+            strat.force_rebalance(None);
+        };
+
+        // Half-invested so the target moves with equity, and a `!never` gate so
+        // the pair never resizes on its own.
+        let build = || {
+            PairsStrategy::new("L", "R")
+                .on(
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::new(0.5))
+        };
+
+        let mut both = build();
+        let mut w_both = PaperWallet::new(1_000.0);
+        let mut one = build();
+        let mut w_one = PaperWallet::new(1_000.0);
+        for (s, w) in [(&mut both, &mut w_both), (&mut one, &mut w_one)] {
+            step(s, w, 100.0, 100.0, None); // signal
+            step(s, w, 100.0, 100.0, None); // both legs fill
+        }
+        let (l0, r0) = (w_both.position(&"L").amount, w_both.position(&"R").amount);
+        assert!(l0 > 0.0 && r0 < 0.0, "fixture: long L, short R");
+
+        // Prices move, so the sizing target has moved away from what is held.
+        step(&mut both, &mut w_both, 200.0, 200.0, Some(&[]));
+        step(&mut both, &mut w_both, 200.0, 200.0, None);
+        assert!(
+            (w_both.position(&"L").amount - l0).abs() > 1e-9
+                && (w_both.position(&"R").amount - r0).abs() > 1e-9,
+            "an unheld force must resize both legs: {:?}",
+            w_both.positions(),
+        );
+
+        step(&mut one, &mut w_one, 200.0, 200.0, Some(&["L"]));
+        step(&mut one, &mut w_one, 200.0, 200.0, None);
+        assert!(
+            (w_one.position(&"L").amount - l0).abs() < 1e-9,
+            "the held leg must not move: {:?}",
+            w_one.position(&"L"),
+        );
+        assert!(
+            (w_one.position(&"R").amount - r0).abs() > 1e-9,
+            "the other leg must still be resized: {:?}",
+            w_one.position(&"R"),
+        );
     }
 
     #[test]

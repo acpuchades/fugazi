@@ -239,6 +239,17 @@ pub struct Portfolio<Sym> {
     /// behavior. Explicit opt-in via
     /// [`rebalance_on`](PortfolioBuilder::rebalance_on).
     rebalance: RebalanceSignal<Sym>,
+    /// One-shot override of the gate above, armed by
+    /// [`force_rebalance`](Strategy::force_rebalance) for a single `trade` call
+    /// and never serialized. See
+    /// [`ForcedRebalance`](crate::strategies::ForcedRebalance).
+    ///
+    /// Forcing a portfolio runs one full cycle — cash phase, then position
+    /// phase — against the current weight vector, which is exactly what a
+    /// gate-fire bar does. The hold list is honoured in the position phase: a
+    /// held symbol is never offered to the [`PositionRebalancer`], so nothing
+    /// the override does can trim it.
+    forced_rebalance: crate::strategies::ForcedRebalance<Sym>,
     /// One weight-share indicator per child (in `add(...)` order). When
     /// non-empty, each rebalance-fire reads their values, normalizes
     /// `w_i = N_i / Σ N_j`, and uses those as the target weight vector
@@ -730,7 +741,13 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // `rebalance_on(...)`. It runs before netting so a rebalance's
         // position changes merge into the same order as the children's.
         if self.rebalance.value().unwrap_or(false) {
-            self.rebalance_now();
+            self.rebalance_now(&[]);
+        } else if let Some(hold) = self.forced_rebalance.as_deref() {
+            // The one-shot override runs the same cycle the gate would have.
+            // Only this arm passes a hold list: on a natural fire bar the
+            // portfolio trades as its document says and `hold` settles
+            // afterwards, unchanged from every release before this one.
+            self.rebalance_now(hold);
         }
 
         // Nothing has reached the account yet — every child (and the
@@ -743,12 +760,22 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             .net_and_submit(wallet);
     }
 
+    /// Arms the portfolio's own gate — one full cash-then-position cycle on the
+    /// next `trade`. Children are **not** forced individually: a portfolio
+    /// rebalance moves value between sleeves, and telling each child to resize
+    /// its own book at the same time would be a different, additive
+    /// instruction nobody asked for.
+    fn force_rebalance(&mut self, hold: Option<&[Sym]>) {
+        crate::strategies::arm_rebalance(&mut self.forced_rebalance, hold);
+    }
+
     fn reset(&mut self) {
         for child in &mut self.children {
             child.strategy.reset();
         }
         self.policy.reset();
         self.rebalance.reset();
+        self.forced_rebalance = None;
         for chain in self.share_indicators.iter_mut() {
             chain.reset();
         }
@@ -765,8 +792,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
     /// Execute one rebalance cycle — cash phase followed by a position
     /// phase for whatever the cash phase couldn't cover. Called by
     /// [`trade`](Strategy::trade) on gate-fire bars, after every child has
-    /// traded.
-    fn rebalance_now(&self) {
+    /// traded, and by the one-shot
+    /// [`force_rebalance`](Strategy::force_rebalance) override.
+    ///
+    /// `hold` names symbols the position phase must not touch — empty on a
+    /// gate-fire bar, and the caller's hold list when the override drove this
+    /// call. The cash phase ignores it: moving notional between sleeves trades
+    /// nothing, so there is no position there to hold.
+    fn rebalance_now(&self, hold: &[Sym]) {
         let n = self.children.len();
         if n == 0 {
             return;
@@ -856,6 +889,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
                 inner.ledgers[i]
                     .positions
                     .iter()
+                    .filter(|(symbol, _)| !hold.contains(symbol))
                     .filter_map(|(symbol, &units)| {
                         inner.price_of(symbol).map(|price| PositionInfo {
                             symbol: symbol.clone(),
@@ -1134,6 +1168,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             policy,
             bars_seen: 0,
             rebalance,
+            forced_rebalance: None,
             share_indicators,
             position_rebalancer,
             agg_book,

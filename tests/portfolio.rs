@@ -2243,3 +2243,122 @@ fn a_levered_portfolio_child_is_not_refused_by_its_own_ledger_cash() {
         "a 3x child on a 3x account carried {notional}, not 3,000",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The forced rebalance
+// ---------------------------------------------------------------------------
+
+/// A `!never` portfolio — the default — is told to rebalance once.
+///
+/// The two children diverge with P&L and nothing re-syncs them, which is the
+/// documented default and the right one. Forcing the gate on the final bar runs
+/// the same cash-then-position cycle a fire bar would, so the sleeves snap back
+/// to their configured split without the document being edited.
+#[test]
+fn forcing_a_never_rebalancing_portfolio_runs_one_cycle() {
+    use fugazi::indicators::{Value, ValueBool};
+
+    let build = || -> Portfolio<&'static str> {
+        PortfolioBuilder::default()
+            .with_initial_equity(1_000.0)
+            .add(
+                "half_a",
+                SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
+                    .long_on(
+                        ValueBool::<Snapshot<&'static str>>::new(true),
+                        ValueBool::<Snapshot<&'static str>>::new(false),
+                    )
+                    .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+            )
+            .add(
+                "half_b",
+                SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
+                    .long_on(
+                        ValueBool::<Snapshot<&'static str>>::new(true),
+                        ValueBool::<Snapshot<&'static str>>::new(false),
+                    )
+                    .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+            )
+            .weights(Fixed::new(vec![0.5, 0.5]))
+            .build()
+    };
+
+    let snaps = a_step_up_b_flat_snapshots(4);
+
+    // Control: no gate, no rebalance — the sleeves are left apart.
+    let mut drifting = build();
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run(&mut drifting, &mut wallet, snaps.clone());
+    let drift = (drifting.sub_equity(0) - drifting.sub_equity(1)).abs();
+    assert!(
+        drift > 100.0,
+        "fixture: the sleeves must actually have diverged, got {drift}",
+    );
+
+    // Same document, same bars, one forced fire on the last of them.
+    let mut forced = build();
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run_rebalancing(&mut forced, &mut wallet, &snaps, &[]);
+    let gap = (forced.sub_equity(0) - forced.sub_equity(1)).abs();
+    assert!(
+        gap < 1.0,
+        "one forced cycle must snap the sleeves to 50/50; got {} and {}",
+        forced.sub_equity(0),
+        forced.sub_equity(1),
+    );
+}
+
+/// A held symbol is never offered to the position rebalancer, so nothing the
+/// override does can trim it. The cash phase is unaffected — moving notional
+/// between sleeves trades nothing, so there is no position there to hold.
+#[test]
+fn a_forced_portfolio_rebalance_never_trims_a_held_symbol() {
+    use fugazi::indicators::ValueBool;
+
+    // Fully-invested children: the cash phase has nothing to donate, so the
+    // position phase is the only way to move value — and it is the phase the
+    // hold list guards.
+    let build = || -> Portfolio<&'static str> {
+        PortfolioBuilder::default()
+            .with_initial_equity(1_000.0)
+            .add(
+                "full_a",
+                SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0).long_on(
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
+                ),
+            )
+            .add(
+                "full_b",
+                SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0).long_on(
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
+                ),
+            )
+            .weights(Fixed::new(vec![0.5, 0.5]))
+            .build()
+    };
+    let snaps = a_step_up_b_flat_snapshots(5);
+
+    // The position phase queues like every other order, so it settles on the
+    // next chunk's open — one more bar is what makes the difference visible.
+    let settle = a_step_up_b_flat_snapshots(6);
+    let drive = |hold: &[&'static str]| -> PaperWallet<&'static str> {
+        let mut portfolio = build();
+        let mut wallet = PaperWallet::new(1_000.0);
+        backtest::run_rebalancing(&mut portfolio, &mut wallet, &snaps, hold);
+        backtest::run(&mut portfolio, &mut wallet, settle[5..].to_vec());
+        wallet
+    };
+    let w_unheld = drive(&[]);
+    let w_held = drive(&["A"]);
+
+    // A is the overweight sleeve, so the unheld run trims it; the held run
+    // must leave it exactly where the children put it.
+    assert!(
+        w_unheld.position(&"A").amount < w_held.position(&"A").amount,
+        "the override must trim A when it may, and not when it may not: {:?} vs {:?}",
+        w_unheld.position(&"A"),
+        w_held.position(&"A"),
+    );
+}

@@ -104,6 +104,9 @@ BY_PARAM = {
     "resume": "str | None",
     "flatten": "bool",
     "hold": "Mapping[str, float] | None",
+    # `run_resumable(rebalance=...)`. Every `rebalance_on` builder names its
+    # parameter `signal`, so this name is unambiguously the boolean.
+    "rebalance": "bool",
     "report": "RunReport",
     "equity_curve": SERIES,
     "returns": SERIES,
@@ -650,7 +653,7 @@ def param_type(owner: str, func: str, name: str) -> str:
         return "Candle | Atom | Snapshot | Mapping[str, Any] | float"
     if name == "data":
         return FRAME
-    if name in ("enter", "exit", "signal", "rebalance"):
+    if name in ("enter", "exit", "signal"):
         return "Signal | None" if name == "exit" else "Signal"
     if name == "size":
         return "Size | float | None"

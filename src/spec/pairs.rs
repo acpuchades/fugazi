@@ -479,6 +479,9 @@ impl Strategy for DynPairsStrategy {
     fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
+    fn force_rebalance(&mut self, hold: Option<&[Symbol]>) {
+        self.inner.force_rebalance(hold);
+    }
     fn reset(&mut self) {
         self.inner.reset();
     }

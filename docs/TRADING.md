@@ -403,6 +403,15 @@ bar is driven — `Carry` (leave it, the default), `Flatten` (the CLI's
 `--flatten`, via `Wallet::flatten`), or `Hold(map)` (drive named symbols to
 signed unit targets, via `Wallet::settle_position`, `0.0` being a close).
 
+`Closeout::Rebalance { hold }` is the fourth arm and the one that does **not** come
+through here. It forces the document's own rebalance gate on the final bar — "re-size
+to what your `sizing:` now wants" — which is an ordinary `Wallet::set`, so it queues
+and fills at the next chunk's `open` like every other rebalance. Settling it at the
+last bar's close would manufacture a fill at a price the market never offered, and a
+rebalance has no claim to the exemption the three terminal arms take below: the run
+continues, so there *is* a next bar. Its `hold` map is the only part `apply_closeout`
+sees, read exactly as `Hold`'s. See ARCHITECTURE *Rebalance on demand*.
+
 `close` alone cannot finish a run: it *queues*, and a queued move settles at the
 next bar's open — of which, at the end, there is none. So `PaperWallet`
 overrides both trait defaults with a synchronous form that goes straight to

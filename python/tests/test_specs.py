@@ -2224,6 +2224,117 @@ def test_an_empty_hold_is_the_same_as_none():
     assert wallet.position("X") > 0.0
 
 
+# ---------------------------------------------------------------------------
+# `rebalance=`: make the document re-size its book now.
+# ---------------------------------------------------------------------------
+
+
+def test_rebalance_resizes_a_never_rebalancing_document_to_the_new_leverage():
+    """**The reported bug.** An operator lifts a live account's leverage and
+    resumes. With the default `rebalance_on: !never` the document re-reads its
+    `sizing:` only when it next trades of its own accord, so the book sits at
+    the size the old account chose. `rebalance=True` is the supported way to
+    say "apply it now", and needs no edit to the document."""
+    spec_yaml = _ALL_IN_YAML
+    snaps = _snaps_single("X", _wobbly(30))
+
+    # Chunk one at 1x.
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = ta.load_spec(spec_yaml).run_resumable(wallet, snaps[:10])
+    entered = wallet.position("X")
+    assert entered > 0.0
+
+    def resume_at_3x(**kwargs):
+        w = ta.PaperWallet(10_000.0, leverage=3.0)
+        _r, s = ta.load_spec(spec_yaml).run_resumable(
+            w, snaps[10:20], resume=state, **kwargs
+        )
+        # The forced order queues like any other rebalance, so it fills at the
+        # next chunk's open.
+        ta.load_spec(spec_yaml).run_resumable(w, snaps[20:], resume=s)
+        return w.position("X")
+
+    carried = resume_at_3x()
+    assert carried == pytest.approx(entered), (
+        "the reported behaviour: a !never document holds its old size"
+    )
+
+    rebalanced = resume_at_3x(rebalance=True)
+    assert rebalanced > carried * 2.0, (
+        f"one forced gate-fire must size against the 3x account: "
+        f"{rebalanced} vs {carried}"
+    )
+
+
+def test_rebalance_queues_rather_than_settling():
+    """The forced orders go out the way the document's own always do — queued,
+    filling at the next chunk's open. Nothing is settled at the last bar's
+    close, because a rebalance is not terminal the way `flatten` and `hold`
+    are."""
+    snaps = _snaps_single("X", _wobbly(30))
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps[:10])
+
+    w = ta.PaperWallet(10_000.0, leverage=3.0)
+    ta.load_spec(_ALL_IN_YAML).run_resumable(w, snaps[10:20], resume=state)
+    before = w.position("X")
+
+    w = ta.PaperWallet(10_000.0, leverage=3.0)
+    ta.load_spec(_ALL_IN_YAML).run_resumable(
+        w, snaps[10:20], resume=state, rebalance=True
+    )
+    assert w.position("X") == pytest.approx(before), (
+        "the resize must still be queued when the chunk ends, not booked into it"
+    )
+
+
+def test_rebalance_composes_with_hold_and_the_held_symbol_wins():
+    """`hold` is the narrower instruction: the named symbols sit out the forced
+    rebalance and are driven to their own targets, so nothing moves twice."""
+    yaml = """
+    long:
+      enter: !gt { lhs: !close, rhs: !value 0.0 }
+    sizing: !value 0.4
+    """
+    snaps = _two_symbol_snaps(30)
+
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = ta.load_spec(yaml, kind="multi").run_resumable(wallet, snaps[:10])
+
+    w = ta.PaperWallet(10_000.0, leverage=3.0)
+    _rep, state2 = ta.load_spec(yaml, kind="multi").run_resumable(
+        w, snaps[10:20], resume=state, rebalance=True, hold={"A": 1.5}
+    )
+    assert w.position("A") == pytest.approx(1.5)
+
+    # And nothing is queued behind the hold waiting to undo it: A was held out
+    # of the override, not merely overwritten by it.
+    ta.load_spec(yaml, kind="multi").run_resumable(w, snaps[20:21], resume=state2)
+    assert w.position("A") == pytest.approx(1.5)
+
+
+def test_rebalance_and_flatten_together_are_refused():
+    """They contradict each other — the flatten would close what the rebalance
+    had just resized — so the combination is an error, not a precedence rule."""
+    snaps = _snaps_single("X", _wobbly(10))
+    with pytest.raises(ValueError, match="contradict"):
+        ta.load_spec(_ALL_IN_YAML).run_resumable(
+            ta.PaperWallet(1000.0), snaps, flatten=True, rebalance=True
+        )
+
+
+def test_rebalance_false_is_the_default_and_changes_nothing():
+    """The knob is opt-in: an unset `rebalance` leaves every existing caller's
+    behaviour exactly where it was."""
+    snaps = _snaps_single("X", _wobbly(20))
+    a = ta.PaperWallet(1000.0)
+    rep_a, state_a = ta.load_spec(_ALL_IN_YAML).run_resumable(a, snaps)
+    b = ta.PaperWallet(1000.0)
+    rep_b, state_b = ta.load_spec(_ALL_IN_YAML).run_resumable(b, snaps, rebalance=False)
+    assert rep_a.equity_curve == rep_b.equity_curve
+    assert state_a == state_b
+
+
 def test_run_resumable_rejects_a_stale_format_version():
     """A state file from another build is refused, not mis-parsed."""
     import json

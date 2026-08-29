@@ -212,6 +212,15 @@ pub struct BasketStrategy<Sym> {
     /// pre-`rebalance_on` "re-rank every bar" behavior. Set with
     /// [`rebalance_on`](Self::rebalance_on).
     rebalance: RebalanceSignal<Sym>,
+    /// One-shot override of the gate above, armed by
+    /// [`force_rebalance`](Strategy::force_rebalance) for a single `trade` call
+    /// and never serialized. See [`ForcedRebalance`](super::ForcedRebalance).
+    ///
+    /// Because the basket's gate wraps **selection**, forcing it re-ranks: it
+    /// opens newly-selected legs and closes de-selected ones. It does not
+    /// resize a leg that is already on its selected side — that is the gate's
+    /// own meaning here, not something the override changes.
+    forced_rebalance: super::ForcedRebalance<Sym>,
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
     /// If `true`, per-symbol sizes are scaled at each rebalance so
@@ -268,6 +277,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             latest_size: SymMap::default(),
             selection: Box::new(|_scores: &HashMap<Sym, Real>| HashMap::new()),
             rebalance: Box::new(Every::<Snapshot<Sym>>::new(1)),
+            forced_rebalance: None,
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
             balance_sides: true,
@@ -880,7 +890,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         // "unsettled data ⇒ wait" convention). Default gate is
         // `Every::new(1)` so this is a no-op unless the caller wired a
         // less-frequent cadence.
-        if !self.rebalance.value().unwrap_or(false) {
+        let gate = self.rebalance.value().unwrap_or(false);
+        if !gate && self.forced_rebalance.is_none() {
             return;
         }
         let selection = self.selection.pick(&self.latest_score);
@@ -919,6 +930,14 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         };
 
         for sym in self.scores.keys() {
+            // A symbol the caller is holding at a target of its own sits out a
+            // pass that only happened because the override forced it — the
+            // narrower instruction wins over one we manufactured. When the
+            // document's own gate fired this bar the basket trades normally and
+            // `hold` settles afterwards, exactly as it always has.
+            if !gate && super::held_back(&self.forced_rebalance, sym) {
+                continue;
+            }
             let position = self.positions.get(sym);
             match selection.get(sym) {
                 Some(Side::Buy) => {
@@ -989,6 +1008,14 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         }
     }
 
+    /// Arms the gate for the whole basket, minus any symbols the caller's
+    /// `hold` names. Because the gate wraps selection, this re-ranks rather
+    /// than resizes: it opens newly-selected legs and closes de-selected ones,
+    /// and leaves a leg already on its selected side at the size it holds.
+    fn force_rebalance(&mut self, hold: Option<&[Sym]>) {
+        super::arm_rebalance(&mut self.forced_rebalance, hold);
+    }
+
     fn is_ready(&self) -> bool {
         // Lax / floating universes report no required symbols → this
         // loop is a no-op → always ready to *try*. Per-symbol readiness
@@ -1016,6 +1043,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         self.latest_score.clear();
         self.latest_size.clear();
         self.rebalance.reset();
+        self.forced_rebalance = None;
         self.book.reset();
     }
 }
@@ -1024,7 +1052,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
 mod tests {
     use super::*;
     use crate::indicators::sizing::equal_weight;
-    use crate::indicators::{Close, Pick};
+    use crate::indicators::{Close, Pick, ValueBool};
     use crate::types::{Atom, Selector};
     use crate::wallet::PaperWallet;
 
@@ -1060,6 +1088,107 @@ mod tests {
         // A new symbol appearing later: also lazily built.
         strat.update(snap(&[("A", 101.0), ("B", 51.0), ("C", 200.0)]));
         assert!(strat.position(&"C").is_some());
+    }
+
+    /// A frozen basket (`rebalance_on(false)`) is told to re-rank once.
+    ///
+    /// This is the shape whose gate means something different: it wraps
+    /// *selection*, not resize, so forcing it opens the newly-selected leg and
+    /// closes the de-selected one. It does **not** resize a leg already on its
+    /// selected side — that is the basket gate's own meaning, inherited rather
+    /// than changed, and the reason a basket is the one shape where "apply my
+    /// new leverage now" is not what this does.
+    #[test]
+    fn forcing_a_frozen_basket_re_ranks_it_once() {
+        let bar = |a: Real, b: Real| snap(&[("A", a), ("B", b)]);
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 0)
+            .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+
+        let step = |strat: &mut BasketStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    s: Snapshot<&'static str>,
+                    force: Option<&[&'static str]>| {
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle.unwrap()) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            if force.is_some() {
+                strat.force_rebalance(force);
+            }
+            strat.trade(wallet);
+            strat.force_rebalance(None);
+        };
+
+        // Frozen from the first bar: it never selects, so it never trades.
+        step(&mut strat, &mut wallet, bar(100.0, 50.0), None);
+        step(&mut strat, &mut wallet, bar(100.0, 50.0), None);
+        assert!(
+            wallet.orders().is_empty(),
+            "a frozen basket must not trade on its own",
+        );
+
+        // One forced fire: A scores highest, so the top-1 long opens.
+        step(&mut strat, &mut wallet, bar(100.0, 50.0), Some(&[]));
+        step(&mut strat, &mut wallet, bar(100.0, 50.0), None);
+        assert!(
+            wallet.position(&"A").amount > 0.0,
+            "the forced fire must run selection: {:?}",
+            wallet.positions(),
+        );
+        let after = wallet.orders().len();
+
+        // B now scores highest, but the gate is frozen again — the stale pick
+        // is held, which is exactly what `!never` asks for.
+        for _ in 0..3 {
+            step(&mut strat, &mut wallet, bar(50.0, 100.0), None);
+        }
+        assert_eq!(
+            wallet.orders().len(),
+            after,
+            "the latch must not have survived its bar",
+        );
+        assert!(wallet.position(&"A").amount > 0.0, "A is still held");
+    }
+
+    /// A held symbol is kept out of a pass that only happened because the
+    /// override forced it — so a basket told to re-rank while one name is
+    /// pinned leaves that name alone.
+    #[test]
+    fn a_held_symbol_sits_out_a_forced_re_rank() {
+        let mut strat: BasketStrategy<&'static str> = BasketStrategy::with_initial_equity(1_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(|_| equal_weight::<&'static str>(2))
+            .top_bottom(1, 0)
+            .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+
+        for force in [None, None, Some(&["A"][..]), None] {
+            let s = snap(&[("A", 100.0), ("B", 50.0)]);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle.unwrap()) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            if force.is_some() {
+                strat.force_rebalance(force);
+            }
+            strat.trade(&mut wallet);
+            strat.force_rebalance(None);
+        }
+        assert!(
+            wallet.orders().is_empty(),
+            "A was the only selection and it was held back: {:?}",
+            wallet.orders(),
+        );
     }
 
     #[test]

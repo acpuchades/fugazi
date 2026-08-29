@@ -1129,6 +1129,28 @@ calendar signals to trigger event-driven rebalancing.
 | composite: `!and`, `!or`, `!xor`, `!not`, `!all`, `!any` | boolean logic over any of the above and any other signal |
 | calendar / drawdown / crossover / … | any [Signal](#signals) works |
 
+### Rebalancing on demand
+
+The gate is a property of the *document*, so it answers "when should this
+strategy re-size?" and nothing else. An operator driving a resumed run in chunks
+sometimes needs the other question answered — "re-size **now**, because I just
+changed something about the account". That is a driver-level instruction, not a
+document one:
+
+- Python: `spec.run_resumable(wallet, snaps, resume=state, rebalance=True)`
+- CLI: `fugazi run … --resume state.json --rebalance --save-state state.json`
+
+It forces one gate-fire on the final bar, so the strategy drives to whatever its
+`sizing:` chooses against the account as it now stands — the table above is
+exactly what each shape then does. The document is untouched, which is the point:
+a `!never` document that was *edited* to rebalance cannot resume from a state it
+captured before the edit. Note that on `basket:` this re-**ranks**; it is the one
+shape where "apply my new leverage" is not what forcing the gate means.
+
+The resulting orders queue and fill at the next chunk's open, like every other
+rebalance — nothing fills on the bar that caused it. See
+[PYTHON](PYTHON.md) and [CLI](CLI.md).
+
 ### Between rebalances
 
 A gated strategy holds "stale" state between rebalance events. For

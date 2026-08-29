@@ -600,27 +600,48 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
         .map_err(build_err)
 }
 
-/// Resolve the `flatten` / `hold` pair into the one [`Closeout`] the driver
-/// takes.
+/// Resolve the `flatten` / `hold` / `rebalance` trio into the one [`Closeout`]
+/// the driver takes.
 ///
-/// The two arguments are one concept at the Rust boundary — `flatten` is `hold`
-/// at zero for everything open — so the combination is refused here rather than
-/// given a precedence rule nobody would remember. A `hold` mapping that is
-/// present but empty is not the same as no `hold` at all in Python's eyes, but
-/// it means the same thing here: touch nothing.
-fn closeout_from(flatten: bool, hold: Option<HashMap<String, Real>>) -> PyResult<Closeout> {
-    match (flatten, hold) {
-        (true, Some(h)) if !h.is_empty() => Err(PyValueError::new_err(
+/// The three are one concept at the Rust boundary — each says where the book
+/// should sit at this chunk's boundary — so the contradictory pairs are refused
+/// here rather than given a precedence rule nobody would remember. `flatten` is
+/// `hold` at zero for everything open; `rebalance` then `flatten` would close
+/// what it had just resized.
+///
+/// `rebalance` **does** compose with `hold`, and they arrive as one
+/// [`Closeout::Rebalance`]: the named symbols sit out the forced rebalance and
+/// are driven to their own targets afterwards. Splitting that into two
+/// instructions would move a symbol twice — free on a paper wallet, a real
+/// round trip on a live venue.
+///
+/// A `hold` mapping that is present but empty is not the same as no `hold` at
+/// all in Python's eyes, but it means the same thing here: touch nothing.
+fn closeout_from(
+    flatten: bool,
+    hold: Option<HashMap<String, Real>>,
+    rebalance: bool,
+) -> PyResult<Closeout> {
+    if flatten && rebalance {
+        return Err(PyValueError::new_err(
+            "flatten=True and rebalance=True contradict each other — a forced rebalance resizes \
+             the book the flatten would then close. Pass one or the other.",
+        ));
+    }
+    let targets: HashMap<_, _> = hold
+        .into_iter()
+        .flatten()
+        .map(|(sym, target)| (fugazi_core::types::symbol(&sym), target))
+        .collect();
+    match (flatten, rebalance, targets.is_empty()) {
+        (true, _, false) => Err(PyValueError::new_err(
             "flatten=True and hold=... are the same instruction — flatten is hold at 0.0 for \
              every open position. Pass one or the other.",
         )),
-        (true, _) => Ok(Closeout::Flatten),
-        (false, Some(h)) if !h.is_empty() => Ok(Closeout::Hold(
-            h.into_iter()
-                .map(|(sym, target)| (fugazi_core::types::symbol(&sym), target))
-                .collect(),
-        )),
-        (false, _) => Ok(Closeout::Carry),
+        (true, _, true) => Ok(Closeout::Flatten),
+        (_, true, _) => Ok(Closeout::Rebalance { hold: targets }),
+        (_, false, false) => Ok(Closeout::Hold(targets)),
+        (_, false, true) => Ok(Closeout::Carry),
     }
 }
 
@@ -865,6 +886,27 @@ impl PyStrategySpec {
     /// position there rather than moving it further — which is how a standing
     /// instruction outlives the bar it was issued on.
     ///
+    /// `rebalance=True` asks the document to **re-size its book now**: the
+    /// strategy's own rebalance gate is forced on the last bar, so it drives to
+    /// the targets its `sizing:` chooses against the account's current equity
+    /// and leverage. That is the answer to "I raised this account's leverage,
+    /// apply it" — a document whose `rebalance_on:` is `!never` (the default
+    /// for `single:`, `pairs:`, `multi:` and `portfolio:`) otherwise re-reads
+    /// its sizing only when it next trades of its own accord, which may be
+    /// never. It needs no edit to the document, so the resume path is
+    /// untouched.
+    ///
+    /// The forced orders go out the way the document's own always do — queued
+    /// on a paper wallet and filled at the next chunk's open, routed straight
+    /// to the broker on a live venue. Nothing is settled at the last bar's
+    /// close, because a rebalance is not terminal the way `flatten` and `hold`
+    /// are. Nothing happens at all on a bar the strategy is not ready for.
+    ///
+    /// `rebalance=True` composes with `hold`: the held symbols sit out the
+    /// rebalance and are driven to their own targets, so the narrower
+    /// instruction wins without moving anything twice. It does **not** compose
+    /// with `flatten=True`, which would close what it had just resized.
+    ///
     /// `flatten=True` is `hold` at `0.0` for every open symbol, so passing both
     /// is a `ValueError` rather than a silent precedence rule.
     ///
@@ -872,7 +914,7 @@ impl PyStrategySpec {
     /// wallet the returned state's `wallet` field is `null`: the venue owns the
     /// positions and cash, so only the strategy's own state is carried and the
     /// account is re-read on resume.
-    #[pyo3(signature = (wallet, snapshots, *, resume = None, flatten = false, hold = None))]
+    #[pyo3(signature = (wallet, snapshots, *, resume = None, flatten = false, hold = None, rebalance = false))]
     pub(crate) fn run_resumable(
         &self,
         wallet: &Bound<'_, PyAny>,
@@ -880,10 +922,11 @@ impl PyStrategySpec {
         resume: Option<String>,
         flatten: bool,
         hold: Option<HashMap<String, Real>>,
+        rebalance: bool,
     ) -> PyResult<(PyRunReport, String)> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = parse_resume(resume)?;
-        let closeout = closeout_from(flatten, hold)?;
+        let closeout = closeout_from(flatten, hold, rebalance)?;
         let owned = owned_at_resume(&self.inner, &snaps, resume_state.as_ref())?;
         over_any_wallet!(wallet, py, resume_state.as_ref(), &owned, _seed, w => {
             let (report, state) =

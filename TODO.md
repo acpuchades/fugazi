@@ -748,6 +748,34 @@ ever grows a real hedge-ratio slot (beta, cointegration weights) rather than
 splitting notional evenly, its default is worth re-opening — maintaining a
 *correct* ratio is a different proposition from maintaining an arbitrary one.
 
+**The defaults survived the pressure that came for them.** The reported case: an
+operator lifts a live account's leverage, resumes, and watches a `!never`
+document hold its old size forever. That is an argument for a *driver* knob, not
+a changed default — the document's cadence is still the right answer to "when
+should this strategy re-size?", and the operator is asking a different question.
+So `Closeout::Rebalance` forces one gate-fire (Python `rebalance=True`, CLI
+`--rebalance`) and every default above stands untouched. See ARCHITECTURE
+*Rebalance on demand*.
+
+### A `!never` document cannot resume into a rebalancing one
+
+Rewriting `rebalance_on:` from `!never` (or omitted) to a real signal and
+resuming the same run is refused: `strategy > rebalance > expected a state
+object, got null`. The default gate is a bare `ValueBool` installed by the
+strategy constructor (`single_asset.rs`, `pairs.rs`, `multi_asset.rs`), while a
+document that writes `rebalance_on:` installs an erased `runtime::Chain` built
+from the node — two different types under the same `"rebalance"` state key, and
+`load_state` is type-specific. Every other direction works, including swapping
+*to* `!never`.
+
+Left alone deliberately. The refusal is the general "resuming into a changed
+document is refused rather than silently hybridised" rule doing its job, and the
+one use case that made it hurt — "make this document re-size now" — is answered
+without a rewrite by `Closeout::Rebalance`. What would change it: a second
+document edit that people legitimately want mid-run, or a state format that
+records the gate's *value* rather than its node's private state. The latter is
+the real fix and is not worth a format bump on its own.
+
 ### `check` types the placeholders nobody has values for, not every `!param`
 
 `spec::check` reports a `HoleTypes` per *unresolved* placeholder. A `!param`

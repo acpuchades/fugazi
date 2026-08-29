@@ -444,6 +444,19 @@ struct RunArgs {
     #[arg(long = "flatten")]
     flatten: bool,
 
+    /// Force the document's own rebalance gate on the final bar, so the book
+    /// re-sizes to what its `sizing:` chooses against the account as it now
+    /// stands — "I changed this account's leverage, apply it now". Needs
+    /// `--save-state`: the resulting order queues for the next chunk's open the
+    /// way every other rebalance does, so it only means anything if the state
+    /// is carried forward. Mutually exclusive with `--flatten`.
+    #[arg(
+        long = "rebalance",
+        requires = "save_state",
+        conflicts_with = "flatten"
+    )]
+    rebalance: bool,
+
     #[command(flatten)]
     range: DateRangeArgs,
 
@@ -1497,6 +1510,7 @@ fn run(args: RunArgs) -> Result<()> {
         resume: resume_state.as_ref(),
         save_state: args.save_state.as_deref(),
         flatten: args.flatten,
+        rebalance: args.rebalance,
         montecarlo: montecarlo.as_ref(),
         range: args.range.resolve()?,
         from_label: args.range.from.as_deref(),

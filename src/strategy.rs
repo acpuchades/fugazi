@@ -106,6 +106,38 @@ pub trait Strategy {
         true
     }
 
+    /// Arm or clear a **one-shot override of this strategy's rebalance gate**,
+    /// consumed by the very next [`trade`](Strategy::trade) call.
+    ///
+    /// `Some(hold)` makes the next `trade` behave as though the gate fired,
+    /// leaving the symbols named in `hold` alone; `None` clears the latch. The
+    /// driver arms it immediately before one `trade` and clears it immediately
+    /// after, so the override never outlives the bar it was issued for — which
+    /// is why it is deliberately **absent from
+    /// [`save_state`](Strategy::save_state)**. A resumed run rebuilds with the
+    /// latch clear, and cannot re-fire an instruction its operator issued for a
+    /// bar that has already gone by.
+    ///
+    /// Two halves, and only the first is common to every shape. *Arming* is
+    /// generic — it is the same act the gate performs on a fire bar, so it means
+    /// exactly what `rebalance_on:` means for the shape it is called on:
+    /// resizing a held position on `single:` / `multi:` / `pairs:`, re-running
+    /// *selection* on `basket:`, and one full cash-then-position cycle on
+    /// `portfolio:`. *Holding back* is per-symbol and applies to whatever
+    /// order flow the shape would otherwise have produced for that symbol.
+    ///
+    /// Orders go out through the shape's ordinary path — [`Wallet::set`], not
+    /// [`Wallet::settle_position`] — so a
+    /// [`PaperWallet`](crate::PaperWallet) queues the move and fills it at the
+    /// next bar's `open` like any other rebalance, and a live venue routes it to
+    /// the broker now. Nothing fills on the bar that caused it, here as
+    /// everywhere else.
+    ///
+    /// Default: a no-op, for the many strategies that have no gate to force.
+    fn force_rebalance(&mut self, hold: Option<&[Self::Symbol]>) {
+        let _ = hold;
+    }
+
     /// Clear the strategy's own state (its signals/indicators), returning it to
     /// its freshly-constructed condition. Does not touch any wallet.
     fn reset(&mut self);

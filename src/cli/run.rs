@@ -130,6 +130,10 @@ pub struct RunOptions<'a> {
     /// `--flatten`: finalize open positions into the trade blotter at the
     /// last bar (mutually exclusive with `save_state`).
     pub flatten: bool,
+    /// `--rebalance`: force the document's rebalance gate on the final bar, so
+    /// it re-sizes to its current `sizing:` target. Requires `save_state` —
+    /// the order queues for the next chunk like any other rebalance.
+    pub rebalance: bool,
     /// `--montecarlo`: when set, run the significance analysis after the
     /// backtest and attach a `montecarlo:` block to `metrics.yml` plus a
     /// `montecarlo.csv` of the per-resample values. `None` skips it entirely.
@@ -210,18 +214,21 @@ fn iterate(
             inputs.effective_freq.is_some(),
         ));
     }
-    if opts.resume.is_none() && opts.save_state.is_none() && !opts.flatten {
+    if opts.resume.is_none() && opts.save_state.is_none() && !opts.flatten && !opts.rebalance {
         return backtest::run_iteration_any(spec, bars, snapshots, inputs)
             .map_err(backtest::build_error);
     }
-    // The CLI's `--flatten` is the whole-account arm of `Closeout`. The
-    // per-symbol arm is a deployment's concern — an operator overriding one
-    // position on a live book — and has no meaning for a backtest, which owns
-    // its wallet outright.
-    let closeout = if opts.flatten {
-        fugazi::backtest::Closeout::Flatten
-    } else {
-        fugazi::backtest::Closeout::Carry
+    // The CLI's `--flatten` is the whole-account arm of `Closeout`, and
+    // `--rebalance` the non-terminal one. The per-symbol `Hold` arm is a
+    // deployment's concern — an operator overriding one named position on a
+    // live book — and has no meaning for a backtest, which owns its wallet
+    // outright; `--rebalance` therefore carries an empty hold map here.
+    let closeout = match (opts.flatten, opts.rebalance) {
+        (true, _) => fugazi::backtest::Closeout::Flatten,
+        (_, true) => fugazi::backtest::Closeout::Rebalance {
+            hold: Default::default(),
+        },
+        _ => fugazi::backtest::Closeout::Carry,
     };
     let (iter, state) =
         backtest::run_iteration_resumable(spec, bars, snapshots, inputs, opts.resume, &closeout)

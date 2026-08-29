@@ -1573,6 +1573,61 @@ instruction that could not be carried out is visible rather than lost. `flatten=
 is `hold` at `0.0` for every open position, so passing both raises `ValueError`
 instead of applying a precedence rule.
 
+### Re-sizing the book on demand
+
+`rebalance=True` asks the document to **re-size its book now**: its own rebalance gate
+is forced on the last bar, so it drives to the targets its `sizing:` chooses against
+the account's current equity and leverage.
+
+That is the answer to *"I raised this account's leverage — apply it"*. With the
+default `rebalance_on: !never` (for `single:`, `pairs:`, `multi:` and `portfolio:`) a
+document re-reads its sizing only when it next trades of its own accord, which may be
+never — so a new leverage reaches the account immediately and the *book* not at all.
+The instruction needs no edit to the document, which matters: rewriting
+`rebalance_on` to a fires-now signal and resuming the same run is refused, because a
+`!never` document saved no gate state for a rebalancing one to restore.
+
+```python
+always_in = ta.load_spec("""
+root: X
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+""")
+snaps = [ta.Snapshot({"X": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
+
+# Chunk one at 1x.
+account = ta.PaperWallet(10_000.0)
+rep, state = always_in.run_resumable(account, snaps[:10])
+entered = account.position("X")
+
+# The operator lifts the account to 3x and says "apply it".
+account = ta.PaperWallet(10_000.0, leverage=3.0)
+rep, state = always_in.run_resumable(account, snaps[10:20], resume=state, rebalance=True)
+
+# The forced order queues like any other rebalance, so it fills at the next
+# chunk's open — the position is three times the size from there on.
+rep, state = always_in.run_resumable(account, snaps[20:], resume=state)
+assert account.position("X") > 2 * entered
+```
+
+The orders go out the way the document's own always do: queued on a `PaperWallet` and
+filled at the next chunk's `open`, routed straight to the broker on a live venue.
+Nothing is settled at the last bar's close, because a rebalance is not terminal the
+way `flatten` and `hold` are — the run continues, so booking it there would
+manufacture a fill at a price the market never offered. Nothing happens at all on a
+bar the strategy is not ready for.
+
+What "force the gate" means is the shape's own definition of it, inherited rather than
+redefined: a resize on `single:` / `pairs:` / `multi:`, a re-**rank** on `basket:`
+(whose gate wraps selection, so it opens and closes legs but does not resize one
+already on its selected side), and one cash-then-position cycle on `portfolio:`.
+
+`rebalance=True` composes with `hold`: the named symbols sit out the forced rebalance
+and are then driven to their own absolute targets, so the narrower instruction wins
+without moving anything twice — invisible on a paper wallet, a real round trip on a
+live venue. It does **not** compose with `flatten=True`, which would close what it had
+just resized; that pair raises `ValueError`.
+
 Resuming against an account that holds **more than this strategy's positions** works
 the way you would hope: the state says what the strategy itself owns, and only the
 remainder is treated as the user's own and left alone. A fully-invested strategy —

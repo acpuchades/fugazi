@@ -152,6 +152,44 @@ pub(crate) struct Leg<'a, Sym> {
     pub short_target: Option<Real>,
 }
 
+// ---------------------------------------------------------------------------
+// The one-shot rebalance override
+// ---------------------------------------------------------------------------
+
+/// The latch behind [`Strategy::force_rebalance`](crate::Strategy::force_rebalance),
+/// held by every shape that owns a rebalance gate.
+///
+/// `None` is the resting state. `Some(hold)` means *the next `trade` runs as
+/// though the gate fired*, leaving the symbols in `hold` alone — and `hold` is
+/// very often empty, which is why this is an `Option<Vec<_>>` rather than a
+/// `Vec<_>` plus a `bool` that could disagree with it.
+pub(crate) type ForcedRebalance<Sym> = Option<Vec<Sym>>;
+
+/// Arm (`Some`) or clear (`None`) a [`ForcedRebalance`] latch — the whole body
+/// of every shape's `force_rebalance`, so the five cannot drift.
+pub(crate) fn arm_rebalance<Sym: Clone>(latch: &mut ForcedRebalance<Sym>, hold: Option<&[Sym]>) {
+    *latch = hold.map(<[Sym]>::to_vec);
+}
+
+/// Whether an armed latch wants `symbol` rebalanced this bar — armed, and not
+/// named in the hold list.
+pub(crate) fn forced_for<Sym: PartialEq>(latch: &ForcedRebalance<Sym>, symbol: &Sym) -> bool {
+    latch.as_ref().is_some_and(|hold| !hold.contains(symbol))
+}
+
+/// Whether an armed latch is holding `symbol` back — the caller named it in
+/// `hold`, so this bar's override must produce no order flow for it at all.
+///
+/// The narrower instruction wins: `hold` states an absolute target the driver
+/// settles once the bar is over, and a rebalance that also moved the symbol
+/// would be undone by it — silently on a
+/// [`PaperWallet`](crate::PaperWallet), whose `settle_position` drops the
+/// queued move, and at the cost of a real round trip on a live venue, where the
+/// order has already reached the broker.
+pub(crate) fn held_back<Sym: PartialEq>(latch: &ForcedRebalance<Sym>, symbol: &Sym) -> bool {
+    latch.as_ref().is_some_and(|hold| hold.contains(symbol))
+}
+
 /// Drive one leg's wallet interaction for one bar.
 ///
 /// `SingleAssetStrategy::trade` and `MultiAssetStrategy::trade` ran this

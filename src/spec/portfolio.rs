@@ -914,6 +914,9 @@ impl Strategy for DynPortfolio {
     fn is_ready(&self) -> bool {
         self.inner.is_ready()
     }
+    fn force_rebalance(&mut self, hold: Option<&[Symbol]>) {
+        self.inner.force_rebalance(hold);
+    }
     fn reset(&mut self) {
         self.inner.reset();
     }

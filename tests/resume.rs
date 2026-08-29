@@ -1548,3 +1548,229 @@ fn probing_a_mismatched_state_reports_the_mismatch() {
         .expect_err("a foreign shape must be refused");
     assert!(err.contains("portfolio"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// Rebalance on demand
+// ---------------------------------------------------------------------------
+
+/// **The reported bug.** An operator lifts a live account's leverage and
+/// resumes. With the default `rebalance_on: !never` the document re-reads its
+/// `sizing:` only when it next trades of its own accord — so the book sits at
+/// the size the old account chose, and there was no supported way to say
+/// "apply it now".
+///
+/// `Closeout::Rebalance` is that way. It needs no edit to the document, which
+/// matters: rewriting `rebalance_on` to a fires-now signal and resuming the
+/// same run is *refused*, because a `!never` document saved no gate state for
+/// a rebalancing one to restore.
+#[test]
+fn a_never_rebalancing_document_can_be_told_to_resize_now() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(30);
+
+    // Chunk one at 1x, sizing the entry against a 1x account.
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (_, state) = built
+        .drive_resumable_with(&snaps[..10], &mut wallet, None, &Closeout::Carry)
+        .expect("chunk one");
+    let entered = wallet.position(&intern("X")).amount;
+    assert!(entered > 0.0, "the fixture must be holding something");
+
+    // Chunk two, resumed into an account that now runs at 3x. Two runs from the
+    // same state over the same bars, differing only in the closeout.
+    let resize = |closeout: &Closeout| -> Real {
+        let mut built = spec.try_build(CASH, &sch, None).expect("build");
+        let mut wallet = fugazi::PaperWallet::new(CASH).with_leverage(3.0);
+        let (_, state) = built
+            .drive_resumable_with(&snaps[10..20], &mut wallet, Some(&state), closeout)
+            .expect("chunk two");
+        // The forced order queues like any other rebalance, so it fills at the
+        // next chunk's open — driving one more chunk is what settles it.
+        let mut built = spec.try_build(CASH, &sch, None).expect("build");
+        built
+            .drive_resumable_with(&snaps[20..], &mut wallet, Some(&state), &Closeout::Carry)
+            .expect("chunk three");
+        wallet.position(&intern("X")).amount
+    };
+
+    let carried = resize(&Closeout::Carry);
+    assert!(
+        (carried - entered).abs() < 1e-9,
+        "the reported behaviour: a !never document holds its old size ({carried} vs {entered})",
+    );
+
+    let rebalanced = resize(&Closeout::Rebalance {
+        hold: Default::default(),
+    });
+    assert!(
+        rebalanced > carried * 2.0,
+        "one forced gate-fire must re-size against the 3x account: {rebalanced} vs {carried}",
+    );
+}
+
+/// The forced orders go out the way the document's own always do — queued, so
+/// they fill at the next chunk's open. Nothing is settled at the last bar's
+/// close, because a rebalance is not terminal: the run continues, and booking
+/// it there would manufacture a fill at a price the market never offered.
+///
+/// This is the whole reason `Rebalance` is applied by the driver rather than by
+/// `apply_closeout` alongside `Flatten` and `Hold`.
+#[test]
+fn a_forced_rebalance_queues_rather_than_settling() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(30);
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (_, state) = built
+        .drive_resumable_with(&snaps[..10], &mut wallet, None, &Closeout::Carry)
+        .expect("chunk one");
+    let before = wallet.position(&intern("X")).amount;
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH).with_leverage(3.0);
+    built
+        .drive_resumable_with(
+            &snaps[10..20],
+            &mut wallet,
+            Some(&state),
+            &Closeout::Rebalance {
+                hold: Default::default(),
+            },
+        )
+        .expect("chunk two");
+    assert!(
+        (wallet.position(&intern("X")).amount - before).abs() < 1e-9,
+        "the resize must still be queued when the chunk ends, not booked into it",
+    );
+}
+
+/// `hold` is the narrower instruction and wins, without moving the symbol
+/// twice: a held symbol sits out the forced rebalance entirely and is then
+/// driven to its own absolute target. On a paper wallet a double move would be
+/// invisible (`settle_position` drops the queued one); on a live venue it is a
+/// real round trip, which is why the suppression is in the strategy rather than
+/// left to the settle to undo.
+#[test]
+fn a_held_symbol_sits_out_the_forced_rebalance() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(30);
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (_, state) = built
+        .drive_resumable_with(&snaps[..10], &mut wallet, None, &Closeout::Carry)
+        .expect("chunk one");
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH).with_leverage(3.0);
+    let (_, state) = built
+        .drive_resumable_with(
+            &snaps[10..20],
+            &mut wallet,
+            Some(&state),
+            &Closeout::Rebalance {
+                hold: [(intern("X"), 1.5)].into_iter().collect(),
+            },
+        )
+        .expect("chunk two");
+    assert!(
+        (wallet.position(&intern("X")).amount - 1.5).abs() < 1e-9,
+        "the hold target must be what the account ends the chunk at: {:?}",
+        wallet.position(&intern("X")),
+    );
+
+    // And no queued resize is waiting to undo it on the next chunk's open —
+    // the symbol was held out of the override, not merely overwritten by it.
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    built
+        .drive_resumable_with(&snaps[20..21], &mut wallet, Some(&state), &Closeout::Carry)
+        .expect("chunk three");
+    assert!(
+        (wallet.position(&intern("X")).amount - 1.5).abs() < 1e-9,
+        "nothing may have been queued behind the hold: {:?}",
+        wallet.position(&intern("X")),
+    );
+}
+
+/// One spec per shape, with the snapshot stream it wants — the five handles
+/// `StrategySpec` sums over, so a test can sweep them without repeating the
+/// fixtures above.
+fn every_shape() -> Vec<(&'static str, StrategySpec, Vec<Snapshot<Symbol>>)> {
+    vec![
+        (
+            "single",
+            StrategySpec::Single(Box::new(parse!(
+                fugazi::spec::StrategyRef,
+                r#"
+                root: X
+                long:
+                  enter: !crosses_above
+                    lhs: !ema { period: 3, source: !close }
+                    rhs: !ema { period: 8, source: !close }
+                  exit: !crosses_below
+                    lhs: !ema { period: 3, source: !close }
+                    rhs: !ema { period: 8, source: !close }
+            "#
+            ))),
+            single_snaps(40),
+        ),
+        (
+            "pairs",
+            StrategySpec::Pairs(Box::new(pairs_spec())),
+            multi_snaps(40),
+        ),
+        (
+            "basket",
+            StrategySpec::Basket(Box::new(basket_spec())),
+            multi_snaps(40),
+        ),
+        (
+            "multi",
+            StrategySpec::Multi(Box::new(multi_spec())),
+            multi_snaps(40),
+        ),
+        (
+            "portfolio",
+            StrategySpec::Portfolio(Box::new(portfolio_spec())),
+            multi_snaps(40),
+        ),
+    ]
+}
+
+/// Every shape accepts the instruction, and none of them panics or refuses it —
+/// `force_rebalance` reaches all five through the object-safe handle. What each
+/// one *does* with it is its own gate's meaning (a resize on `single:` /
+/// `multi:` / `pairs:`, a re-rank on `basket:`, one cash-then-position cycle on
+/// `portfolio:`), which the shape-level tests pin.
+#[test]
+fn every_shape_accepts_a_forced_rebalance() {
+    let sch = schema();
+    let rebalance = Closeout::Rebalance {
+        hold: Default::default(),
+    };
+    for (kind, spec, snaps) in every_shape() {
+        let mut built = spec
+            .try_build(CASH, &sch, None)
+            .unwrap_or_else(|e| panic!("{kind}: build: {e}"));
+        let (_, state) = built
+            .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
+            .unwrap_or_else(|e| panic!("{kind}: chunk one: {e}"));
+        let mut built = spec
+            .try_build(CASH, &sch, None)
+            .unwrap_or_else(|e| panic!("{kind}: rebuild: {e}"));
+        built
+            .drive_resumable(&snaps, CASH, &[], Some(&state), &rebalance)
+            .unwrap_or_else(|e| panic!("{kind}: forced rebalance: {e}"));
+    }
+}

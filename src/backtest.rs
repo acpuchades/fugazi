@@ -193,7 +193,60 @@ where
     I: IntoIterator<Item = A>,
     A: Into<Snapshot<Sym>>,
 {
-    drive(strategy, wallet, snapshots, DriveMode::Trade)
+    drive(strategy, wallet, snapshots, DriveMode::Trade, None)
+}
+
+/// [`run`], with the strategy's own **rebalance gate forced on the final bar**
+/// — the operator's "apply my new sizing now", for a deployment driving a
+/// document in chunks.
+///
+/// A document whose `rebalance_on:` is `!never` (the default for `single:`,
+/// `pairs:`, `multi:` and `portfolio:`) re-reads its `sizing:` only on a
+/// transition, so a change to the account underneath it — new leverage, a
+/// deposit — reaches the *book* only when the strategy next trades of its own
+/// accord, which may be never. This forces one gate-fire, so the document
+/// re-sizes to what it would choose against the account as it stands.
+///
+/// **The final bar, not the first**: the point is to size against current
+/// equity and current price, and a chunk that catches up on a long gap would
+/// otherwise resize at its stale head and drift for the rest of the run.
+///
+/// **Through the ordinary path.** The orders are the ones the document itself
+/// would issue, so they queue on a [`PaperWallet`](crate::PaperWallet) and fill
+/// at the next chunk's `open`, and route straight to the broker on a live
+/// venue. This is not a [`Closeout`]: nothing is settled synchronously here,
+/// because a rebalance is not terminal — the run continues, and booking it at
+/// the last bar's close would manufacture a fill at a price the market never
+/// offered.
+///
+/// `hold` names symbols to leave alone — the same symbols a
+/// [`Closeout::Hold`] is about to drive to absolute targets, which would
+/// otherwise undo this bar's resize (and cost a real round trip doing it on a
+/// live venue).
+///
+/// Nothing happens on a bar the strategy is not
+/// [`ready`](crate::Strategy::is_ready) for, or after
+/// [`ruin`](RunReport::ruin_bar) — the trade step is skipped wholesale in both
+/// cases, and forcing a gate does not reach past that.
+pub fn run_rebalancing<Sym, S, W>(
+    strategy: &mut S,
+    wallet: &mut W,
+    snapshots: &[Snapshot<Sym>],
+    hold: &[Sym],
+) -> RunReport<Sym>
+where
+    Sym: Clone + PartialEq,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
+    W: Wallet<Sym>,
+{
+    let force = snapshots.len().checked_sub(1).map(|last| (last, hold));
+    drive(
+        strategy,
+        wallet,
+        snapshots.iter().cloned(),
+        DriveMode::Trade,
+        force,
+    )
 }
 
 /// Feed `snapshots` through `strategy` **without trading**: chains advance and
@@ -223,7 +276,7 @@ where
     I: IntoIterator<Item = A>,
     A: Into<Snapshot<Sym>>,
 {
-    let _ = drive(strategy, wallet, snapshots, DriveMode::WarmUpOnly);
+    let _ = drive(strategy, wallet, snapshots, DriveMode::WarmUpOnly, None);
 }
 
 /// Whether the shared driver loop is allowed to call
@@ -236,13 +289,21 @@ enum DriveMode {
     WarmUpOnly,
 }
 
-/// The shared body of [`run`] and [`warm_up`]. See [`run`] for the per-bar
-/// order of operations; `mode` gates the trade step and nothing else.
+/// The shared body of [`run`], [`run_rebalancing`] and [`warm_up`]. See
+/// [`run`] for the per-bar order of operations; `mode` gates the trade step and
+/// nothing else.
+///
+/// `force_rebalance` is `Some((bar, hold))` to arm
+/// [`Strategy::force_rebalance`] around that one bar's
+/// [`trade`](crate::Strategy::trade) call — armed immediately before it and
+/// cleared immediately after, so the override cannot outlive the bar it was
+/// issued for even if the same strategy handle is driven again.
 fn drive<Sym, S, W, I, A>(
     strategy: &mut S,
     wallet: &mut W,
     snapshots: I,
     mode: DriveMode,
+    force_rebalance: Option<(usize, &[Sym])>,
 ) -> RunReport<Sym>
 where
     Sym: Clone + PartialEq,
@@ -331,7 +392,14 @@ where
         // so this is a no-op for strategies that don't override it.
         // `WarmUpOnly` suppresses exactly this step and nothing else.
         if mode == DriveMode::Trade && ruin_bar.is_none() && strategy.is_ready() {
+            let forced = force_rebalance.filter(|(at, _)| *at == bar);
+            if let Some((_, hold)) = forced {
+                strategy.force_rebalance(Some(hold));
+            }
             strategy.trade(wallet);
+            if forced.is_some() {
+                strategy.force_rebalance(None);
+            }
             // Refusals from this bar's own submissions — a live wallet rejecting
             // synchronously. (PaperWallet accepts everything at submit time and
             // fails at fill time instead, so this drain is empty for it.)
@@ -379,19 +447,30 @@ where
     }
 }
 
-/// What to do with the account's open positions once a run's last bar has been
-/// driven — the terminal half of [`apply_closeout`].
+/// The **operator's override at a chunk boundary** — what happens to the
+/// account's open positions around a run's last bar.
 ///
 /// [`Carry`](Closeout::Carry) is the backtest's answer and the default: an open
 /// position at the end of a chunk is simply still open, and the next chunk
-/// resumes holding it. The other two exist for a *deployment*, where a chunk
+/// resumes holding it. The rest exist for a *deployment*, where a chunk
 /// boundary is a real moment in time and somebody may need the book somewhere
 /// other than where the strategy's signal would leave it.
 ///
-/// The three are one knob rather than two because
+/// They are one knob rather than several because they contradict each other in
+/// pairs, and an enum makes a contradiction unsayable instead of a runtime
+/// error with a precedence rule nobody would remember.
 /// [`Flatten`](Closeout::Flatten) *is* [`Hold`](Closeout::Hold) at `0.0` for
-/// every open symbol — combining them could only ever mean one overriding the
-/// other, and an enum makes that unsayable instead of a runtime error.
+/// every open symbol; [`Rebalance`](Closeout::Rebalance) carries its own
+/// `hold`, because "resize to what the document wants" and "put this symbol
+/// exactly here" are one instruction about one book, not two that happen to
+/// arrive together — and it is meaningless alongside `Flatten`, which would
+/// only close what it had just resized.
+///
+/// **Three of the four are terminal, and [`apply_closeout`] is where they
+/// happen** — after the last bar's [`trade`](crate::Strategy::trade), settled
+/// synchronously because there is no next bar to queue against.
+/// `Rebalance` is the exception and is applied by the *driver*, around that
+/// same bar's `trade`: see [`run_rebalancing`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Closeout {
     /// Leave the book exactly as the strategy left it. Positions stay open and
@@ -414,6 +493,24 @@ pub enum Closeout {
     /// instead of moving it again; that is how a standing instruction outlives
     /// the bar it was issued on, without the driver having to carry a clock.
     Hold(std::collections::HashMap<Symbol, crate::types::Real>),
+    /// **Force the document's own rebalance gate on the final bar**, then apply
+    /// `hold` exactly as [`Hold`](Closeout::Hold) does.
+    ///
+    /// The answer to "I raised this account's leverage — apply it now". Sizing
+    /// is the document's arithmetic, evaluated against the account as it
+    /// stands, so this asks the strategy for its own targets rather than
+    /// naming units the way `Hold` does. See [`run_rebalancing`] for what
+    /// "force the gate" means per shape and why the resulting orders queue
+    /// rather than settle.
+    ///
+    /// `hold` is usually empty. When it isn't, those symbols are held out of
+    /// the forced rebalance *and* driven to their targets afterwards — the
+    /// narrower instruction wins, and wins without a wasted round trip.
+    Rebalance {
+        /// Absolute signed unit targets, read exactly as [`Hold`](Closeout::Hold)
+        /// reads its map.
+        hold: std::collections::HashMap<Symbol, crate::types::Real>,
+    },
 }
 
 impl Closeout {
@@ -421,6 +518,31 @@ impl Closeout {
     /// backtest always asks for.
     pub fn is_carry(&self) -> bool {
         matches!(self, Closeout::Carry)
+    }
+
+    /// The symbols a forced rebalance must leave alone, or `None` when this
+    /// closeout forces no rebalance at all — what a driver hands
+    /// [`crate::Strategy::force_rebalance`].
+    ///
+    /// Sorted, so a multi-symbol instruction reaches the strategy in the same
+    /// order every run regardless of the map's layout — the same rule
+    /// [`apply_closeout`] follows for the targets themselves.
+    pub fn forced_rebalance_hold(&self) -> Option<Vec<Symbol>> {
+        let Closeout::Rebalance { hold } = self else {
+            return None;
+        };
+        let mut held: Vec<Symbol> = hold.keys().cloned().collect();
+        held.sort();
+        Some(held)
+    }
+
+    /// The absolute signed unit targets this closeout settles once the last bar
+    /// is over — the map for the two variants that carry one.
+    fn targets(&self) -> Option<&std::collections::HashMap<Symbol, crate::types::Real>> {
+        match self {
+            Closeout::Hold(targets) | Closeout::Rebalance { hold: targets } => Some(targets),
+            Closeout::Carry | Closeout::Flatten => None,
+        }
     }
 }
 
@@ -472,7 +594,11 @@ pub fn apply_closeout<S, W>(
         // `unreachable!()`, so a future variant is a compile error here.
         Closeout::Carry => Vec::new(),
         Closeout::Flatten => wallet.flatten(),
-        Closeout::Hold(targets) => {
+        // `Rebalance`'s own half already happened, inside the last bar's
+        // `trade` — all that is left of it here is the `hold` map, which it
+        // reads exactly as `Hold` does.
+        Closeout::Hold(_) | Closeout::Rebalance { .. } => {
+            let targets = closeout.targets().expect("both arms carry targets");
             // Sorted, so a multi-symbol instruction books its legs in the same
             // order every run regardless of the map's layout — the same rule
             // `PaperWallet::flatten` follows, and for the same reason.

@@ -291,6 +291,10 @@ pub struct MultiAssetStrategy<Sym> {
     /// doesn't wire `.rebalance_on(...)` behaves exactly as before (sizing
     /// only read on transitions).
     rebalance: RebalanceSignal<Sym>,
+    /// One-shot override of the gate above, armed by
+    /// [`force_rebalance`](Strategy::force_rebalance) for a single `trade` call
+    /// and never serialized. See [`ForcedRebalance`](super::ForcedRebalance).
+    forced_rebalance: super::ForcedRebalance<Sym>,
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
     /// This bar's `(symbol, candle)` pairs, rebuilt at the top of each
@@ -360,6 +364,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             }),
             states: SymMap::default(),
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            forced_rebalance: None,
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
             bar_candles: SymMap::default(),
@@ -939,7 +944,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
                     enter_short: state.short.value().unwrap_or(false),
                     close_long: state.close_long.value().unwrap_or(false),
                     close_short: state.close_short.value().unwrap_or(false),
-                    rebalancing,
+                    rebalancing: rebalancing || super::forced_for(&self.forced_rebalance, sym),
                     long_stop: state.long_stop.as_ref().and_then(|l| l.value()),
                     long_target: state.long_target.as_ref().and_then(|l| l.value()),
                     short_stop: state.short_stop.as_ref().and_then(|l| l.value()),
@@ -950,9 +955,17 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy
         }
     }
 
+    /// Arms the gate for every discovered symbol, minus any the caller's `hold`
+    /// names. A symbol this strategy has not discovered yet has no position to
+    /// resize, so the override reaches nothing for it either way.
+    fn force_rebalance(&mut self, hold: Option<&[Sym]>) {
+        super::arm_rebalance(&mut self.forced_rebalance, hold);
+    }
+
     fn reset(&mut self) {
         self.states.clear();
         self.rebalance.reset();
+        self.forced_rebalance = None;
         self.book.reset();
     }
 }
@@ -1010,6 +1023,62 @@ mod tests {
         // A new symbol later is also lazily built.
         strat.update(snap(&[("A", 101.0), ("B", 51.0), ("C", 200.0)]));
         assert!(strat.position(&"C").is_some());
+    }
+
+    // ---------------- The forced rebalance ------------------------------
+
+    /// Two long legs at a sizing target that moves with equity, so a `!never`
+    /// document drifts away from it and a forced gate-fire pulls both back.
+    ///
+    /// The per-symbol `hold` is the point: `A` is named, so the override leaves
+    /// it exactly where it was while `B` is resized. This is the only shape
+    /// where the distinction is observable within one strategy.
+    #[test]
+    fn a_forced_rebalance_resizes_every_symbol_except_the_held_one() {
+        let mut strat: MultiAssetStrategy<&'static str> =
+            MultiAssetStrategy::with_initial_equity(1_000.0)
+                .long_on(
+                    |sym: &&'static str| close_of(sym).gt(Value::new(1.0)),
+                    |sym: &&'static str| close_of(sym).lt(Value::new(0.0)),
+                )
+                .position_sizing(|_| equal_weight::<&'static str>(4));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 100.0)]);
+        let (a0, b0) = (wallet.position(&"A").amount, wallet.position(&"B").amount);
+        assert!(a0 > 0.0 && b0 > 0.0, "fixture: both legs open");
+
+        // Both prices double: equity is up, so each leg's quarter-of-equity
+        // target is worth fewer units than it holds. The `!never` gate does not
+        // notice.
+        tick(&mut strat, &mut wallet, &[("A", 200.0), ("B", 200.0)]);
+        assert!((wallet.position(&"A").amount - a0).abs() < 1e-9);
+
+        // Force, holding A back.
+        let s = snap(&[("A", 200.0), ("B", 200.0)]);
+        for (sym_opt, _f, atom) in s.iter() {
+            let sym = sym_opt.copied().unwrap();
+            for fill in wallet.update(sym, atom.candle.unwrap()) {
+                strat.on_fill(&fill);
+            }
+        }
+        strat.update(s);
+        strat.force_rebalance(Some(&["A"]));
+        strat.trade(&mut wallet);
+        strat.force_rebalance(None);
+        // One more bar to settle the queued move.
+        tick(&mut strat, &mut wallet, &[("A", 200.0), ("B", 200.0)]);
+
+        assert!(
+            (wallet.position(&"A").amount - a0).abs() < 1e-9,
+            "A was held back and must not have moved: {} vs {a0}",
+            wallet.position(&"A").amount,
+        );
+        assert!(
+            (wallet.position(&"B").amount - b0).abs() > 1e-9,
+            "B must have been resized to its current target: {} vs {b0}",
+            wallet.position(&"B").amount,
+        );
     }
 
     // ---------------- Independent per-symbol decision -------------------

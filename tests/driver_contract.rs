@@ -42,6 +42,12 @@ enum Event {
         price: Real,
     },
     Reject,
+    /// `force_rebalance(Some(hold))` — the one-shot gate override being armed.
+    Force {
+        hold: Vec<&'static str>,
+    },
+    /// `force_rebalance(None)` — the same latch being cleared.
+    Unforce,
     /// `trade(wallet)` — carries the bar count at the time, so gating is visible.
     Trade {
         bars_seen: usize,
@@ -102,6 +108,15 @@ impl Strategy for Recorder {
 
     fn is_ready(&self) -> bool {
         self.bars_seen >= self.ready_from
+    }
+
+    fn force_rebalance(&mut self, hold: Option<&[&'static str]>) {
+        self.push(match hold {
+            Some(hold) => Event::Force {
+                hold: hold.to_vec(),
+            },
+            None => Event::Unforce,
+        });
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -455,6 +470,100 @@ fn warm_up_advances_state_but_never_trades() {
             .any(|e| matches!(e, Event::Fill { .. })),
         "the control run should have filled something"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The forced rebalance
+// ---------------------------------------------------------------------------
+
+/// `run_rebalancing` arms the gate override around the **final** bar's
+/// `trade` — and around that one only.
+///
+/// Which bar is load-bearing. The point of forcing a rebalance is to size
+/// against the account as it stands *now*, so a chunk that catches up on a long
+/// gap has to resize at its tail. Arming the first bar instead would size
+/// against stale equity and then drift for the rest of the chunk, which an
+/// operator reads as "my instruction did nothing".
+#[test]
+fn a_forced_rebalance_is_armed_around_the_final_bars_trade_only() {
+    let prices = [100.0, 101.0, 102.0, 103.0];
+    let (mut rec, log) = Recorder::new(0, &[]);
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run_rebalancing(&mut rec, &mut wallet, &tagged(&prices), &[SYMBOL]);
+
+    let events = log.lock().expect("log").clone();
+    let forced: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Event::Force { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(forced.len(), 1, "exactly one arming: {events:?}");
+
+    let at = forced[0];
+    assert_eq!(
+        events[at],
+        Event::Force { hold: vec![SYMBOL] },
+        "the hold list must reach the strategy verbatim",
+    );
+    assert!(
+        matches!(events[at + 1], Event::Trade { bars_seen } if bars_seen == prices.len()),
+        "arming must sit immediately before the last bar's trade: {events:?}",
+    );
+    assert_eq!(
+        events[at + 2],
+        Event::Unforce,
+        "and be cleared immediately after it: {events:?}",
+    );
+}
+
+/// Plain `run` never touches the latch, so nothing about the ordinary driver
+/// path changed.
+#[test]
+fn an_ordinary_run_never_arms_the_gate_override() {
+    let prices = [100.0, 101.0, 102.0];
+    let (mut rec, log) = Recorder::new(0, &[]);
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run(&mut rec, &mut wallet, tagged(&prices));
+
+    let events = log.lock().expect("log").clone();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Force { .. } | Event::Unforce)),
+        "run() must leave the override alone: {events:?}",
+    );
+}
+
+/// A strategy that never reports ready is never traded, and so is never forced
+/// either — the override rides on the trade step and cannot reach past the
+/// readiness gate. "Safe defaults" holds here too: an operator cannot force a
+/// document to size off half-warmed indicators.
+#[test]
+fn a_forced_rebalance_does_not_outrank_the_readiness_gate() {
+    let prices = [100.0, 101.0, 102.0];
+    let (mut rec, log) = Recorder::new(usize::MAX, &[]);
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run_rebalancing(&mut rec, &mut wallet, &tagged(&prices), &[]);
+
+    let events = log.lock().expect("log").clone();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Force { .. } | Event::Trade { .. })),
+        "an unready strategy is neither traded nor forced: {events:?}",
+    );
+}
+
+/// An empty stream has no final bar to arm, and must not panic reaching for
+/// one.
+#[test]
+fn a_forced_rebalance_over_an_empty_stream_is_a_no_op() {
+    let (mut rec, log) = Recorder::new(0, &[]);
+    let mut wallet = PaperWallet::new(1_000.0);
+    let report = backtest::run_rebalancing(&mut rec, &mut wallet, &[], &[]);
+    assert!(report.equity_curve.is_empty());
+    assert!(log.lock().expect("log").is_empty());
 }
 
 /// A fill that arrives *during* a warm-up still reaches the strategy.
