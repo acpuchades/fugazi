@@ -384,6 +384,14 @@ WALLET_NOT_BOUND = {
         "the per-symbol half of the same pair, and terminal for the same reason — "
         "reachable as StrategySpec.run_resumable(hold={sym: units})"
     ),
+    "settle_pending": (
+        "the third member of that family, and unbound for the family's reason — "
+        "it settles what the *strategy* queued, so the only caller that can have "
+        "queued anything is a run; reachable as the bar-less arm of "
+        "StrategySpec.run_resumable(rebalance=True), which books the fills into "
+        "the report as well as the account. A hand-driven wallet loop would want "
+        "it, and that is the same caller take_rejections is waiting on"
+    ),
 }
 
 

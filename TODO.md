@@ -93,6 +93,20 @@ needs a bar-less rejection type, and `RunReport.rejections` already exposes the
 same entries for the run path. Only worth revisiting for a caller driving the
 wallet loop by hand who needs rejections *during* the loop rather than after.
 
+### `Wallet.settle_pending`
+
+Unbound, with the reason in `python/tests/test_parity.py` beside `flatten` and
+`settle_position` — the family it completes. It settles what the *strategy*
+queued rather than a target the caller named, so the only caller who can have
+queued anything is a run, and the run that needs it already calls it:
+`StrategySpec.run_resumable(rebalance=True)` on an empty stream, which books the
+resulting fills into the report as well as the account. Binding the raw method
+would hand back the fills with no report to record them against, which is the
+half of `take_rejections`' problem that has nothing to do with the bar stamp.
+
+Revisit together with `take_rejections`, for the same caller: someone driving
+the wallet loop by hand. Neither is worth a stub regen on its own.
+
 ### Position-anchored protective stops, and the Rust recipe catalogue
 
 Noted in the Python README's `Strategy` section as not bound. Drop to the wallet
@@ -535,6 +549,28 @@ This changes if state files ever become long-lived artefacts rather than
 process-to-process handoffs — a deployment that cannot afford to replay months of
 bars would justify a `v1 → v2` shim for the three shapes whose v1 blob *is*
 complete (single, pairs, and any portfolio that never traded).
+
+### A bar-less report stamps its fills and rejections `bar: 0`
+
+`rebalance_now` returns an empty `equity_curve` with a non-empty `fills` /
+`rejections`, each `Rejected`/`Fill` stamped `bar: 0` — a bar that does not
+exist. `apply_closeout` has done the same for a bar-less `Flatten` since it
+existed (`snapshots.len().saturating_sub(1)`), so this is one convention, not a
+new wart.
+
+Left as is, deliberately. Nothing indexes the curve by it: `report_slice` filters
+on `bar` ranges (a zero-length range admits nothing), and `metrics.rs`'s
+time-in-market difference is degenerate over an empty curve anyway. The honest
+alternative is `Option<usize>`, which ripples through `Fill`, `Rejected`,
+`report_slice`'s rebasing arithmetic, the CLI's `fills.csv`/`rejections.csv`
+columns, and the Python `RunReport` accessors — a wide break to encode "outside
+the bar stream" in a field every consumer currently reads as a number.
+
+What would change it: a consumer that joins fills back onto the curve by index
+and is wrong rather than merely empty, or a second bar-less producer, at which
+point the sentinel is being relied on in two places and should be a type. Until
+then it is documented on `rebalance_now` as *outside the bar stream, not the
+first bar*.
 
 ### The resume file drops the blotter and the rejection log
 

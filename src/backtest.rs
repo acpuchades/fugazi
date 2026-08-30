@@ -300,14 +300,17 @@ where
 /// [`Wallet::set`] is what makes that safe: it names an absolute target, so
 /// re-issuing it drives to the same place instead of adding to it.
 ///
-/// **Empty [`RunReport`].** No bar was driven, so `equity_curve` is empty —
-/// the `equity_curve.len() == snapshots.len()` invariant every consumer relies
-/// on, at zero. `initial_equity` is the account's equity on entry, and
-/// `rejections` carries anything a live venue refused synchronously, stamped at
-/// bar `0` the way [`apply_closeout`] stamps a bar-less
-/// [`Flatten`](Closeout::Flatten). No fill can appear: the orders queue on a
-/// [`PaperWallet`](crate::PaperWallet) and route to the broker on a live venue,
-/// and nothing fills on the bar that caused it — here as everywhere else.
+/// **Curve-less [`RunReport`].** No bar was driven, so `equity_curve` is empty
+/// — the `equity_curve.len() == snapshots.len()` invariant every consumer
+/// relies on, at zero. `initial_equity` is the account's equity on entry.
+///
+/// `fills` and `rejections` are **not** empty: [`Wallet::settle_pending`]
+/// resolves the queued moves here rather than leaving them for a next bar that
+/// is not coming, so the orders that moved the book are on the report that
+/// describes the call. Both are stamped at bar `0` — the bar
+/// [`apply_closeout`] stamps a bar-less [`Flatten`](Closeout::Flatten) at too,
+/// and the only index an empty curve leaves available. It indexes nothing:
+/// treat it as *"outside the bar stream"*, not as the first bar.
 ///
 /// **An unready strategy is refused, not ignored.** With a bar to drive, an
 /// unready strategy simply does not trade and the report still describes the

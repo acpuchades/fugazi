@@ -287,6 +287,50 @@ fn a_resumed_chunk_may_not_quote_the_symbol() {
     );
 }
 
+/// **The universe check must not speak for a bar-less rebalance.** An operator
+/// pressing "rebalance now" between two closes passes no bars, and forgetting
+/// `resume=` is the one mistake that path invites. Cold, the stream check ran
+/// first and reported *"the document trades `S0USDT`, which is not in the input
+/// at all — the stream carries no symbols at all … check for a typo or a case
+/// mismatch"*: false on both counts, and it sends the reader to the document
+/// when the fault is the missing state.
+///
+/// `rebalance_now`'s own error is the diagnosis — the strategy is cold, and a
+/// resumed state is what carries the warm-up — so the check stands aside on the
+/// one stream it has nothing to say about.
+#[test]
+fn a_bar_less_rebalance_reports_readiness_not_a_missing_symbol() {
+    let spec = single(&doc("S0USDT"));
+    let costs = empty_costs();
+    let rebalance = Closeout::Rebalance {
+        hold: Default::default(),
+    };
+
+    let err = run_iteration_resumable(&spec, labels(0), &[], &ctx(&costs), None, &rebalance)
+        .map(|_| ())
+        .expect_err("a cold strategy has no sizing target to rebalance to");
+    assert!(
+        err.contains("finished warming up"),
+        "the readiness error is the diagnosis, got: {err}",
+    );
+    assert!(
+        !err.contains("not in the input at all"),
+        "the universe check shadowed it, got: {err}",
+    );
+
+    // The check is stood aside for *this* instruction only. The same empty
+    // stream under any other closeout still reports the missing symbol, so a
+    // genuine typo is not newly swallowed.
+    let carried =
+        run_iteration_resumable(&spec, labels(0), &[], &ctx(&costs), None, &Closeout::Carry)
+            .map(|_| ())
+            .expect_err("an empty stream still carries no declared symbol");
+    assert!(
+        carried.contains("not in the input at all"),
+        "the exemption must be scoped to the bar-less rebalance, got: {carried}",
+    );
+}
+
 #[test]
 fn discovered_universes_declare_nothing_to_check() {
     // Basket and multi-asset read their universe off the stream, so they have

@@ -588,8 +588,11 @@ pub(crate) fn run_spec_resumable<W: Wallet<Symbol> + Send>(
     closeout: &Closeout,
 ) -> PyResult<(RunReport<Symbol>, fugazi_core::spec::RunState)> {
     // Cold starts only: on a resume, a chunk in which a symbol never quotes is
-    // legitimate — the state carrying it came from an earlier chunk.
-    if resume.is_none() {
+    // legitimate — the state carrying it came from an earlier chunk. A bar-less
+    // forced rebalance is exempt too: with no stream there is nothing for a
+    // declared symbol to be missing from, so the check would shadow the
+    // readiness error that is the real diagnosis. See `is_barless_rebalance`.
+    if resume.is_none() && !spec_backtest::is_barless_rebalance(snapshots, closeout) {
         spec_backtest::validate_universe(loaded, snapshots).map_err(build_err)?;
     }
     let cash = wallet.equity().0;

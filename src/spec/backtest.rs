@@ -198,6 +198,21 @@ pub fn validate_universe(
     ))
 }
 
+/// Whether this is the bar-less forced-rebalance case — an operator saying
+/// *now*, between two closes, which [`crate::backtest::rebalance_now`] answers
+/// against the marks the account already carries.
+///
+/// The one thing [`validate_universe`] must not speak about: with no stream
+/// there is nothing for a declared symbol to be missing *from*, so it fires on
+/// every such call — "the stream carries no symbols at all", advising a check
+/// for a typo — and shadows the readiness error that is the actual diagnosis.
+pub fn is_barless_rebalance<Sym>(
+    snapshots: &[crate::types::Snapshot<Sym>],
+    closeout: &Closeout,
+) -> bool {
+    snapshots.is_empty() && matches!(closeout, Closeout::Rebalance { .. })
+}
+
 /// Everything one iteration of a backtest produces — consumed by
 /// `crate::run::run`. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
@@ -613,7 +628,14 @@ pub fn run_iteration_resumable(
     // is driven — see `validate_universe`. Cold starts only: on a resume, a
     // chunk in which a symbol never quotes is legitimate, because the state
     // that carries it was restored from an earlier one.
-    if resume.is_none() {
+    //
+    // A bar-less forced rebalance is the other exemption, and for the opposite
+    // reason: there is no stream for the universe to disagree with, so the
+    // check reports "the stream carries no symbols at all — check for a typo",
+    // which is both false and the wrong instruction. The real fault is a cold
+    // strategy with no `resume` to warm it, and `rebalance_now` says exactly
+    // that. Skipped here so its message reaches the caller instead.
+    if resume.is_none() && !is_barless_rebalance(snapshots, closeout) {
         validate_universe(spec, snapshots)?;
     }
     // The warm-up prefix is fed to the strategy but not measured, so it is

@@ -2188,31 +2188,6 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Ok(())
     }
 
-    /// Close every open position **synchronously**, at each symbol's last known
-    /// close, and return the fills.
-    ///
-    /// The trait default (queue a `close` per symbol, then drain `poll_fills`)
-    /// is wrong here: a `PaperWallet`'s queued moves settle at the *next* bar's
-    /// open and it reports no out-of-band fills, so the default would flatten
-    /// nothing at all. This goes straight to `fill_at` — the same engine every
-    /// other fill routes through, so spread, slippage and commission apply
-    /// exactly as they would to a strategy-issued exit — and mints a real
-    /// [`OrderId`] per leg, so `reconstruct_trades` pairs them like any other
-    /// close.
-    ///
-    /// Terminal: every queued move, resting bracket and resting limit is
-    /// dropped, since none of them can fill after this.
-    /// Fills **synchronously**, at `symbol`'s last close, rather than queueing
-    /// for the next bar's open the way [`set_position`](Wallet::set_position)
-    /// does — the whole point of the method, since its callers stand at the end
-    /// of a chunk where no next bar is coming.
-    ///
-    /// A move that only shrinks the position (an exit, a partial trim) is
-    /// classified as reducing, which exempts it from the leverage cap the way
-    /// every other exit path is: a cap must never be able to refuse a close.
-    /// Anything that grows the position, flips its side, or opens one from flat
-    /// is an ordinary sized fill and meets the account's solvency rules in full,
-    /// so an unaffordable target is refused rather than booked.
     /// Resolve every queued order against the last close and settle it.
     ///
     /// A queued `Pending::Sized` is resolved exactly as the bar-ful path
@@ -2261,6 +2236,17 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         fills
     }
 
+    /// Fills **synchronously**, at `symbol`'s last close, rather than queueing
+    /// for the next bar's open the way [`set_position`](Wallet::set_position)
+    /// does — the whole point of the method, since its callers stand at the end
+    /// of a chunk where no next bar is coming.
+    ///
+    /// A move that only shrinks the position (an exit, a partial trim) is
+    /// classified as reducing, which exempts it from the leverage cap the way
+    /// every other exit path is: a cap must never be able to refuse a close.
+    /// Anything that grows the position, flips its side, or opens one from flat
+    /// is an ordinary sized fill and meets the account's solvency rules in full,
+    /// so an unaffordable target is refused rather than booked.
     fn settle_position(&mut self, symbol: Sym, target: Real) -> Vec<Order<Sym>> {
         self.pending.remove(&symbol);
         self.protective.remove(&symbol);
@@ -2298,6 +2284,20 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         }
     }
 
+    /// Close every open position **synchronously**, at each symbol's last known
+    /// close, and return the fills.
+    ///
+    /// The trait default (queue a `close` per symbol, then drain `poll_fills`)
+    /// is wrong here: a `PaperWallet`'s queued moves settle at the *next* bar's
+    /// open and it reports no out-of-band fills, so the default would flatten
+    /// nothing at all. This goes straight to `fill_at` — the same engine every
+    /// other fill routes through, so spread, slippage and commission apply
+    /// exactly as they would to a strategy-issued exit — and mints a real
+    /// [`OrderId`] per leg, so `reconstruct_trades` pairs them like any other
+    /// close.
+    ///
+    /// Terminal: every queued move, resting bracket and resting limit is
+    /// dropped, since none of them can fill after this.
     fn flatten(&mut self) -> Vec<Order<Sym>> {
         // Sorted so a multi-symbol flatten books its legs in a stable order
         // regardless of `positions`' hash seed.

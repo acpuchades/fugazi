@@ -2421,6 +2421,30 @@ def test_rebalance_needs_no_bar():
     )
 
 
+def test_a_bar_less_rebalance_reports_readiness_not_a_missing_symbol():
+    """Forgetting `resume=` is the mistake the bar-less path invites, and the
+    universe check answered it for the wrong reason.
+
+    Cold, with no bars, it reported "the document trades `X`, which is not in
+    the input at all - the stream carries no symbols at all ... check for a typo
+    or a case mismatch": false on both counts, and it points at the document
+    when the fault is the missing state. The readiness error is the diagnosis,
+    and it says what to do about it.
+    """
+    with pytest.raises(ta.SpecError) as excinfo:
+        ta.load_spec(_ALL_IN_YAML).run_resumable(
+            ta.PaperWallet(10_000.0), [], rebalance=True
+        )
+    message = str(excinfo.value)
+    assert "finished warming up" in message, message
+    assert "not in the input at all" not in message, message
+
+    # Scoped to that one instruction: the same empty stream under any other
+    # closeout still names the missing symbol, so a real typo is not swallowed.
+    with pytest.raises(ta.SpecError, match="not in the input at all"):
+        ta.load_spec(_ALL_IN_YAML).run_resumable(ta.PaperWallet(10_000.0), [])
+
+
 def test_a_bar_less_rebalance_advances_no_clock():
     """It is an instruction about the book, not a step of the run: the state it
     returns describes exactly the bar the state it resumed from described."""
