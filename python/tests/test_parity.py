@@ -783,7 +783,15 @@ def test_the_wallet_abc_claims_only_what_all_three_have():
 #: Every provider *class* in the bindings. `fugazi.fetch` also accepts
 #: `"binance-vision-futures"`, which has no class of its own — it is
 #: `BinanceVision(market="futures")`.
-PROVIDER_CLASSES = ("Binance", "BinanceVision", "Coinbase", "CoinGecko", "Okx", "Yahoo")
+PROVIDER_CLASSES = (
+    "Binance",
+    "BinanceFutures",
+    "BinanceVision",
+    "Coinbase",
+    "CoinGecko",
+    "Okx",
+    "Yahoo",
+)
 
 
 def _known_providers(fn, *args):

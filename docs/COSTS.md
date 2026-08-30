@@ -108,6 +108,8 @@ charges and the model needs no notion of settlement cadence.
 
 ```sh
 fugazi get binance-vision-futures:BTCUSDT[1d] --since 2023-01-01 -o funding.csv
+# …or `binance-futures:BTCUSDT[1d]` for the same column live, current to the
+# bar forming now rather than ~2 days behind.
 fugazi run @strategy.yml -s @btc.csv -s @funding.csv -o out/ \
   --max-gross 3 --costs 'carry=!funding {}' --costs 'commission=!percentage { rate: 0.0005 }'
 ```

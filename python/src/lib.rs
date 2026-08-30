@@ -147,6 +147,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYahoo>()?;
     m.add_class::<PyCoinGecko>()?;
     m.add_class::<PyBinanceVision>()?;
+    m.add_class::<PyBinanceFutures>()?;
     m.add_class::<PyCostConfig>()?;
     m.add_class::<PyMonteCarloConfig>()?;
     m.add_class::<PyStrategySpec>()?;

@@ -46,8 +46,9 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, CoinGecko, Coinbase, Interval, Kraken, Okx, SeriesSource,
-    Timestamp, Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
+    self, Binance, BinanceFutures, BinanceVision, CoinGecko, Coinbase, Interval, Kraken, Okx,
+    SeriesSource, Timestamp, Yahoo, binance::binance_schema,
+    binance_futures::binance_futures_schema, binance_vision::binance_vision_schema,
     coingecko::coingecko_schema, kraken::kraken_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
@@ -288,6 +289,14 @@ pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
         name: "binance",
         description: "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
         schema: Some(|| binance_schema().clone()),
+    },
+    ProviderInfo {
+        name: "binance-futures",
+        description: "Binance USDⓈ-M perpetual klines, live from `fapi` — the same columns as \
+             `binance-vision-futures` (funding rate, premium index, open interest, the \
+             long/short ratios) with no archive lag. Open interest and the ratios reach back \
+             30 days; bars, funding and premium index reach back to listing",
+        schema: Some(|| binance_futures_schema().clone()),
     },
     ProviderInfo {
         name: "binance-vision",
@@ -1357,6 +1366,9 @@ async fn fetch(
         "cg" => Ok(CoinGecko::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "binance-futures" => Ok(BinanceFutures::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         "binance-vision" => Ok(BinanceVision::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
@@ -1373,6 +1385,7 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
+        "binance-futures" => Ok(BinanceFutures::new().tickers().await?),
         "binance-vision" => Ok(BinanceVision::new().tickers().await?),
         "binance-vision-futures" => Ok(BinanceVision::futures().tickers().await?),
         "okx" => Ok(Okx::new().tickers().await?),
@@ -2186,6 +2199,7 @@ mod tests {
             ("yfinance", "raw_close"),
             ("binance-vision", "quote_volume"),
             ("binance-vision-futures", "funding_rate"),
+            ("binance-futures", "funding_rate"),
             ("cg", "market_cap"),
         ] {
             let schema = provider_schema(provider);

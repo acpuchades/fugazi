@@ -124,6 +124,7 @@ BY_PARAM = {
     "base_url": "str | None",
     "user_agent": "str | None",
     "adjusted": "bool",
+    "bars_only": "bool",
     "market": "str",
     "permutations": "int",
     "scheme": "str",
@@ -372,6 +373,7 @@ MEMBER_RETURNS = {
     },
     # --- providers and live wallets -----------------------------------------
     ("Binance", "tickers"): "list[str]",
+    ("BinanceFutures", "tickers"): "list[str]",
     ("BinanceVision", "tickers"): "list[str]",
     ("CoinGecko", "tickers"): "list[str]",
     ("Coinbase", "tickers"): "list[str]",

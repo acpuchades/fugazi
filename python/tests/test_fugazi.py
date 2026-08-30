@@ -3567,6 +3567,21 @@ def test_binance_vision_constructs():
     assert ta.BinanceVision(base_url="http://localhost:1") is not None
 
 
+def test_binance_futures_constructs():
+    assert ta.BinanceFutures() is not None
+    assert ta.BinanceFutures(bars_only=True, base_url="http://localhost:1") is not None
+
+
+def test_both_dispatchers_advertise_the_live_futures_id():
+    # `binance-futures` is the archive tree's live twin, not a spelling of it:
+    # a caller reaching for the recent tail has to find the id on the flat
+    # dispatchers, not only on the class.
+    with pytest.raises(ValueError, match="binance-futures"):
+        ta.fetch(provider="nope", symbol="BTCUSDT")
+    with pytest.raises(ValueError, match="binance-futures"):
+        ta.tickers("nope")
+
+
 def test_fetch_advertises_both_binance_vision_ids():
     # The market rides in the provider id rather than a `market` kwarg, so the
     # flat fetch() carries both trees the way the CLI does.

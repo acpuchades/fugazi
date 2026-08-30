@@ -49,12 +49,18 @@
 //! ```
 
 pub mod binance;
+pub mod binance_futures;
 pub mod binance_vision;
 pub mod coinbase;
 pub mod coingecko;
 pub mod kraken;
 pub mod okx;
 pub mod yahoo;
+
+/// Bucketing irregular side-channel samples onto the requested bar cadence —
+/// shared by the two providers that carry them, so the archive and the live
+/// endpoint fold the same day the same way.
+mod bucket;
 
 use std::fmt;
 use std::future::Future;
@@ -64,6 +70,7 @@ pub use crate::types::Timestamp;
 use crate::types::{Atom, Schema};
 
 pub use binance::Binance;
+pub use binance_futures::BinanceFutures;
 pub use binance_vision::BinanceVision;
 pub use coinbase::Coinbase;
 pub use coingecko::CoinGecko;

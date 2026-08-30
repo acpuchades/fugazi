@@ -1400,11 +1400,33 @@ by `Market`, each **carrying candles**: `Spot` = spot klines + four `kline_extra
 `premium_index`, `open_interest`/`_value`, four positioning ratios). The old two-trait
 split (`CandleSource`/`OverlaySource`, `BinanceFunding`) is gone.
 
+`BinanceFutures` is the archive's **live twin** — the same USDⓈ-M columns from
+`fapi.binance.com`, and literally the same `Arc<Schema>`
+(`binance_futures_schema()` *returns* `binance_vision_schema(UsdMFutures)`), so the two
+cannot drift and a frame from either concatenates onto the other. It merges eight
+endpoints — klines, `premiumIndexKlines`, `fundingRate` and five `/futures/data/*`
+statistics — each paged independently and concurrently, then folded in **feed order**
+so a tie or a float sum never depends on what the network settled first. The split of
+labour is temporal: the live one is current to the forming bar but `/futures/data/*`
+serves a rolling **30 days**, so its cursor starts at that horizon rather than paging
+years of empty responses; the archive lags ~2 days and reaches back to 2021.
+
+**Stamp conventions differ per endpoint, and the difference is silent.** The four
+`/futures/data` *snapshots* (open interest, the three account ratios) label a row by
+its window's **close**, so each is moved back one period to land on the bar it
+measured — matching the archive, which stamps by the open. `takerlongshortRatio` is a
+volume ratio *accrued over* `[t, t+period)` and is stamped at the open like a kline, so
+it does not move. Verified value-for-value against the `metrics` archive: with the shift,
+`open_interest` is bit-identical; the account ratios agree to `fapi`'s own 4-decimal
+rounding, and the taker ratio is deliberately the whole bar's flow rather than the
+archive's last 5-minute sample within it.
+
 Providers whose side-channel samples arrive off-cadence bucket them onto the requested
 interval via `sources::floor_to_bucket`, but **level vs accrual** columns aggregate
 differently: a *level* keeps one representative sample per bucket (CoinGecko keeps the
-**first**; BinanceVision's `premium_index`/`open_interest`/ratios keep the **last**,
-`Aggregation::Last`), while `funding_rate` is an *accrual* so its samples are
+**first**; the two Binance perpetual providers' `premium_index`/`open_interest`/ratios
+keep the **last** *by the sample's own timestamp*, `Aggregation::Last`, in the
+`sources::bucket::Fold` they share), while `funding_rate` is an *accrual* so its samples are
 **summed** — `[1d]` is the day's total carry (3 × 8h). No baked-in moving average —
 that's `get -x` / `!sma { source: !get { key: funding_rate } }`.
 
@@ -1948,7 +1970,7 @@ variant on the core `StrategySpec` the pyclass wraps; (b) new per-kind `.run()`/
 | `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyStrSource`/`PyMulti`/`PySharedMulti` |
 | `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the live wallets (`PyOkxWallet`/`PyCoinbaseWallet`/`PyKrakenWallet`), the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
 | `constructors.rs` | leaf sources, `src_period!`/`bar_period!`/… invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`, `compute_overlays` |
-| `sources.rs` | `PyBinance`/`PyBinanceVision`/`PyOkx`/`PyKraken`/`PyCoinbase`/`PyYahoo`/`PyCoinGecko` + `fetch` |
+| `sources.rs` | `PyBinance`/`PyBinanceFutures`/`PyBinanceVision`/`PyOkx`/`PyKraken`/`PyCoinbase`/`PyYahoo`/`PyCoinGecko` + `fetch` |
 | `metrics.rs` | `PyFill`/`PyTrade`/`PyDrawdownSegment` + one `#[pyfunction]` per metric; injected into `sys.modules["fugazi.metrics"]` |
 | `spec.rs` | `PyCostConfig`/`PyStrategySpec`/`PySweep`/`PySweepRow`/`PyWalkForward*` + `load_spec` / `optimize` / `spec_tags` |
 | `prelude.rs` | the shared `use` block every module glob-imports |

@@ -69,7 +69,6 @@
 //!   level: 0.0
 //! ```
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
@@ -77,9 +76,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
+use crate::types::{Atom, Candle, Real, Schema};
 
-use super::{Interval, SeriesSource, SourceError, Timestamp, floor_to_bucket};
+use super::bucket::{Aggregation, Fold};
+use super::{Interval, SeriesSource, SourceError, Timestamp};
 
 /// Which of the archive's two trees a client reads.
 ///
@@ -342,33 +342,14 @@ impl SeriesSource for BinanceVision {
     }
 }
 
-/// One bucket's value for one column, tagged with the timestamp of the sample
-/// that set it.
-///
-/// The tag is what lets [`Aggregation::Last`] mean *newest sample* rather than
-/// *last one folded in*. The two are different questions whenever a bucket is
-/// written by more than one archive, which at every UTC midnight it is: a
-/// `metrics` file for day *D* closes with a row stamped a second or two into
-/// *D+1*, so both that file and *D+1*'s own contribute to *D+1*'s first bucket.
-/// Fetches complete out of order, so the last writer is the network's choice
-/// and the newest sample is not.
-///
-/// [`Aggregation::Sum`] doesn't consult it — addition doesn't care which
-/// sample came last — but still keeps it current, so the field means the same
-/// thing in every cell.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Cell {
-    /// Sample timestamp, in epoch milliseconds, before bucketing.
-    at: i64,
-    value: Real,
-}
-
 /// Fold every fetched archive into one [`Atom`] per bucket of `interval`,
 /// keeping only samples inside `[since, until)`.
 ///
 /// Split out of [`SeriesSource::atoms`] so the assembly can be exercised
 /// against a fixed set of archives in an arbitrary order — which is exactly
-/// what the concurrent fetch hands it.
+/// what the concurrent fetch hands it. The bucketing itself lives in
+/// [`Fold`](super::bucket::Fold), shared with the live `binance-futures`
+/// provider so the same day fetched either way folds identically.
 fn assemble(
     fetched: &[(Archive, String, String)],
     schema: &Arc<Schema>,
@@ -376,84 +357,21 @@ fn assemble(
     since: i64,
     until: i64,
 ) -> Result<Vec<Atom>, SourceError> {
-    // One `bucket -> cell` map per schema column, plus the bars the kline
-    // archive contributes.
-    let mut columns: Vec<BTreeMap<i64, Cell>> = vec![BTreeMap::new(); schema.len()];
-    let mut bars: BTreeMap<i64, Candle> = BTreeMap::new();
+    let mut fold = Fold::new(schema.clone(), interval, since, until);
     for (kind, url, csv) in fetched {
         if *kind != Archive::Klines {
             continue;
         }
         for (time, candle) in parse_candles(csv, url)? {
-            if time < since || time >= until {
-                continue;
-            }
-            bars.insert(floor_to_bucket(time, interval), candle);
+            fold.bar(time, candle);
         }
     }
     for (kind, url, csv) in fetched {
         for (time, slot, value) in parse_archive(*kind, csv, url)? {
-            if time < since || time >= until {
-                continue;
-            }
-            let bucket = floor_to_bucket(time, interval);
-            let cell = columns[slot].entry(bucket).or_insert(Cell {
-                at: i64::MIN,
-                value: 0.0,
-            });
-            match kind.aggregation() {
-                // An accrual: samples inside one bar add up, whatever order
-                // they arrive in.
-                Aggregation::Sum => {
-                    cell.value += value;
-                    cell.at = cell.at.max(time);
-                }
-                // A level: the bar keeps its newest sample. `>=` so that two
-                // archives carrying the same instant resolve to the later of
-                // them in job order, which `fetch_concurrently` fixes.
-                Aggregation::Last => {
-                    if time >= cell.at {
-                        *cell = Cell { at: time, value };
-                    }
-                }
-            }
+            fold.sample(time, slot, value, kind.aggregation());
         }
     }
-
-    let mut buckets: Vec<i64> = columns
-        .iter()
-        .flat_map(|c| c.keys().copied())
-        .chain(bars.keys().copied())
-        .collect();
-    buckets.sort_unstable();
-    buckets.dedup();
-
-    Ok(buckets
-        .into_iter()
-        .map(|time| Atom {
-            // A bar when the kline archive covered this bucket; `None` for a
-            // bucket only the overlay archives reached — early funding history
-            // predates nothing, but `metrics` and the klines start at
-            // different dates.
-            candle: bars.get(&time).copied(),
-            time: Some(Timestamp(time)),
-            overlays: Some(OverlayInfo::sparse(
-                schema.clone(),
-                columns
-                    .iter()
-                    .map(|c| c.get(&time).map(|cell| OverlayValue::Real(cell.value))),
-            )),
-        })
-        .collect())
-}
-
-/// How a column's samples collapse into one bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Aggregation {
-    /// Add them up — for a quantity that accrues over the bar.
-    Sum,
-    /// Keep the last — for a quantity that is a level at a point in time.
-    Last,
+    Ok(fold.finish())
 }
 
 /// Which archive tree a request targets. The three differ in path shape, in
@@ -1035,6 +953,7 @@ fn month_start_ms(year: i32, month: u8) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::OverlayValue;
 
     #[test]
     fn every_archive_column_maps_to_a_real_schema_slot() {

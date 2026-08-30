@@ -873,6 +873,105 @@ impl PyCoinGecko {
     }
 }
 
+/// Binance USDⓈ-M perpetuals, live from `fapi.binance.com`.
+///
+/// The live twin of `BinanceVision(market="futures")`: the **same twelve
+/// columns**, fetched from the query API instead of the dated archive, so a
+/// frame from either concatenates onto the other and a strategy reading
+/// `funding_rate` does not care which produced its input.
+///
+/// They differ in *when*, not in *what*. This client is current to the bar
+/// forming right now, where the archive lags about two days. In exchange,
+/// `open_interest`, `open_interest_value` and the four long/short ratios reach
+/// back only **30 days** — that is what `fapi` serves, and the reason the
+/// archive provider exists. The bars, `funding_rate` and `premium_index` reach
+/// back to the contract's listing. So: this one for the recent tail, the
+/// archive for depth.
+///
+/// A column with no sample in a bar reads as an *absent* sample (`None` in the
+/// frame), never a zero — for the funding accrual that is the difference
+/// between "no carry recorded" and "carry was nil".
+///
+/// Aggregation within a bar is the archive's, shared in code: **funding is
+/// summed**, so `"1d"` is that day's total carry, and everything else is a
+/// level, keeping the sample that was true when the bar ended.
+///
+/// ```python
+/// f = fugazi.BinanceFutures()
+/// df = f.fetch(symbol="BTCUSDT", freq="1h", since="7d ago")
+/// bars = fugazi.BinanceFutures(bars_only=True).fetch(symbol="BTCUSDT")
+/// ```
+///
+/// `symbol` is a **perpetual contract** symbol; `.tickers()` enumerates the
+/// perpetuals of `/fapi/v1/exchangeInfo`, which is not the same list as spot's.
+#[pyclass(name = "BinanceFutures", module = "fugazi", frozen)]
+pub(crate) struct PyBinanceFutures {
+    pub(crate) inner: BinanceFutures,
+}
+
+#[pymethods]
+impl PyBinanceFutures {
+    /// Construct a client. `bars_only` skips the seven side-channel feeds —
+    /// eight paginated endpoints become one — leaving their columns declared
+    /// but unsampled. `base_url` overrides the API endpoint (default
+    /// `https://fapi.binance.com`), useful for local test servers.
+    #[new]
+    #[pyo3(signature = (*, bars_only = false, base_url = None))]
+    pub(crate) fn new(bars_only: bool, base_url: Option<String>) -> Self {
+        let mut inner = BinanceFutures::new();
+        if bars_only {
+            inner = inner.bars_only();
+        }
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch one `(symbol, freq)` window of the perpetual.
+    ///
+    /// * `symbol` — a contract symbol: `"BTCUSDT"`, `"ETHUSDT"`.
+    /// * `freq` — bar cadence, the whole kline vocabulary `"1m"` through
+    ///   `"1M"`. The positioning statistics speak a coarser one and are
+    ///   sampled at the finest period that fits inside the bar.
+    /// * `since` / `until` — dates, same grammar as the other providers.
+    ///   `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"`.
+    ///
+    /// Returned columns: `time` (ISO 8601 UTC), the OHLCV block, the kline
+    /// extras (`quote_volume`, `n_trades`, `taker_buy_base_volume`,
+    /// `taker_buy_quote_volume`), then `funding_rate`, `premium_index`,
+    /// `open_interest`, `open_interest_value`, `long_short_ratio`,
+    /// `top_trader_account_ratio`, `top_trader_position_ratio` and
+    /// `taker_long_short_ratio`.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, *, output = "polars"))]
+    pub(crate) fn fetch(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
+    }
+
+    /// Every perpetual currently trading, sorted — the vocabulary `symbol`
+    /// accepts. Read from `/fapi/v1/exchangeInfo`, which is a different list
+    /// from spot's and not interchangeable with it.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
+}
+
 /// Binance Vision — the public historical archive — as a **candle** provider.
 ///
 /// Binance publishes its own market data as dated ZIP-of-CSV files at
@@ -999,11 +1098,13 @@ impl PyBinanceVision {
 /// OHLCV block when no row carries a bar.
 ///
 /// Providers: `"binance"`, `"okx"`, `"kraken"`, `"coinbase"`, `"yfinance"`,
-/// `"cg"` (CoinGecko), `"binance-vision"` (public archive, spot) and
-/// `"binance-vision-futures"` (the same archive's USD-M tree, which adds the
-/// funding rate and positioning columns). The market rides in the provider id
-/// rather than a `market` kwarg, matching the CLI's ids; `BinanceVision(market=
-/// ...)` remains for the explicit form and for `base_url` overrides.
+/// `"cg"` (CoinGecko), `"binance-futures"` (live USD-M perpetuals, with the
+/// funding rate and positioning columns), `"binance-vision"` (public archive,
+/// spot) and `"binance-vision-futures"` (the same archive's USD-M tree — the
+/// same columns as `"binance-futures"`, deeper but ~2 days behind). The market
+/// rides in the provider id rather than a `market` kwarg, matching the CLI's
+/// ids; `BinanceVision(market=...)` remains for the explicit form and for
+/// `base_url` overrides.
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 pub(crate) fn fetch(
@@ -1057,6 +1158,15 @@ pub(crate) fn fetch(
             since_ts,
             until_ts,
         ),
+        "binance-futures" => fetch_frame(
+            py,
+            &BinanceFutures::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         "binance-vision" => fetch_frame(
             py,
             &BinanceVision::new(),
@@ -1077,7 +1187,7 @@ pub(crate) fn fetch(
         ),
         other => Err(PyValueError::new_err(format!(
             "unknown provider {other:?}. Known providers: binance, okx, kraken, coinbase, \
-             yfinance, cg, binance-vision, binance-vision-futures"
+             yfinance, cg, binance-futures, binance-vision, binance-vision-futures"
         ))),
     }
 }
@@ -1097,7 +1207,8 @@ pub(crate) fn fetch(
 /// and a wrong spelling is not an error, it is an empty series.
 ///
 /// Providers: `"binance"`, `"okx"`, `"kraken"`, `"coinbase"`, `"cg"`
-/// (CoinGecko), `"binance-vision"` and `"binance-vision-futures"`. `"yfinance"` is accepted
+/// (CoinGecko), `"binance-futures"`, `"binance-vision"` and
+/// `"binance-vision-futures"`. `"yfinance"` is accepted
 /// by `fetch` but raises `FetchError` here — Yahoo publishes no endpoint that
 /// enumerates its universe, and most retail equity APIs are the same. It is a
 /// `FetchError` and not a `ValueError` on purpose: the id is real, the
@@ -1116,11 +1227,12 @@ pub(crate) fn tickers(py: Python<'_>, provider: &str) -> PyResult<Vec<String>> {
         "coinbase" => list_of(py, Coinbase::new()),
         "yfinance" => list_of(py, Yahoo::new()),
         "cg" => list_of(py, CoinGecko::new()),
+        "binance-futures" => list_of(py, BinanceFutures::new()),
         "binance-vision" => list_of(py, BinanceVision::new()),
         "binance-vision-futures" => list_of(py, BinanceVision::futures()),
         other => Err(PyValueError::new_err(format!(
             "unknown provider {other:?}. Known providers: binance, okx, kraken, coinbase, \
-             yfinance, cg, binance-vision, binance-vision-futures"
+             yfinance, cg, binance-futures, binance-vision, binance-vision-futures"
         ))),
     }
 }

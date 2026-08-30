@@ -2719,6 +2719,35 @@ The flat `ta.fetch` carries both trees as their own provider ids —
 the USD-M tree — matching the CLI. The explicit `ta.BinanceVision(market=...)`
 constructor stays for the `base_url` override.
 
+`BinanceFutures` is the archive's **live twin**: the same twelve perpetual
+columns, from `fapi.binance.com` instead of the archive, so a frame from either
+concatenates onto the other and a strategy reading `funding_rate` does not care
+which produced its input.
+
+```python
+perp = ta.BinanceFutures()                 # provider id: "binance-futures"
+bars = perp.fetch(symbol="BTCUSDT", freq="1h", since="7d ago")
+# the same columns as BinanceVision(market="futures")
+
+price_only = ta.BinanceFutures(bars_only=True).fetch(symbol="BTCUSDT")
+```
+
+The two differ in *when*, not in *what*. This one is current to the bar forming
+right now, where the archive lags about two days; in exchange `open_interest`,
+`open_interest_value` and the four long/short ratios reach back only **30 days**
+— that is what `fapi` serves, and it is the reason the archive provider exists.
+Bars, `funding_rate` and `premium_index` reach back to the contract's listing,
+and the whole kline vocabulary (`"1m"` through `"1M"`) is admitted rather than
+the archive's `"1h"`–`"1d"`. So: this one for the recent tail, the archive for
+depth. On a day both cover, `open_interest` comes back bit-identical; two
+columns agree only approximately, and neither is a defect — `fapi` rounds the
+three account ratios to four decimals where the archive carries eight, and
+`taker_long_short_ratio` is the *whole bar's* accumulated taker flow here
+against the archive's last 5-minute sample inside that bar (at `"5m"` they
+agree). `bars_only=True` skips the seven side-channel feeds — eight paginated
+endpoints become one — leaving their columns declared but unsampled, which reads
+as absent rather than as zero.
+
 ## Performance
 
 An incremental engine is usually the slow choice in Python doubly over: a

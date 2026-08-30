@@ -1141,8 +1141,9 @@ slices with `file:` + `--since`/`--until`, optimize on training with `-w`, then
 fugazi get binance:BTCUSDT[1d] --since 2023-01-01 -o btc.csv
 ```
 
-Providers: `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
-`kraken`, `coinbase`, `yfinance`, and `cg` (CoinGecko). `file:PATH` re-processes an existing
+Providers: `binance`, `binance-futures`, `binance-vision`,
+`binance-vision-futures`, `okx`, `kraken`, `coinbase`, `yfinance`, and `cg`
+(CoinGecko). `file:PATH` re-processes an existing
 CSV instead of fetching. `fugazi list tickers <provider> 'b*usd*t'` browses a
 provider's vocabulary (case-insensitive whole-symbol globs).
 
@@ -1168,8 +1169,10 @@ downstream reader sees an unsettled value; `--keep-unstable` opts out.
 
 **Non-price series.** `cg` is overlay-only — market cap, volume, supply, no OHLCV —
 so fetch it to its own file and `--series` both into the run.
-`binance-vision-futures` needs no join: it returns perpetual bars *and*
-`funding_rate`, `open_interest` and the rest in one frame. Either way, a column is
+The two perpetual providers need no join: they return perpetual bars *and*
+`funding_rate`, `open_interest` and the rest in one frame, on one shared schema
+— `binance-futures` live and current to the forming bar,
+`binance-vision-futures` ~2 days behind but reaching back years. Either way, a column is
 read in the strategy with `!get { key: funding_rate }`.
 
 ### `check`, `list`, `grammar`
