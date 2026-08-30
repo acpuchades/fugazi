@@ -2215,7 +2215,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// so an unaffordable target is refused rather than booked.
     /// Resolve every queued order against the last close and settle it.
     ///
-    /// A queued [`Pending::Sized`] is resolved exactly as the bar-ful path
+    /// A queued `Pending::Sized` is resolved exactly as the bar-ful path
     /// resolves it, with the last **close** standing in for the `open` there is
     /// no bar to read — the same substitution `settle_position` already makes,
     /// and the only price this wallet knows between bars.

@@ -2390,12 +2390,31 @@ def test_rebalance_needs_no_bar():
         # No bars at all — the operator is between two closes.
         rep, s = ta.load_spec(_ALL_IN_YAML).run_resumable(w, [], resume=state, **kwargs)
         assert rep.equity_curve == [], "no bar was driven"
-        assert rep.fills == [], "a rebalance settles nothing"
+        # Read *before* any further bar: what the instruction did on its own
+        # call is the thing under test.
+        now = w.position("X")
         ta.load_spec(_ALL_IN_YAML).run_resumable(w, snaps[20:], resume=s)
-        return w.position("X")
+        return len(rep.fills), now, w.position("X")
 
-    carried = resume_at_3x()
-    rebalanced = resume_at_3x(rebalance=True)
+    carry_fills, carry_now, carried = resume_at_3x()
+    rebalance_fills, rebalance_now, rebalanced = resume_at_3x(rebalance=True)
+
+    assert carry_fills == 0, "a carry settles nothing"
+    # **It settles rather than queues.** `set` queues, and a queued-fill wallet
+    # settles at the next bar's `open`, so a queued instruction would wait out
+    # the very cadence this exists to remove — on paper, while a venue, which
+    # routes synchronously, moved at once.
+    assert rebalance_fills > 0, "the bar-less rebalance queued instead of settling"
+    assert rebalance_now > carry_now * 2.0, (
+        f"the book must re-size against the 3x account on the call itself: "
+        f"{rebalance_now} vs {carry_now}"
+    )
+    # And it is settled, not merely started: the next chunk changes nothing
+    # about the size, where a queued order would have landed there instead.
+    assert abs(rebalanced - rebalance_now) < rebalance_now * 0.5, (
+        f"the next chunk re-sized it again, so the instruction had not settled: "
+        f"{rebalance_now} -> {rebalanced}"
+    )
     assert rebalanced > carried * 2.0, (
         f"the bar-less instruction must size against the 3x account: "
         f"{rebalanced} vs {carried}"

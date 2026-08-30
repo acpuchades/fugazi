@@ -214,7 +214,7 @@ pub trait Wallet<Sym> {
     /// and [`flatten`](Wallet::flatten) belong to, and it exists for the same
     /// reason they do: [`set`](Wallet::set) and
     /// [`set_position`](Wallet::set_position) *queue*, and a queued-fill wallet
-    /// like [`PaperWallet`](crate::wallet::PaperWallet) settles at the next bar's
+    /// like [`PaperWallet`] settles at the next bar's
     /// `open`. A caller standing between bars has no next bar, so a queued move
     /// would simply never happen. Those two settle targets the caller *named*;
     /// this settles the ones the **strategy** submitted.
