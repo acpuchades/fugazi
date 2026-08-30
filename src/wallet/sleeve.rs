@@ -175,6 +175,30 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
             amount,
         })
     }
+    /// Delegates with the baseline translation `set_position` uses, rather than
+    /// taking the trait default.
+    ///
+    /// The default is `set_position` + `poll_fills`, and over a queued-fill inner
+    /// wallet that queues and drains nothing — which is the precise failure
+    /// [`PaperWallet`](crate::wallet::PaperWallet) overrides this method to avoid,
+    /// re-introduced one layer up because the override is on the inner object and
+    /// the default never reaches it. So `Closeout::Flatten` and `Closeout::Hold`
+    /// against a paper-backed sleeve queued instead of settling, and a run ending
+    /// there simply dropped them.
+    ///
+    /// Delegating rather than draining is what keeps it exact: the inner's own
+    /// override settles **this symbol** where a whole-queue drain would also book
+    /// the final bar's orders for symbols the instruction never named — which a
+    /// `PaperWallet` leaves queued, to be dropped with the run.
+    ///
+    /// `target` is the sleeve's own position, so it is expressed against the
+    /// inner's external-inclusive basis on the way down. `0.0` therefore means
+    /// "hold none of it myself" and drives the inner to the baseline — closing the
+    /// carve-out and leaving somebody else's position exactly where it was.
+    fn settle_position(&mut self, symbol: Sym, target: Real) -> Vec<Order<Sym>> {
+        let amount = self.base(&symbol) + target;
+        self.inner.settle_position(symbol, amount)
+    }
     fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
         // Forward to the inner wallet rather than resolving to units here (the
         // trait default), so the inner's *fill-time* resolution and
@@ -376,6 +400,63 @@ mod tests {
         assert!((account.position(&"C").amount - EXTERNAL_UNITS).abs() < 1e-9);
         let baseline = external_baseline(&account);
         (account, baseline)
+    }
+
+    /// **A settle over a queued-fill inner must fill now, not queue.**
+    ///
+    /// `PaperWallet` overrides `settle_position` precisely because the trait
+    /// default queues and a queued move "would simply never happen". A sleeve
+    /// wrapping one used to take that default — so the override sat on the inner
+    /// object with nothing routing to it, and `Closeout::Flatten` / `Hold`
+    /// against a paper-backed sleeve queued instead of settling. A run ending
+    /// there dropped them.
+    #[test]
+    fn settle_position_fills_now_through_the_inner_wallets_own_override() {
+        let (account, baseline) = account_with_an_external_position();
+        let mut sleeve = SleeveWallet::new(account, baseline);
+        sleeve.update("S", bar(MARK));
+
+        let fills = sleeve.settle_position("S", 4.0);
+
+        assert!(!fills.is_empty(), "the settle queued instead of filling");
+        assert!(
+            (sleeve.position(&"S").amount - 4.0).abs() < 1e-9,
+            "the book did not move on the call: got {}",
+            sleeve.position(&"S").amount,
+        );
+    }
+
+    /// **`0.0` means "hold none of it myself", not "empty the account".**
+    ///
+    /// The target is the sleeve's own position, so it is translated against the
+    /// inner's external-inclusive basis on the way down. Getting this wrong in
+    /// the obvious direction — forwarding the raw target, or delegating
+    /// `flatten` straight to the inner — closes somebody else's position.
+    #[test]
+    fn flattening_the_carve_out_leaves_the_external_position_alone() {
+        let (account, baseline) = account_with_an_external_position();
+        let mut sleeve = SleeveWallet::new(account, baseline);
+        sleeve.update("C", bar(MARK));
+        sleeve.settle_position("C", 2.0);
+        assert!(
+            (sleeve.position(&"C").amount - 2.0).abs() < 1e-9,
+            "the fixture must be holding its own leg of the shared symbol",
+        );
+
+        let fills = sleeve.flatten();
+
+        assert!(!fills.is_empty(), "the flatten queued instead of filling");
+        assert!(
+            sleeve.position(&"C").amount.abs() < 1e-9,
+            "the carve-out was not closed: got {}",
+            sleeve.position(&"C").amount,
+        );
+        assert!(
+            (sleeve.inner.position(&"C").amount - EXTERNAL_UNITS).abs() < 1e-9,
+            "the externally-held position was traded — it is not ours to close: \
+             {} vs {EXTERNAL_UNITS}",
+            sleeve.inner.position(&"C").amount,
+        );
     }
 
     /// **The carve-out is what the sleeve exists for.** Equity must exclude the
