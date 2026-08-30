@@ -340,6 +340,17 @@ where
     strategy.force_rebalance(Some(hold));
     strategy.trade(wallet);
     strategy.force_rebalance(None);
+    // **`trade` queues, and there is no next bar to settle against** — which is
+    // the whole reason `settle_position` and `flatten` exist. Left queued, the
+    // instruction an operator asked for *now* would sit in `pending` until the
+    // next ordinary bar: a paper book would not move while a venue's did, on the
+    // same call, which makes the paper arm stop predicting the live one.
+    let settled = wallet.settle_pending();
+    for order in &settled {
+        strategy.on_fill(order);
+    }
+    // Drained *after* the settle, or a target the account cannot afford is
+    // refused into a report that has already been built.
     let rejections = wallet
         .take_rejections()
         .into_iter()
@@ -350,7 +361,12 @@ where
         .collect();
     Ok(RunReport {
         equity_curve: Vec::new(),
-        fills: Vec::new(),
+        // Stamped `bar: 0` like the rejections beside them, which is the bar
+        // `apply_closeout` uses for a bar-less closeout too.
+        fills: settled
+            .into_iter()
+            .map(|order| Fill { bar: 0, order })
+            .collect(),
         rejections,
         initial_equity,
         ruin_bar: None,

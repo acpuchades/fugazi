@@ -2213,6 +2213,54 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// Anything that grows the position, flips its side, or opens one from flat
     /// is an ordinary sized fill and meets the account's solvency rules in full,
     /// so an unaffordable target is refused rather than booked.
+    /// Resolve every queued order against the last close and settle it.
+    ///
+    /// A queued [`Pending::Sized`] is resolved exactly as the bar-ful path
+    /// resolves it, with the last **close** standing in for the `open` there is
+    /// no bar to read — the same substitution `settle_position` already makes,
+    /// and the only price this wallet knows between bars.
+    ///
+    /// Ordered the way the bar-ful queue is ordered — credits before debits,
+    /// then by submission id — for both of that ordering's reasons: a debit may
+    /// need the cash a credit releases, and a multi-symbol instruction has to
+    /// book its legs the same way every run rather than in whatever order the
+    /// map happens to be laid out in.
+    fn settle_pending(&mut self) -> Vec<Order<Sym>> {
+        let equity = self.equity().0;
+        let mut queued: Vec<(bool, OrderId, Sym, Real)> = Vec::new();
+        for (symbol, pending) in self.pending.iter() {
+            let position = self.positions.get(symbol).copied().unwrap_or(0.0);
+            // Unpriced is handed to `settle_position` anyway, with a target that
+            // asks for nothing: it refuses on the missing price and records the
+            // rejection, where skipping would leave the order queued and the
+            // caller told nothing.
+            let target = match (self.bars.get(symbol).map(|c| c.close), pending) {
+                (None, _) => position,
+                (Some(_), Pending::Target(amount, _)) => *amount,
+                (Some(price), Pending::Sized(side, size, _)) => {
+                    side.sign()
+                        * size.resolve_at_leverage(
+                            price,
+                            position,
+                            self.funds,
+                            equity,
+                            self.leverage,
+                        )
+                }
+            };
+            let id = match pending {
+                Pending::Target(_, id) | Pending::Sized(_, _, id) => *id,
+            };
+            queued.push((target - position > 0.0, id, symbol.clone(), target));
+        }
+        queued.sort_by_key(|(debit, id, _, _)| (*debit, *id));
+        let mut fills = Vec::new();
+        for (_, _, symbol, target) in queued {
+            fills.extend(self.settle_position(symbol, target));
+        }
+        fills
+    }
+
     fn settle_position(&mut self, symbol: Sym, target: Real) -> Vec<Order<Sym>> {
         self.pending.remove(&symbol);
         self.protective.remove(&symbol);

@@ -1925,7 +1925,7 @@ fn a_forced_rebalance_needs_no_bar() {
     // Chunk two carries *no bars at all* — the operator is between closes. Two
     // runs from the same state over the same (empty) stream, differing only in
     // the closeout.
-    let resize = |closeout: &Closeout| -> Real {
+    let resize = |closeout: &Closeout| -> (usize, Real, Real) {
         let mut built = spec.try_build(CASH, &sch, None).expect("build");
         let mut wallet = fugazi::PaperWallet::new(CASH).with_leverage(3.0);
         let (report, state) = built
@@ -1935,20 +1935,48 @@ fn a_forced_rebalance_needs_no_bar() {
             report.equity_curve.is_empty(),
             "no bar was driven, so the curve stays at snapshots.len() == 0",
         );
-        // The forced order queues like any other rebalance — nothing fills on
-        // the bar that caused it, and here there was not even a bar.
-        assert!(report.fills.is_empty(), "a rebalance settles nothing");
+        // Read *before* any further bar: what the instruction did on its own
+        // call is the thing under test.
+        let now = wallet.position(&intern("X")).amount;
         let mut built = spec.try_build(CASH, &sch, None).expect("build");
         built
             .drive_resumable_with(&snaps[20..], &mut wallet, Some(&state), &Closeout::Carry)
             .expect("the next chunk");
-        wallet.position(&intern("X")).amount
+        (
+            report.fills.len(),
+            now,
+            wallet.position(&intern("X")).amount,
+        )
     };
 
-    let carried = resize(&Closeout::Carry);
-    let rebalanced = resize(&Closeout::Rebalance {
+    let (carry_fills, carry_now, carried) = resize(&Closeout::Carry);
+    let (rebalance_fills, rebalance_now, rebalanced) = resize(&Closeout::Rebalance {
         hold: Default::default(),
     });
+
+    assert_eq!(carry_fills, 0, "a carry settles nothing");
+    // **It settles rather than queues, and that is the whole of what "needs no
+    // bar" has to mean.** `set` queues and a queued-fill wallet settles at the
+    // next bar's `open`, so a queued instruction would wait out the very cadence
+    // this exists to remove — and would wait on *paper* while a venue, which
+    // routes synchronously, moved at once. The two arms have to agree, or the
+    // paper book stops predicting the live one.
+    assert!(
+        rebalance_fills > 0,
+        "the bar-less rebalance queued instead of settling",
+    );
+    assert!(
+        rebalance_now > carry_now * 2.0,
+        "the book must re-size against the 3x account on the call itself: \
+         {rebalance_now} vs {carry_now}",
+    );
+    // And it is settled, not merely started: the next chunk changes nothing
+    // about the size, where a queued order would have landed there instead.
+    assert!(
+        (rebalanced - rebalance_now).abs() < rebalance_now * 0.5,
+        "the next chunk re-sized it again, so the instruction had not settled: \
+         {rebalance_now} -> {rebalanced}",
+    );
     assert!(
         rebalanced > carried * 2.0,
         "the bar-less instruction must re-size against the 3x account: \

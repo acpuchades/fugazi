@@ -207,6 +207,25 @@ pub trait Wallet<Sym> {
         fills
     }
 
+    /// Settle every **queued** order at the last known mark, returning the fills
+    /// booked.
+    ///
+    /// The third member of the family [`settle_position`](Wallet::settle_position)
+    /// and [`flatten`](Wallet::flatten) belong to, and it exists for the same
+    /// reason they do: [`set`](Wallet::set) and
+    /// [`set_position`](Wallet::set_position) *queue*, and a queued-fill wallet
+    /// like [`PaperWallet`](crate::wallet::PaperWallet) settles at the next bar's
+    /// `open`. A caller standing between bars has no next bar, so a queued move
+    /// would simply never happen. Those two settle targets the caller *named*;
+    /// this settles the ones the **strategy** submitted.
+    ///
+    /// The default body suits a venue that routes synchronously: the order is
+    /// already at the exchange, so there is nothing to resolve and draining
+    /// [`poll_fills`](Wallet::poll_fills) is the whole of it.
+    fn settle_pending(&mut self) -> Vec<Order<Sym>> {
+        self.poll_fills()
+    }
+
     /// Rest a **stop-loss** on `symbol` at `trigger`: an adverse level the wallet
     /// fills when a bar trades through it (a long fills when the bar trades down to
     /// `trigger`, a short when it trades up). The side is read from the current

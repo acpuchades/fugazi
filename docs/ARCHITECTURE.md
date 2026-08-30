@@ -1007,7 +1007,8 @@ and one cash-then-position cycle on `portfolio:`. The orders go out through the
 ordinary path — `Wallet::set`, not `settle_position` — so a `PaperWallet` queues them
 and fills at the next chunk's `open` like any other rebalance, and a live venue routes
 them to the broker now. Nothing fills on the bar that caused it, here as everywhere
-else. `hold` names symbols to leave out of the forced pass; they are then driven to
+else. That is the **bar-ful** path, where the next bar's `open` is the honest fill
+price; the bar-less one has no such bar and settles instead (see *Between bars*). `hold` names symbols to leave out of the forced pass; they are then driven to
 their absolute targets exactly as `Hold` does. The narrower instruction wins, and wins
 without moving anything twice — free to get wrong on paper (`settle_position` drops
 the queued move) but a real round trip on a live venue.
@@ -1025,6 +1026,23 @@ bar counter, no equity point, so `equity_curve.len() == snapshots.len()` holds a
 zero and the state it returns keeps the resumed state's `bars_seen` and `last_bar`.
 `Flatten` had always worked bar-lessly, through `apply_closeout`; this is the same
 instruction reaching the same book by the non-terminal path.
+
+**And it settles rather than queues, which is the half that makes it mean anything.**
+`trade` goes out through `Wallet::set`, and a queued-fill wallet settles at the next
+bar's `open` — so between bars the instruction would sit in `pending` until the next
+ordinary chunk, which is the very cadence the bar-less path exists to remove. Worse
+than slow: `set` routes *synchronously* on a live venue, so the same call would move a
+broker's book at once and a `PaperWallet`'s a bar later. The paper arm is what a
+deployment is tested on, so an arm that lags the venue on the one instruction an
+operator issues by hand stops predicting it. `Wallet::settle_pending` is the third
+member of the `settle_position` / `flatten` family and exists for their reason: it
+resolves each queued order against the last known mark and books it now. Those two
+settle targets the *caller* named; this settles the ones the *strategy* submitted.
+`PaperWallet` orders them the way its bar-ful queue is ordered — credits before
+debits, then by submission id — because a debit may need the cash a credit releases
+and a multi-symbol instruction must book its legs the same way every run. The fills
+come back on the report stamped `bar: 0`, like the rejections beside them, so a caller
+recording a ledger sees what moved rather than discovering it a chunk later.
 
 It re-runs the *last bar's* decision rather than a fresh one — `trade` reads values,
 and every one of them still holds what the previous chunk's final bar left there.

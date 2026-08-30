@@ -256,6 +256,12 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn poll_fills(&mut self) -> Vec<Order<Sym>> {
         self.inner.poll_fills()
     }
+    // Forwarded for `poll_fills`' reason: the queue being settled is the inner
+    // wallet's, so the trait default (which would only drain fills) would leave
+    // a sleeve over a paper book unsettled between bars.
+    fn settle_pending(&mut self) -> Vec<Order<Sym>> {
+        self.inner.settle_pending()
+    }
     // Forwarded so a sleeve over a paper wallet still round-trips its book.
     // The baseline itself is not persisted: it is re-snapshotted from the
     // account each time a run is prepared, so it always reflects what the user
