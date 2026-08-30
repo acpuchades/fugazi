@@ -724,6 +724,24 @@ where
         if let (Some(p), Some(v)) = (self.positions.get(sym), obj.get("position")) {
             p.restore(v).map_err(|e| at("position", e))?;
         }
+        // Reseed the projections `trade` actually reads. `latest_score` /
+        // `latest_size` are not serialized and do not need to be — they are a
+        // pure copy of what the two chains above are already holding — but they
+        // are written by `update`, so a restored basket carries loaded chains
+        // beside empty maps until a bar goes through.
+        //
+        // That gap is invisible on the bar-ful path (the resumed chunk's first
+        // `update` fills them before its `trade`) and dangerous off it: a
+        // bar-less forced rebalance would pick a selection out of an empty
+        // score map, which is *no symbols*, and close every open leg. Restoring
+        // the chains has to restore what they project, or the basket is only
+        // half resumed.
+        if let Some(score) = self.scores.get(sym).and_then(|c| c.value()) {
+            self.latest_score.insert(sym.clone(), score);
+        }
+        if let Some(size) = self.sizes.get(sym).and_then(|c| c.value()) {
+            self.latest_size.insert(sym.clone(), size);
+        }
         Ok(())
     }
 }

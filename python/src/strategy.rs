@@ -939,6 +939,34 @@ impl PyWallet {
             .collect()
     }
 
+    /// Serialize the book — cash, positions, queued and resting orders — as
+    /// JSON. The same blob `RunState.wallet` carries.
+    ///
+    /// This and [`restore_state`](Self::restore_state) are how the account is
+    /// reachable *between* bars. Everything a run does to a wallet used to be
+    /// visible only through `StrategySpec.run_resumable`, so reading the book a
+    /// state describes, or driving it somewhere by hand, meant re-running the
+    /// chunk to get at it.
+    ///
+    /// The blotter and the rejection log are deliberately left out: they are
+    /// this run's report, not the account's condition, and a resumed run reports
+    /// its own fills rather than replaying the previous chunk's.
+    pub(crate) fn snapshot_state(&self) -> PyResult<String> {
+        wallet_snapshot(&self.inner)
+    }
+
+    /// Restore a book produced by [`snapshot_state`](Self::snapshot_state).
+    ///
+    /// **Into this wallet's configuration, which the snapshot does not carry.**
+    /// Leverage, margin rate, maintenance margin, the gross cap, the quote
+    /// currency and the cost models come from the constructor and are left
+    /// alone — which is why this is a method on a wallet you have already set
+    /// up, and not a `PaperWallet.from_snapshot(...)` that would hand back a
+    /// silently 1x, cost-free account wearing the right positions.
+    pub(crate) fn restore_state(&mut self, state: &str) -> PyResult<()> {
+        wallet_restore(&mut self.inner, state)
+    }
+
     /// Cancel a working order by its `id` (see `Order.id`): a queued market
     /// order or a resting protective leg is dropped. An unknown id is a no-op.
     pub(crate) fn cancel(&mut self, id: u64) -> PyResult<()> {
@@ -1246,6 +1274,23 @@ impl PyOkxWallet {
             .map(|inner| PyOrder { inner })
             .collect()
     }
+
+    /// `"null"` — a live account's book is **not** snapshotted. The venue owns
+    /// the positions and the cash, so replaying them from a state that may have
+    /// gone stale would contradict the broker; they are re-read instead. Present
+    /// for parity with `PaperWallet.snapshot_state`, and it is what
+    /// `RunState.wallet` holds for a live run.
+    pub(crate) fn snapshot_state(&self) -> PyResult<String> {
+        wallet_snapshot(&self.inner)
+    }
+
+    /// Accepts and ignores, for the same reason
+    /// [`snapshot_state`](Self::snapshot_state) produces nothing: the account is
+    /// re-read from the venue on the next call, which is the only source that
+    /// can be trusted about it.
+    pub(crate) fn restore_state(&mut self, state: &str) -> PyResult<()> {
+        wallet_restore(&mut self.inner, state)
+    }
 }
 
 /// A live [`Wallet`] over Coinbase Advanced Trade **spot** — the same order-flow
@@ -1516,6 +1561,23 @@ impl PyCoinbaseWallet {
             .into_iter()
             .map(|inner| PyOrder { inner })
             .collect()
+    }
+
+    /// `"null"` — a live account's book is **not** snapshotted. The venue owns
+    /// the positions and the cash, so replaying them from a state that may have
+    /// gone stale would contradict the broker; they are re-read instead. Present
+    /// for parity with `PaperWallet.snapshot_state`, and it is what
+    /// `RunState.wallet` holds for a live run.
+    pub(crate) fn snapshot_state(&self) -> PyResult<String> {
+        wallet_snapshot(&self.inner)
+    }
+
+    /// Accepts and ignores, for the same reason
+    /// [`snapshot_state`](Self::snapshot_state) produces nothing: the account is
+    /// re-read from the venue on the next call, which is the only source that
+    /// can be trusted about it.
+    pub(crate) fn restore_state(&mut self, state: &str) -> PyResult<()> {
+        wallet_restore(&mut self.inner, state)
     }
 }
 
@@ -1791,6 +1853,23 @@ impl PyKrakenWallet {
             .into_iter()
             .map(|inner| PyOrder { inner })
             .collect()
+    }
+
+    /// `"null"` — a live account's book is **not** snapshotted. The venue owns
+    /// the positions and the cash, so replaying them from a state that may have
+    /// gone stale would contradict the broker; they are re-read instead. Present
+    /// for parity with `PaperWallet.snapshot_state`, and it is what
+    /// `RunState.wallet` holds for a live run.
+    pub(crate) fn snapshot_state(&self) -> PyResult<String> {
+        wallet_snapshot(&self.inner)
+    }
+
+    /// Accepts and ignores, for the same reason
+    /// [`snapshot_state`](Self::snapshot_state) produces nothing: the account is
+    /// re-read from the venue on the next call, which is the only source that
+    /// can be trusted about it.
+    pub(crate) fn restore_state(&mut self, state: &str) -> PyResult<()> {
+        wallet_restore(&mut self.inner, state)
     }
 }
 
@@ -3989,6 +4068,27 @@ pub(crate) fn _rebuild_run_report(
 /// (`orders`, `reset`, `set_costs_for`, `retention`, `adjust_funds`) that a live
 /// venue documents as unbound — see the per-wallet ledgers in
 /// `python/tests/test_parity.py`.
+/// [`Wallet::snapshot_state`] as the JSON string the Python surface passes
+/// around — one body for all four wallet classes, so their answers cannot
+/// drift from each other or from `RunState.wallet`.
+fn wallet_snapshot<W: fugazi_core::wallet::Wallet<Symbol>>(wallet: &W) -> PyResult<String> {
+    serde_json::to_string(&wallet.snapshot_state())
+        .map_err(|e| PyValueError::new_err(format!("serializing wallet state: {e}")))
+}
+
+/// The other half of [`wallet_snapshot`]. A malformed blob is a `ValueError`
+/// naming what failed to parse, never a partially-restored account.
+fn wallet_restore<W: fugazi_core::wallet::Wallet<Symbol>>(
+    wallet: &mut W,
+    state: &str,
+) -> PyResult<()> {
+    let value: serde_json::Value = serde_json::from_str(state)
+        .map_err(|e| PyValueError::new_err(format!("parsing wallet state: {e}")))?;
+    wallet
+        .restore_state(&value)
+        .map_err(|e| PyValueError::new_err(format!("restoring wallet state: {e}")))
+}
+
 const WALLET_SURFACE: &[&str] = &[
     "position",
     "price",
@@ -4009,6 +4109,8 @@ const WALLET_SURFACE: &[&str] = &[
     "cancel_limit",
     "cancel_protective",
     "poll_fills",
+    "snapshot_state",
+    "restore_state",
 ];
 
 /// Register `fugazi.Wallet`: an [`abc.ABCMeta`] class with the three concrete

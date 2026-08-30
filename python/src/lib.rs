@@ -135,6 +135,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBasketStrategy>()?;
     m.add_class::<PySelection>()?;
     m.add_class::<PyRunReport>()?;
+    m.add_class::<PyRunState>()?;
     m.add_class::<PyRejected>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyChildFill>()?;

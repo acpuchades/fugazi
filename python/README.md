@@ -1578,7 +1578,8 @@ snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
 january, february = snaps[:20], snaps[20:]
 
 rep, state = ta.load_spec(text).run_resumable(ta.PaperWallet(10_000.0), january)
-# `state` is a JSON string — persist it however you like.
+# `state` is a `RunState`: `state.to_json()` to persist it, `ta.RunState(text)`
+# to parse it back.
 
 # Later, in another process: rebuild from the document, resume from the state.
 rep2, state2 = ta.load_spec(text).run_resumable(
@@ -1595,6 +1596,64 @@ number of ways and the concatenated equity curve and fills match the uninterrupt
 run exactly, for all five shapes. Resuming into a different shape, or from a state
 written by a different build, raises `ValueError` rather than mis-parsing; there is no
 migration between state versions, so regenerate by re-running the history.
+
+A `RunState` answers for itself rather than through `json.loads`:
+
+```python
+spec = ta.load_spec("""
+root: BTC
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+""")
+snaps = [
+    ta.Snapshot({"BTC": ta.Atom(ta.Candle(v, v, v, v, 1.0), None, i * 86_400_000)})
+    for i, v in enumerate(prices)
+]
+rep, state = spec.run_resumable(ta.PaperWallet(10_000.0), snaps)
+
+state.kind          # 'single' — the shape; resuming into another is refused
+state.bars_seen     # bars the strategy had seen at capture
+state.last_bar      # UTC ms of the last bar, or None if the bars carried no time
+state.to_json()     # what you persist
+assert ta.RunState(state.to_json()) == state
+```
+
+`state.strategy` and `state.wallet` are the two halves, as JSON strings. They stay
+strings rather than dicts on purpose: they are opaque — the private state of the
+document's indicator chains — and they have to round-trip *bit*-exactly, because a
+restored `f64` off by one ULP diverges the resumed equity curve. `json.loads` one if
+you want to look inside.
+
+The account half is not read-only. `PaperWallet.snapshot_state()` and
+`.restore_state(blob)` are the same pair the run uses, so a caller can reach the book
+**between** bars — inspect what a state is holding, or drive it somewhere by hand
+through `set_position` — without a run around it:
+
+```python
+spec = ta.load_spec("""
+root: BTC
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+""")
+snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
+
+wallet = ta.PaperWallet(10_000.0)
+rep, state = spec.run_resumable(wallet, snaps)
+
+# A second account, configured however you like, walked to the same book.
+audit = ta.PaperWallet(1.0)
+audit.restore_state(state.wallet)
+assert audit.position("BTC") == wallet.position("BTC")
+assert audit.snapshot_state() == state.wallet
+```
+
+`restore_state` restores into *this* wallet's configuration, which the snapshot does
+not carry: leverage, margin rate, the gross cap, the quote currency and the cost
+models come from the constructor and are left alone. That is why there is no
+`PaperWallet.from_snapshot(...)` — it would hand back a silently 1x, cost-free account
+wearing the right positions. On a live wallet `snapshot_state()` is `"null"` and
+`restore_state` accepts and ignores: the venue owns the book, and it is re-read rather
+than replayed.
 
 `flatten=True` closes every open position at the last bar — a real order through the
 cost pipeline, so it moves cash and pays commission — and books the closing legs into
@@ -1675,6 +1734,37 @@ Nothing is settled at the last bar's close, because a rebalance is not terminal 
 way `flatten` and `hold` are — the run continues, so booking it there would
 manufacture a fill at a price the market never offered. Nothing happens at all on a
 bar the strategy is not ready for.
+
+**`snapshots` may be empty**, which is the case a live deployment actually has: an
+operator presses *rebalance now* between two closes, and there is no bar to pass. The
+gate then fires against the account as it already stands — the marks the wallet
+carries and the indicator values `resume` restored — consuming no bar, advancing no
+clock, and leaving the returned state's `bars_seen` and `last_bar` where they were:
+
+```python
+always_in = ta.load_spec("""
+root: X
+long:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+""")
+snaps = [ta.Snapshot({"X": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
+rep, state = always_in.run_resumable(ta.PaperWallet(10_000.0), snaps[:20])
+
+# No bars: the operator is between two closes.
+account = ta.PaperWallet(10_000.0, leverage=3.0)
+rep, state = always_in.run_resumable(account, [], resume=state, rebalance=True)
+assert rep.equity_curve == []      # no bar was driven
+
+# The resize queues like any other, so it fills at the next chunk's open.
+rep, state = always_in.run_resumable(account, snaps[20:], resume=state)
+```
+
+Waiting for a bar instead cost a full cadence before the instruction reached the
+engine at all, and a second before it filled — about two hours on a `1h` deployment,
+two days on a `1d` one. A bar-less instruction the strategy is too cold to evaluate is
+a `ValueError`, not a silent no-op: with no bars there is no report to read the
+difference off, so "delivered, nothing to do" and "never evaluated" would look
+identical.
 
 What "force the gate" means is the shape's own definition of it, inherited rather than
 redefined: a resize on `single:` / `pairs:` / `multi:`, a re-**rank** on `basket:`

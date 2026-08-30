@@ -664,14 +664,165 @@ fn owned_at_resume(
         .map_err(build_err)
 }
 
-/// Parse the JSON string Python hands back as a resume state.
-fn parse_resume(resume: Option<String>) -> PyResult<Option<fugazi_core::spec::RunState>> {
-    resume
-        .map(|text| {
-            serde_json::from_str::<fugazi_core::spec::RunState>(&text)
-                .map_err(|e| PyValueError::new_err(format!("parsing resume state: {e}")))
-        })
-        .transpose()
+/// A persisted run — everything needed to rebuild a strategy from its document
+/// and continue it over new bars with identical behaviour.
+///
+/// `run_resumable` and `warm_up` return one; pass it back as `resume=` to
+/// continue. It used to be a bare JSON `str`, which made the *only* way to look
+/// inside it `json.loads`, and the only way to reach the account half of it a
+/// hand-rolled dict walk that no Rust-side check ever saw. A deployment doing
+/// real work with these — deciding whether a state is fresh enough to resume
+/// from, or handing the book to `PaperWallet.restore_state` between bars — was
+/// writing that walk itself.
+///
+/// The document's *structure* is not in here; it is rebuilt from the spec. What
+/// is in here is the runtime state: the strategy's serialized
+/// indicator/position/book state, and the account's cash, positions and resting
+/// orders.
+///
+/// ```python
+/// report, state = spec.run_resumable(wallet, snapshots)
+/// open("state.json", "w").write(state.to_json())
+/// ...
+/// state = fugazi.RunState(open("state.json").read())
+/// report, state = spec.run_resumable(wallet, more, resume=state)
+/// ```
+#[pyclass(name = "RunState", module = "fugazi", frozen)]
+pub(crate) struct PyRunState {
+    pub(crate) inner: fugazi_core::spec::RunState,
+}
+
+#[pymethods]
+impl PyRunState {
+    /// Parse a state previously written by [`to_json`](Self::to_json).
+    ///
+    /// The only constructor: the `strategy` and `wallet` blobs below are the
+    /// private state of types this module does not expose, so there is nothing
+    /// to build one out of field by field.
+    #[new]
+    fn new(json: &str) -> PyResult<Self> {
+        serde_json::from_str::<fugazi_core::spec::RunState>(json)
+            .map(|inner| PyRunState { inner })
+            .map_err(|e| PyValueError::new_err(format!("parsing resume state: {e}")))
+    }
+
+    /// Serialize back to the JSON a later [`RunState`](Self) parses — what a
+    /// deployment persists between chunks.
+    fn to_json(&self) -> PyResult<String> {
+        state_json(&self.inner)
+    }
+
+    /// Schema version of the serialized shape. A state written by a build with
+    /// a different one is refused on resume rather than mis-parsed.
+    #[getter]
+    fn format_version(&self) -> u32 {
+        self.inner.format_version
+    }
+
+    /// The document shape this was captured from — `"single"`, `"pairs"`,
+    /// `"basket"`, `"multi"` or `"portfolio"`. Resuming into a different shape
+    /// is refused.
+    #[getter]
+    fn kind(&self) -> &str {
+        &self.inner.kind
+    }
+
+    /// Timestamp (UTC ms) of the last bar processed when this was captured, or
+    /// `None` when the bars carried no time column.
+    ///
+    /// The field a scheduler reads to decide whether the next chunk starts
+    /// where this one stopped — a gap means bars were missed, an overlap means
+    /// they are about to be replayed.
+    #[getter]
+    fn last_bar(&self) -> Option<i64> {
+        self.inner.last_bar
+    }
+
+    /// Total bars the strategy had seen at capture. Informational: warm-up is
+    /// the strategy's own business, and this does not gate anything.
+    #[getter]
+    fn bars_seen(&self) -> usize {
+        self.inner.bars_seen
+    }
+
+    /// The strategy's serialized state, as JSON.
+    ///
+    /// A `str` and not a `dict` deliberately. This is opaque — the private
+    /// state of the document's indicator chains, keyed by names that are an
+    /// implementation detail — and it has to round-trip *bit*-exactly: the
+    /// crate depends on serde's `float_roundtrip` because a restored `f64` off
+    /// by one ULP diverges the resumed equity curve. Handing back a `dict`
+    /// invites editing and re-serializing it through a path no Rust-side check
+    /// ever sees. `json.loads` it if you want to look.
+    #[getter]
+    fn strategy(&self) -> PyResult<String> {
+        blob_json(&self.inner.strategy)
+    }
+
+    /// The account's serialized state, as JSON — cash, positions, resting
+    /// orders. Feed it to `PaperWallet.restore_state` to reach the book between
+    /// bars; see [`strategy`](Self::strategy) for why it is a `str`.
+    ///
+    /// `"null"` for a run that traded a **live** wallet: the venue owns the
+    /// positions and the cash, so they are re-read on resume rather than
+    /// replayed from a snapshot that may have gone stale.
+    #[getter]
+    fn wallet(&self) -> PyResult<String> {
+        blob_json(&self.inner.wallet)
+    }
+
+    fn __repr__(&self) -> String {
+        // Hand-spelled rather than `{:?}` on the fields: Rust's Debug would
+        // print `Some(950400000)` and double-quote the kind, which reads as
+        // neither Python nor anything a caller can paste back.
+        let last_bar = match self.inner.last_bar {
+            Some(t) => t.to_string(),
+            None => "None".to_string(),
+        };
+        format!(
+            "RunState(kind='{}', bars_seen={}, last_bar={last_bar})",
+            self.inner.kind, self.inner.bars_seen,
+        )
+    }
+
+    /// Field-by-field, over the opaque blobs too — "these two runs are in the
+    /// same place" is the question a caller comparing states is asking, and
+    /// object identity answers a different one. Left unimplemented it would
+    /// have quietly answered `False` for two states that are the same run.
+    fn __eq__(&self, other: &PyRunState) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Over the cheap identifying fields only, not the opaque blobs.
+    ///
+    /// Equal states necessarily agree on all four, which is the whole contract
+    /// — two states differing only inside `strategy` collide, and colliding is
+    /// allowed. Hashing the blobs instead would mean serializing both halves on
+    /// every lookup to answer a question a dict does not need answered that
+    /// precisely. Spelled out because pyo3 does **not** follow Python's rule
+    /// that defining `__eq__` clears the inherited identity `__hash__`: left
+    /// alone, two equal states would have hashed differently.
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.inner.format_version.hash(&mut hasher);
+        self.inner.kind.hash(&mut hasher);
+        self.inner.bars_seen.hash(&mut hasher);
+        self.inner.last_bar.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Pickled through its JSON, so a state can be handed to a worker process.
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let cls = py.get_type::<PyRunState>();
+        Ok((cls.into_any().unbind(), (PyRunState::to_json(self)?,)))
+    }
+}
+
+/// Serialize one of a state's opaque sub-blobs for the getters above.
+fn blob_json(value: &serde_json::Value) -> PyResult<String> {
+    serde_json::to_string(value)
+        .map_err(|e| PyValueError::new_err(format!("serializing run state: {e}")))
 }
 
 /// Serialize a state back to the JSON string Python persists.
@@ -902,6 +1053,17 @@ impl PyStrategySpec {
     /// close, because a rebalance is not terminal the way `flatten` and `hold`
     /// are. Nothing happens at all on a bar the strategy is not ready for.
     ///
+    /// **`snapshots` may be empty**, which is the case a live deployment
+    /// actually has: an operator presses "rebalance now" *between* two closes,
+    /// and there is no bar to pass. The gate then fires against the account as
+    /// it already stands — the marks the wallet carries and the indicator
+    /// values `resume` restored — consuming no bar, advancing no clock and
+    /// leaving the returned state's `bars_seen` and `last_bar` where they were.
+    /// Waiting for a bar instead cost a full cadence before the instruction
+    /// even reached the engine, and a second before it filled. A bar-less
+    /// instruction the strategy is too cold to evaluate is a `SpecError`, not a
+    /// silent no-op: with no bars there is no report to read the difference off.
+    ///
     /// `rebalance=True` composes with `hold`: the held symbols sit out the
     /// rebalance and are driven to their own targets, so the narrower
     /// instruction wins without moving anything twice. It does **not** compose
@@ -919,19 +1081,19 @@ impl PyStrategySpec {
         &self,
         wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
-        resume: Option<String>,
+        resume: Option<PyRef<'_, PyRunState>>,
         flatten: bool,
         hold: Option<HashMap<String, Real>>,
         rebalance: bool,
-    ) -> PyResult<(PyRunReport, String)> {
+    ) -> PyResult<(PyRunReport, PyRunState)> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let resume_state = parse_resume(resume)?;
+        let resume_state = resume.map(|r| r.inner.clone());
         let closeout = closeout_from(flatten, hold, rebalance)?;
         let owned = owned_at_resume(&self.inner, &snaps, resume_state.as_ref())?;
         over_any_wallet!(wallet, py, resume_state.as_ref(), &owned, _seed, w => {
             let (report, state) =
                 run_spec_resumable(py, &self.inner, &snaps, w, resume_state.as_ref(), &closeout)?;
-            Ok((PyRunReport { inner: report }, state_json(&state)?))
+            Ok((PyRunReport { inner: report }, PyRunState { inner: state }))
         })
     }
 
@@ -947,23 +1109,23 @@ impl PyStrategySpec {
     /// dropping the state and re-serving a long-period indicator's whole
     /// warm-up after every pause.
     ///
-    /// Returns the state JSON only; there is no report, because no run
-    /// happened. A fill that arrives anyway (a resting order left from before
-    /// the pause) still reaches the strategy, so its position cannot drift from
-    /// the account's.
+    /// Returns a [`RunState`](PyRunState) only; there is no report, because no
+    /// run happened. A fill that arrives anyway (a resting order left from
+    /// before the pause) still reaches the strategy, so its position cannot
+    /// drift from the account's.
     #[pyo3(signature = (wallet, snapshots, resume = None))]
     pub(crate) fn warm_up(
         &self,
         wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
-        resume: Option<String>,
-    ) -> PyResult<String> {
+        resume: Option<PyRef<'_, PyRunState>>,
+    ) -> PyResult<PyRunState> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let resume_state = parse_resume(resume)?;
+        let resume_state = resume.map(|r| r.inner.clone());
         let owned = owned_at_resume(&self.inner, &snaps, resume_state.as_ref())?;
         over_any_wallet!(wallet, py, resume_state.as_ref(), &owned, _seed, w => {
             let state = warm_up_spec(py, &self.inner, &snaps, w, resume_state.as_ref())?;
-            state_json(&state)
+            Ok(PyRunState { inner: state })
         })
     }
 

@@ -2164,8 +2164,6 @@ def test_warming_over_no_bars_still_returns_a_resumable_state():
     Recomputing `last_bar` from an empty chunk answers `None`, which drops a
     position in time the state already knew.
     """
-    import json
-
     spec = ta.load_spec(_ALL_IN_YAML)
     # Timestamped, so `last_bar` has something to carry in the first place.
     snaps = [
@@ -2173,11 +2171,11 @@ def test_warming_over_no_bars_still_returns_a_resumable_state():
         for i, v in enumerate(_wobbly(12))
     ]
     _wallet, state = _all_in_state(snaps[:6])
-    assert json.loads(state)["last_bar"] is not None
+    assert state.last_bar is not None
 
     wallet = ta.PaperWallet(10_000.0)
     warmed = spec.warm_up(wallet, [], resume=state)
-    assert json.loads(warmed)["last_bar"] == json.loads(state)["last_bar"]
+    assert warmed.last_bar == state.last_bar
 
     # And it round-trips: the state is a real resume point, not a dead end.
     spec.run_resumable(wallet, snaps[6:], resume=warmed)
@@ -2370,6 +2368,88 @@ def test_rebalance_and_flatten_together_are_refused():
         )
 
 
+def test_rebalance_needs_no_bar():
+    """**The reported bug.** `flatten` and `rebalance` are documented siblings,
+    but diverged on an empty snapshot stream: `flatten` closed the book at the
+    wallet's own last known price, while `rebalance` was accepted and did
+    nothing — no fill, no queued order, no error.
+
+    That is the case a live deployment has. Between one close and the next there
+    is no bar to pass, so an operator pressing "rebalance now" waited a full
+    cadence before the instruction reached the engine at all, and a second
+    before it filled — about two hours on a 1h deployment, two days on 1d.
+    """
+    snaps = _snaps_single("X", _wobbly(30))
+
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps[:20])
+    assert wallet.position("X") > 0.0
+
+    def resume_at_3x(**kwargs):
+        w = ta.PaperWallet(10_000.0, leverage=3.0)
+        # No bars at all — the operator is between two closes.
+        rep, s = ta.load_spec(_ALL_IN_YAML).run_resumable(w, [], resume=state, **kwargs)
+        assert rep.equity_curve == [], "no bar was driven"
+        assert rep.fills == [], "a rebalance settles nothing"
+        ta.load_spec(_ALL_IN_YAML).run_resumable(w, snaps[20:], resume=s)
+        return w.position("X")
+
+    carried = resume_at_3x()
+    rebalanced = resume_at_3x(rebalance=True)
+    assert rebalanced > carried * 2.0, (
+        f"the bar-less instruction must size against the 3x account: "
+        f"{rebalanced} vs {carried}"
+    )
+
+
+def test_a_bar_less_rebalance_advances_no_clock():
+    """It is an instruction about the book, not a step of the run: the state it
+    returns describes exactly the bar the state it resumed from described."""
+    snaps = [
+        ta.Snapshot({"X": ta.Atom(ta.Candle(v, v, v, v, 1000.0), None, i * 86_400_000)})
+        for i, v in enumerate(_wobbly(20))
+    ]
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, before = ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps)
+
+    _rep, after = ta.load_spec(_ALL_IN_YAML).run_resumable(
+        wallet, [], resume=before, rebalance=True
+    )
+    assert after.bars_seen == before.bars_seen
+    assert after.last_bar == before.last_bar
+
+
+def test_a_bar_less_rebalance_on_an_unready_strategy_is_refused():
+    """The other half of the reported bug: an instruction that cannot be carried
+    out is refused, not silently dropped.
+
+    With bars to drive, an unready strategy simply does not trade and the report
+    still describes the bars that went by. With no bars there is no such report,
+    so success would leave a caller unable to tell "delivered, nothing to do"
+    from "never evaluated".
+    """
+    yaml = """
+    root: X
+    long:
+      enter: !gt { lhs: !sma { period: 50, source: !close }, rhs: !value 0.0 }
+    """
+    # Five bars into a fifty-bar warm-up: a real state, from a strategy that has
+    # nothing to say yet.
+    snaps = _snaps_single("X", _wobbly(5))
+    _rep, state = ta.load_spec(yaml).run_resumable(ta.PaperWallet(1000.0), snaps)
+
+    with pytest.raises(ValueError, match="rebalance"):
+        ta.load_spec(yaml).run_resumable(
+            ta.PaperWallet(1000.0), [], resume=state, rebalance=True
+        )
+
+    # And the same instruction *with* bars is not refused — that path still
+    # reports the bars it drove, so its silence is readable.
+    ta.load_spec(yaml).run_resumable(
+        ta.PaperWallet(1000.0), snaps, resume=state, rebalance=True
+    )
+
+
 def test_rebalance_false_is_the_default_and_changes_nothing():
     """The knob is opt-in: an unset `rebalance` leaves every existing caller's
     behaviour exactly where it was."""
@@ -2382,6 +2462,96 @@ def test_rebalance_false_is_the_default_and_changes_nothing():
     assert state_a == state_b
 
 
+# ---------------------------------------------------------------------------
+# `RunState`: the state a run hands back, as an object rather than a JSON str.
+# ---------------------------------------------------------------------------
+
+
+def test_run_state_round_trips_and_describes_itself():
+    """A state is a value: it reports what it is, serializes, parses back and
+    compares equal to what it came from.
+
+    It used to be a bare JSON `str`, so every one of these questions was a
+    `json.loads` and a dict walk no Rust-side check ever saw.
+    """
+    snaps = [
+        ta.Snapshot({"X": ta.Atom(ta.Candle(v, v, v, v, 1000.0), None, i * 86_400_000)})
+        for i, v in enumerate(_wobbly(12))
+    ]
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(
+        ta.PaperWallet(10_000.0), snaps
+    )
+
+    assert state.kind == "single"
+    assert state.bars_seen == 12
+    assert state.last_bar == 11 * 86_400_000
+    assert state.format_version >= 2
+    assert "RunState(kind='single'" in repr(state)
+
+    again = ta.RunState(state.to_json())
+    assert again == state
+    assert hash(again) == hash(state)
+
+    # And it is still a real resume point after the round trip.
+    ta.load_spec(_ALL_IN_YAML).run_resumable(
+        ta.PaperWallet(10_000.0), snaps, resume=again
+    )
+
+
+def test_run_state_pickles():
+    """States get handed to worker processes; identity-only pickling would make
+    that a `TypeError` at the process boundary."""
+    import pickle
+
+    snaps = _snaps_single("X", _wobbly(12))
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(
+        ta.PaperWallet(10_000.0), snaps
+    )
+    assert pickle.loads(pickle.dumps(state)) == state
+
+
+def test_the_book_is_reachable_between_bars():
+    """`RunState.wallet` + `PaperWallet.restore_state` are how a caller reaches
+    the account without a run around it.
+
+    The blob used to be readable only inside `run_resumable`, so inspecting the
+    book a state describes — or driving it somewhere by hand — meant re-running
+    the chunk to get at it.
+    """
+    snaps = _snaps_single("X", _wobbly(20))
+    wallet = ta.PaperWallet(10_000.0)
+    _rep, state = ta.load_spec(_ALL_IN_YAML).run_resumable(wallet, snaps)
+    held = wallet.position("X")
+    assert held > 0.0
+
+    # A second account, configured independently, walked to the same book.
+    other = ta.PaperWallet(1.0)
+    other.restore_state(state.wallet)
+    assert other.position("X") == held
+    assert other.funds == wallet.funds
+
+    # …and back out again, unchanged.
+    assert ta.RunState(state.to_json()).wallet == other.snapshot_state()
+
+
+def test_a_live_wallets_book_is_not_snapshotted():
+    """The venue owns a live account's positions and cash, so they are re-read
+    on resume rather than replayed from a snapshot that may have gone stale."""
+    live = ta.OkxWallet.demo("k", "s", "p")
+    assert live.snapshot_state() == "null"
+    live.restore_state("null")
+
+
+def test_restoring_a_malformed_wallet_blob_is_an_error():
+    """Not a partially-restored account, and not a panic."""
+    wallet = ta.PaperWallet(1000.0)
+    with pytest.raises(ValueError, match="parsing wallet state"):
+        wallet.restore_state("{not json")
+    with pytest.raises(ValueError, match="restoring wallet state"):
+        wallet.restore_state('{"funds": "a lot"}')
+    assert wallet.funds == 1000.0
+
+
 def test_run_resumable_rejects_a_stale_format_version():
     """A state file from another build is refused, not mis-parsed."""
     import json
@@ -2390,12 +2560,12 @@ def test_run_resumable_rejects_a_stale_format_version():
     _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(
         ta.PaperWallet(1000.0), snaps
     )
-    stale = json.loads(state)
+    stale = json.loads(state.to_json())
     stale["format_version"] += 1
 
     with pytest.raises(ValueError, match="format version"):
         ta.load_spec(_RESUME_YAML).run_resumable(
-            ta.PaperWallet(1000.0), snaps, resume=json.dumps(stale)
+            ta.PaperWallet(1000.0), snaps, resume=ta.RunState(json.dumps(stale))
         )
 
 

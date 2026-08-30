@@ -1893,3 +1893,231 @@ fn every_shape_accepts_a_forced_rebalance() {
             .unwrap_or_else(|e| panic!("{kind}: forced rebalance: {e}"));
     }
 }
+
+/// **The reported bug.** `flatten` and `rebalance` are documented siblings, but
+/// they diverged on an empty snapshot stream: `flatten` closed the book at the
+/// wallet's own last known price, while `rebalance` was accepted and did
+/// nothing at all — no fill, no queued order, no error.
+///
+/// That is the case a live deployment actually has. Between one close and the
+/// next there is no bar to pass, so an operator pressing "rebalance now" waited
+/// a full cadence for one before the instruction reached the engine, and a
+/// second for the fill: about two hours on a `1h` deployment, two days on `1d`.
+/// The information was all there — the resumed wallet carries the marks — and
+/// the gate simply was never evaluated against them.
+#[test]
+fn a_forced_rebalance_needs_no_bar() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(30);
+
+    // Chunk one at 1x, sizing the entry against a 1x account.
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (_, state) = built
+        .drive_resumable_with(&snaps[..20], &mut wallet, None, &Closeout::Carry)
+        .expect("chunk one");
+    let entered = wallet.position(&intern("X")).amount;
+    assert!(entered > 0.0, "the fixture must be holding something");
+
+    // Chunk two carries *no bars at all* — the operator is between closes. Two
+    // runs from the same state over the same (empty) stream, differing only in
+    // the closeout.
+    let resize = |closeout: &Closeout| -> Real {
+        let mut built = spec.try_build(CASH, &sch, None).expect("build");
+        let mut wallet = fugazi::PaperWallet::new(CASH).with_leverage(3.0);
+        let (report, state) = built
+            .drive_resumable_with(&[], &mut wallet, Some(&state), closeout)
+            .expect("the bar-less instruction");
+        assert!(
+            report.equity_curve.is_empty(),
+            "no bar was driven, so the curve stays at snapshots.len() == 0",
+        );
+        // The forced order queues like any other rebalance — nothing fills on
+        // the bar that caused it, and here there was not even a bar.
+        assert!(report.fills.is_empty(), "a rebalance settles nothing");
+        let mut built = spec.try_build(CASH, &sch, None).expect("build");
+        built
+            .drive_resumable_with(&snaps[20..], &mut wallet, Some(&state), &Closeout::Carry)
+            .expect("the next chunk");
+        wallet.position(&intern("X")).amount
+    };
+
+    let carried = resize(&Closeout::Carry);
+    let rebalanced = resize(&Closeout::Rebalance {
+        hold: Default::default(),
+    });
+    assert!(
+        rebalanced > carried * 2.0,
+        "the bar-less instruction must re-size against the 3x account: \
+         {rebalanced} vs {carried}",
+    );
+}
+
+/// A bar-less rebalance is an instruction about the book, not a step of the
+/// run: it consumes nothing and advances nothing. The state it returns
+/// describes exactly the bar the state it resumed from described — same
+/// `bars_seen`, same `last_bar` — so the next chunk picks up where the previous
+/// one left off rather than one phantom bar later.
+#[test]
+fn a_bar_less_rebalance_advances_no_clock() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+    let snaps = single_snaps(20);
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (_, before) = built
+        .drive_resumable_with(&snaps, &mut wallet, None, &Closeout::Carry)
+        .expect("chunk one");
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let (_, after) = built
+        .drive_resumable_with(
+            &[],
+            &mut wallet,
+            Some(&before),
+            &Closeout::Rebalance {
+                hold: Default::default(),
+            },
+        )
+        .expect("the bar-less instruction");
+
+    assert_eq!(after.bars_seen, before.bars_seen, "no bar was consumed");
+    assert_eq!(after.last_bar, before.last_bar, "no clock advanced");
+}
+
+/// The other half of the reported bug: a bar-less instruction that cannot be
+/// carried out is **refused**, not silently dropped.
+///
+/// With bars to drive, an unready strategy simply does not trade and the report
+/// still describes the bars that went by — that silence is documented and
+/// stands. With no bars there is no such report, so returning success would
+/// leave the caller unable to tell "delivered, nothing to do" from "never
+/// evaluated". A live deployment cannot act on that difference, and it is the
+/// difference that matters.
+#[test]
+fn a_bar_less_rebalance_on_an_unready_strategy_is_refused() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let spec = all_in_spec();
+    let sch = schema();
+
+    // Cold, no resume: the chains have seen nothing, so there is no sizing
+    // target to rebalance to.
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let err = built
+        .drive_resumable_with(
+            &[],
+            &mut wallet,
+            None,
+            &Closeout::Rebalance {
+                hold: Default::default(),
+            },
+        )
+        .expect_err("an unevaluable instruction must be refused, not dropped");
+    assert!(err.starts_with("!rebalance > "), "{err}");
+    assert!(err.contains("warming up"), "{err}");
+}
+
+/// Every shape takes the instruction bar-lessly too, through the same
+/// object-safe handle — the bar-less path is not a single-asset special case.
+#[test]
+fn every_shape_accepts_a_bar_less_forced_rebalance() {
+    let sch = schema();
+    let rebalance = Closeout::Rebalance {
+        hold: Default::default(),
+    };
+    for (kind, spec, snaps) in every_shape() {
+        let mut built = spec
+            .try_build(CASH, &sch, None)
+            .unwrap_or_else(|e| panic!("{kind}: build: {e}"));
+        let (_, state) = built
+            .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
+            .unwrap_or_else(|e| panic!("{kind}: chunk one: {e}"));
+        let mut built = spec
+            .try_build(CASH, &sch, None)
+            .unwrap_or_else(|e| panic!("{kind}: rebuild: {e}"));
+        let (report, _) = built
+            .drive_resumable(&[], CASH, &[], Some(&state), &rebalance)
+            .unwrap_or_else(|e| panic!("{kind}: bar-less forced rebalance: {e}"));
+        assert!(report.equity_curve.is_empty(), "{kind}: no bar was driven",);
+    }
+}
+
+/// A basket's gate is a re-**rank**, and ranking reads `latest_score` — a map
+/// `update` writes and `save_state` does not carry, because it is a pure copy
+/// of what the per-symbol score chains already hold.
+///
+/// On the bar-ful path that gap is invisible: the resumed chunk's first
+/// `update` refills the map before its `trade`. Bar-lessly there is no such
+/// bar, and a selection picked out of an **empty** score map is *no symbols* —
+/// so the instruction "re-size this basket" would have closed every open leg
+/// instead. Restoring the chains has to restore what they project.
+#[test]
+fn a_bar_less_rebalance_does_not_empty_a_restored_basket() {
+    let sch = schema();
+    let snaps = multi_snaps(40);
+    let spec = StrategySpec::Basket(Box::new(basket_spec()));
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("build");
+    let (_, state) = built
+        .drive_resumable(&snaps, CASH, &[], None, &Closeout::Carry)
+        .expect("chunk one");
+    let held: Vec<_> = built
+        .owned_positions()
+        .into_iter()
+        .filter(|u| u.amount.abs() > 1e-9)
+        .collect();
+    assert!(
+        !held.is_empty(),
+        "the fixture must hold something to be able to lose it",
+    );
+
+    let mut built = spec.try_build(CASH, &sch, None).expect("rebuild");
+    let (_, after) = built
+        .drive_resumable(
+            &[],
+            CASH,
+            &[],
+            Some(&state),
+            &Closeout::Rebalance {
+                hold: Default::default(),
+            },
+        )
+        .expect("the bar-less instruction");
+
+    // The orders a rebalance issues *queue*, so the strategy's own position
+    // tracking is unchanged either way — what moved is the wallet's pending
+    // map, which the returned state carries.
+    let pending = after
+        .wallet
+        .get("pending")
+        .expect("a paper wallet snapshot");
+    for leg in &held {
+        let Some(queued) = pending.get(&*leg.symbol) else {
+            continue;
+        };
+        // `Pending::Target(units, id)` — a re-rank that dropped the leg queues
+        // it to `0.0`. A `Sized` entry is a resize, which is the instruction
+        // working as asked.
+        let Some(target) = queued
+            .get("Target")
+            .and_then(|t| t.get(0))
+            .and_then(|t| t.as_f64())
+        else {
+            continue;
+        };
+        assert!(
+            target.signum() == leg.amount.signum() && target.abs() > 1e-9,
+            "re-ranking a restored basket must not queue {:?} to flat:              holding {} and queued to {target}",
+            leg.symbol,
+            leg.amount,
+        );
+    }
+}

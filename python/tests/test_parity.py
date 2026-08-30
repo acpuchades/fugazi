@@ -349,6 +349,8 @@ WALLET_BOUND = {
     "cancel",
     "adjust_funds",
     "poll_fills",
+    "snapshot_state",
+    "restore_state",
     "set_costs_for",
     # Inherent PaperWallet extras, not trait methods.
     "orders",
@@ -382,11 +384,6 @@ WALLET_NOT_BOUND = {
         "the per-symbol half of the same pair, and terminal for the same reason — "
         "reachable as StrategySpec.run_resumable(hold={sym: units})"
     ),
-    "snapshot_state": (
-        "reached as the state JSON StrategySpec.run_resumable / .warm_up return; "
-        "a raw snapshot with no run around it has no use from Python"
-    ),
-    "restore_state": "the other half of the same pair — passed back as resume=",
 }
 
 
@@ -434,6 +431,8 @@ OKX_WALLET_BOUND = {
     "cancel_limit",
     "cancel",
     "poll_fills",
+    "snapshot_state",
+    "restore_state",
     # Live-only extras.
     "refresh_account",
     # The only path that reads leverage for a symbol the account is flat in —
@@ -500,6 +499,8 @@ COINBASE_WALLET_BOUND = {
     "cancel_limit",
     "cancel",
     "poll_fills",
+    "snapshot_state",
+    "restore_state",
     # Live-only extras.
     "refresh_account",
     "errors",
@@ -558,6 +559,8 @@ KRAKEN_WALLET_BOUND = {
     "cancel_limit",
     "cancel",
     "poll_fills",
+    "snapshot_state",
+    "restore_state",
     # Live-only extras.
     "refresh_account",
     "errors",

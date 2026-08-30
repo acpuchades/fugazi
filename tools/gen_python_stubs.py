@@ -101,7 +101,11 @@ BY_PARAM = {
     "montecarlo": "MonteCarloConfig | None",
     "wallet": "Wallet",
     "snapshots": "Sequence[Snapshot | Mapping[str, Atom | Candle]]",
-    "resume": "str | None",
+    "resume": "RunState | None",
+    # `RunState(json)` and `Wallet.restore_state(state)` — both are the JSON a
+    # state was written as, not a parsed object. See `RunState.strategy`.
+    "json": "str",
+    "state": "str",
     "flatten": "bool",
     "hold": "Mapping[str, float] | None",
     # `run_resumable(rebalance=...)`. Every `rebalance_on` builder names its
@@ -242,8 +246,13 @@ MEMBER_RETURNS = {
     ("SpecHole", "used"): "list[str]",
     ("SpecHole", "required_type"): "str | None",
     ("StrategySpec", "run"): "RunReport",
-    ("StrategySpec", "run_resumable"): "tuple[RunReport, str]",
-    ("StrategySpec", "warm_up"): "str",
+    ("StrategySpec", "run_resumable"): "tuple[RunReport, RunState]",
+    ("StrategySpec", "warm_up"): "RunState",
+    # The two opaque halves of a state: JSON `str` and not `dict`, because they
+    # have to round-trip bit-exactly — see `RunState.strategy`.
+    ("RunState", "strategy"): "str",
+    ("RunState", "wallet"): "str",
+    ("RunState", "last_bar"): "int | None",
     ("StrategySpec", "evaluate"): "dict[str, Any]",
     ("Sweep", "best"): "SweepRow | None",
     ("Sweep", "rows"): "list[SweepRow]",
@@ -437,6 +446,13 @@ MEMBER_RETURNS = {
 MEMBER_RULES = {
     "warm_up_bars": "int",
     "unstable_bars": "int",
+    "bars_seen": "int",
+    "format_version": "int",
+    "to_json": "str",
+    # The account half of a run state, as JSON: `"null"` from a live wallet,
+    # whose book the venue owns.
+    "snapshot_state": "str",
+    "restore_state": "None",
     "stable_bars": "int",
     "is_ready": "bool",
     "is_empty": "bool",

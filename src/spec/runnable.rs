@@ -59,7 +59,11 @@ pub const RUN_STATE_FORMAT_VERSION: u32 = 2;
 /// document. What is stored is the runtime *state*: the strategy's serialized
 /// indicator/position/book state and the wallet's cash / positions / resting
 /// orders. Written as JSON (via [`serde_json`]).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Equality is field-by-field, over the opaque halves too: "are these two runs
+/// in the same place?" is the question a caller comparing states is asking, and
+/// it is the one a test pinning a no-op closeout against `Carry` has to ask.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunState {
     /// Schema version; see [`RUN_STATE_FORMAT_VERSION`].
     pub format_version: u32,
@@ -276,7 +280,17 @@ where
     // final bar's `trade` rather than after it — see `backtest::run_rebalancing`
     // for why a rebalance cannot be settled the way the terminal arms are. Its
     // `hold` map is still handled below by `apply_closeout`, like `Hold`'s.
+    //
+    // With no bars there is no final bar to arm around, and the operator asking
+    // for a rebalance between two closes is asking for it *now* — so it fires
+    // against the marks the account is already carrying. `Flatten` has always
+    // worked bar-lessly, through `apply_closeout` below; this is the same
+    // instruction reaching the same book by the non-terminal path.
     let mut report = match closeout.forced_rebalance_hold() {
+        Some(hold) if snapshots.is_empty() => {
+            crate::backtest::rebalance_now(strategy, wallet, &hold)
+                .map_err(|e| format!("!rebalance > {e}"))?
+        }
         Some(hold) => crate::backtest::run_rebalancing(strategy, wallet, snapshots, &hold),
         None => crate::backtest::run(strategy, wallet, snapshots.iter().cloned()),
     };

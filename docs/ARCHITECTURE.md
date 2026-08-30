@@ -1012,6 +1012,42 @@ their absolute targets exactly as `Hold` does. The narrower instruction wins, an
 without moving anything twice — free to get wrong on paper (`settle_position` drops
 the queued move) but a real round trip on a live venue.
 
+**Between bars.** `run_rebalancing` needs a final bar to arm around, and a deployment
+driven on a cadence has none: between one close and the next there is no snapshot to
+pass. Called with an empty stream it drove nothing and reported success, so the
+operator waited a full cadence before the instruction reached the engine at all and a
+second before it filled — two hours on `1h`, two days on `1d`, for an instruction that
+named no time. `backtest::rebalance_now` is the bar-less twin, picked by `drive_over`
+when `snapshots.is_empty()`: the same arm / `trade` / clear with the bar taken out,
+fired against the marks the wallet already carries and the indicator values
+`restore_state` replayed. Nothing is consumed and nothing advances — no `update`, no
+bar counter, no equity point, so `equity_curve.len() == snapshots.len()` holds at
+zero and the state it returns keeps the resumed state's `bars_seen` and `last_bar`.
+`Flatten` had always worked bar-lessly, through `apply_closeout`; this is the same
+instruction reaching the same book by the non-terminal path.
+
+It re-runs the *last bar's* decision rather than a fresh one — `trade` reads values,
+and every one of them still holds what the previous chunk's final bar left there.
+`Wallet::set` is what makes a second `trade` against one bar's state safe: it names an
+absolute target, so re-issuing it drives to the same place instead of adding to it.
+
+That is also what made the bar-less path expose a half-finished restore in `basket:`.
+Its `trade` reads `latest_score` / `latest_size` rather than the per-symbol chains
+directly, and those maps are written by `update` and deliberately not serialized —
+they are a pure copy of what the chains already hold. On the bar-ful path the resumed
+chunk's first `update` refills them before its `trade`, so nothing noticed. Bar-lessly
+there is no such bar, and `Selection::pick` over an *empty* score map selects nothing,
+which for a basket means **close every open leg** — the exact opposite of "re-size".
+`restore_symbol` now reseeds both maps from the chains it just loaded: restoring a
+chain has to restore what it projects.
+
+**And it refuses rather than shrugging.** With bars to drive, an unready strategy
+simply does not trade and the report still describes the bars that went by — that
+silence is readable, and stands. With no bars there is no such report, so returning
+success would leave a caller unable to tell *delivered, nothing to do* from *never
+evaluated*. `rebalance_now` returns `Err` on an unready strategy, surfaced as
+`!rebalance > …`; *fired* is the only other outcome it has.
+
 **Warming without trading.** `backtest::warm_up` is `run` with the `trade` step gated
 (`DriveMode::WarmUpOnly` — one loop, one branch), surfaced as
 `RunnableStrategyExt::warm_up_over` and Python `spec.warm_up(...) -> state_json`. It
@@ -1027,11 +1063,33 @@ outright, so the per-symbol `Hold` arm has no meaning there; `--rebalance` requi
 `--save-state`, since a queued resize means nothing unless the state is carried
 forward). Python
 `spec.run_resumable(wallet, snapshots, resume=None, flatten=False, hold=None,
-rebalance=False) -> (report, state_json)` and
-`spec.warm_up(wallet, snapshots, resume=None) -> state_json`, both taking a
+rebalance=False) -> (report, RunState)` and
+`spec.warm_up(wallet, snapshots, resume=None) -> RunState`, both taking a
 `PaperWallet`, an `OkxWallet`, a `CoinbaseWallet` or a `KrakenWallet`.
 `flatten=True` with a non-empty `hold`, or with `rebalance=True`, is a `ValueError`;
-`rebalance=True` with `hold` is the one composition that is meant.
+`rebalance=True` with `hold` is the one composition that is meant, and
+`rebalance=True` with an **empty** `snapshots` is the bar-less path above.
+
+**`RunState` is a pyclass, not a JSON `str`.** Rust always had the struct — public
+fields, `Serialize`/`Deserialize`, `PartialEq` — but Python could only see the blob
+`run_resumable` handed back, so every question about it (*is this state fresh enough
+to resume from? what is it holding?*) was a `json.loads` and a dict walk no Rust-side
+check ever saw. `fugazi.RunState(json)` parses, `.to_json()` serializes, and
+`.kind` / `.bars_seen` / `.last_bar` / `.format_version` answer directly; `__eq__`
+delegates to the derive and `__hash__` covers those four fields (equal states agree on
+all of them, and hashing the blobs would mean serializing both halves per lookup).
+`.strategy` and `.wallet` stay JSON strings: they are opaque, and they must round-trip
+bit-exactly — `float_roundtrip` is load-bearing — so handing back a `dict` would invite
+editing and re-serializing through a path nothing checks.
+
+The account half is reachable on its own through `PaperWallet.snapshot_state()` /
+`.restore_state(blob)`, which the parity ledger used to list as deliberately unbound
+("a raw snapshot with no run around it has no use from Python"). It has one: reading
+the book a state describes, or driving it somewhere by hand, otherwise meant
+re-running the chunk. `restore_state` restores into the wallet's existing
+configuration — leverage, margin, the gross cap, costs and quote currency come from
+the constructor — which is why there is no `from_snapshot` classmethod that would hand
+back a silently 1x, cost-free account wearing the right positions.
 
 **Resuming into a shared account.** A run driven against a wallet the caller supplies
 has to work out which of the account's positions are *its own*. On a cold start the

@@ -757,6 +757,16 @@ So `Closeout::Rebalance` forces one gate-fire (Python `rebalance=True`, CLI
 `--rebalance`) and every default above stands untouched. See ARCHITECTURE
 *Rebalance on demand*.
 
+**The follow-on report was the same operator, one cadence later.** The knob was
+armed around the run's *final bar*, and a deployment driven on a cadence has no
+bar between bars — so "apply it now" waited a full cadence to be evaluated and a
+second to fill. `backtest::rebalance_now` fires the gate against the marks the
+wallet already carries, with no bar, no `update` and no clock advance; `drive_over`
+picks it on an empty stream. Still not a changed default, and still one gate-fire:
+the same instruction, delivered when it was issued. What would change it: a shape
+whose `trade` reads something only `update` can produce, which would make "the
+last bar's values" the wrong thing to size against.
+
 ### A `!never` document cannot resume into a rebalancing one
 
 Rewriting `rebalance_on:` from `!never` (or omitted) to a real signal and

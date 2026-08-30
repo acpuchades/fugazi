@@ -241,7 +241,13 @@ where
 /// Nothing happens on a bar the strategy is not
 /// [`ready`](crate::Strategy::is_ready) for, or after
 /// [`ruin`](RunReport::ruin_bar) — the trade step is skipped wholesale in both
-/// cases, and forcing a gate does not reach past that.
+/// cases, and forcing a gate does not reach past that. The report still
+/// describes the bars that did go by, which is why that stays silent rather
+/// than failing; with **no** bars at all there is no such report, and
+/// [`rebalance_now`] refuses instead.
+///
+/// An empty `snapshots` is therefore not this function's case: it has no final
+/// bar to arm around, and the driver routes it to [`rebalance_now`].
 pub fn run_rebalancing<Sym, S, W>(
     strategy: &mut S,
     wallet: &mut W,
@@ -261,6 +267,100 @@ where
         DriveMode::Trade,
         force,
     )
+}
+
+/// Force the document's rebalance gate **between bars** — the bar-less twin of
+/// [`run_rebalancing`], for an operator who is saying *now*.
+///
+/// [`run_rebalancing`] arms the gate around the final bar's
+/// [`trade`](crate::Strategy::trade), so it needs a bar to hang the instruction
+/// on. A deployment driven on a cadence has none: between one close and the
+/// next there is no snapshot to pass, and the same call with an empty stream
+/// used to drive nothing and report success. The operator then waited a full
+/// cadence for a bar to close before the instruction reached the engine at all,
+/// and a second for the fill — two hours on a `1h` deployment, two days on
+/// `1d`. For a re-levering instruction on real money that is the wrong
+/// semantics.
+///
+/// So this fires the gate against the account **as it already stands**: the
+/// marks the wallet is carrying, the equity they imply, and the indicator
+/// values the strategy was restored with. Nothing is consumed and nothing
+/// advances — no snapshot, no [`update`](crate::Strategy::update), no bar
+/// counter, no equity point. The strategy is left describing exactly the bar it
+/// described on entry, so the [`RunState`](crate::spec::RunState) captured
+/// after this resumes as if the rebalance had never happened — except for the
+/// orders it queued, which live in the wallet.
+///
+/// **It re-runs the last bar's decision, not a fresh one.** `trade` reads
+/// values, and every one of them still holds what the previous chunk's final
+/// bar left there. An entry signal that fired then and has not filled yet fires
+/// again here, at the size the account justifies now — which is the instruction
+/// ("size against the account as it stands"), but it is a *second* `trade`
+/// against one bar's worth of state rather than a new bar's worth, and
+/// [`Wallet::set`] is what makes that safe: it names an absolute target, so
+/// re-issuing it drives to the same place instead of adding to it.
+///
+/// **Empty [`RunReport`].** No bar was driven, so `equity_curve` is empty —
+/// the `equity_curve.len() == snapshots.len()` invariant every consumer relies
+/// on, at zero. `initial_equity` is the account's equity on entry, and
+/// `rejections` carries anything a live venue refused synchronously, stamped at
+/// bar `0` the way [`apply_closeout`] stamps a bar-less
+/// [`Flatten`](Closeout::Flatten). No fill can appear: the orders queue on a
+/// [`PaperWallet`](crate::PaperWallet) and route to the broker on a live venue,
+/// and nothing fills on the bar that caused it — here as everywhere else.
+///
+/// **An unready strategy is refused, not ignored.** With a bar to drive, an
+/// unready strategy simply does not trade and the report still describes the
+/// bars that went by. Here there is no such report: driving nothing and
+/// returning success is indistinguishable from "delivered, nothing to do", and
+/// the caller has no way to tell that the instruction never reached the engine.
+/// So it is an `Err` — the only outcome this can have other than *fired*.
+pub fn rebalance_now<Sym, S, W>(
+    strategy: &mut S,
+    wallet: &mut W,
+    hold: &[Sym],
+) -> Result<RunReport<Sym>, String>
+where
+    Sym: Clone + PartialEq,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
+    W: Wallet<Sym>,
+{
+    if !strategy.is_ready() {
+        return Err(
+            "the strategy has not finished warming up, so it has no sizing target to \
+             rebalance to — drive the missing bars first (a resumed state carries the \
+             warm-up with it), or pass the bars along with the instruction"
+                .to_string(),
+        );
+    }
+    let initial_equity = wallet.equity().0;
+    // The same arm/trade/clear the driver performs around a bar's `trade`, with
+    // the bar taken out. Cleared immediately after for the same reason it is
+    // there: the latch must not outlive the instruction that armed it.
+    strategy.force_rebalance(Some(hold));
+    strategy.trade(wallet);
+    strategy.force_rebalance(None);
+    let rejections = wallet
+        .take_rejections()
+        .into_iter()
+        .map(|rejection| {
+            strategy.on_reject(&rejection);
+            Rejected { bar: 0, rejection }
+        })
+        .collect();
+    Ok(RunReport {
+        equity_curve: Vec::new(),
+        fills: Vec::new(),
+        rejections,
+        initial_equity,
+        ruin_bar: None,
+        carry_coverage: wallet.carry_coverage(),
+        // Drained rather than skipped: a composite's buffers are scoped to the
+        // run that produced them, and leaving one behind would hand it to the
+        // next run's report. Empty for every shape here — the rows are pushed
+        // by `update` and `on_fill`, neither of which runs.
+        attribution: strategy.take_attribution(),
+    })
 }
 
 /// Feed `snapshots` through `strategy` **without trading**: chains advance and
@@ -532,7 +632,10 @@ pub enum Closeout {
     /// stands, so this asks the strategy for its own targets rather than
     /// naming units the way `Hold` does. See [`run_rebalancing`] for what
     /// "force the gate" means per shape and why the resulting orders queue
-    /// rather than settle.
+    /// rather than settle, and [`rebalance_now`] for the bar-less case — an
+    /// operator pressing this between two closes is saying *now*, and waiting
+    /// for the next bar to fire the gate is a full cadence of delay on an
+    /// instruction that named no time.
     ///
     /// `hold` is usually empty. When it isn't, those symbols are held out of
     /// the forced rebalance *and* driven to their targets afterwards — the
