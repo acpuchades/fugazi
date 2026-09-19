@@ -22,6 +22,7 @@ use crate::calendar::{
 use crate::costs::CostConfig;
 use crate::data::{DataFrame, IndexKey};
 use crate::daterange::{self, Slice};
+use crate::format::{evaluated_period_line, format_metric, friendly_metric_label};
 use crate::imports;
 use crate::input;
 use crate::input::StrategyKind;
@@ -1817,35 +1818,6 @@ fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) 
     );
 }
 
-/// `start → end (N bars)` when the atom stream has at least one entry, else
-/// `None`. Shared by the single-asset and multi-symbol drivers so both echo
-/// the same period line as `run` does.
-/// The `period` line, over the bars a sweep will actually *measure*.
-///
-/// `labels` is the fed stream, warm-up prefix included; `warmup` is how much of
-/// its head only settles the chains. Reporting the fed range here would
-/// overstate both the period and the bar count by that prefix.
-fn evaluated_period_line(labels: &[String], warmup: usize) -> Option<String> {
-    let evaluated = labels.get(warmup.min(labels.len())..)?;
-    let (s, e) = (evaluated.first()?, evaluated.last()?);
-    let bars = evaluated.len();
-    Some(match warmup {
-        0 => format!("{s} → {e} ({bars} bars)"),
-        w => format!("{s} → {e} ({bars} bars, {w} warm-up)"),
-    })
-}
-
-/// Short friendly label for the console — strip the section prefix from a
-/// canonical dotted metric path (`risk_adjusted.sharpe` → `sharpe`,
-/// `returns.cagr_pct` → `cagr_pct`). CSV columns stay as the canonical
-/// dotted path — this is just for display.
-fn friendly_metric_label(dotted_or_short: &str) -> String {
-    dotted_or_short
-        .rsplit_once('.')
-        .map(|(_, tail)| tail.to_string())
-        .unwrap_or_else(|| dotted_or_short.to_string())
-}
-
 /// Under `--shrink` in a plain sweep: what each member actually chose.
 ///
 /// The grid CSV's winner is the **consensus** — what complete pooling would
@@ -2160,27 +2132,6 @@ fn print_best_block(sweep: &Sweep, k: Real, member_winners: Option<&Path>) {
             "this cell is not rankable, so it is shown here only because no \
              solvent cell out-ranked it",
         );
-    }
-}
-
-/// One metric value for the best block: `1.2345` for a whole-run evaluation,
-/// `1.2345 ± 0.6789` for a windowed one, `1.2345 ± 0.6789 (28/30)` for a pooled
-/// one, `—` when degenerate (everywhere).
-fn format_metric(eval: &Evaluation, path: &str) -> String {
-    match eval {
-        Evaluation::Whole(m) => {
-            lookup(m, path).map_or_else(|| "—".to_string(), |v| format!("{v:.4}"))
-        }
-        Evaluation::Windowed(ws) => lookup_windowed(ws, path).map_or_else(
-            || "—".to_string(),
-            |(mean, std)| format!("{mean:.4} ± {std:.4}"),
-        ),
-        // `± std (n/m)` — the support is inline rather than in a separate
-        // field because the number is only interpretable next to it.
-        Evaluation::Panel(ms) => crate::spec::panel::pool_metric(ms, path).map_or_else(
-            || "—".to_string(),
-            |p| format!("{:.4} ± {:.4} ({}/{})", p.mean, p.std, p.defined, p.members),
-        ),
     }
 }
 

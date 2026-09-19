@@ -18,6 +18,7 @@ mod completions;
 mod csv_source;
 mod data;
 mod daterange;
+mod format;
 mod get;
 mod glob;
 mod grammar;

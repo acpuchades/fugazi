@@ -50,6 +50,10 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::{DataFrame, IndexKey};
 use crate::daterange::{self, Slice};
+use crate::format::{
+    format_holding_line, format_ms_count, format_ms_ratio, format_ms_signed_pct,
+    format_ms_unsigned_pct, format_pct, format_ratio, mean_std_of,
+};
 use crate::metrics;
 use crate::overlap::{self, Overlap};
 use crate::spec::{
@@ -2353,73 +2357,6 @@ fn print_metrics_block(
     }
 }
 
-/// Compose the `holding` line: `avg N bars (~Xu) · min N (~Xu) · max N (~Xu)`,
-/// the duration twin dropped when `bar_freq` is unknown. `None` when the run
-/// booked no trades (all three legs are absent).
-///
-/// When min, max, and avg coincide (one closed trade, or every trade held the
-/// exact same number of bars), collapses to a single `N bars (~Xu)` — no point
-/// showing three identical numbers.
-fn format_holding_line(m: &metrics::Metrics, bar_freq: Option<Frequency>) -> Option<String> {
-    let avg = m.trades.average_bars;
-    let min = m.trades.min_bars.map(|n| n as Real);
-    let max = m.trades.max_bars.map(|n| n as Real);
-    if avg.is_none() && min.is_none() && max.is_none() {
-        return None;
-    }
-    let bars_str = |bars: Real, precision: usize| -> String {
-        let dur = bar_freq
-            .map(|f| format!(" (~{})", format_bars_as_duration(bars, f)))
-            .unwrap_or_default();
-        format!("{bars:.*} bars{dur}", precision)
-    };
-    // Collapse to a single value when the three legs coincide (either one
-    // trade, or every trade held the exact same number of bars). Uses a
-    // 1e-6 tolerance since `avg` is a Real from a running mean.
-    if let (Some(avg), Some(min), Some(max)) = (avg, min, max)
-        && (avg - min).abs() < 1e-6
-        && (avg - max).abs() < 1e-6
-    {
-        let precision = if avg.fract().abs() < 1e-6 { 0 } else { 1 };
-        return Some(bars_str(avg, precision));
-    }
-    let leg = |label: &str, bars: Option<Real>, precision: usize| -> Option<String> {
-        Some(format!("{label} {}", bars_str(bars?, precision)))
-    };
-    let parts: Vec<String> = [leg("avg", avg, 1), leg("min", min, 0), leg("max", max, 0)]
-        .into_iter()
-        .flatten()
-        .collect();
-    Some(parts.join(" · "))
-}
-
-/// Render `bars` bars of `freq` cadence as a duration in the cadence's own
-/// unit alphabet (`21d`, `4h`, `26h` — `Frequency::from_str`-compatible for
-/// integer counts). Fractional averages carry one decimal.
-fn format_bars_as_duration(bars: Real, freq: Frequency) -> String {
-    let (mult, letter) = match freq {
-        Frequency::Minute(n) => (n, "m"),
-        Frequency::Hour(n) => (n, "h"),
-        Frequency::Day(n) => (n, "d"),
-        Frequency::Week(n) => (n, "w"),
-        Frequency::Month(n) => (n, "M"),
-    };
-    let total = bars * mult as Real;
-    if (total - total.round()).abs() < 1e-6 {
-        format!("{total:.0}{letter}")
-    } else {
-        format!("{total:.1}{letter}")
-    }
-}
-
-fn format_ratio(v: Option<Real>) -> String {
-    v.map_or_else(|| "—".to_string(), |r| format!("{r:.2}"))
-}
-
-fn format_pct(v: Option<Real>) -> String {
-    v.map_or_else(|| "—".to_string(), |r| format!("{r:.1}%"))
-}
-
 /// Printed right after [`print_metrics_block`] under `-w`: each headline stat
 /// becomes the cross-window `mean ± std` over the non-overlapping N-bar rows
 /// in `metrics.csv`, so the caller sees both the whole-run single estimate
@@ -2491,39 +2428,4 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
             format_ms_ratio(pf),
         ),
     );
-}
-
-/// Project `f` across each window's `Metrics`, drop `None`s, and reduce to
-/// `(mean, population_std)` via [`metrics::mean_std`]. `None` when no window
-/// defines the stat.
-fn mean_std_of<F>(windows: &[metrics::WindowMetrics], f: F) -> Option<(Real, Real)>
-where
-    F: Fn(&metrics::Metrics) -> Option<Real>,
-{
-    metrics::mean_std(windows.iter().filter_map(|w| f(&w.metrics)))
-}
-
-/// `+M.MM ± S.SS%` — signed mean (returns can be negative), unsigned stddev,
-/// unit suffix once at the end.
-fn format_ms_signed_pct(pair: Option<(Real, Real)>) -> String {
-    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:+.2} ± {s:.2}%"))
-}
-
-/// `M.MM ± S.SS%` — unsigned mean (magnitudes, ratios in percent form).
-fn format_ms_unsigned_pct(pair: Option<(Real, Real)>) -> String {
-    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:.2} ± {s:.2}%"))
-}
-
-/// `M.MM ± S.SS` — unitless ratio (Sharpe, Sortino, Omega, profit factor).
-fn format_ms_ratio(pair: Option<(Real, Real)>) -> String {
-    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:.2} ± {s:.2}"))
-}
-
-/// `M ± S` at `precision` decimals — for counts (trades, drawdown duration
-/// bars) treated as floats so a fractional mean survives the format.
-fn format_ms_count(pair: Option<(Real, Real)>, precision: usize) -> String {
-    pair.map_or_else(
-        || "—".to_string(),
-        |(m, s)| format!("{m:.*} ± {s:.*}", precision, precision),
-    )
 }
