@@ -26,7 +26,7 @@ use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
 /// Spread-level source (a real-valued indicator over the pair's `Snapshot`).
-type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
+type Level<Sym> = super::Chain<Sym>;
 
 /// The strategy's internal spread indicator: `close(left) - close(right)`.
 type Spread<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
@@ -42,10 +42,7 @@ fn find_atom<Sym: PartialEq + Clone + Eq + std::hash::Hash>(
     snap.find(&query).cloned()
 }
 
-/// The latest value of an optional level, if it is present and warmed up.
-fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
-    level.as_ref().and_then(|l| l.value())
-}
+use super::level_value;
 
 /// A two-symbol, spread-driven pair-trading strategy, long / flat / short **on
 /// the spread**.

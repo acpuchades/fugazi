@@ -16,15 +16,12 @@ use crate::types::Snapshot;
 /// `position.entry()` (etc.) is already
 /// [`Input = Snapshot<Sym>`](crate::types::Snapshot) via the [`Position`]
 /// carriers.
-type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
+type Level<Sym> = super::Chain<Sym>;
 
 /// The **rebalance gate** signal — a boolean over the strategy's snapshot.
 type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
-/// The latest value of an optional level, if it is present and warmed up.
-fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
-    level.as_ref().and_then(|l| l.value())
-}
+use super::level_value;
 
 /// Route the strategy's *own* asset out of a per-bar [`Snapshot`] for the
 /// [`Position`] tracker. Prefers a symbol-matching entry (any frequency); if

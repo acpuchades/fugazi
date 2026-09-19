@@ -44,7 +44,7 @@ use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
-use crate::wallet::{CASH_EPSILON, POSITION_EPSILON};
+use crate::wallet::{POSITION_EPSILON, cash_tolerance};
 
 use super::netting::PortfolioInner;
 
@@ -358,7 +358,11 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         // nothing here.
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ledger = &mut inner.ledgers[self.idx];
-        if ledger.cash + delta < -CASH_EPSILON {
+        // Scale-aware, like every other cash check: the debits arriving here
+        // come out of `resolve_allocations`' float splits, so on a large
+        // slice they round by more than a fixed epsilon and a bare
+        // `< -CASH_EPSILON` read as insufficient funds.
+        if ledger.cash + delta < -cash_tolerance(ledger.cash) {
             return Err(WalletError::InsufficientFunds);
         }
         ledger.cash += delta;

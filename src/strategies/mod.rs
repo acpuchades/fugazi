@@ -75,6 +75,12 @@ pub(crate) type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = R
 /// A per-symbol, position-aware factory for a protective level.
 pub(crate) type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
 
+/// The latest value of an optional protective level, if it is present and
+/// warmed up. `single_asset` and `pairs` each carried a private copy.
+pub(crate) fn level_value<Sym>(level: &Option<Chain<Sym>>) -> Option<Real> {
+    level.as_ref().and_then(|l| l.value())
+}
+
 /// Box a user-supplied protective-level factory into a [`LevelFactory`].
 ///
 /// The four builders (`long_stop_loss`, `long_take_profit`,

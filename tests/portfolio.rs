@@ -1341,6 +1341,51 @@ fn a_resting_limit_order_is_refused_inside_a_portfolio() {
 }
 
 #[test]
+fn a_child_cash_debit_tolerates_rounding_at_scale() {
+    // A rebalance split computed off a large slice rounds by more than a
+    // fixed epsilon; the ledger's cash check is scale-aware so that rounding
+    // is not read as overdraft. (This failed under the old fixed
+    // `< -CASH_EPSILON`.)
+    struct Withdrawer {
+        result: std::sync::Arc<std::sync::Mutex<Option<Result<(), WalletError>>>>,
+    }
+    impl Strategy for Withdrawer {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+        fn update(&mut self, _snap: Snapshot<&'static str>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+            let mut slot = self.result.lock().unwrap();
+            if slot.is_none() {
+                // The whole slice plus a rounding sliver beyond the fixed
+                // epsilon (1e-4 ≫ 1e-8), well inside the scale-aware band.
+                *slot = Some(wallet.adjust_funds(-(5e8 + 1e-4)));
+            }
+        }
+        fn reset(&mut self) {}
+    }
+    let result: std::sync::Arc<std::sync::Mutex<Option<Result<(), WalletError>>>> =
+        Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1e9)
+        .add(
+            "withdrawer",
+            Withdrawer {
+                result: std::sync::Arc::clone(&result),
+            },
+        )
+        .add("idle", submitter(&Default::default(), None))
+        .weights(EqualWeight)
+        .build();
+    let _ = portfolio.run(a_rising_b_flat_snapshots());
+
+    assert_eq!(
+        *result.lock().unwrap(),
+        Some(Ok(())),
+        "a debit overshooting only by rounding-at-scale must not be refused",
+    );
+}
+
+#[test]
 fn a_child_adjusting_funds_moves_only_its_own_sub_wallet() {
     struct Depositor;
     impl Strategy for Depositor {

@@ -2353,7 +2353,10 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// outside the blotter (no `Order`, no `on_fill`).
     fn adjust_funds(&mut self, delta: Real) -> Result<(), WalletError> {
         let new_funds = self.funds + delta;
-        if new_funds < 0.0 {
+        // Scale-aware, like the fill-affordability checks above: a withdrawal
+        // computed as a fraction of a large balance rounds by more than a
+        // fixed epsilon, and a bare `< 0.0` read that rounding as overdraft.
+        if new_funds < -cash_tolerance(self.funds) {
             return Err(WalletError::InsufficientFunds);
         }
         self.funds = new_funds;
@@ -4649,6 +4652,23 @@ mod tests {
             Err(WalletError::InsufficientFunds)
         );
         assert_eq!(w.funds().0, 500.0);
+    }
+
+    #[test]
+    fn adjust_funds_tolerates_rounding_at_scale() {
+        // A withdrawal computed as a fraction of a large balance rounds by
+        // more than a fixed epsilon; the check is scale-aware so that
+        // rounding is not read as overdraft. (This failed under the old
+        // bare `new_funds < 0.0`.)
+        let mut w: PaperWallet<&'static str> = PaperWallet::new(1e9);
+        assert!(w.adjust_funds(-(1e9 + 1e-4)).is_ok());
+        assert!(w.funds().0.abs() < 1e-3, "funds: {}", w.funds().0);
+        // A genuine overdraft at the same scale still refuses.
+        let mut w: PaperWallet<&'static str> = PaperWallet::new(1e9);
+        assert_eq!(
+            w.adjust_funds(-1.001e9),
+            Err(WalletError::InsufficientFunds)
+        );
     }
 
     #[test]
