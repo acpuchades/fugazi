@@ -226,6 +226,7 @@ pub use runnable::{
     RESUME_PROBE_SEED, RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, RunnableStrategyExt,
     StrategySpec, drive_over,
 };
+pub use shape::detect_document_kind;
 pub use strategy::SingleStrategySpec;
 pub use strategy::{DynSingleStrategy, SideSpec};
 pub use template::SpecTemplate;

@@ -1126,6 +1126,7 @@ calendar signals to trigger event-driven rebalancing.
 | `!never` | never (sugar for `!value false`) — **not** what omitting the field means; see [Defaults](#defaults) |
 | `!every N` | on bar `N-1` (0-indexed), then every `N` bars — delayed first fire so `!every 5` at end of every 5-bar block |
 | `!value true` / `!value false` | constants — for programmatic overrides |
+| `!hourly` / `!daily` / `!weekly` / `!monthly` / `!quarterly` / `!annually` | on the bar where the wall-clock hour / day of month / ISO week / month / quarter / year rolls over — sugar for `!changed { source: !hour }` (…`!day`, `!week_of_year`, `!month`, `!quarter`, `!year`), lowered at load. Needs bar `time`; like every edge, `None` through warm-up |
 | composite: `!and`, `!or`, `!xor`, `!not`, `!all`, `!any` | boolean logic over any of the above and any other signal |
 | calendar / drawdown / crossover / … | any [Signal](#signals) works |
 

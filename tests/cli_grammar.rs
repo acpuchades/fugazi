@@ -142,8 +142,14 @@ fn schema_document_emits_the_five_shapes() {
     let schema = run_json(&["schema", "--document"]);
     // `anyOf`, not `oneOf`: `root:` is optional on the single-asset shape, so a
     // document that omits it is structurally both a `single` and a `multi`.
+    // The sixth branch is the top-level preset spelling (`!ma_crossover {…}`
+    // as the whole document).
     let any_of = schema["anyOf"]
         .as_array()
         .expect("document root is an anyOf");
-    assert_eq!(any_of.len(), 5, "single/pairs/basket/multi/portfolio");
+    assert_eq!(
+        any_of.len(),
+        6,
+        "single/pairs/basket/multi/portfolio + preset"
+    );
 }

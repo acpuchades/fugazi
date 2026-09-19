@@ -149,9 +149,11 @@ fn document_schema_is_well_formed() {
         assert!(defs.contains_key(name), "missing $defs/{name}");
     }
 
-    // Root is an `anyOf` over exactly the five shapes — `anyOf` because a
-    // document that omits the optional `root:` is structurally both a `single`
-    // and a `multi`, and `oneOf` would reject what both shapes accept.
+    // Root is an `anyOf` over exactly the five shapes plus the top-level
+    // preset spelling (`!ma_crossover { … }` as the whole document) — `anyOf`
+    // because a document that omits the optional `root:` is structurally both
+    // a `single` and a `multi`, and `oneOf` would reject what both shapes
+    // accept.
     let root: BTreeSet<String> = schema["anyOf"]
         .as_array()
         .expect("root anyOf")
@@ -161,11 +163,11 @@ fn document_schema_is_well_formed() {
         .collect();
     assert_eq!(
         root,
-        ["single", "pairs", "basket", "multi", "portfolio"]
+        ["single", "pairs", "basket", "multi", "portfolio", "preset"]
             .iter()
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>(),
-        "document root must be an anyOf of the five shapes"
+        "document root must be an anyOf of the five shapes + preset"
     );
 
     // The single-asset `root:` is optional, and the schema *publishes* what

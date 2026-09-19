@@ -571,6 +571,21 @@ pub fn known_selection_tags() -> Vec<String> {
 /// `known_node_tags` has to know about them.
 pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "slot"];
 
+/// The wall-clock cadence sugar tags — like [`REWRITTEN_TAGS`] they are
+/// rewritten before the typed parse (`rewrite_cadence_sugar` lowers each to
+/// `!changed { source: !<calendar accessor> }`), but unlike them they are
+/// genuine *node* tags: each evaluates to a boolean signal, so they carry
+/// hand-authored `node`-group descriptor rows (`grammar::cadence_grammar_tags`)
+/// rather than `document`-group ones.
+pub const CADENCE_SUGAR_TAGS: &[&str] = &[
+    "hourly",
+    "daily",
+    "weekly",
+    "monthly",
+    "quarterly",
+    "annually",
+];
+
 /// A tag no variant will ever be named, used to provoke serde's
 /// variant-listing error. The mapping body keeps the shape valid for tags that
 /// take fields.

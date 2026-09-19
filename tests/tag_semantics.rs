@@ -120,6 +120,14 @@ const ALIASES: &[(&str, &str, &str)] = &[
          the probe builds",
     ),
     ("any", "or", "as `!all` / `!and`"),
+    (
+        "daily",
+        "hourly",
+        "the probe stride (5d 1h 1m 7s) advances both the wall-clock hour and \
+         the day of month on every bar, so both rollover edges fire on every \
+         bar past warm-up. The other cadence tags separate because a 5-day \
+         stride can stay inside one ISO week / month / quarter / year",
+    ),
 ];
 
 /// An adversarial-but-plain candle stream: a rise, a gap down, a flat stretch,

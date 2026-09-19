@@ -383,6 +383,7 @@ pub fn spec_grammar() -> Vec<GrammarTag> {
     tags.extend(crate::spec::basket::SelectionRuleSpec::grammar_tags());
     tags.extend(crate::spec::basket::UniverseSpec::grammar_tags());
     tags.extend(document_grammar_tags());
+    tags.extend(cadence_grammar_tags());
     // Stamp the editorial `category` the derive left blank. `CATEGORIES` is the
     // one authority for the taxonomy (and its curated order); a test pins it to
     // cover every tag exactly once, so a missing stamp is a test failure, not a
@@ -593,6 +594,13 @@ pub const CATEGORIES: &[(&str, &[&str])] = &[
             "time",
             "is_weekday",
             "is_weekend",
+            // The wall-clock cadence sugar over the accessors above.
+            "hourly",
+            "daily",
+            "weekly",
+            "monthly",
+            "quarterly",
+            "annually",
         ],
     ),
     (
@@ -985,6 +993,53 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
     ]
 }
 
+/// The hand-authored records for the six wall-clock cadence sugar tags
+/// (`!hourly` / `!daily` / `!weekly` / `!monthly` / `!quarterly` /
+/// `!annually`) — genuine **node** tags, unlike [`document_grammar_tags`]'s
+/// load-time directives, but rewritten away before the typed parse
+/// (`expr.rs`'s `rewrite_cadence_sugar` lowers each to
+/// `!changed { source: !<calendar accessor> }`), so no serde variant exists to
+/// reflect them off. Without these rows the published JSON Schemas rejected
+/// documents the loader accepts.
+fn cadence_grammar_tags() -> Vec<GrammarTag> {
+    const CADENCE: &[(&str, &str, &str)] = &[
+        ("hourly", "hour", "the wall-clock hour"),
+        ("daily", "day", "the day of month"),
+        ("weekly", "week_of_year", "the ISO week number"),
+        ("monthly", "month", "the month"),
+        ("quarterly", "quarter", "the quarter"),
+        ("annually", "year", "the year"),
+    ];
+    CADENCE
+        .iter()
+        .map(|(name, accessor, what)| GrammarTag {
+            name: (*name).to_owned(),
+            group: "node".to_owned(),
+            kind: "predicate".to_owned(),
+            forms: vec![GrammarForm {
+                shape: "unit".to_owned(),
+                fields: Vec::new(),
+                payload: None,
+                payload_output: None,
+                scope: None,
+                doc: None,
+            }],
+            output: "bool".to_owned(),
+            projections: Vec::new(),
+            // Stamped by `spec_grammar` from `CATEGORIES`, like every other tag.
+            category: String::new(),
+            doc: Some(format!(
+                "Fires on the bar where {what} rolls over — sugar for `!changed \
+                 {{ source: !{accessor} }}`, lowered at load. Needs bar `time`; \
+                 like every edge it is `None` through warm-up, so a rollover \
+                 coincident with the first bar is not an event."
+            )),
+            since: SINCE_BASELINE.to_owned(),
+            host_affecting: false,
+        })
+        .collect()
+}
+
 /// [`spec_grammar`] wrapped with its [`SCHEMA_VERSION`] as the top-level
 /// document the Python `spec_grammar()` returns: `{ schema_version, tags }`.
 pub fn spec_grammar_document() -> serde_json::Value {
@@ -1029,7 +1084,8 @@ pub fn spec_json_schema() -> serde_json::Value {
 /// slots, `$ref`-ing the same `node` / `selection` grammar for every expression.
 /// Phase 2 of the proposal.
 ///
-/// The root is an **`anyOf`** over the five shapes. It was a `oneOf` while
+/// The root is an **`anyOf`** over the five shapes plus the top-level preset
+/// spelling (`!ma_crossover { … }` as the whole document). It was a `oneOf` while
 /// `single` still required `root:` and the five were therefore disjoint by their
 /// required keys; making that key optional (it defaults to `!pick { symbol:
 /// !param SYMBOL, freq: !param FREQ }` — see [`root::apply_default`]) collapses
@@ -1058,20 +1114,37 @@ pub fn spec_document_json_schema() -> serde_json::Value {
     defs.insert("basket".into(), doc_basket());
     defs.insert("multi".into(), doc_multi());
     defs.insert("portfolio".into(), doc_portfolio());
+    // A whole document that *is* a preset tag (`!ma_crossover { root: … }`) —
+    // `StrategyRef`'s other spelling, accepted by every single-shape loader.
+    // Structure only, like everything here: the preset's own field set stays
+    // with its serde parse.
+    let preset_keys: Vec<serde_json::Value> = crate::spec::preset::PRESET_TAGS
+        .iter()
+        .map(|t| serde_json::json!(t))
+        .collect();
+    defs.insert(
+        "preset".into(),
+        serde_json::json!({
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "propertyNames": { "enum": preset_keys },
+        }),
+    );
 
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": format!("https://fugazi.dev/spec/{}/document.schema.json", env!("CARGO_PKG_VERSION")),
         "$comment": "Validates the JSON bridge form of a whole fugazi strategy \
                      document. Shape is an anyOf over single/pairs/basket/multi/\
-                     portfolio: a document that omits the optional `root:` is \
-                     both a single and a multi, so the shape comes from the \
-                     caller (the CLI prefix, Python's kind=), not the document. \
-                     Structure only.",
+                     portfolio plus the top-level preset spelling: a document \
+                     that omits the optional `root:` is both a single and a \
+                     multi, so the shape comes from the caller (the CLI prefix, \
+                     Python's kind=), not the document. Structure only.",
         "title": "fugazi spec document",
         "anyOf": [
             def_ref("single"), def_ref("pairs"), def_ref("basket"),
-            def_ref("multi"), def_ref("portfolio"),
+            def_ref("multi"), def_ref("portfolio"), def_ref("preset"),
         ],
         "$defs": defs,
     })

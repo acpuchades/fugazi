@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 use fugazi::spec::grammar::{
     GrammarDefault, GrammarField, SCHEMA_VERSION, spec_grammar, spec_grammar_document,
 };
-use fugazi::spec::typecheck::{REWRITTEN_TAGS, known_node_tags, known_selection_tags};
+use fugazi::spec::typecheck::{
+    CADENCE_SUGAR_TAGS, REWRITTEN_TAGS, known_node_tags, known_selection_tags,
+};
 
 /// The one authority for *names* is serde's variant list. The descriptor's
 /// names, per group, must equal it exactly — this is what lets `spec_tags()`
@@ -29,7 +31,11 @@ fn names_match_serde_variant_list() {
         .map(|t| t.name.as_str())
         .collect();
 
-    let want_node: BTreeSet<String> = known_node_tags().into_iter().collect();
+    // The serde variants, plus the cadence sugar — real node tags with no
+    // variant behind them (rewritten away before the typed parse), so their
+    // hand-authored rows are pinned here by the parser's own list.
+    let mut want_node: BTreeSet<String> = known_node_tags().into_iter().collect();
+    want_node.extend(CADENCE_SUGAR_TAGS.iter().map(|s| s.to_string()));
     let want_selection: BTreeSet<String> = known_selection_tags().into_iter().collect();
 
     let want_node: BTreeSet<&str> = want_node.iter().map(|s| s.as_ref()).collect();

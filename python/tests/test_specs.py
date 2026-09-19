@@ -31,6 +31,21 @@ def _snaps_multi(series, volume=1000.0):
 # ---------------------------------------------------------------------------
 
 
+def test_every_preset_tag_loads_under_kind_auto():
+    # The Python mirror of shape.rs's preset-routing sweep: `kind="auto"`
+    # reads the library's single shape decision, so a preset that routes on
+    # the CLI must route identically here — not fall through to `multi` and
+    # die on an unknown field.
+    for doc in (
+        "!buy_and_hold { root: BTC }",
+        "!ma_crossover { root: BTC, fast: 2, slow: 4 }",
+        "!rsi_reversal { root: BTC, period: 5, oversold: 30, exit: 50 }",
+        "!donchian_breakout { root: BTC, period: 5 }",
+        "!keltner_breakout { root: BTC, ema_period: 5, atr_period: 5, multiplier: 2.0 }",
+    ):
+        assert ta.load_spec(doc).kind == "single", doc
+
+
 def test_load_preset_and_run():
     """A `!buy_and_hold` preset loads, kind='single', and runs against snapshots."""
     spec = ta.load_spec("!buy_and_hold { root: BTC }")

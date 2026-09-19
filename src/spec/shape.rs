@@ -14,6 +14,7 @@
 
 use serde_norway::Value;
 
+use super::input::StrategyKind;
 use super::preset::PRESET_TAGS;
 
 /// The shape a nested strategy payload describes.
@@ -83,6 +84,47 @@ fn is_preset_tag(name: &str) -> bool {
     PRESET_TAGS.contains(&name)
 }
 
+/// Which of the five [`StrategyKind`]s a whole strategy **document** describes
+/// — the document-level twin of the (crate-private) `detect_shape` above, over
+/// the JSON bridge form, with the one arm a nested payload can't have
+/// (`children:` → a portfolio; a portfolio can never nest inside another).
+///
+/// Reads the keys that are *there*, so the two root-bearing shapes may leave
+/// theirs out: a `root:`-less single document and a `left:`/`right:`-less
+/// pairs one are both a bare mapping, and both land on
+/// [`Multi`](StrategyKind::Multi) — which is why every caller also takes an
+/// explicit kind override. A preset-tag document (`!ma_crossover { … }`,
+/// post-bridge a single-key map) loads through the single-asset loader, so it
+/// answers [`Single`](StrategyKind::Single).
+///
+/// This is the copy Python's `kind="auto"` reads too — it used to carry its
+/// own arm-for-arm duplicate, preset list included, which is exactly the
+/// drift this module exists to end.
+pub fn detect_document_kind(v: &serde_json::Value) -> StrategyKind {
+    let serde_json::Value::Object(m) = v else {
+        // Not a mapping: a bare scalar. The single loader owns the error
+        // message for that, so route it there.
+        return StrategyKind::Single;
+    };
+    if m.len() == 1
+        && let Some(k) = m.keys().next()
+        && is_preset_tag(k)
+    {
+        return StrategyKind::Single;
+    }
+    if m.contains_key("children") {
+        StrategyKind::Portfolio
+    } else if m.contains_key("left") && m.contains_key("right") {
+        StrategyKind::Pairs
+    } else if m.contains_key("selection") {
+        StrategyKind::Basket
+    } else if m.contains_key("root") {
+        StrategyKind::Single
+    } else {
+        StrategyKind::Multi
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +189,47 @@ mod tests {
         // `{long: {...}}` is a one-key map too — only the *tag name* separates
         // it from a bridged preset.
         assert_eq!(detect_shape(&parse("{ long: {} }")), ShapeHint::Multi);
+    }
+
+    /// The JSON bridge form of `yaml`, as the document-level detector sees it.
+    fn doc(yaml: &str) -> serde_json::Value {
+        crate::spec::convert::yaml_to_json(parse(yaml)).unwrap()
+    }
+
+    #[test]
+    fn every_preset_tag_document_is_detected_as_single() {
+        // The document-level twin of the bridged-preset regression above —
+        // and the arm Python's `kind="auto"` reads, so a sixth preset that
+        // misses this routing would load on the CLI and fail from Python.
+        for tag in PRESET_TAGS {
+            let v = doc(&format!("!{tag} {{ root: X }}"));
+            assert_eq!(detect_document_kind(&v), StrategyKind::Single, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_five_document_shapes_are_told_apart() {
+        assert_eq!(
+            detect_document_kind(&doc("{ children: [], weights: !equal_weight }")),
+            StrategyKind::Portfolio,
+        );
+        assert_eq!(
+            detect_document_kind(&doc("{ left: A, right: B, entry: !value true }")),
+            StrategyKind::Pairs,
+        );
+        assert_eq!(
+            detect_document_kind(&doc(
+                "{ score: !close, selection: !top_bottom { longs: 1 } }"
+            )),
+            StrategyKind::Basket,
+        );
+        assert_eq!(
+            detect_document_kind(&doc("{ root: X, long: {} }")),
+            StrategyKind::Single,
+        );
+        assert_eq!(
+            detect_document_kind(&doc("{ long: {}, sizing: !value 1.0 }")),
+            StrategyKind::Multi,
+        );
     }
 }
