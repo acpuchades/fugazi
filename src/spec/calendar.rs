@@ -578,6 +578,66 @@ fn split_scope(text: &str) -> Result<(Scope, &str), String> {
     Ok((Scope::default(), text))
 }
 
+/// Split `s` by **top-level** `,` — commas inside `[...]` / `{...}` brackets
+/// or `"..."` quotes (with `\"` escapes) belong to their term, so a
+/// JSON-shaped value like `FAST=[3,5,8]`, a YAML body like
+/// `!percentage { rate: 0.001 }`, or a quoted string containing a comma stays
+/// one term.
+///
+/// The one comma-term splitter: `--params`, `--costs` and `-x/--overlay` all
+/// parse through here. They used to carry three near-copies with three
+/// different tolerance rules — one silently accepted an over-closed `]`, one
+/// never noticed an unclosed quote, one split inside quotes — so unbalanced
+/// input is an error here for all of them (callers prefix their own DSL's
+/// name). Empty segments are kept, and every caller trims and skips them, so
+/// a trailing `,` is not an error.
+pub fn split_top_commas(s: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut prev = '\0';
+    for c in s.chars() {
+        if in_str {
+            buf.push(c);
+            if c == '"' && prev != '\\' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                '"' => {
+                    in_str = true;
+                    buf.push(c);
+                }
+                '[' | '{' => {
+                    depth += 1;
+                    buf.push(c);
+                }
+                ']' | '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return Err(format!("unexpected `{c}`"));
+                    }
+                    buf.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut buf));
+                }
+                _ => buf.push(c),
+            }
+        }
+        prev = c;
+    }
+    if in_str {
+        return Err("unclosed `\"` quote".to_string());
+    }
+    if depth != 0 {
+        return Err("unclosed bracket".to_string());
+    }
+    out.push(buf);
+    Ok(out)
+}
+
 /// Split a `SYMBOL[FREQ]` token into its two raw parts (symbol as owned string,
 /// freq as a borrowed slice for the caller to parse into whatever concrete type
 /// it uses — [`Frequency`] on this side, [`Interval`] on the overlay side).
@@ -829,6 +889,38 @@ fn snap_seconds_to_frequency(secs: i64) -> Frequency {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_top_commas_respects_brackets_and_quotes() {
+        assert_eq!(
+            split_top_commas("a=1,b=[3,5,8],c=!p { x: 1, y: 2 }").unwrap(),
+            vec!["a=1", "b=[3,5,8]", "c=!p { x: 1, y: 2 }"],
+        );
+        // Quoted commas belong to their term — the overlay copy used to split
+        // these.
+        assert_eq!(
+            split_top_commas(r#"s=!value "a,b",t=2"#).unwrap(),
+            vec![r#"s=!value "a,b""#, "t=2"],
+        );
+        // A trailing comma yields an empty segment, which every caller skips.
+        assert_eq!(split_top_commas("a=1,").unwrap(), vec!["a=1", ""]);
+    }
+
+    #[test]
+    fn split_top_commas_refuses_unbalanced_input() {
+        // The params copy used to saturate past an over-close silently.
+        assert!(
+            split_top_commas("a=]3]")
+                .unwrap_err()
+                .contains("unexpected")
+        );
+        assert!(split_top_commas("a=[3,5").unwrap_err().contains("unclosed"));
+        assert!(
+            split_top_commas(r#"a="unterminated"#)
+                .unwrap_err()
+                .contains("quote")
+        );
+    }
 
     #[test]
     fn frequency_parses_common_codes() {

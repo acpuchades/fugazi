@@ -372,33 +372,13 @@ fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<NodeSpec> {
     Ok(serde_json::from_value(value)?)
 }
 
-/// Split a spec by top-level `,` — respects `{...}` and `[...]` bracket depth so a
-/// term like `sma20=!sma { source: close, period: 20 }` stays a single term.
-fn split_top_commas(s: &str) -> Result<Vec<&str>> {
-    let mut parts = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth -= 1;
-                if depth < 0 {
-                    bail!("unexpected {ch:?} in overlay spec");
-                }
-            }
-            ',' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        bail!("unclosed bracket in overlay spec");
-    }
-    parts.push(&s[start..]);
-    Ok(parts)
+/// Split a spec by top-level `,` — the shared term grammar
+/// (`calendar::split_top_commas`: quote- and bracket-aware, strict on
+/// unbalanced input) so a term like `sma20=!sma { source: close, period: 20 }`
+/// stays a single term. Quote-awareness matters here too: a `!value "a,b"`
+/// string literal used to split.
+fn split_top_commas(s: &str) -> Result<Vec<String>> {
+    fugazi::spec::calendar::split_top_commas(s).map_err(|e| anyhow!("overlay spec: {e}"))
 }
 
 /// Reserved names collide with the base CSV columns `fugazi get` writes.

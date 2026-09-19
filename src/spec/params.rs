@@ -29,6 +29,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
+use crate::spec::calendar;
 use crate::spec::input::{self, Source};
 use crate::spec::param_type::{ParamType, parse_declaration};
 
@@ -53,7 +54,7 @@ impl FromStr for ParamSpec {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut terms = Vec::new();
-        for term in split_terms(s) {
+        for term in calendar::split_top_commas(s).map_err(|e| format!("params: {e}"))? {
             let term = term.trim();
             if term.is_empty() {
                 continue;
@@ -62,50 +63,6 @@ impl FromStr for ParamSpec {
         }
         Ok(ParamSpec(terms))
     }
-}
-
-/// Split a `--params` spec by top-level `,` — commas inside `[...]` / `{...}`
-/// brackets or `"..."` quotes are kept, so a term like `FAST=[3,5,8]` (an
-/// `optimize` sweep list, JSON-shaped) stays one term rather than splitting into
-/// `FAST=[3`, `5`, `8]`.
-fn split_terms(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut depth: i32 = 0;
-    let mut in_str = false;
-    let mut prev = '\0';
-    for c in s.chars() {
-        if in_str {
-            buf.push(c);
-            if c == '"' && prev != '\\' {
-                in_str = false;
-            }
-        } else {
-            match c {
-                '"' => {
-                    in_str = true;
-                    buf.push(c);
-                }
-                '[' | '{' => {
-                    depth += 1;
-                    buf.push(c);
-                }
-                ']' | '}' => {
-                    depth = depth.saturating_sub(1);
-                    buf.push(c);
-                }
-                ',' if depth == 0 => {
-                    out.push(std::mem::take(&mut buf));
-                }
-                _ => buf.push(c),
-            }
-        }
-        prev = c;
-    }
-    if !buf.is_empty() {
-        out.push(buf);
-    }
-    out
 }
 
 fn parse_term(term: &str) -> Result<ParamTerm, String> {

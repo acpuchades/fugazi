@@ -174,55 +174,11 @@ fn split_scope(text: &str) -> Result<(Scope, &str)> {
     Ok((Scope::default(), text))
 }
 
-// ---------------------------------------------------------------------------
-// Top-level `,`-splitter — respects `{...}` / `[...]` / `"..."` grouping so a
-// term like `commission=!percentage { rate: 0.001 }` stays a single term.
-// ---------------------------------------------------------------------------
-
+// Top-level `,`-splitting is the shared term grammar —
+// `calendar::split_top_commas` (quote- and bracket-aware, strict on
+// unbalanced input), with this DSL's name prefixed onto its errors.
 fn split_top_commas(s: &str) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut depth: i32 = 0;
-    let mut in_str = false;
-    let mut prev = '\0';
-    for c in s.chars() {
-        if in_str {
-            buf.push(c);
-            if c == '"' && prev != '\\' {
-                in_str = false;
-            }
-        } else {
-            match c {
-                '"' => {
-                    in_str = true;
-                    buf.push(c);
-                }
-                '{' | '[' => {
-                    depth += 1;
-                    buf.push(c);
-                }
-                '}' | ']' => {
-                    depth -= 1;
-                    if depth < 0 {
-                        bail!("unexpected `{c}` in cost spec");
-                    }
-                    buf.push(c);
-                }
-                ',' if depth == 0 => {
-                    out.push(std::mem::take(&mut buf));
-                }
-                _ => buf.push(c),
-            }
-        }
-        prev = c;
-    }
-    if depth != 0 {
-        bail!("unclosed bracket in cost spec");
-    }
-    if !buf.is_empty() {
-        out.push(buf);
-    }
-    Ok(out)
+    calendar::split_top_commas(s).map_err(|e| anyhow!("cost spec: {e}"))
 }
 
 // ---------------------------------------------------------------------------
