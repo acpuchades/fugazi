@@ -4127,3 +4127,30 @@ def test_attribution_is_scoped_to_its_own_run():
     assert len(first.attribution.equity) == 100
     assert len(second.attribution.equity) == 60
     assert all(f.bar < 60 for f in second.attribution.fills)
+
+
+# ---------------------------------------------------------------------------
+# measure_overlap: the fragmented-universe diagnostic
+# ---------------------------------------------------------------------------
+
+
+def test_measure_overlap_flags_a_fragmented_universe():
+    # A and B alternate snapshots and never co-occur — the silent failure the
+    # diagnostic exists for: per-symbol everything looks right, only the
+    # joint occupancy is wrong.
+    a = ta.Snapshot({"A": ta.Candle(1, 1, 1, 1, 0)})
+    b = ta.Snapshot({"B": ta.Candle(2, 2, 2, 2, 0)})
+    o = ta.measure_overlap([a, b, a, b])
+    assert o["fragmented"]
+    assert (o["total"], o["widest"]) == (2, 1)
+    assert sorted(o["isolated"]) == ["A", "B"]
+    assert o["at"] == 0
+    assert o["summary"] == "widest snapshot: 1 of 2 symbols"
+
+
+def test_measure_overlap_accepts_a_healthy_universe():
+    snaps = _snaps_multi({"A": [1.0, 2.0], "B": [3.0, 4.0]})
+    o = ta.measure_overlap(snaps)
+    assert not o["fragmented"]
+    assert (o["total"], o["widest"], o["snapshots"]) == (2, 2, 2)
+    assert o["isolated"] == []

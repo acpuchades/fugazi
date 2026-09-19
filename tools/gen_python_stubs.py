@@ -182,6 +182,7 @@ RETURNS = {
     "check_spec": "SpecCheck",
     "optimize": "Sweep | WalkForwardResult | PanelWalkForwardResult",
     "evaluate_report": "dict[str, Any]",
+    "measure_overlap": "dict[str, Any]",
     "fetch": "Any",
     "tickers": "list[str]",
     "slot_demand": "list[str] | None",

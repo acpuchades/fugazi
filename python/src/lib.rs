@@ -92,8 +92,8 @@ use crate::constructors::{
 use crate::classes::{_rebuild_schema, _rebuild_snapshot};
 use crate::sources::{fetch, tickers};
 use crate::spec::{
-    check_spec, load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema,
-    spec_grammar, spec_json_schema, spec_tags,
+    check_spec, load_spec, measure_overlap, optimize, slot_demand, slot_demands,
+    spec_document_json_schema, spec_grammar, spec_json_schema, spec_tags,
 };
 use crate::strategy::{_rebuild_order, _rebuild_run_report, _rebuild_size};
 use crate::strategy::{
@@ -321,6 +321,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         spec_grammar,
         spec_json_schema,
         spec_tags,
+        measure_overlap,
         evaluate_report,
         // Unpickling entry points. These deliberately stay in the module's
         // generated `__all__`, underscore prefix and all: maturin's shim

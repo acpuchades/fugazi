@@ -896,6 +896,43 @@ pub(crate) fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAn
 /// to `RunReport` for the whole tree. The `costs.*` section is absent either
 /// way: it is a property of the wallet that executed the run, not of the report.
 ///
+/// Measure how much of a multi-symbol universe ever shares a snapshot — the
+/// CLI's fragmented-universe diagnostic (`fugazi::overlap`), over the same
+/// snapshot sequence `run` / `evaluate` take.
+///
+/// Snapshots group bars by **exact timestamp**, so a universe assembled from
+/// differently-timed sessions can fragment completely while every per-symbol
+/// surface still looks right: a cross-sectional strategy then ranks fewer
+/// symbols than declared, and a `!pick` across the boundary reads `None` —
+/// indistinguishable from an indicator still warming up. This is the check
+/// the CLI runs on every multi-symbol input; run it on a hand-built stream
+/// before trusting a basket/multi backtest over it.
+///
+/// Returns a dict: `total` (distinct symbols), `widest` (most symbols any one
+/// snapshot held), `widest_symbols`, `at` (that snapshot's index, or None),
+/// `isolated` (symbols never sharing a snapshot with any other), `snapshots`,
+/// `singletons` (snapshots holding one symbol), `fragmented` (no snapshot
+/// holds the whole universe), and a printable `summary`.
+#[pyfunction]
+pub(crate) fn measure_overlap(py: Python<'_>, snapshots: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let snaps = snapshots_from_sequence(snapshots)?;
+    let o = fugazi_core::overlap::measure(snaps.iter().enumerate().flat_map(|(i, s)| {
+        s.iter()
+            .filter_map(move |(sym, _freq, _atom)| sym.map(|sym| (i, &**sym)))
+    }));
+    let out = PyDict::new(py);
+    out.set_item("total", o.total)?;
+    out.set_item("widest", o.widest)?;
+    out.set_item("widest_symbols", &o.widest_symbols)?;
+    out.set_item("at", o.at)?;
+    out.set_item("isolated", &o.isolated)?;
+    out.set_item("snapshots", o.snapshots)?;
+    out.set_item("singletons", o.singletons)?;
+    out.set_item("fragmented", o.is_fragmented())?;
+    out.set_item("summary", o.summary())?;
+    Ok(out.into_any().unbind())
+}
+
 /// Metrics assume a **closed system** — see the note on `fugazi.metrics`.
 #[pyfunction]
 #[pyo3(signature = (report, *, bars_per_year = 252.0, risk_free_rate = 0.0, seconds_per_bar = None))]
