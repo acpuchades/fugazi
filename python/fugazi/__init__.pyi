@@ -258,6 +258,7 @@ class Indicator:
     def abs(self) -> Indicator: ...
     def add(self, other: Indicator | float) -> Indicator: ...
     def below(self, level: float) -> Signal: ...
+    def changed(self) -> Signal: ...
     def clamp(self, lower: Indicator | float, upper: Indicator | float) -> Indicator: ...
     def crosses_above(self, other: Indicator | float) -> Signal: ...
     def crosses_below(self, other: Indicator | float) -> Signal: ...
@@ -667,6 +668,9 @@ class PaperWallet:
     """
     def __init__(self, funds: float, *, quote_ccy: Any = ..., leverage: float = ..., max_gross: float | None = ..., margin_rate: float = ..., maintenance_margin: float | None = ..., bar_freq: str | Frequency | None = ...) -> None: ...
     def adjust_funds(self, delta: float) -> None: ...
+    def advance(self, bars: Any) -> list[Order]: ...
+    @property
+    def bar_year_fraction(self) -> float | None: ...
     @property
     def can_short(self) -> bool: ...
     def cancel(self, id: Any) -> None: ...
@@ -687,6 +691,7 @@ class PaperWallet:
     def maintenance_margin(self) -> float | None: ...
     @property
     def margin_rate(self) -> float: ...
+    def observe(self, symbol: str, atom: Atom) -> None: ...
     def orders(self) -> list[Order]: ...
     def poll_fills(self) -> list[Order]: ...
     def position(self, symbol: str) -> float: ...
@@ -712,6 +717,7 @@ class Portfolio:
     """N *different* strategies sharing one account."""
     def add(self, name: str, strategy: Any) -> Portfolio: ...
     def rebalance_on(self, signal: Signal) -> Portfolio: ...
+    def rebalance_policy(self, policy: Any) -> Portfolio: ...
     def run(self, wallet: Wallet, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]]) -> RunReport: ...
     def weights(self, weights: Any) -> Portfolio: ...
 
@@ -1002,7 +1008,7 @@ class StrategySpec:
     def reads(self) -> list[str]: ...
     def run(self, wallet: Wallet, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]]) -> RunReport: ...
     def run_resumable(self, wallet: Wallet, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]], *, resume: RunState | None = ..., flatten: bool = ..., hold: Mapping[str, float] | None = ..., rebalance: bool = ...) -> tuple[RunReport, RunState]: ...
-    def warm_up(self, wallet: Wallet, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]], resume: RunState | None = ...) -> RunState: ...
+    def warm_up(self, wallet: Wallet, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candle]], *, resume: RunState | None = ...) -> RunState: ...
 
 class Sweep:
     @property
@@ -1017,6 +1023,8 @@ class Sweep:
     def member_winners(self) -> dict[str, dict[str, Any]]: ...
     @property
     def metric_columns(self) -> list[tuple[str, str]]: ...
+    @property
+    def plateau(self) -> int | None: ...
     @property
     def rows(self) -> list[SweepRow]: ...
     @property
@@ -1139,18 +1147,28 @@ def _rebuild_snapshot(items: Any) -> Snapshot:
     duplicates and insertion order.
     """
     ...
-def ad() -> Indicator:
+def ad(source: AtomSource | None = ...) -> Indicator:
     """Chaikin accumulation/distribution line (cumulative)."""
     ...
-def adx(period: int = ...) -> MultiIndicator:
+def adx(period: int = ..., source: AtomSource | None = ...) -> MultiIndicator:
     """Average directional index: {plus_di, minus_di, adx} (Wilder's 14 by default)."""
     ...
-def aroon(period: int = ...) -> MultiIndicator:
+def annually(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the year rolls over — the spec's `!annually`, sugar for
+    `year().changed()`.
+    """
+    ...
+def aroon(period: int = ..., source: AtomSource | None = ...) -> MultiIndicator:
     """Aroon indicator: {up, down, oscillator} (14 by default)."""
     ...
-def atr(period: int = ...) -> Indicator:
+def atr(period: int = ..., source: AtomSource | None = ...) -> Indicator:
     """Average true range over `period` (Wilder's 14 by default; consumes the full
     bar).
+    """
+    ...
+def atr_risk(risk_frac: Any, atr_multiple: Any, period: int = ..., source: AtomSource | None = ...) -> Indicator:
+    """Fixed per-trade risk sizing scaled by ATR — the spec's `!atr_risk`, meant for
+    `Strategy.position_sizing`: `risk_frac * close / (atr_multiple * ATR(period))`.
     """
     ...
 def bars_since(source: Indicator) -> Indicator:
@@ -1217,6 +1235,11 @@ def covariance(lhs: Indicator | float, rhs: Indicator | float, period: int) -> I
     or both snapshot-rooted).
     """
     ...
+def daily(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the day of month rolls over — the spec's `!daily`, sugar for
+    `day().changed()`.
+    """
+    ...
 def day(source: AtomSource | None = ...) -> Indicator:
     """Source: the day of the month, 1 through 31."""
     ...
@@ -1226,7 +1249,7 @@ def day_of_week(source: AtomSource | None = ...) -> Indicator:
 def day_of_year(source: AtomSource | None = ...) -> Indicator:
     """Source: day of the year, 1 through 366."""
     ...
-def dmi(period: int = ...) -> MultiIndicator:
+def dmi(period: int = ..., source: AtomSource | None = ...) -> MultiIndicator:
     """Directional movement index: {plus_di, minus_di} (Wilder's 14 by default)."""
     ...
 def dollar_bars(threshold: Any, inner: Any) -> Indicator:
@@ -1274,7 +1297,7 @@ def exp(source: Indicator, base: float = ...) -> Indicator:
 def fetch(provider: Any, symbol: str, freq: str | Frequency | None = ..., since: str = ..., until: str | None = ..., output: str = ...) -> Any:
     """Fetch a series from a named provider and return a DataFrame."""
     ...
-def garman_klass(period: int) -> Indicator:
+def garman_klass(period: int, source: AtomSource | None = ...) -> Indicator:
     """Garman-Klass OHLC volatility estimator over `period`."""
     ...
 def get(schema: Schema, key: str, source: AtomSource | None = ...) -> Indicator | Signal | StrSource:
@@ -1308,6 +1331,11 @@ def hma(source: Indicator, period: int) -> Indicator:
     ...
 def hour(source: AtomSource | None = ...) -> Indicator:
     """Source: the hour of the day (UTC), 0 through 23."""
+    ...
+def hourly(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the wall-clock hour rolls over — the spec's `!hourly`, sugar
+    for `hour().changed()`.
+    """
     ...
 def identity() -> Indicator:
     """Source: the raw value stream, passed straight through. Root an indicator here
@@ -1352,7 +1380,7 @@ def latch(source: Indicator) -> Indicator:
     between boundaries.
     """
     ...
-def linreg(source: Indicator, period: int = ...) -> MultiIndicator:
+def linreg(source: Indicator, period: int) -> MultiIndicator:
     """Rolling least-squares fit of `source` against the bar index: {slope, intercept,
     value, r2}.
     """
@@ -1385,7 +1413,7 @@ def max_drawdown_of(strategy: Any, period: int) -> Indicator:
 def median(source: AtomSource | None = ...) -> Indicator:
     """Source: the bar's median price, (high + low) / 2."""
     ...
-def mfi(period: int = ...) -> Indicator:
+def mfi(period: int = ..., source: AtomSource | None = ...) -> Indicator:
     """Money-flow index over `period` (14 by default; consumes the full bar)."""
     ...
 def minute(source: AtomSource | None = ...) -> Indicator:
@@ -1394,7 +1422,18 @@ def minute(source: AtomSource | None = ...) -> Indicator:
 def month(source: AtomSource | None = ...) -> Indicator:
     """Source: the Gregorian month, 1 (Jan) through 12 (Dec)."""
     ...
-def obv() -> Indicator:
+def monthly(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the month rolls over — the spec's `!monthly`, sugar for
+    `month().changed()`.
+    """
+    ...
+def never() -> Signal:
+    """Signal: constant `false` — the spec's `!never`, the named opt-out for
+    `rebalance_on` and any other slot that wants a signal that never fires. Candle-
+    rooted like [`every`], so it lifts into any snapshot-rooted slot.
+    """
+    ...
+def obv(source: AtomSource | None = ...) -> Indicator:
     """On-balance volume (cumulative; reset to re-anchor)."""
     ...
 def open(source: AtomSource | None = ...) -> Indicator:
@@ -1405,7 +1444,7 @@ def optimize(text: str, snapshots: Sequence[Snapshot | Mapping[str, Atom | Candl
     one row per grid point, ranked by `best_by` when set.
     """
     ...
-def parkinson(period: int) -> Indicator:
+def parkinson(period: int, source: AtomSource | None = ...) -> Indicator:
     """Parkinson high/low range volatility estimator over `period`."""
     ...
 def percentile(source: Indicator, period: int, pct: Any = ...) -> Indicator:
@@ -1432,6 +1471,11 @@ def quantile(long_q: Any, short_q: Any, of: Any = ...) -> Selection:
 def quarter(source: AtomSource | None = ...) -> Indicator:
     """Source: calendar quarter, 1 through 4."""
     ...
+def quarterly(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the quarter rolls over — the spec's `!quarterly`, sugar for
+    `quarter().changed()`.
+    """
+    ...
 def resample(every: Any, inner: Any) -> Indicator:
     """Aggregate every `every` base candles into one higher-timeframe candle and run
     `inner` (any candle-rooted Real source — `close()`, `ema(close(), 20)`, …) over
@@ -1444,7 +1488,7 @@ def resample(every: Any, inner: Any) -> Indicator:
 def rma(source: Indicator, period: int) -> Indicator:
     """Wilder (running) moving average of `source` over `period`."""
     ...
-def rogers_satchell(period: int) -> Indicator:
+def rogers_satchell(period: int, source: AtomSource | None = ...) -> Indicator:
     """Rogers-Satchell drift-independent OHLC volatility estimator over `period`."""
     ...
 def rsi(source: Indicator, period: int = ...) -> Indicator:
@@ -1455,7 +1499,7 @@ def rsi_reversal(symbol: str, period: int, oversold: Any = ..., exit_level: Any 
     above `exit_level`. Matches `fugazi::strategies::mean_reversion::rsi_reversal`.
     """
     ...
-def sar(step: float = ..., max: float = ...) -> MultiIndicator:
+def sar(step: float = ..., max: float = ..., source: AtomSource | None = ...) -> Indicator:
     """Parabolic SAR. `step` is the acceleration increment, `max` its cap."""
     ...
 def second(source: AtomSource | None = ...) -> Indicator:
@@ -1506,9 +1550,11 @@ def spec_json_schema() -> dict[str, Any]:
     """
     ...
 def spec_tags() -> dict[str, list[str]]:
-    """Every tag the YAML spec layer accepts, keyed by the vocabulary it belongs to.
-    Five groups: `"node"` (the one composable expression enum — numeric sources,
-    boolean predicates, and string comparisons together), `"selection"` (a `basket:`
+    """Every expression- and document-directive tag the YAML spec layer accepts, keyed
+    by the vocabulary it belongs to. (The five strategy *preset* tags name whole
+    documents and are deliberately not listed — see [`spec_grammar`].) Five groups:
+    `"node"` (the one composable expression enum — numeric sources, boolean
+    predicates, and string comparisons together), `"selection"` (a `basket:`
     document's `selection:` rules), `"universe"` (`!all_of`/`!any_of`),
     `"weighting"` (portfolio `weights:` sugar `!fixed`/`!equal_weight`), and
     `"document"` (load-time `!import`/`!param`/`!slot`/`!undefined`). Only `node`
@@ -1519,7 +1565,7 @@ def spec_tags() -> dict[str, list[str]]:
 def stddev(source: Indicator, period: int) -> Indicator:
     """Rolling standard deviation of `source` over `period`."""
     ...
-def stoch_rsi(source: Indicator, rsi_period: int = ..., stoch_period: int = ...) -> MultiIndicator:
+def stoch_rsi(source: Indicator, rsi_period: int = ..., stoch_period: int = ...) -> Indicator:
     """Stochastic RSI: the stochastic transform over an RSI of `source`. Sugar for
     `stochastic(rsi(source, rsi_period), stoch_period)`.
     """
@@ -1540,7 +1586,7 @@ def top_bottom(longs: Any, shorts: Any, of: Any = ...) -> Selection:
     optional `of` inner rule (default: the whole universe).
     """
     ...
-def true_range() -> Indicator:
+def true_range(source: AtomSource | None = ...) -> Indicator:
     """True range of the current bar."""
     ...
 def typical(source: AtomSource | None = ...) -> Indicator:
@@ -1581,6 +1627,12 @@ def variance_ratio(source: Indicator, period: int, lag: int = ...) -> Indicator:
     autocorrelated) regime and `< 1.0` in a mean-reverting one.
     """
     ...
+def vol_target(target: float, window: Any, bars_per_year: float, source: AtomSource | None = ...) -> Indicator:
+    """Inverse-realized-vol (vol targeting) sizing multiplier — the spec's
+    `!vol_target`, meant for `Strategy.position_sizing`: `target /
+    (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
+    """
+    ...
 def volatility_of(strategy: Any, period: int, bars_per_year: float) -> Indicator:
     """Rolling annualized volatility of the equity curve of an embedded
     [`Strategy`](PyStrategy). Matches `!volatility` in the YAML spec.
@@ -1595,13 +1647,18 @@ def volume_bars(threshold: Any, inner: Any) -> Indicator:
     information-driven sibling: identical in every respect except what closes a bar.
     """
     ...
-def vwap(period: int) -> Indicator:
+def vwap(period: int, source: AtomSource | None = ...) -> Indicator:
     """Volume-weighted average price over `period` (rolling)."""
     ...
 def week_of_year(source: AtomSource | None = ...) -> Indicator:
     """Source: ISO 8601 week of the year, 1 through 53."""
     ...
-def williams_r(period: int = ...) -> Indicator:
+def weekly(source: AtomSource | None = ...) -> Signal:
+    """Signal: fires where the ISO week number rolls over — the spec's `!weekly`, sugar
+    for `week_of_year().changed()`.
+    """
+    ...
+def williams_r(period: int = ..., source: AtomSource | None = ...) -> Indicator:
     """Williams %R over `period` (14 by default; consumes the full bar)."""
     ...
 def wma(source: Indicator, period: int) -> Indicator:

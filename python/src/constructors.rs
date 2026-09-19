@@ -548,7 +548,8 @@ impl CandleColumns {
 }
 
 /// Read a frame's OHLCV columns without zipping them into candles — the
-/// streaming counterpart of [`candles_from_frame`]. See [`CandleColumns`].
+/// streaming replacement for the retired columns→`Vec<Candle>` zip. See
+/// [`CandleColumns`].
 pub(crate) fn columns_from_frame(data: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
     if !(data.hasattr("columns")? || data.is_instance_of::<PyDict>()) {
         return Err(PyTypeError::new_err(
@@ -1428,6 +1429,153 @@ pub(crate) fn every(period: usize) -> PyResult<PySignal> {
     ))))
 }
 
+/// Signal: constant `false` — the spec's `!never`, the named opt-out for
+/// `rebalance_on` and any other slot that wants a signal that never fires.
+/// Candle-rooted like [`every`], so it lifts into any snapshot-rooted slot.
+#[pyfunction]
+pub(crate) fn never() -> PySignal {
+    PySignal::wrap(AnySignal::Atom(SignalBox::new(ValueBool::<Atom>::new(
+        false,
+    ))))
+}
+
+/// The wall-clock cadence sugar signals (`!hourly` … `!annually` in YAML): a
+/// calendar accessor's rollover edge, i.e. `accessor.changed()` bundled under
+/// the name the spec uses. Same optional `source=` re-rooting as the accessor
+/// leaves themselves.
+macro_rules! cadence_signal {
+    ($name:ident, $ty:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[doc = "\n\nLike every edge it is `None` through warm-up, so a \
+                 rollover coincident with the first bar is not an event. \
+                 `source=` re-roots onto a `pick()`'s atoms; omitted, reads \
+                 the driving stream."]
+        #[pyfunction]
+        #[pyo3(signature = (source = None))]
+        pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PySignal {
+            match source.map(|s| s.inner.clone()) {
+                None => PySignal::wrap(AnySignal::Atom(SignalBox::new($ty::new().changed()))),
+                Some(AnyAtomSource::Atom(s)) => {
+                    PySignal::wrap(AnySignal::Atom(SignalBox::new($ty::of(s).changed())))
+                }
+                Some(AnyAtomSource::Snapshot(s)) => {
+                    PySignal::wrap(AnySignal::Snapshot(SignalBox::new($ty::of(s).changed())))
+                }
+            }
+        }
+    };
+}
+
+cadence_signal!(
+    hourly,
+    Hour,
+    "Signal: fires where the wall-clock hour rolls over — the spec's `!hourly`, \
+     sugar for `hour().changed()`."
+);
+cadence_signal!(
+    daily,
+    Day,
+    "Signal: fires where the day of month rolls over — the spec's `!daily`, \
+     sugar for `day().changed()`."
+);
+cadence_signal!(
+    weekly,
+    WeekOfYear,
+    "Signal: fires where the ISO week number rolls over — the spec's `!weekly`, \
+     sugar for `week_of_year().changed()`."
+);
+cadence_signal!(
+    monthly,
+    Month,
+    "Signal: fires where the month rolls over — the spec's `!monthly`, sugar \
+     for `month().changed()`."
+);
+cadence_signal!(
+    quarterly,
+    Quarter,
+    "Signal: fires where the quarter rolls over — the spec's `!quarterly`, \
+     sugar for `quarter().changed()`."
+);
+cadence_signal!(
+    annually,
+    Year,
+    "Signal: fires where the year rolls over — the spec's `!annually`, sugar \
+     for `year().changed()`."
+);
+
+/// Inverse-realized-vol (vol targeting) sizing multiplier — the spec's
+/// `!vol_target`, meant for `Strategy.position_sizing`:
+/// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
+///
+/// `source=` re-roots onto another symbol's atoms (a `pick()`, typically),
+/// like the tag's `source:`; omitted, reads the strategy's own series.
+#[pyfunction]
+#[pyo3(signature = (target, window, bars_per_year, source = None))]
+pub(crate) fn vol_target(
+    target: f64,
+    window: usize,
+    bars_per_year: f64,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<PyIndicator> {
+    if target <= 0.0 {
+        return Err(PyValueError::new_err("target must be > 0"));
+    }
+    ensure_period(window)?;
+    if bars_per_year <= 0.0 {
+        return Err(PyValueError::new_err("bars_per_year must be > 0"));
+    }
+    Ok(match source.map(|s| s.inner.clone()) {
+        None => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
+            fugazi_core::indicators::sizing::vol_target::<Symbol>(target, window, bars_per_year),
+        ))),
+        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
+            fugazi_core::indicators::sizing::vol_target_of(s, target, window, bars_per_year),
+        ))),
+        Some(AnyAtomSource::Atom(_)) => {
+            return Err(PyValueError::new_err(
+                "source must be snapshot-rooted (a pick()); sizing recipes read the snapshot",
+            ));
+        }
+    })
+}
+
+/// Fixed per-trade risk sizing scaled by ATR — the spec's `!atr_risk`, meant
+/// for `Strategy.position_sizing`:
+/// `risk_frac * close / (atr_multiple * ATR(period))`.
+///
+/// `period` defaults to Wilder's 14, as in the tag. `source=` re-roots onto
+/// another symbol's atoms (a `pick()`, typically), like the tag's `source:`;
+/// omitted, reads the strategy's own series.
+#[pyfunction]
+#[pyo3(signature = (risk_frac, atr_multiple, period = 14, source = None))]
+pub(crate) fn atr_risk(
+    risk_frac: f64,
+    atr_multiple: f64,
+    period: usize,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<PyIndicator> {
+    if risk_frac <= 0.0 {
+        return Err(PyValueError::new_err("risk_frac must be > 0"));
+    }
+    if atr_multiple <= 0.0 {
+        return Err(PyValueError::new_err("atr_multiple must be > 0"));
+    }
+    ensure_period(period)?;
+    Ok(match source.map(|s| s.inner.clone()) {
+        None => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
+            fugazi_core::indicators::sizing::atr_risk::<Symbol>(risk_frac, period, atr_multiple),
+        ))),
+        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
+            fugazi_core::indicators::sizing::atr_risk_of(s, risk_frac, period, atr_multiple),
+        ))),
+        Some(AnyAtomSource::Atom(_)) => {
+            return Err(PyValueError::new_err(
+                "source must be snapshot-rooted (a pick()); sizing recipes read the snapshot",
+            ));
+        }
+    })
+}
+
 // The trailing `$default` is the tag's conventional period, mirroring the
 // `#[serde(default)]` on the YAML side — `ta.rsi(close)` and `!rsi {}` have to
 // agree, and `test_constructor_signatures_match_the_descriptor` pins them to the
@@ -1745,21 +1893,33 @@ fn ensure_base(what: &str, base: f64) -> PyResult<()> {
 
 macro_rules! bar_period {
     ($name:ident, $ty:ident, $doc:literal) => {
-        bar_period!(@build $name, $ty, $doc, (period));
+        bar_period!(@build $name, $ty, $doc, (period, source = None));
     };
     ($name:ident, $ty:ident, $doc:literal, $default:tt) => {
-        bar_period!(@build $name, $ty, $doc, (period = $default));
+        bar_period!(@build $name, $ty, $doc, (period = $default, source = None));
     };
     (@build $name:ident, $ty:ident, $doc:literal, $signature:tt) => {
         #[doc = $doc]
+        #[doc = "\n\n`source=` re-roots onto another stream's bars (a `pick()`, \
+                 typically), like the tag's `source:`; omitted, reads the driving \
+                 bar stream."]
         #[pyfunction]
         #[pyo3(signature = $signature)]
-        pub(crate) fn $name(period: usize) -> PyResult<PyIndicator> {
+        pub(crate) fn $name(
+            period: usize,
+            source: Option<PyRef<'_, PyAtomSource>>,
+        ) -> PyResult<PyIndicator> {
             ensure_period(period)?;
-            // `Identity::<Candle>` rather than `CurrentBar` (which is
-            // `CurrentBar<Identity<Atom>>`): these read the bar and nothing else,
-            // so they belong in the bar domain. See `bar_source`.
-            Ok(bar_source($ty::new(Identity::<Candle>::new(), period)))
+            Ok(match source.map(|s| s.inner.clone()) {
+                // `Identity::<Candle>` rather than `CurrentBar` (which is
+                // `CurrentBar<Identity<Atom>>`): these read the bar and nothing
+                // else, so they belong in the bar domain. See `bar_source`.
+                None => bar_source($ty::new(Identity::<Candle>::new(), period)),
+                Some(AnyAtomSource::Atom(s)) => atom_source($ty::new(CurrentBar::of(s), period)),
+                Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(
+                    runtime::erase($ty::new(CurrentBar::of(s), period)),
+                )),
+            })
         }
     };
 }
@@ -1806,9 +1966,19 @@ bar_period!(
 macro_rules! bar_noarg {
     ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]
+        #[doc = "\n\n`source=` re-roots onto another stream's bars (a `pick()`, \
+                 typically), like the tag's `source:`; omitted, reads the driving \
+                 bar stream."]
         #[pyfunction]
-        pub(crate) fn $name() -> PyIndicator {
-            bar_source($ty::new(Identity::<Candle>::new()))
+        #[pyo3(signature = (source = None))]
+        pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
+            match source.map(|s| s.inner.clone()) {
+                None => bar_source($ty::new(Identity::<Candle>::new())),
+                Some(AnyAtomSource::Atom(s)) => atom_source($ty::new(CurrentBar::of(s))),
+                Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(
+                    runtime::erase($ty::new(CurrentBar::of(s))),
+                )),
+            }
         }
     };
 }
@@ -1827,22 +1997,39 @@ bar_noarg!(true_range, TrueRange, "True range of the current bar.");
 
 macro_rules! bar_period_multi {
     ($name:ident, $ty:ident, $doc:literal) => {
-        bar_period_multi!(@build $name, $ty, $doc, (period));
+        bar_period_multi!(@build $name, $ty, $doc, (period, source = None));
     };
     ($name:ident, $ty:ident, $doc:literal, $default:tt) => {
-        bar_period_multi!(@build $name, $ty, $doc, (period = $default));
+        bar_period_multi!(@build $name, $ty, $doc, (period = $default, source = None));
     };
     (@build $name:ident, $ty:ident, $doc:literal, $signature:tt) => {
         #[doc = $doc]
+        #[doc = "\n\n`source=` re-roots onto another stream's bars (a `pick()`, \
+                 typically), like the tag's `source:`; omitted, reads the driving \
+                 bar stream."]
         #[pyfunction]
         #[pyo3(signature = $signature)]
-        pub(crate) fn $name(period: usize) -> PyResult<PyMulti> {
+        pub(crate) fn $name(
+            period: usize,
+            source: Option<PyRef<'_, PyAtomSource>>,
+        ) -> PyResult<PyMulti> {
             ensure_period(period)?;
             Ok(PyMulti {
-                // `Identity<Candle>`, not `CurrentBar<Identity<Atom>>`: the bar
-                // goes straight in rather than being wrapped in an `Atom` and
-                // read back out. See `AnyMulti::Candle`.
-                inner: AnyMulti::Candle(MultiBox::new($ty::new(Identity::<Candle>::new(), period))),
+                inner: match source.map(|s| s.inner.clone()) {
+                    // `Identity<Candle>`, not `CurrentBar<Identity<Atom>>`: the bar
+                    // goes straight in rather than being wrapped in an `Atom` and
+                    // read back out. See `AnyMulti::Candle`.
+                    None => AnyMulti::Candle(MultiBox::new($ty::new(
+                        Identity::<Candle>::new(),
+                        period,
+                    ))),
+                    Some(AnyAtomSource::Atom(s)) => {
+                        AnyMulti::Atom(MultiBox::new($ty::new(CurrentBar::of(s), period)))
+                    }
+                    Some(AnyAtomSource::Snapshot(s)) => {
+                        AnyMulti::Snapshot(MultiBox::new($ty::new(CurrentBar::of(s), period)))
+                    }
+                },
             })
         }
     };
@@ -1868,10 +2055,19 @@ bar_period_multi!(
 );
 
 /// Parabolic SAR. `step` is the acceleration increment, `max` its cap.
+///
+/// `source=` re-roots onto another stream's bars (a `pick()`, typically), like
+/// the tag's `source:`; omitted, reads the driving bar stream.
 #[pyfunction]
-#[pyo3(signature = (step = 0.02, max = 0.2))]
-pub(crate) fn sar(step: f64, max: f64) -> PyIndicator {
-    atom_source(Sar::new(CurrentBar::new(), step, max))
+#[pyo3(signature = (step = 0.02, max = 0.2, source = None))]
+pub(crate) fn sar(step: f64, max: f64, source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
+    match source.map(|s| s.inner.clone()) {
+        None => atom_source(Sar::new(CurrentBar::new(), step, max)),
+        Some(AnyAtomSource::Atom(s)) => atom_source(Sar::new(CurrentBar::of(s), step, max)),
+        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
+            Sar::new(CurrentBar::of(s), step, max),
+        ))),
+    }
 }
 
 /// MACD of `source`: {macd, signal, histogram}.
@@ -1917,7 +2113,7 @@ pub(crate) fn bollinger(
 /// of the window and `intercept` the fit at the oldest; `r2` is in `[0, 1]`.
 /// `period` must be at least 2 — one point has no slope.
 #[pyfunction]
-#[pyo3(signature = (source, period = 20))]
+#[pyo3(signature = (source, period))]
 pub(crate) fn linreg(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyMulti> {
     if period < 2 {
         return Err(PyValueError::new_err(

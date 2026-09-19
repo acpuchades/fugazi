@@ -563,6 +563,15 @@ impl PyWallet {
         self.inner.maintenance_margin()
     }
 
+    /// The fraction of a year one bar spans, resolved from the `bar_freq` this
+    /// wallet was built with — what the margin rate and annual carry models
+    /// pro-rate by. `None` when no `bar_freq` was given (those models then
+    /// charge nothing).
+    #[getter]
+    pub(crate) fn bar_year_fraction(&self) -> Option<f64> {
+        self.inner.bar_year_fraction()
+    }
+
     /// `(bars that wanted a carry rate, bars that got one)`.
     ///
     /// A funding model charges nothing on a bar whose column carried no sample,
@@ -793,18 +802,45 @@ impl PyWallet {
         symbol: String,
         bar: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<PyOrder>> {
-        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
-            candle.borrow().inner
-        } else {
-            let price: f64 = bar.extract()?;
-            Candle::new(price, price, price, price, 0.0)
-        };
         Ok(self
             .inner
-            .update(intern(symbol), candle)
+            .update(intern(symbol), coerce_bar(bar)?)
             .into_iter()
             .map(|inner| PyOrder { inner })
             .collect())
+    }
+
+    /// Feed one bar for **several symbols at once** — the multi-symbol twin of
+    /// [`update`](Self::update) — and return the fills. `bars` is a mapping of
+    /// symbol to `Candle` or bare price float.
+    ///
+    /// This is what the spec `run` path uses per snapshot, and the difference
+    /// from a per-symbol `update` loop matters on paper: fills settle in
+    /// phases against the shared cash balance (cash-crediting fills land
+    /// before cash-consuming ones), so a same-bar rotation is funded by its
+    /// own sale regardless of iteration order.
+    pub(crate) fn advance(&mut self, bars: &Bound<'_, PyDict>) -> PyResult<Vec<PyOrder>> {
+        let mut entries = Vec::with_capacity(bars.len());
+        for (k, v) in bars.iter() {
+            let symbol: String = k.extract()?;
+            entries.push((intern(symbol), coerce_bar(&v)?));
+        }
+        Ok(self
+            .inner
+            .advance(&entries)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
+    }
+
+    /// Let the wallet read `symbol`'s side channels off this bar's `Atom` —
+    /// how a carry model installed via `set_costs_for` sees its column (a
+    /// perpetual's funding rate, say). The spec `run` path calls this for you,
+    /// once per symbol before pricing; a hand-driven loop with carry costs
+    /// must do the same — call it before `update`/`advance` each bar — or the
+    /// carry accrues nothing and `carry_coverage` reports every bar uncovered.
+    pub(crate) fn observe(&mut self, symbol: String, atom: &PyAtom) {
+        self.inner.observe(&intern(symbol), &atom.inner);
     }
 
     /// Queue a market order driving `symbol` to `target` signed units; it fills on
@@ -1873,6 +1909,17 @@ impl PyKrakenWallet {
     }
 }
 
+/// Coerce a wallet-feed bar argument: a `Candle`, or a bare price float
+/// standing in for a flat bar (`open = high = low = close`, zero volume).
+pub(crate) fn coerce_bar(bar: &Bound<'_, PyAny>) -> PyResult<Candle> {
+    if let Ok(candle) = bar.cast::<PyCandle>() {
+        Ok(candle.borrow().inner)
+    } else {
+        let price: f64 = bar.extract()?;
+        Ok(Candle::new(price, price, price, price, 0.0))
+    }
+}
+
 /// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
 /// is merely working, or a `ValueError`.
 pub(crate) fn wrap_ack(result: Result<Ack<Symbol>, WalletError>) -> PyResult<Option<PyOrder>> {
@@ -2331,8 +2378,8 @@ impl PyStrategy {
         Ok(s)
     }
 
-    /// Drive the strategy over `candles` against `wallet` (a `PaperWallet`, an
-    /// `OkxWallet`, or a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). `candles` is a
+    /// Drive the strategy over `candles` against `wallet` (a `PaperWallet` or
+    /// any live venue wallet), returning the [`RunReport`](PyRunReport). `candles` is a
     /// DataFrame / dict of OHLCV columns (same shape as `Indicator.feed`). Passing
     /// an `OkxWallet` drives the strategy **live**, one bar at a time. The book is
     /// seeded to the wallet's opening equity, so book-anchored sizing reads
@@ -2774,8 +2821,8 @@ impl PyMultiAssetStrategy {
         s
     }
 
-    /// Drive the strategy over `snapshots` against `wallet` (a `PaperWallet`, an `OkxWallet`, or
-    /// a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). The book is
+    /// Drive the strategy over `snapshots` against `wallet` (a `PaperWallet` or
+    /// any live venue wallet), returning the [`RunReport`](PyRunReport). The book is
     /// seeded to the wallet's opening equity. The wallet is mutated in place. Any
     /// positions the wallet already holds are left untouched and sizing is against
     /// our own capital (see `Strategy.run`).
@@ -3136,8 +3183,8 @@ impl PyBasketStrategy {
         s
     }
 
-    /// Drive the basket over `snapshots` against `wallet` (a `PaperWallet`, an
-    /// `OkxWallet`, or a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). The book is seeded
+    /// Drive the basket over `snapshots` against `wallet` (a `PaperWallet` or
+    /// any live venue wallet), returning the [`RunReport`](PyRunReport). The book is seeded
     /// to the wallet's opening equity. The wallet is mutated in place. Any
     /// positions the wallet already holds are left untouched and sizing is against
     /// our own capital (see `Strategy.run`).
@@ -3816,6 +3863,7 @@ pub(crate) struct PyPortfolio {
     children: Vec<(String, Py<PyAny>)>,
     weights: Option<Vec<Real>>,
     rebalance: Option<SignalBox<Snapshot<Symbol>>>,
+    largest_first: bool,
 }
 
 #[pymethods]
@@ -3882,8 +3930,29 @@ impl PyPortfolio {
         Ok(next)
     }
 
-    /// Drive the portfolio over `snapshots` against `wallet` (a `PaperWallet`, an `OkxWallet`, or
-    /// a `CoinbaseWallet`), returning the aggregate report.
+    /// How the position phase of a rebalance covers a cash shortfall — the
+    /// YAML `rebalance_policy:`. `"proportional"` (the default) scales every
+    /// held leg by the same fraction; `"largest_first"` fully liquidates the
+    /// biggest positions (by `|units| * price`) first, partially scaling the
+    /// last one touched.
+    pub(crate) fn rebalance_policy(&self, py: Python<'_>, policy: &str) -> PyResult<PyPortfolio> {
+        let largest_first = match policy {
+            "proportional" => false,
+            "largest_first" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Portfolio.rebalance_policy: expected 'proportional' or \
+                     'largest_first', got '{other}'"
+                )));
+            }
+        };
+        let mut next = self.clone_with(py);
+        next.largest_first = largest_first;
+        Ok(next)
+    }
+
+    /// Drive the portfolio over `snapshots` against `wallet` (a `PaperWallet`
+    /// or any live venue wallet), returning the aggregate report.
     ///
     /// A portfolio is an ordinary strategy that trades the wallet it is handed,
     /// exactly like the other four shapes: it nets its children's intents onto
@@ -3926,6 +3995,7 @@ impl PyPortfolio {
                 .collect(),
             weights: self.weights.clone(),
             rebalance: self.rebalance.clone(),
+            largest_first: self.largest_first,
         }
     }
 
@@ -3992,6 +4062,9 @@ impl PyPortfolio {
         }
         if let Some(rebalance) = &self.rebalance {
             builder = builder.rebalance_on(rebalance.clone());
+        }
+        if self.largest_first {
+            builder = builder.position_rebalancer(fugazi_core::portfolio::rebalance::LargestFirst);
         }
         Ok(builder.build())
     }

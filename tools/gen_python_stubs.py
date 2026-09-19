@@ -146,15 +146,21 @@ RETURNS = {
             "stddev skewness kurtosis zscore correlation percentile percentile_rank bars_since "
             "bars_since_high bars_since_low variance_ratio stochastic cci log exp atr parkinson "
             "garman_klass rogers_satchell mfi williams_r obv vwap ad true_range resample latch "
-            "volume_bars dollar_bars "
+            "volume_bars dollar_bars sar stoch_rsi vol_target atr_risk "
             "unstable if_else get_real year month day hour minute second day_of_week day_of_year "
             "week_of_year quarter unix_seconds unix_millis covariance beta"
         ).split()
     },
-    **{n: "Signal" for n in "is_weekday is_weekend every get_bool".split()},
+    **{
+        n: "Signal"
+        for n in (
+            "is_weekday is_weekend every never get_bool "
+            "hourly daily weekly monthly quarterly annually"
+        ).split()
+    },
     **{
         n: "MultiIndicator"
-        for n in "adx dmi aroon sar macd bollinger keltner donchian stoch_rsi linreg".split()
+        for n in "adx dmi aroon macd bollinger keltner donchian linreg".split()
     },
     "value_str": "StrSource",
     "get_str": "StrSource",
@@ -195,6 +201,14 @@ RETURNS = {
 #: Return type by `Class.member`. Members not listed fall back to `MEMBER_RULES`.
 MEMBER_RETURNS = {
     ("Indicator", "update"): "float | None",
+    # The Real-side rollover-edge detector (`ta.month().changed()`), distinct
+    # from Signal's own toggle in SIGNAL_TO_SIGNAL.
+    ("Indicator", "changed"): "Signal",
+    # The multi-symbol twin of `update` and the side-channel read a carry
+    # model depends on.
+    ("PaperWallet", "advance"): "list[Order]",
+    ("PaperWallet", "observe"): "None",
+    ("PaperWallet", "bar_year_fraction"): "float | None",
     ("Indicator", "value"): "float | None",
     ("Indicator", "feed"): FED,
     ("Signal", "update"): "bool",
@@ -263,6 +277,8 @@ MEMBER_RETURNS = {
     ("Sweep", "independent_searches"): "float | None",
     ("Sweep", "shrinkage"): "PanelShrinkage | None",
     ("Sweep", "shrunk"): "bool",
+    # Under `smooth=` + `best_by=`, the size of the winner's plateau.
+    ("Sweep", "plateau"): "int | None",
     # `(mean, std, defined, members)` of the member-demeaned score — the same
     # 4-tuple layout as `PanelWalkForwardResult.breadth`.
     ("SweepRow", "demeaned"): "DemeanedScore | None",
@@ -543,6 +559,7 @@ SELF_RETURNING = {
     "weights",
     "weight_shares",
     "position_rebalancer",
+    "rebalance_policy",
     "unstable",
 }
 

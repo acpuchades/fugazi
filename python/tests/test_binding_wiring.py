@@ -133,6 +133,10 @@ UNDRIVEN = {
     "volatility": "as sharpe",
     "max_drawdown": "as sharpe",
     "calmar": "as sharpe",
+    "vol_target": "snapshot-rooted sizing recipe (its `Pick` needs a "
+    "one-symbol snapshot stream, not the bar stream this sweep drives) — "
+    "the recipe's numbers are pinned by src/indicators/sizing.rs's tests",
+    "atr_risk": "as vol_target",
 }
 
 # Two-source rolling statistics, driven explicitly.
@@ -328,8 +332,12 @@ def test_component_accessors_match_their_yaml_tag():
         for p in params:
             field = PARAM_TO_FIELD.get(p, p)
             if p == "source":
-                args.append(ta.close())
-                extra.append("source: !close")
+                # Only a `scalar`-demanding `source` takes a real source
+                # object; a `candle`/`atom` one is the bar itself and the
+                # constructor defaults it (the `_module_tags` rule).
+                if _source_demand(tag, grammar) == "scalar":
+                    args.append(ta.close())
+                    extra.append("source: !close")
             elif p == "high":
                 args.append(ta.high())
                 extra.append("high: !high")

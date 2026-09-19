@@ -391,41 +391,20 @@ pub(crate) fn default_cost_config() -> CostConfig {
 /// exists — and why it is also what `root::apply_default` is handed, since only
 /// the caller can say which shape an under-keyed document meant to be.
 pub(crate) fn detect_kind(v: &JsonValue) -> &'static str {
-    // Presets like !buy_and_hold arrive as either a top-level tagged value
-    // (serde_norway path) or a single-key mapping (JSON path). In both cases
-    // the tag key is one of the preset names — route them as `single`.
-    const PRESET_TAGS: &[&str] = &[
-        "buy_and_hold",
-        "ma_crossover",
-        "rsi_reversal",
-        "donchian_breakout",
-        "keltner_breakout",
-    ];
-    if let JsonValue::Object(m) = v
-        && m.len() == 1
-        && let Some(k) = m.keys().next()
-        && PRESET_TAGS.contains(&k.as_str())
-    {
-        return "single";
+    // The decision itself lives in the library (`spec::shape`), beside the
+    // nested-payload twin and the preset-tag list — this used to be an
+    // arm-for-arm duplicate, preset list included, which is exactly the drift
+    // `shape.rs` exists to end. Kept as a `&str` here only because the
+    // callers thread it back through `kind_of` beside the user's `kind=`
+    // string.
+    use fugazi_core::spec::input::StrategyKind as K;
+    match fugazi_core::spec::detect_document_kind(v) {
+        K::Single => "single",
+        K::Pairs => "pairs",
+        K::Basket => "basket",
+        K::Multi => "multi",
+        K::Portfolio => "portfolio",
     }
-    let Some(map) = v.as_object() else {
-        return "single"; // fallback; typed parse will surface the error
-    };
-    if map.contains_key("children") {
-        return "portfolio";
-    }
-    if map.contains_key("left") && map.contains_key("right") {
-        return "pairs";
-    }
-    if map.contains_key("selection") {
-        return "basket";
-    }
-    if map.contains_key("root") {
-        return "single";
-    }
-    // Bare per-side factories or a lone `long:` / `short:` mapping — that's
-    // a multi-asset shape.
-    "multi"
 }
 
 /// Load a strategy YAML doc from text, auto-detecting kind (or using the
@@ -998,8 +977,9 @@ impl PyStrategySpec {
     /// Drive the spec over `snapshots` against `wallet`, returning the full
     /// run report.
     ///
-    /// `wallet` is a `PaperWallet`, an `OkxWallet` or a `CoinbaseWallet` —
-    /// the same three `Strategy.run` accepts. Every shape trades the wallet it
+    /// `wallet` is a `PaperWallet` or any of the live venue wallets (`Okx`,
+    /// `Coinbase`, `Kraken`) — the same set `Strategy.run` accepts. Every
+    /// shape trades the wallet it
     /// is handed, portfolio included, so the wallet's `equity()` seeds the
     /// strategy and any costs pre-installed via `wallet.set_costs_for(sym, ...)`
     /// apply naturally. Positions the account already holds are treated as the
@@ -1019,11 +999,11 @@ impl PyStrategySpec {
         })
     }
 
-    /// Drive the spec with **run resuming**: optionally restore `resume` (a JSON
-    /// string previously returned here) before the run, optionally close out
-    /// open positions with `flatten` or `hold`, and return `(report,
-    /// state_json)` — the run report plus the final state to persist and resume
-    /// from later.
+    /// Drive the spec with **run resuming**: optionally restore `resume` (a
+    /// [`RunState`](PyRunState) previously returned here) before the run,
+    /// optionally close out open positions with `flatten` or `hold`, and
+    /// return `(report, state)` — the run report plus the final
+    /// [`RunState`](PyRunState) to persist and resume from later.
     ///
     /// `flatten=True` closes every open position **in the account**, through
     /// the normal cost pipeline, so the returned state holds a genuinely flat
@@ -1075,7 +1055,7 @@ impl PyStrategySpec {
     /// `flatten=True` is `hold` at `0.0` for every open symbol, so passing both
     /// is a `ValueError` rather than a silent precedence rule.
     ///
-    /// Takes the same three wallet types as [`Self::run`]. Against a live
+    /// Takes the same wallet types as [`Self::run`]. Against a live
     /// wallet the returned state's `wallet` field is `null`: the venue owns the
     /// positions and cash, so only the strategy's own state is carried and the
     /// account is re-read on resume.
@@ -1116,7 +1096,7 @@ impl PyStrategySpec {
     /// run happened. A fill that arrives anyway (a resting order left from
     /// before the pause) still reaches the strategy, so its position cannot
     /// drift from the account's.
-    #[pyo3(signature = (wallet, snapshots, resume = None))]
+    #[pyo3(signature = (wallet, snapshots, *, resume = None))]
     pub(crate) fn warm_up(
         &self,
         wallet: &Bound<'_, PyAny>,
@@ -1135,7 +1115,13 @@ impl PyStrategySpec {
     /// Drive the spec over `snapshots` against `wallet`, reduce the run
     /// report to a metrics document, and return it as a nested dict (mirroring
     /// `metrics.yml`). Convenience over calling `.run(...)` then feeding the
-    /// report to `fugazi.metrics.*` — same wallet-first shape as [`Self::run`].
+    /// report to `fugazi.metrics.*` — same wallet-first shape as [`Self::run`],
+    /// same four wallet types.
+    ///
+    /// The document's `costs` section is absent here even when the wallet has
+    /// costs installed: `cost_drag_pct` needs the frictionless twin run that
+    /// only the `optimize(costs=…)` path performs, so the section is reported
+    /// there (on `SweepRow.metrics()`) and not from a single observed run.
     ///
     /// Passing `windowed=N` additionally slices the run into `N`-bar spans —
     /// exactly `run -w N`'s `metrics.csv`/`rolling.csv` — and embeds them as
@@ -1171,8 +1157,7 @@ impl PyStrategySpec {
     ))]
     pub(crate) fn evaluate(
         &self,
-        py: Python<'_>,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
         bars_per_year: Real,
         risk_free_rate: Real,
@@ -1182,7 +1167,8 @@ impl PyStrategySpec {
     ) -> PyResult<Py<PyAny>> {
         let snaps = snapshots_from_sequence(snapshots)?;
         // Drive once for the observed report, reduce to metrics.
-        let report = run_spec(py, &self.inner, &snaps, &mut wallet.inner)?;
+        over_any_wallet!(wallet, py, None::<&fugazi_core::spec::RunState>, &[], _seed, w => {
+        let report = run_spec(py, &self.inner, &snaps, w)?;
         let mut metrics =
             spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar);
         if let Some(0) = windowed {
@@ -1260,6 +1246,7 @@ impl PyStrategySpec {
             );
         }
         json_to_py(py, &value)
+        })
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1371,7 +1358,9 @@ impl PyStrategySpec {
 ///
 /// **What it does not cover**, by design: the nested config *sub-documents* —
 /// `costs:` (`TradingCostsConfig`) and a portfolio child's embedded strategy —
-/// which are whole documents, not slot-level tags.
+/// which are whole documents, not slot-level tags; and the five strategy
+/// *preset* tags (`!buy_and_hold`, `!ma_crossover`, …), which name whole
+/// documents too (see the CLI reference's preset table).
 ///
 /// Same anti-drift guarantee as [`spec_tags`], one level deeper. The `node` /
 /// `selection` / `universe` groups flow from the serde definitions via
@@ -1433,7 +1422,9 @@ pub(crate) fn spec_document_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
     json_to_py(py, &schema)
 }
 
-/// Every tag the YAML spec layer accepts, keyed by the vocabulary it belongs to.
+/// Every expression- and document-directive tag the YAML spec layer accepts,
+/// keyed by the vocabulary it belongs to. (The five strategy *preset* tags name
+/// whole documents and are deliberately not listed — see [`spec_grammar`].)
 /// Five groups: `"node"` (the one composable expression enum — numeric sources,
 /// boolean predicates, and string comparisons together), `"selection"` (a
 /// `basket:` document's `selection:` rules), `"universe"` (`!all_of`/`!any_of`),
@@ -2176,6 +2167,8 @@ pub(crate) struct PySweep {
     pub(crate) shrinkage: Option<fugazi_core::spec::shrinkage::Summary>,
     // Whether the rows are ordered by the member-demeaned score.
     pub(crate) shrunk: bool,
+    // Under `smooth=` + `best_by=`, the size of the winner's plateau.
+    pub(crate) plateau: Option<usize>,
 }
 
 #[pymethods]
@@ -2222,6 +2215,16 @@ impl PySweep {
     #[getter]
     pub(crate) fn shrinkage(&self, py: Python<'_>) -> PyResult<Option<Py<PyPanelShrinkage>>> {
         PyPanelShrinkage::wrap(py, self.shrinkage)
+    }
+
+    /// Under `smooth=` + `best_by=`, the size of the largest connected region
+    /// of grid points within tolerance of the best smoothed value — the CLI's
+    /// plateau diagnostic. The grid's *shape* is the result; its maximum is
+    /// not, and a one-cell plateau under a wide kernel says the peak is an
+    /// artifact of this sample. `None` when smoothing didn't run.
+    #[getter]
+    pub(crate) fn plateau(&self) -> Option<usize> {
+        self.plateau
     }
 
     /// Members whose pick differed from the pooled winner.
@@ -2840,6 +2843,7 @@ pub(crate) fn optimize(
             independent_searches: sweep.selection.map(|b| b.effective),
             shrinkage: sweep.shrinkage,
             shrunk: sweep.shrunk,
+            plateau: sweep.plateau,
         },
     )?;
     Ok(py_sweep.into_any())

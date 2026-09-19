@@ -123,9 +123,8 @@ NOT_BOUND = {
     "return_per_bar": "book-anchored; Book is not exposed to Python",
     "trade_pnl": "book-anchored; Book is not exposed to Python",
     "trade_return": "book-anchored; Book is not exposed to Python",
-    # Sizing recipes read the strategy's Book / own asset, same reason.
-    "vol_target": "sizing recipe; built inside a strategy, not standalone",
-    "atr_risk": "sizing recipe; built inside a strategy, not standalone",
+    # Book-anchored sizing recipes, same reason as the book fields above.
+    # (`vol_target` / `atr_risk` read only price, so they *are* bound.)
     "drawdown_throttle": "sizing recipe; book-anchored",
     "equity_vol_target": "sizing recipe; book-anchored",
     "fractional_kelly": "sizing recipe; book-anchored",
@@ -135,9 +134,8 @@ NOT_BOUND = {
     "time": "raw Timestamp leaf; the calendar accessors cover the useful reads",
     "all": "n-ary AND fold; chain .and_() instead",
     "any": "n-ary OR fold; chain .or_() instead",
-    "became_true": "rising edge; compose .changed() with the condition",
-    "became_false": "falling edge; compose .changed() with the condition",
-    "never": "constant-false signal; use value(False)",
+    "became_true": "rising edge; compose cond.and_(cond.changed())",
+    "became_false": "falling edge; compose cond.not_().and_(cond.changed())",
     "has_column": "schema predicate; resolved at build time in a spec",
 }
 
@@ -296,6 +294,17 @@ def test_constructor_signatures_match_the_descriptor():
                 # Every constructor default must equal the descriptor's, so the
                 # duplicated constant can't drift.
                 if param.default is not inspect.Parameter.empty:
+                    if param.default is None:
+                        # `None` is the pyo3 spelling of "omitted" — the
+                        # optional `source=` re-rooting arguments. The tag
+                        # must make the field omissible too (its default may
+                        # be a *node*, e.g. `!current`, which no Python
+                        # signature can carry as a literal).
+                        assert not fields[field_name]["required"], (
+                            f"{ctor_name}({py_param}=None) is omissible but "
+                            f"!{tag}.{field_name} is required"
+                        )
+                        continue
                     # `default` is tagged: a pyo3 signature default is always a
                     # value, so it must line up with the `literal` arm. A slot
                     # defaulting to a node (`{"expr": "!close"}`) is not
@@ -338,6 +347,12 @@ WALLET_BOUND = {
     "data_sources",
     "leverage",
     "update",
+    # The multi-symbol twin of update (phase-ordered fills against the shared
+    # cash balance) and the side-channel read a carry model depends on — the
+    # two calls a hand-driven multi-symbol loop needs to match what the spec
+    # run path does per snapshot.
+    "advance",
+    "observe",
     "set",
     "set_position",
     "close",
@@ -361,6 +376,7 @@ WALLET_BOUND = {
     # coverage counter that says whether a carry model ever got its data.
     "margin_rate",
     "maintenance_margin",
+    "bar_year_fraction",
     "carry_coverage",
     # The deployment multiple, beside the cap it defaults to. Two numbers
     # because they answer two questions: what a fractional sizing is multiplied
@@ -375,6 +391,10 @@ WALLET_NOT_BOUND = {
     "take_rejections": (
         "needs a bar-less rejection type; the run path already exposes the same "
         "entries on RunReport.rejections"
+    ),
+    "rejections": (
+        "the non-draining inherent reader of the same entries; unbound for "
+        "take_rejections' reason"
     ),
     "flatten": (
         "terminal by design — reachable as StrategySpec.run_resumable(flatten=True), "
@@ -640,6 +660,7 @@ KEYWORD_ONLY_AFTER = {
 KEYWORD_ONLY_AFTER_METHOD = {
     ("StrategySpec", "evaluate"): "snapshots",
     ("StrategySpec", "run_resumable"): "snapshots",
+    ("StrategySpec", "warm_up"): "snapshots",
     ("Order", "__init__"): "price",
     # `funds` is the account; the currency label and the leverage cap are how it
     # is configured.
@@ -653,7 +674,9 @@ KEYWORD_ONLY_AFTER_METHOD = {
     # The (symbol, freq, since, until) window reads naturally positionally;
     # `output` selects a return type, so it alone is keyword-only.
     ("Binance", "fetch"): "until",
+    ("BinanceFutures", "fetch"): "until",
     ("Okx", "fetch"): "until",
+    ("Kraken", "fetch"): "until",
     ("Coinbase", "fetch"): "until",
     ("Yahoo", "fetch"): "until",
     ("CoinGecko", "fetch"): "until",
@@ -789,6 +812,7 @@ PROVIDER_CLASSES = (
     "BinanceVision",
     "Coinbase",
     "CoinGecko",
+    "Kraken",
     "Okx",
     "Yahoo",
 )

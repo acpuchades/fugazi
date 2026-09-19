@@ -880,7 +880,7 @@ pub(crate) fn coerce_frequency(obj: &Bound<'_, PyAny>) -> PyResult<Frequency> {
 ///
 /// - `PySelector` directly.
 /// - `str` — parsed as a symbol (`Selector::by_symbol`).
-/// - `PyFrequency` — parsed as a frequency (`Selector::by_freq`).
+/// - `PyFrequency` — parsed as a stream key (`Selector::by_stream`).
 /// - `(str, Frequency | str | None)` tuple — a `(symbol, freq)` pair.
 pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbol>> {
     if let Ok(sel) = obj.cast::<PySelector>() {
@@ -1408,6 +1408,14 @@ impl PyIndicator {
     /// `self < level` for a constant level.
     pub(crate) fn below(&self, level: f64) -> PySignal {
         PySignal::wrap(source_to_signal!(self.src.clone(), |s| s.below(level)))
+    }
+
+    /// `true` on any bar where the value differs from the previous bar's — a
+    /// bidirectional toggle detector, `!changed` in YAML. Useful for calendar
+    /// rollovers on integer-valued accessors: `ta.month().changed()` fires once
+    /// per month change.
+    pub(crate) fn changed(&self) -> PySignal {
+        PySignal::wrap(source_to_signal!(self.src.clone(), |s| s.changed()))
     }
 
     /// `self` rises above `other` on this step.
