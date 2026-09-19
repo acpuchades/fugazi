@@ -64,20 +64,10 @@ use serde::de::DeserializeOwned;
 
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
+use crate::metrics::safe_div;
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
 use crate::wallet::{PaperWallet, Wallet};
-
-/// `Some(num / denom)` when `denom` is a positive finite number, else `None` —
-/// the same degenerate-denominator guard [`metrics`](crate::metrics) uses for
-/// its risk-adjusted ratios.
-fn safe_div(num: Real, denom: Real) -> Option<Real> {
-    if denom > 0.0 && denom.is_finite() {
-        Some(num / denom)
-    } else {
-        None
-    }
-}
 
 /// Max drawdown over an equity slice as a non-negative fraction — the largest
 /// peak-to-trough decline. Mirrors the depth reduction in

@@ -1306,7 +1306,11 @@ fn cagr_fraction(
 
 /// `Some(numerator / denominator)`, or `None` when the denominator is not
 /// strictly positive (so ratios don't leak `NaN`/`Infinity`).
-fn safe_div(num: Real, denom: Real) -> Option<Real> {
+///
+/// `pub(crate)` because it encodes a *convention*, not just a convenience:
+/// the trailing risk indicators guard their denominators the same way, and a
+/// second copy of the rule is a place for the two to drift apart.
+pub(crate) fn safe_div(num: Real, denom: Real) -> Option<Real> {
     if denom > 0.0 && denom.is_finite() {
         Some(num / denom)
     } else {
