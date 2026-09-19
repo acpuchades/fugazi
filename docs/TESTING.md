@@ -16,7 +16,7 @@ adding a thing; this is the *map* of where its tests go.
 
 ## The layers
 
-Five, from narrowest to widest. Each has one job; a test that could live in two
+Six, from narrowest to widest. Each has one job; a test that could live in two
 places belongs in the narrower one.
 
 | Layer | Lives in | Sees | Runs under |
@@ -26,7 +26,7 @@ places belongs in the narrower one.
 | **End-to-end** | `tests/{run,costs,optimize,optimize_recovery,pooled,overlap,cadence,date_range,examples_validate,…}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
 | **Coverage guard** | `tests/metrics_coverage.rs`, `tests/tag_semantics.rs` | which metrics have a reference at all; which expression tags are wired to a distinct indicator | `cargo test` (reads key sets / the grammar descriptor — never skips) |
-| **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
+| **Performance guards** | `tests/perf_guard.rs` | allocation scaling and type widths | `cargo test` |
 
 Plus **doctests** (~55 of them, mostly in `README.md` and the strategy-shape
 docs), which are the executable half of the user-facing prose. A `no_run` /
@@ -165,7 +165,7 @@ to one copy never reached the others.
 Three conventions:
 
 - **A venue wallet's behaviour is shared; its payloads are not.**
-  `common::live` holds thirteen parameterized bodies a venue lists as one-line
+  `common::live` holds fourteen parameterized bodies a venue lists as one-line
   `#[test]` delegations, and they assert **counts and outcomes** — one POST
   reached the venue, one rejection was booked, this fill reached the strategy.
   Request-body assertions stay in `tests/live_<venue>.rs`, because the payload

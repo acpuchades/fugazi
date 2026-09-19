@@ -388,8 +388,8 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
     /// `self.and(self.changed())` but bundled so callers don't need to name
     /// the source twice — useful for gating rebalance schedules on "the
     /// moment a condition begins to hold" (e.g. `!became_true { source: !ge
-    /// { lhs: !day_of_month, rhs: !value 27 } }` fires on the first bar of
-    /// each month's TOM window).
+    /// { lhs: !day, rhs: !value 27 } }` fires on the first bar of each
+    /// month's TOM window).
     fn became_true(self) -> BecameTrue<Self>
     where
         Self: Sized,

@@ -81,7 +81,7 @@ jobs:
       # *compiles* them, and a check that never runs an assertion is
       # indistinguishable from a passing one.
       #
-      # `--lib` as well as the three integration targets, because those unit
+      # `--lib` as well as the four integration targets, because those unit
       # tests are half the coverage and live in the library. Everything is
       # offline: `wiremock` on localhost, and the handful of tests that touch a
       # real venue are `#[ignore]`d and env-gated.

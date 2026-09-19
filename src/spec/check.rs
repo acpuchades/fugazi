@@ -848,7 +848,7 @@ long:
     }
 
     /// Every shape goes through the one pass — `check` has no per-shape twin,
-    /// and a sixth shape gets its arm in `parse_holed` alongside the rest.
+    /// and a sixth shape gets its arm in `parse_shape` alongside the rest.
     #[test]
     fn every_shape_checks_around_its_own_placeholders() {
         for (kind, text) in [

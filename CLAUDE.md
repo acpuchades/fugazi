@@ -8,9 +8,9 @@ and put new depth there rather than here.
 |---|---|
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | Subsystem internals: indicator taxonomy, every strategy shape, wallet, run resuming, Monte Carlo, the spec/optimize kernel, Python parity. "See ARCHITECTURE" below means here. |
 | [CONTRIBUTING](docs/CONTRIBUTING.md) | The *procedure*. Adding an indicator / signal / operator / metric / provider / live wallet: every place the change has to touch, in order, and which are compiler- or test-enforced. |
-| [TESTING](docs/TESTING.md) | The suite's *map*: the five layers, where a given change's test goes, the `tests/common/` harness, how the drift guards are built, the skip-vs-fail fixture policy. Read before adding a test file or helper. |
+| [TESTING](docs/TESTING.md) | The suite's *map*: the six layers, where a given change's test goes, the `tests/common/` harness, how the drift guards are built, the skip-vs-fail fixture policy. Read before adding a test file or helper. |
 | [TRADING](docs/TRADING.md) | The *execution path*, end to end: bar → submission → queue/rest → fill → the three books → closed trade. The ordering rules and why (nothing fills on the bar that caused it; fills precede `update`). |
-| [STRATEGIES](docs/STRATEGIES.md) · [CLI](docs/CLI.md) · [COSTS](docs/COSTS.md) · [METRICS](docs/METRICS.md) · [PYTHON](docs/PYTHON.md) | User-facing surface docs. |
+| [STRATEGIES](docs/STRATEGIES.md) · [CLI](docs/CLI.md) · [COSTS](docs/COSTS.md) · [METRICS](docs/METRICS.md) · [PYTHON](docs/PYTHON.md) | User-facing surface docs. `docs/PYTHON.md` is a **symlink** to `python/README.md` — one document, never two to sync. |
 | [PERFORMANCE](docs/PERFORMANCE.md) | Measured history, phase by phase — what was tried, what it cost, what was reverted. |
 | [TODO](TODO.md) | A *decision log*, not a backlog: a judgment already made and what would change it. Read it before re-litigating; don't burn it down. |
 
@@ -41,7 +41,7 @@ else, and each has already broken a green local tree.
 
 | Only checked by | Command |
 |---|---|
-| rustdoc lints (`redundant_explicit_links`, doc-comment reattachment) | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fugazi` |
+| rustdoc lints (`redundant_explicit_links`, doc-comment reattachment) — **library only**: the binary shares the library's name, so `src/cli/`'s intra-doc links are never checked | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fugazi` |
 | `python/src` — ~11k lines every other clippy scopes past with `-p fugazi` | `cargo clippy -p fugazi-python --all-targets -- -D warnings` |
 | the live wallets — `live` is off by default, so a plain `cargo test` runs *none* of `tests/live_*.rs` or `src/live/`'s unit tests | `cargo test -p fugazi --features live --lib --test live_okx --test live_coinbase --test live_kraken --test live_portfolio` |
 | the feature matrix — the `--no-default-features` configurations compile in no other job | `cargo clippy -p fugazi --no-default-features --features <f> --lib -- -D warnings` |
@@ -165,6 +165,7 @@ you supply, and share one body with `drive`.
 strategy that trades the wallet it is handed, so no shape overrides `drive` /
 `drive_resumable`, and anything shape-specific in a driver is a smell.
 **Adding a sixth shape** = a `StrategySpec` variant + a `RunnableStrategy` impl + an arm
+in `spec::shape::detect_document_kind` (the one `kind="auto"` decision Python and embedders read) + an arm
 in `optimize::build_any_spec` and Python's `spec_from_value`. Not ten new functions.
 
 One asymmetry to know about: basket and multi build per-symbol chains **lazily**, so
@@ -237,7 +238,7 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
   match exactly (plus `unstable_bars()` when smoothing recursively). Add new indicators to
   `tests/warm_up.rs`.
 - **Writing a new indicator? Read *Writing one that is fast without trying* in
-  [CONTRIBUTING](docs/CONTRIBUTING.md) before the first line of `update`** — eight rules,
+  [CONTRIBUTING](docs/CONTRIBUTING.md) before the first line of `update`** — ten rules,
   each one a mistake that shipped and cost 25–60% of an indicator. The one to carry in
   your head: never allocate in `update`.
 - Comparison/edge is **`None` until** every source is warmed; `And`/`Or` are `None` until
@@ -303,7 +304,7 @@ The rationale behind each lives in the item's own doc comment, or in
 | Aggregate portfolio `Book`; mark a `Book` from outside | `Portfolio::book()`; `Book::mark_equity(v)` (equity + peak + per-bar return only) | `src/portfolio/mod.rs`, `src/indicators/book.rs` |
 | Close every open position **now**, through the cost pipeline | `Wallet::flatten` — `settle_position(sym, 0.0)` per open leg (`PaperWallet` overrides both synchronously; its queued moves would never settle) | `src/wallet/{mod,paper}.rs` |
 | Settle the orders a **strategy** just queued, with no bar to settle against | `Wallet::settle_pending` — resolves each queued `Size` at the last mark (`PaperWallet` overrides; credits before debits, then submission id). The third member of the `settle_position` / `flatten` family | `src/wallet/{mod,paper}.rs` |
-| Drive **one** symbol to a target **now** | `Wallet::settle_position(sym, signed_units)`; `backtest::Closeout::{Carry, Flatten, Hold}` is the driver-level knob, applied by `apply_closeout` | `src/wallet/{mod,paper}.rs`, `src/backtest.rs` |
+| Drive **one** symbol to a target **now** | `Wallet::settle_position(sym, signed_units)`; `backtest::Closeout` is the driver-level knob, applied by `apply_closeout` | `src/wallet/{mod,paper}.rs`, `src/backtest.rs` |
 | Settle through a **carve-out** | `SleeveWallet` overrides `settle_position` to delegate with its baseline translation — the trait default is `set_position` + `poll_fills`, which over a queued-fill inner queues and drains nothing, so the inner's own override never got reached. `0.0` is "hold none of it myself": it drives the inner to the baseline and leaves the external position alone | `src/wallet/sleeve.rs` |
 | Which of a shared account's positions are **this run's own** | `StrategySpec::positions_at_resume` (cold start = none) → `wallet::external_baseline_net_of`. A portfolio answers off its ledgers, not its mark-driven `Book` | `src/spec/runnable.rs`, `src/wallet/sleeve.rs`, `src/portfolio/mod.rs` |
 | Ask an account what it is | `Wallet::{can_short, quote_ccy, data_sources, carry_coverage}` — all **inform, never enforce**, and a default answer means *"does not say"*. `RunReport::carry_coverage` carries the last out of a run. `SleeveWallet` delegates; `LedgerWallet` delegates only what can cross the portfolio mutex | `src/wallet/{mod,paper,sleeve}.rs`, `src/live/*.rs`, `src/portfolio/{mod,ledger,netting}.rs` |
@@ -332,7 +333,7 @@ The rationale behind each lives in the item's own doc comment, or in
 | Load whole strategy doc | `spec::load_document(text, &params, base, root, label, kind)` — `load_value` is the same pipeline without the `root::apply_default` splice; `*StrategySpec::from_text_with_params_in` | `src/spec/mod.rs` |
 | Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
 | Load-time `!param` / `!import` substitution | `params::substitute`; `imports::resolve(value, base, root)` — `base` is `input::Source::base_dir()`, the importing file's directory; `root` is the confinement boundary (`--import-root`) it was decoupled from. Partial pass: `params::substitute_partial` | `src/spec/{params,imports,input}.rs` |
-| A `!param` / `!slot` body — its `key`, `default` and optional declared `type` | `params::placeholder_of(tag, body)` → `Placeholder`, `.apply(v)` to coerce; `param_type::{ParamType, parse_declaration}`. Both tags share the one parse, so the key set (**closed** — an unknown key is an error, or `typ:` would silently mean "untyped") and the four names (`string`/`numeric`/`integer`/`bool`) can't drift. No `type:`, or `type: null`, = the pre-existing heuristics, coercion skipped entirely. A declaration also checks the `default:`, and under `check` it is what an unset placeholder reports (`undefined::declare` → `HoleTypes.declared`) | `src/spec/{params,param_type,slots}.rs` |
+| A `!param` / `!slot` body — its `key`, `default` and optional declared `type` | `params::placeholder_of(tag, body)` → `Placeholder`, `.apply(v)` to coerce; `param_type::{ParamType, parse_declaration}`. Both tags share the one parse, so the key set (**closed** — an unknown key is an error, or `typ:` would silently mean "untyped") and the six names (`string`/`numeric`/`integer`/`bool`/`symbol`/`frequency`) can't drift. No `type:`, or `type: null`, = the pre-existing heuristics, coercion skipped entirely. A declaration also checks the `default:`, and under `check` it is what an unset placeholder reports (`undefined::declare` → `HoleTypes.declared`) | `src/spec/{params,param_type,slots}.rs` |
 | Build-time `!slot` substitution; defer a subtree until its bindings are ready | `slots::substitute(value, &bindings)`; `SpecTemplate<T>` + `.build(&bindings)`. A separate namespace from `!param`: each pass rewrites only its own tag and resolves against its own table, so the same name in both never collides. Preprocessed a tree first? `SpecTemplate::checked`, **not** `from_tree` (which skips the probe) | `src/spec/{slots,template}.rs` |
 | Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` / each `*Spec::try_build` → `Err(String)` with the `!tag > ` breadcrumb; `spec::backtest::{build_error, validated}` | `src/spec/{expr,backtest}.rs` |
 | Validate a document **nobody has bound `!param` values for** — shape only, holes typed from their slots | `spec::check::check_value` → `CheckedSpec { spec, holes, reads, built }`. The one copy behind `fugazi check strategy` *and* Python `ta.check_spec`; `spec` is **not runnable** (holes parse as typed zeros). The `check_mode` guard spans the **build**, not just the parse — a deferred template body re-parses there | `src/spec/check.rs` |

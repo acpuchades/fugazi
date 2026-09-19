@@ -80,7 +80,7 @@ live = ["sources", "dep:hmac", "dep:sha2", "dep:base64", "dep:p256"]
 # `spec` compiles the YAML-driven declarative surface (`fugazi::spec`) — the
 # `*Spec` types, `evaluate*` / `measured_report*` / `optimize` kernel,
 # `Metrics` document + `MetricKey`, `CostConfig`, `WindowSpec`, and the
-# `!import` / `!param` / `!arg` load passes. It's what a downstream crate
+# `!import` / `!param` / `!slot` load passes. It's what a downstream crate
 # (the Python bindings, a hosting server, a batch runner) enables to reach
 # through to the strategy vocabulary without pulling in the CLI's clap /
 # progress / csv / date-parsing stack. Depends on `runtime` (all builders
@@ -206,9 +206,6 @@ harness = false
 name = "metrics_variants"
 harness = false
 
-# The Rust half of the Python multi-output `feed` cost. Its own target rather
-# than a workload inside `three_tier`, because sharing an indicator type with a
-# measured row there changed that row by 68% — see the module docs.
 # Per-event latency distributions (p50..p99.9), warm against cold, rather than
 # amortised throughput. Its own target and not criterion: criterion reports a
 # mean with a confidence interval over a warm loop, which is the measure this
@@ -217,6 +214,9 @@ harness = false
 name = "latency"
 harness = false
 
+# The Rust half of the Python multi-output `feed` cost. Its own target rather
+# than a workload inside `three_tier`, because sharing an indicator type with a
+# measured row there changed that row by 68% — see the module docs.
 [[bench]]
 name = "multi_feed"
 harness = false
@@ -294,7 +294,7 @@ codegen-units = 1
 lto = "thin"
 codegen-units = 1
 
-# `cargo test` links **58 integration-test binaries** plus the lib, the bins and
+# `cargo test` links **~65 integration-test binaries** plus the lib, the bins and
 # the doctest unit, and each one carries whatever debuginfo this profile asks
 # for. That link step, not codegen, is what a touch-one-file-and-retest loop
 # spends its time on, and full DWARF is the bulk of what the linker has to

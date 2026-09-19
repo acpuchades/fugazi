@@ -723,7 +723,7 @@ endpoints, its envelopes, its request bodies, and its signing.
 
 7. **Tests.** `impl common::live::LiveVenue` in `tests/live_<venue>.rs` — the
    endpoint paths, the envelopes, a constructor — then list the conformance
-   bodies as one-line `#[test]` delegations. That is thirteen behaviours for
+   bodies as one-line `#[test]` delegations. That is fourteen behaviours for
    free, and they are the ones that keep the venues honest with each other.
    Add venue-specific tests for **payloads** only: the shared suite asserts
    counts and outcomes, and a shared assertion over a request body would be an
@@ -733,8 +733,9 @@ endpoints, its envelopes, its request bodies, and its signing.
 
 `live` is off by default, so a plain `cargo test -p fugazi` runs none of this —
 `tests/live_*.rs` compiles to nothing and every `#[cfg(test)]` in `src/live/` is
-skipped. The `rust` job runs `cargo test -p fugazi --features live --lib --test
-live_okx --test live_coinbase --test live_portfolio`, and the feature matrix
+skipped. The `rust` job runs the live-wallet test command (the one copy is in
+CLAUDE.md's *Commands* table — it names every `tests/live_*.rs` target, so a
+new venue's suite must be added there), and the feature matrix
 separately checks that `live` builds *without* the default features. Run
 `scripts/ci-local.sh rust` for the first and `scripts/ci-local.sh features` for
 the second; `FAST=1` skips the matrix.

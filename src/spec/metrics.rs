@@ -9,7 +9,8 @@
 //! subcommand.
 //!
 //! The output is YAML, grouped by theme: `run`, `returns`, `risk_adjusted`,
-//! `drawdown`, `trades`. Ratios and averages whose denominator is degenerate
+//! `drawdown`, `trades` — plus `costs` and `montecarlo` when the run produced
+//! them. Ratios and averages whose denominator is degenerate
 //! (no trades, zero variance, no losing trade for a profit factor, …) are
 //! omitted rather than emitted as `NaN`/`Infinity` so the file stays a clean
 //! YAML scalar map a downstream tool can trust.
@@ -24,7 +25,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 /// The metrics document written to `metrics.yml`, grouped by theme so the file
-/// reads top-down as "run inputs → returns → risk-adjusted → drawdown → trades".
+/// reads top-down as "run inputs → returns → risk-adjusted → drawdown → trades",
+/// with `costs` and `montecarlo` appended when the run produced them.
 ///
 /// `Clone` so a grid-search caller can retain one full [`Metrics`] per param
 /// combination without re-running the backtest.

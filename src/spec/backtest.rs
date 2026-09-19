@@ -1,21 +1,24 @@
 //! Pure per-iteration evaluation. No IO, no console output, no clock.
 //!
 //! This module owns the "run one backtest, reduce it to a metrics
-//! document" work — `crate::run::run` wraps it with IO. Writing the
-//! results (CSV files, YAML summaries, console banners) is deliberately
-//! kept out of here; that's a concern of the `run` subcommand driver, and
+//! document" work — the `run` subcommand driver in `src/cli/run.rs` wraps it
+//! with IO. Writing the results (CSV files, YAML summaries, console banners)
+//! is deliberately kept out of here; that's a concern of the driver, and
 //! this module never returns a `Path`, opens a file, or calls `println!`.
 //!
-//! ## The three pure entry points
+//! ## The pure entry points (one `_any` family — no per-shape twins)
 //!
-//! * `run_iteration` — the "full" pure evaluation: drives one backtest
+//! * [`run_iteration_any`] — the "full" pure evaluation: drives one backtest
 //!   over `atoms` through a paper wallet, produces the whole-run
 //!   [`metrics::Metrics`] document, optionally the gross twin under active
 //!   costs, and (when `-w N` is set) the windowed + rolling reductions.
 //!   Returns everything the driver needs to write files and print
 //!   summaries via the [`IterationResult`] payload.
-//! * `evaluate` — a thin metrics-only wrapper for `optimize`'s grid loop.
-//! * `evaluate_windowed` — the same shape but with a windowed reduction.
+//!   [`run_iteration_resumable`] is its resume-aware sibling.
+//! * [`evaluate_any`] — a thin metrics-only wrapper for `optimize`'s grid loop.
+//! * [`evaluate_windowed_any`] — the same shape but with a windowed reduction
+//!   ([`evaluate_panel_any`] for pooled panels; [`measured_report_any`] for a
+//!   bare report).
 //!
 //! ## Warm-up and stability
 //!

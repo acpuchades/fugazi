@@ -918,7 +918,7 @@ can say `!pick { freq: 1d }`. `run` does not: `join_universe_by_time` and the
 single/pairs paths all push `None` for the freq tag, and `Selector::matches`
 requires equality when the query's freq is `Some`, so the same expression
 resolves to nothing in a backtest. The bar-cadence census made the
-loader *keep* the cadence — `DataFrame` keys on `(symbol, freq, time)` — so the
+loader *keep* the cadence — `DataFrame` keys on `(symbol, freq, IndexKey)` — so the
 tag is now available to push.
 
 **Deliberately not pushed.** It is two lines of code and a whole design
@@ -1294,9 +1294,10 @@ The lock now covers the `test` extra — `mypy` included — so it matches
 
 Two things a reader should know before reaching for `uv`:
 
-**Nothing depends on this file being right.** CI installs via `maturin build` +
-`pip install` and never invokes `uv`; no check compares the lock against
-`pyproject.toml`. A dependency added to the extra and not re-locked drifts
+**Nothing depends on this file's *dependency set* being right.** CI installs via
+`maturin build` + `pip install` and never invokes `uv`; only the lock's `fugazi`
+version line is enforced (by the `version-sync` job — CLAUDE.md's bump list,
+item 6). A dependency added to the extra and not re-locked drifts
 silently, exactly as `mypy` did the moment it was added — the lock still
 resolved, it just did not contain it.
 

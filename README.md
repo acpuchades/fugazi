@@ -63,8 +63,9 @@ called `run`. A whole `Portfolio` runs the same way.
 speed. Measured against TA-Lib's C library over 200 000 samples, fugazi is at
 parity or faster on `sma` (1.01×), `rsi` (0.99×), `atr` (0.95×), `ema` (0.69×)
 and `macd` (**0.12×**) — while staying one bar at a time. A full backtest
-performs **29 allocations in total**, not per bar, and that ceiling is enforced by
-a test (`tests/perf_guard.rs`), not asserted in prose.
+allocates a **constant number of times regardless of bar count** — a few dozen
+in total, zero per bar — and that scaling is enforced by a test
+(`tests/perf_guard.rs`), not asserted in prose.
 [Full numbers, and the two places it loses →](#performance)
 
 **3. Composition is construction.** No pipe operator, no `Chain` builder, no DSL
@@ -151,11 +152,12 @@ pip install fugazi            # prebuilt wheels for Linux, macOS, Windows
 
 | Feature | Default | What it adds |
 | --- | :---: | --- |
-| `sources` | ✅ | Remote data providers (Binance, Binance Vision, OKX, Kraken, Coinbase, Yahoo, CoinGecko) |
-| `cli` | ✅ | The `fugazi` binary; implies `sources`, `runtime`, `montecarlo`, `parallel` |
-| `runtime` | ✅ | The type-erasure vocabulary the YAML and Python layers build on |
-| `parallel` | — | `backtest::run_many`, the rayon ensemble driver |
-| `montecarlo` | — | Bootstrap resampling and empirical-null p-values (the only use of `rand`) |
+| `sources` | ✅ | Remote data providers (Binance spot + futures, Binance Vision, OKX, Kraken, Coinbase, Yahoo, CoinGecko) |
+| `cli` | ✅ | The `fugazi` binary; implies `spec`, `sources`, `montecarlo` |
+| `spec` | ✅ (via `cli`) | The YAML strategy layer; implies `runtime`, `parallel` |
+| `runtime` | ✅ (via `spec`) | The type-erasure vocabulary the YAML and Python layers build on |
+| `parallel` | ✅ (via `spec`) | `backtest::run_many`, the rayon ensemble driver |
+| `montecarlo` | ✅ (via `cli`) | Bootstrap resampling and empirical-null p-values (the only use of `rand`) |
 | `live` | — | `OkxWallet`, `CoinbaseWallet` and `KrakenWallet` — real order routing |
 
 Want the library alone? `default-features = false` leaves `serde`, `time`,
@@ -1272,7 +1274,7 @@ print(wallet.funds, wallet.position("AAPL"), wallet.orders())
 ```
 
 YAML strategies load from Python too — `load_spec` and `StrategySpec.run` /
-`.run_resumable` / `.warm_up` take any of the three wallet classes, so a spec
+`.run_resumable` / `.warm_up` take any of the wallet classes, so a spec
 developed on the CLI drives a Python process without translation.
 
 `fugazi.metrics` is the reporting surface — the same one-function-per-metric
@@ -1327,8 +1329,9 @@ boundary — that is the last column:
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr` while
 staying one bar at a time, and driving a full backtest allocates **zero times per
-bar** — a 200 000-bar run performs 29 allocations in total, a ceiling
-`tests/perf_guard.rs` enforces. Through the bindings `atr` is **faster than
+bar** — a 200 000-bar run performs a few dozen allocations in total, and
+`tests/perf_guard.rs` asserts the count doesn't grow with bar count. Through the
+bindings `atr` is **faster than
 `talib`**, because a frame of OHLC columns is read in place and folded once rather
 than three arrays being scanned separately.
 

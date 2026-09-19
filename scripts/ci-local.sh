@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Run the exact commands CI runs, locally, in the same order.
 #
-# CI is the only gate that matters, and three of its checks fire *nowhere else*:
+# CI is the only gate that matters, and four of its checks fire *nowhere else*:
 # the rustdoc lints (only under `RUSTDOCFLAGS=-D warnings`), clippy over
-# `python/src` (~11k lines every other clippy invocation scopes past), and the
-# feature matrix (`live` is compiled nowhere else at all). Running `cargo test`
-# and calling it done is how a green local tree pushes a red CI.
+# `python/src` (~11k lines every other clippy invocation scopes past), the live
+# wallet tests (`live` is off by default, so a plain `cargo test` runs none of
+# them), and the feature matrix (the `--no-default-features` rows compile
+# nowhere else). The one copy of this argument, with the exact commands, is
+# CLAUDE.md's *Commands* table. Running `cargo test` and calling it done is how
+# a green local tree pushes a red CI.
 #
 # Every command below is copied verbatim from `.github/workflows/ci.yml`, and
 # `tests/ci_mirror.rs` fails if the two ever drift.

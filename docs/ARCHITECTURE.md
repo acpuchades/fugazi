@@ -577,7 +577,9 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   side, size, limit)` + `cancel_limit(&sym)` — same latest-wins convention; fills at
   the limit **or better** (a gap through it hands you the better `open`). `Size`
   resolves at the *fill* price. Both default to `UnsupportedOperation` / `Ok(())` on
-  the trait; **`PaperWallet` and `OkxWallet` both implement them**.
+  the trait; **`PaperWallet` and all three venue wallets implement them**
+  (`SleeveWallet` delegates), and the shared conformance suite exercises limits
+  on every venue.
 - **🚧 WIP — strategy-layer limit entries.** No strategy shape uses `set_limit`
   yet: the four shapes still enter at market, so limits are reachable only from a
   hand-written `Strategy` or directly from Python via `PaperWallet.set_limit`.
@@ -1911,9 +1913,9 @@ shapes share one run seam** (`over_any_wallet!` / `over_prepared_wallet!` in
 positions automatically** via the
 core `SleeveWallet`. `test_specs.py::test_portfolio_builder_matches_the_equivalent_yaml_document`
 pins the builder against the equivalent `portfolio:` document. The **spec** surface
-(`load_spec(...).run` / `.run_resumable` / `.warm_up`) goes through the same seam and
-so takes the same three wallets — that is what makes a *portfolio* spec runnable
-against a venue. `run_spec` / `run_spec_resumable` are thin adapters over the library's
+(`load_spec(...).run` / `.run_resumable` / `.warm_up` / `.evaluate`) goes through the
+same seam and so takes the same four wallets — that is what makes a *portfolio* spec
+runnable against a venue. `run_spec` / `run_spec_resumable` are thin adapters over the library's
 `drive_over` rather than a second implementation of the driver, so the Python and CLI
 paths cannot drift.
 
@@ -1928,8 +1930,10 @@ pipeline and auto-detects shape. Returns a `StrategySpec` pyclass with the same
 wraps `spec::optimize::optimize`; `walkforward=(is, oos[, embargo])` switches to the
 walk-forward kernel. `windowed=N` and `walkforward=` are mutually exclusive.
 `ta.TradingCostsConfig({...})` wraps `CostConfig`. **Run resuming:**
-`spec.run_resumable(wallet, snapshots, resume=None, flatten=False) -> (report,
-state_json)` — PaperWallet-only.
+`spec.run_resumable(wallet, snapshots, *, resume=None, flatten=False, hold=None,
+rebalance=False) -> (report, state)` — `state` is a `RunState` pyclass, and the
+wallet is any of the four (against a live venue the state's `wallet` half is `null`;
+the venue is re-read on resume).
 
 **Bound — overlay calculation.** `ta.compute_overlays(series, overlays, params=None) ->
 (schema, augmented)` computes derived overlay columns from indicator specs. `overlays`
@@ -1945,7 +1949,9 @@ reflect into, so `python/tests/test_parity.py::test_wallet_surface_matches_the_l
 carries an explicit `WALLET_BOUND` / `WALLET_NOT_BOUND` list. It exists because the gap
 let a real regression through — `set_stop` grew a `size` and the binding kept passing a
 hardcoded whole-position size. **Change a `Wallet` method → update that list in the same
-PR.** Currently unbound with reasons: `take_rejections`, `set_costs_for`.
+PR.** Currently unbound with reasons: `take_rejections` / `rejections`, and the
+terminal settle family (`flatten`, `settle_position`, `settle_pending`) — each
+reachable through `run_resumable`'s closeout arguments instead.
 
 **Intentionally not bound**: `Strategy` trait as subclassable, the CLI binary, `Wallet`
 as a trait to *implement* in Python (only the concrete `PaperWallet` and the live
@@ -1966,7 +1972,7 @@ variant on the core `StrategySpec` the pyclass wraps; (b) new per-kind `.run()`/
 | File | Holds |
 |---|---|
 | `carriers.rs` | type-erasing `TypedSource` + `Source`/`SignalBox`/`StrSource`/`AtomBox`/`MultiBox`, the `AnySource`/`AnySignal`/`AnyMulti` domain enums |
-| `macros.rs` | the 8 domain-preserving dispatch macros. `#[macro_use]`d first in `lib.rs` |
+| `macros.rs` | the domain-preserving dispatch macros (nine today). `#[macro_use]`d first in `lib.rs` |
 | `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyStrSource`/`PyMulti`/`PySharedMulti` |
 | `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the live wallets (`PyOkxWallet`/`PyCoinbaseWallet`/`PyKrakenWallet`), the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
 | `constructors.rs` | leaf sources, `src_period!`/`bar_period!`/… invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`, `compute_overlays` |

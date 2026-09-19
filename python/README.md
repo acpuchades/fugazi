@@ -1555,9 +1555,9 @@ or pass `kind=` (which is also what supplies the shape to the default-root splic
 
 ### Resuming a run, and running against a venue
 
-`.run(wallet, snapshots)` accepts a `PaperWallet`, an `OkxWallet` or a
-`CoinbaseWallet` — the same three the manual `Strategy` builder takes — for every
-shape, portfolio included. Positions the account already holds are treated as the
+`.run(wallet, snapshots)` accepts a `PaperWallet` or any of the live venue
+wallets (`OkxWallet`, `CoinbaseWallet`, `KrakenWallet`) — the same set the
+manual `Strategy` builder takes — for every shape, portfolio included. Positions the account already holds are treated as the
 user's own and left untouched; the strategy sizes against its own capital.
 
 `.run_resumable(...)` is the same run with its **state** surfaced, so a long backtest

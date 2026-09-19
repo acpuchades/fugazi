@@ -4,13 +4,13 @@
 //! `returns.csv`, `metrics.yml`, and the optional `metrics.csv`/`rolling.csv`
 //! under `-w N`), the tiered console banners (**inputs** / **fills** /
 //! **result** / **metrics**), and the wall-clock timing. Evaluation is
-//! delegated to [`crate::backtest::run_iteration`] — this module never touches
-//! the per-bar loop or the metrics reduction itself; it just wraps the pure
-//! payload with IO.
+//! delegated to [`crate::backtest::run_iteration_any`] — this module never
+//! touches the per-bar loop or the metrics reduction itself; it just wraps the
+//! pure payload with IO.
 //!
 //! ## Output shape
 //!
-//! Per bar: feed the wallet the candle (in [`run_iteration`]); the priced
+//! Per bar: feed the wallet the candle (in [`run_iteration_any`]); the priced
 //! blotter comes back sorted by fill index. Every order is written to
 //! `fills.csv` with its bar's `time` and its own fill price — the per-order
 //! log of what the wallet actually booked. Closed round-trip legs are
@@ -322,8 +322,8 @@ fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
 }
 
 /// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
-/// work to [`backtest::run_iteration`], and write the result files +
-/// narrate the tiered run/trade/result/metrics logs.
+/// work to [`backtest::run_iteration_any`] / [`backtest::run_iteration_resumable`],
+/// and write the result files + narrate the tiered run/trade/result/metrics logs.
 /// The measurement half of [`run`], factored out so [`run_pooled`] can reuse
 /// it per panel member: symbol resolution, effective cadence, annualization,
 /// the snapshot stream (the traded symbol lifted into snapshots, with the

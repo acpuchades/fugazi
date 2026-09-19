@@ -319,9 +319,11 @@ pub(super) fn default_risk_free_rate() -> Real {
 // Canonical parameter defaults for the parametric / multi-output indicators.
 // These long lived only in the Python constructor signatures; they now live
 // here as the **single source** — the `#[serde(default = "…")]` fns below (so
-// the YAML may omit them too), the grammar descriptor (which reads the same
-// fns), and the pyo3 signatures (which reference these consts directly) all
-// agree by construction. See `python/src/constructors.rs`.
+// the YAML may omit them too) and the grammar descriptor (which reads the
+// same fns) agree by construction. The pyo3 signatures cannot reference the
+// consts (a const path renders as `...` in `__text_signature__`), so they
+// carry literals pinned to this table by
+// `test_parity.py::test_constructor_signatures_match_the_descriptor`.
 /// Wilder's `14` — RSI, ATR, ADX/DI and the DMI pair. The period Wilder
 /// published each of them with, and the one every charting package ships.
 pub const WILDER_PERIOD: usize = 14;

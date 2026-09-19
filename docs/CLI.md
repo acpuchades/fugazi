@@ -1916,7 +1916,8 @@ root: !pick { symbol: !param { key: SYM, type: string } }   # SYM=700 stays "700
 period: !param { key: FAST, type: integer }                 # FAST=3.5 is refused here
 ```
 
-`string` · `numeric` · `integer` · `bool`. The resolved value (or the `default`,
+`string` · `numeric` · `integer` · `bool` · `symbol` · `frequency` (the full
+six-row table is in [STRATEGIES](STRATEGIES.md)). The resolved value (or the `default`,
 when that is what is used) is coerced to the declared type, or refused naming
 the parameter. Omitted — or written `type: null` — nothing changes: the value
 keeps whatever the scalar heuristic gave it, which is how every placeholder
