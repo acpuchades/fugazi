@@ -272,8 +272,37 @@ impl TryFrom<PayloadValue> for Snapshot<Symbol> {
 /// back to its [`PayloadType`] tag — the compile-time counterpart of the runtime
 /// descriptor the [`Adapter`] blanket uses to fill in `input_type()` /
 /// `output_type()`.
-pub trait TypeOf {
+///
+/// **Sealed.** The carrier ↔ tag correspondence is load-bearing for the
+/// invariant that `Adapter::update`'s type-mismatch panic is unreachable once
+/// construction is checked — an external impl could pair a type with the wrong
+/// tag and make it reachable. The vocabulary grows only with [`PayloadType`]
+/// itself.
+pub trait TypeOf: sealed::SealedTypeOf {
     const TYPE: PayloadType;
+}
+
+/// The seals for the two closed erasure vocabularies ([`TypeOf`] here, and
+/// `ChainDomain` in `chain.rs`): private traits an external crate cannot name,
+/// so it cannot add impls. See each trait's own doc for why closedness is a
+/// correctness property rather than a convenience.
+pub(crate) mod sealed {
+    pub trait SealedTypeOf {}
+    impl SealedTypeOf for crate::types::Real {}
+    impl SealedTypeOf for bool {}
+    impl SealedTypeOf for crate::types::Atom {}
+    impl SealedTypeOf for crate::types::Candle {}
+    impl SealedTypeOf for std::sync::Arc<str> {}
+    impl SealedTypeOf for crate::time::Timestamp {}
+    impl SealedTypeOf for crate::types::Snapshot<crate::types::Symbol> {}
+
+    pub trait SealedChainDomain {}
+    impl SealedChainDomain for crate::types::Real {}
+    impl SealedChainDomain for bool {}
+    impl SealedChainDomain for crate::types::Atom {}
+    impl SealedChainDomain for crate::types::Candle {}
+    impl SealedChainDomain for std::sync::Arc<str> {}
+    impl SealedChainDomain for crate::time::Timestamp {}
 }
 impl TypeOf for Real {
     const TYPE: PayloadType = PayloadType::Real;

@@ -393,7 +393,10 @@ impl AnyChain {
 /// cannot see that `Output = Real` and `Output = bool` are disjoint — so the
 /// dispatch hangs off the *output type* instead, where each impl is
 /// unambiguous.
-pub trait ChainDomain: Sized {
+/// **Sealed** (see `runtime::sealed`): the output-type → variant dispatch is a
+/// closed vocabulary — an external impl could route an output into the wrong
+/// `AnyChain` variant, making the checked-construction panic reachable.
+pub trait ChainDomain: Sized + crate::runtime::sealed::SealedChainDomain {
     /// Box `inner` into the [`AnyChain`] variant for this output type.
     fn into_any_chain<I>(inner: I) -> AnyChain
     where
