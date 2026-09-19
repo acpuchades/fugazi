@@ -23,6 +23,7 @@ mod glob;
 mod grammar;
 mod list;
 mod optimize;
+mod output;
 mod overlap;
 mod overlay;
 mod run;

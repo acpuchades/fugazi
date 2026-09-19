@@ -582,12 +582,7 @@ pub fn run(mut args: GetArgs) -> Result<()> {
         },
     };
 
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
+    crate::output::ensure_parent(&output)?;
 
     let rt = RuntimeBuilder::new_current_thread()
         .enable_all()
@@ -1508,10 +1503,7 @@ fn format_date(t: Timestamp) -> String {
 /// cells render per their runtime type: `Real` via [`format_f64`], `Bool` as
 /// `true`/`false`, `Str` verbatim.
 fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
-    let mut wtr = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut wtr = crate::output::writer(path)?;
 
     // Source-provided extras: union of column names across every row's
     // `atom.overlays`. Skips anything already emitted as a computed

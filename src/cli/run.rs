@@ -2084,13 +2084,7 @@ fn write_windowed_csv(
     Ok(())
 }
 
-/// A `,`-delimited CSV writer at `path`.
-fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
-    csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))
-}
+use crate::output::writer;
 
 // ---------------------------------------------------------------------------
 // Console blocks (single-run mode)

@@ -1388,16 +1388,7 @@ fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
         .as_ref()
         .and(sweep.best_by.as_ref())
         .map(|(_, path, _)| path.as_str());
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(path)?;
 
     let mut header: Vec<String> = union_columns.to_vec();
     for (name, _) in metric_columns {
@@ -2343,16 +2334,7 @@ fn write_walkforward_csv(
     smoothed_path: Option<&str>,
     rows: &[crate::spec::optimize::WalkForwardRow],
 ) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(path)?;
 
     let mut header: Vec<String> = vec![
         "fold".into(),
@@ -2427,16 +2409,7 @@ fn write_walkforward_csv(
 }
 
 fn write_composite_equity_csv(path: &Path, equity: &[Real]) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(path)?;
     writer.write_record(["bar", "equity"])?;
     for (i, eq) in equity.iter().enumerate() {
         writer.write_record([i.to_string(), format_number(*eq)])?;
@@ -2446,12 +2419,7 @@ fn write_composite_equity_csv(path: &Path, equity: &[Real]) -> Result<()> {
 }
 
 fn write_composite_metrics_yaml(path: &Path, m: &metrics::Metrics) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
+    crate::output::ensure_parent(path)?;
     let yaml = serde_norway::to_string(m)
         .with_context(|| format!("serializing composite OOS metrics for `{}`", path.display()))?;
     std::fs::write(path, yaml).with_context(|| format!("writing `{}`", path.display()))?;
@@ -2860,16 +2828,7 @@ fn write_pooled_walkforward_csv(
     smoothed_path: Option<&str>,
     rows: &[fugazi::spec::panel::PanelFoldRow],
 ) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(path)?;
 
     // `is_n` / `oos_n` are the member counts, not window counts — a fold early
     // in a ragged panel rests on fewer members, and that has to be visible
@@ -2995,16 +2954,7 @@ fn write_sweep_member_winners_csv(
         return Ok(None);
     }
     let path = derive_sibling(output, "member_winners", "csv");
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(&path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(&path)?;
 
     let mut header: Vec<String> = vec!["member".into()];
     header.extend(sweep.union_columns.iter().cloned());
@@ -3047,16 +2997,7 @@ fn write_pooled_member_winners_csv(
     {
         return Ok(false);
     }
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating `{}`", path.display()))?;
+    let mut writer = crate::output::writer(path)?;
 
     let mut header: Vec<String> = vec!["fold".into(), "member".into(), "departed".into()];
     header.extend(union_columns.iter().cloned());
@@ -3088,12 +3029,7 @@ fn write_pooled_composite_yaml(
     path: &Path,
     result: &fugazi::spec::panel::PanelWalkForward,
 ) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
-    }
+    crate::output::ensure_parent(path)?;
     let members = result.composite_members();
     let doc = fugazi::spec::panel::pooled_document(&members);
     let text = serde_norway::to_string(&doc).context("serializing pooled composite metrics")?;
