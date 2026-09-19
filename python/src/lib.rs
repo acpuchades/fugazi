@@ -52,9 +52,11 @@ pub(crate) mod strategy;
 pub(crate) mod constructors;
 pub(crate) mod metrics;
 pub(crate) mod montecarlo;
+pub(crate) mod panel;
 pub(crate) mod prelude;
 pub(crate) mod sources;
 pub(crate) mod spec;
+pub(crate) mod wallets;
 
 #[allow(unused_imports)]
 use crate::carriers::*;
@@ -66,6 +68,8 @@ use crate::constructors::*;
 use crate::metrics::*;
 #[allow(unused_imports)]
 use crate::montecarlo::*;
+#[allow(unused_imports)]
+use crate::panel::*;
 use crate::prelude::*;
 #[allow(unused_imports)]
 use crate::sources::*;
@@ -73,6 +77,8 @@ use crate::sources::*;
 use crate::spec::*;
 #[allow(unused_imports)]
 use crate::strategy::*;
+#[allow(unused_imports)]
+use crate::wallets::*;
 // `wrap_pyfunction!` resolves a hidden item pyo3 generates beside each
 // `#[pyfunction]`, and a glob import doesn't carry it — so every registered
 // function is named explicitly. The list doubles as the module's index.

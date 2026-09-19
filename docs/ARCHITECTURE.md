@@ -1974,11 +1974,13 @@ variant on the core `StrategySpec` the pyclass wraps; (b) new per-kind `.run()`/
 | `carriers.rs` | type-erasing `TypedSource` + `Source`/`SignalBox`/`StrSource`/`AtomBox`/`MultiBox`, the `AnySource`/`AnySignal`/`AnyMulti` domain enums |
 | `macros.rs` | the domain-preserving dispatch macros (nine today). `#[macro_use]`d first in `lib.rs` |
 | `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyStrSource`/`PyMulti`/`PySharedMulti` |
-| `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the live wallets (`PyOkxWallet`/`PyCoinbaseWallet`/`PyKrakenWallet`), the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
+| `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the four strategy builders, `PyRunReport`, `AtomLift`, per-symbol factory helpers, catalogue constructors, trailing risk indicators |
+| `wallets.rs` | the live venue wallets (`PyOkxWallet`/`PyCoinbaseWallet`/`PyKrakenWallet`) — the `src/live/{okx,coinbase,kraken}.rs` seam, mirrored |
 | `constructors.rs` | leaf sources, `src_period!`/`bar_period!`/… invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`, `compute_overlays` |
 | `sources.rs` | `PyBinance`/`PyBinanceFutures`/`PyBinanceVision`/`PyOkx`/`PyKraken`/`PyCoinbase`/`PyYahoo`/`PyCoinGecko` + `fetch` |
 | `metrics.rs` | `PyFill`/`PyTrade`/`PyDrawdownSegment` + one `#[pyfunction]` per metric; injected into `sys.modules["fugazi.metrics"]` |
 | `spec.rs` | `PyCostConfig`/`PyStrategySpec`/`PySweep`/`PySweepRow`/`PyWalkForward*` + `load_spec` / `optimize` / `spec_tags` |
+| `panel.rs` | the pooled walk-forward surface (`PyPanelBreadth`/`PyScoreTable`/`PyPanelShrinkage`/`PyPanelFold`/`PyPanelWalkForwardResult`, `run_panel_walkforward`) — the `src/spec/{panel,shrinkage}.rs` seam, mirrored |
 | `prelude.rs` | the shared `use` block every module glob-imports |
 | `lib.rs` | module wiring + `#[pymodule] fn fugazi` |
 

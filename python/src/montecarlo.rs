@@ -1,4 +1,8 @@
+#[allow(unused_imports)]
+use crate::panel::*;
 use crate::prelude::*;
+#[allow(unused_imports)]
+use crate::wallets::*;
 // The binding modules were one flat namespace before the split and still read
 // as one: each pulls in its siblings, so a cross-module reference needs no path.
 #[allow(unused_imports)]
