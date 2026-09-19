@@ -73,6 +73,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 mod grammar;
+mod raw;
 
 /// How a field participates in state save/load.
 enum FieldRole {
@@ -330,6 +331,19 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
 pub fn derive_spec_grammar(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match grammar::expand(input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `#[derive(SpecRaw)]` — emit `<Ident>Raw`, the derived externally-tagged
+/// deserialization twin of a `#[serde(try_from = …)]` spec enum, plus the
+/// mechanical `From<<Ident>Raw> for <Ident>`. See the [`raw`] module docs for
+/// why the twin exists and why it is generated rather than hand-maintained.
+#[proc_macro_derive(SpecRaw)]
+pub fn derive_spec_raw(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match raw::expand(input) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }

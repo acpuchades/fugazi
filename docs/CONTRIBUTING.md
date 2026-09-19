@@ -302,11 +302,11 @@ very nearly its whole Python wrapper cost.
 
 ### 3. The YAML tag — `src/spec/expr.rs`
 
-Add a variant to `NodeSpec` **and** to the private `NodeSpecRaw` mirror, then a
-`try_build` arm. (`tests/hand_maintained_mirrors.rs` guards the mirror — the
-compiler catches a missing variant via `typecheck.rs` and a missing *named*
-default via the field's type, but a dropped bare `#[serde(default)]` on an
-`Option` field compiles clean and silently makes the key required.)
+Add a variant to `NodeSpec`, then a `try_build` arm. The deserialization twin
+(`NodeSpecRaw` and its `From` impl) is **generated** by `#[derive(SpecRaw)]`
+from the variant you just wrote — serde attributes included — so there is no
+mirror to keep in step; the compiler catches a missing `try_build` arm via
+`typecheck.rs`'s exhaustive matches.
 
 The recursive-build shorthands are already in scope:
 
@@ -511,7 +511,7 @@ hierarchy, and (since the value/signal spec split was merged) **no second spec
 enum**: a boolean tag is an ordinary `NodeSpec` variant whose `output_type()` is
 `Bool`. Same seven steps as any node, with:
 
-- The variant goes on `NodeSpec` / `NodeSpecRaw` (`src/spec/expr.rs`) like every
+- The variant goes on `NodeSpec` (`src/spec/expr.rs`) like every
   other tag — its `try_build` arm returns a `Bool`-output `dyn_indicator::wrap`
   (via `boolean(s)?` for a Bool child, `real(s)?` for a `Real` operand), and
   `typecheck.rs`'s `output_type` classifies it `Some(DynType::Bool)` while
@@ -826,8 +826,6 @@ When one of these fails, it is telling you something specific:
 | `categories_are_alphabetical` | The `CATEGORIES` taxonomy went out of order. |
 | `the_output_renders_every_category_and_tag` | A tag is invisible to `fugazi list indicators`. |
 | `every_tag_appears_in_the_strategies_reference` | A tag has no entry in the `docs/STRATEGIES.md` prose reference. |
-| `the_mirror_has_every_variant` | `NodeSpecRaw` doesn't mirror a `NodeSpec` variant. |
-| `the_mirror_repeats_every_serde_default` | A `#[serde(default)]` on an `Option` field wasn't copied to the mirror — the key silently becomes required. |
 | `every_rust_metric_is_bound_on_the_python_module` | A `src/metrics.rs` function isn't in `register_metrics_module`'s `reg!(...)`. |
 | `every_grammar_field_type_has_a_python_dummy_value` | A new grammar field type has no sample in `test_spec_json_schema.py::_dummy` — that `pytest` file would fail with a `KeyError`, which `cargo test` alone would not show. |
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |

@@ -7,11 +7,11 @@
 //! from CI is worse than none: it reports green and the push goes red, which is
 //! exactly the failure this file exists to prevent.
 //!
-//! The two are plain text with no compile-time link, so this is the same
-//! hand-maintained-mirror treatment `tests/hand_maintained_mirrors.rs` gives
-//! `NodeSpecRaw`: extract every command CI runs, and assert the script runs it
-//! too. Textual and coarse, because the drift is textual — a step added to the
-//! workflow and not to the script.
+//! The two are plain text with no compile-time link, so this is the
+//! hand-maintained-mirror treatment (`tests/hand_maintained_mirrors.rs`):
+//! extract every command CI runs, and assert the script runs it too. Textual
+//! and coarse, because the drift is textual — a step added to the workflow
+//! and not to the script.
 //!
 //! It deliberately does **not** check the reverse direction. The script may run
 //! more than CI does (a stricter local gate is fine); it may not run less.
