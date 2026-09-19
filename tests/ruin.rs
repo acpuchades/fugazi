@@ -740,7 +740,16 @@ fn modest_and_alive() -> metrics::Metrics {
             fills.extend(round_trip(bar, 100.0, 94.0));
         }
     }
-    reduce_curve(equity, fills, None)
+    let mut m = reduce_curve(equity, fills, None);
+    // Normally stamped only by the costed optimize path; the fixture carries
+    // one so the `costs.*` directions get the full ordering check below
+    // rather than a None-vs-None skip.
+    m.costs = Some(metrics::CostSection {
+        total_commission: 12.0,
+        total_slippage_cost: 3.0,
+        cost_drag_pct: Some(1.5),
+    });
+    m
 }
 
 fn reduce_curve(
@@ -819,7 +828,7 @@ fn no_rankable_metric_prefers_a_ruined_run_to_a_solvent_profitable_one() {
         }
     }
     assert_eq!(
-        checked, 39,
+        checked, 43,
         "the direction table changed size — re-read the rule in `ranking_lookup` and \
          check the new entries against it rather than adjusting this number"
     );

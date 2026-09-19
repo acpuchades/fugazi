@@ -1,7 +1,8 @@
 # Metrics
 
 Every `fugazi` subcommand that measures a run produces the same catalogue of
-metrics, grouped into six sections. This document lists each metric, states
+metrics, grouped into seven sections (plus a `montecarlo` block when `run
+--montecarlo` produced one). This document lists each metric, states
 what it means, and calls out the caveats that shape how it should be read.
 
 ## Where metrics show up
@@ -164,8 +165,9 @@ ruin contributes **one** `-100%` bar out of however many the run had. Over 1 858
 daily bars that barely moves the ratio: a strategy that compounds for years and
 then dies keeps a positive Sharpe, a positive Sortino and a positive Omega, and
 if the pre-ruin stretch was calm it also posts the grid's lowest `var_95` and
-its shortest `drawdown.avg_duration_bars`. Of the 39 metrics `--best-by` will
-rank, an adversarial pair of curves beats a solvent profitable run on 17, and
+its shortest `drawdown.avg_duration_bars`. Of the 39 metrics `--best-by` ranked
+when this was measured (43 today — `tests/ruin.rs` pins the current count), an
+adversarial pair of curves beats a solvent profitable run on 17, and
 only the nine named above are safe by *construction*.
 
 **No metric is nulled for this.** A pre-ruin Sharpe is a true description of the

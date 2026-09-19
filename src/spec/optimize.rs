@@ -1239,6 +1239,7 @@ pub fn direction_for(path: &str) -> Option<Direction> {
         | "risk_adjusted.sortino"
         | "risk_adjusted.calmar"
         | "risk_adjusted.omega"
+        | "risk_adjusted.probabilistic_sharpe"
         | "risk_adjusted.ulcer_performance_index"
         | "drawdown.recovery_factor"
         | "trades.win_rate_pct"
@@ -1251,7 +1252,7 @@ pub fn direction_for(path: &str) -> Option<Direction> {
         | "trades.average_loss"
         | "trades.largest_loss"
         | "trades.average_return_pct" => Some(Direction::Descending),
-        // Lower is better — drawdown, volatility, tail loss.
+        // Lower is better — drawdown, volatility, tail loss, friction paid.
         "returns.stddev_bar"
         | "returns.annualized_volatility_pct"
         | "returns.var_95"
@@ -1263,7 +1264,10 @@ pub fn direction_for(path: &str) -> Option<Direction> {
         | "drawdown.avg"
         | "drawdown.avg_pct"
         | "drawdown.avg_duration_bars"
-        | "drawdown.time_in_drawdown_pct" => Some(Direction::Ascending),
+        | "drawdown.time_in_drawdown_pct"
+        | "costs.total_commission"
+        | "costs.total_slippage_cost"
+        | "costs.cost_drag_pct" => Some(Direction::Ascending),
         _ => None,
     }
 }
