@@ -137,6 +137,17 @@ def test_crosses_above_fires_once():
     assert states == [False, False, True, False]
 
 
+def test_crossing_epsilon_is_a_deadband():
+    # The tag's `epsilon:` — a cross only registers once it clears the
+    # deadband, so the 2.5 poke over the level doesn't fire but 8.0 does.
+    sig = ta.close().crosses_above(ta.value(2.0), epsilon=1.0)
+    states = feed(sig, closes([1.0, 2.5, 8.0, 9.0]))
+    assert states == [False, False, True, False]
+    below = ta.close().crosses_below(ta.value(2.0), epsilon=1.0)
+    states = feed(below, closes([3.0, 1.5, 0.5, 0.2]))
+    assert states == [False, False, True, False]
+
+
 def test_signal_combination_operators():
     overbought = ta.rsi(ta.close(), 2).above(70.0)
     rising = ta.close().crosses_above(ta.value(13.5))

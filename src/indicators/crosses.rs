@@ -156,6 +156,12 @@ impl<L, R> CrossesBelow<L, R> {
         Self(CrossesAbove::new(rhs, lhs))
     }
 
+    /// Build with an explicit [`Tolerance`], absolute and/or relative. See
+    /// [`CrossesAbove::with_tolerance`].
+    pub fn with_tolerance(lhs: L, rhs: R, tolerance: Tolerance) -> Self {
+        Self(CrossesAbove::with_tolerance(rhs, lhs, tolerance))
+    }
+
     /// Build with an explicit absolute tolerance. See
     /// [`CrossesAbove::with_epsilon`].
     pub fn with_epsilon(lhs: L, rhs: R, epsilon: Real) -> Self {

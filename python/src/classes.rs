@@ -1418,23 +1418,39 @@ impl PyIndicator {
         PySignal::wrap(source_to_signal!(self.src.clone(), |s| s.changed()))
     }
 
-    /// `self` rises above `other` on this step.
-    pub(crate) fn crosses_above(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+    /// `self` rises above `other` on this step. `epsilon` is the absolute
+    /// tolerance on the underlying comparison — the same knob the comparison
+    /// methods take, so a noisy spread only registers a cross once it clears
+    /// the deadband; omitted, the scale-aware default applies.
+    #[pyo3(signature = (other, epsilon = None))]
+    pub(crate) fn crosses_above(
+        &self,
+        other: &Bound<'_, PyAny>,
+        epsilon: Option<Real>,
+    ) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| l.crosses_above(r)
+            |l, r| fugazi_core::indicators::CrossesAbove::with_tolerance(l, r, eps)
         )?))
     }
 
-    /// `self` falls below `other` on this step.
-    pub(crate) fn crosses_below(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+    /// `self` falls below `other` on this step. `epsilon` as on
+    /// [`crosses_above`](Self::crosses_above).
+    #[pyo3(signature = (other, epsilon = None))]
+    pub(crate) fn crosses_below(
+        &self,
+        other: &Bound<'_, PyAny>,
+        epsilon: Option<Real>,
+    ) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| l.crosses_below(r)
+            |l, r| fugazi_core::indicators::CrossesBelow::with_tolerance(l, r, eps)
         )?))
     }
 

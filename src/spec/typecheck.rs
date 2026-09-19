@@ -478,8 +478,8 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         | Lt { lhs, rhs, .. }
         | Ge { lhs, rhs, .. }
         | Le { lhs, rhs, .. }
-        | CrossesAbove { lhs, rhs }
-        | CrossesBelow { lhs, rhs } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
+        | CrossesAbove { lhs, rhs, .. }
+        | CrossesBelow { lhs, rhs, .. } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
         Above { source, .. } | Below { source, .. } => vec![("source", REAL, source)],
         And { lhs, rhs } | Or { lhs, rhs } | Xor { lhs, rhs } => {
             vec![("lhs", BOOL, lhs), ("rhs", BOOL, rhs)]

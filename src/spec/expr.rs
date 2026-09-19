@@ -2415,6 +2415,11 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute tolerance on the underlying comparison, in the operands'
+        /// own units — the same knob `!gt` carries, so a noisy spread only
+        /// registers a cross once it clears the deadband. Omit it for the
+        /// scale-aware default.
+        epsilon: Option<Real>,
     },
     /// Fires on the bar `lhs` crosses from above to below `rhs`.
     #[grammar(kind = "predicate", output = "bool")]
@@ -2423,6 +2428,10 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute tolerance on the underlying comparison, in the operands'
+        /// own units — the same knob `!lt` carries. Omit it for the
+        /// scale-aware default.
+        epsilon: Option<Real>,
     },
     /// Logical AND — true when both `lhs` and `rhs` are true.
     #[grammar(kind = "operator", output = "bool")]
@@ -3486,10 +3495,12 @@ enum NodeSpecRaw {
     CrossesAbove {
         lhs: Box<NodeSpec>,
         rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
     },
     CrossesBelow {
         lhs: Box<NodeSpec>,
         rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
     },
     And {
         lhs: Box<NodeSpec>,
@@ -3912,8 +3923,12 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::Ne { lhs, rhs, epsilon } => NodeSpec::Ne { lhs, rhs, epsilon },
             NodeSpecRaw::Above { source, level } => NodeSpec::Above { source, level },
             NodeSpecRaw::Below { source, level } => NodeSpec::Below { source, level },
-            NodeSpecRaw::CrossesAbove { lhs, rhs } => NodeSpec::CrossesAbove { lhs, rhs },
-            NodeSpecRaw::CrossesBelow { lhs, rhs } => NodeSpec::CrossesBelow { lhs, rhs },
+            NodeSpecRaw::CrossesAbove { lhs, rhs, epsilon } => {
+                NodeSpec::CrossesAbove { lhs, rhs, epsilon }
+            }
+            NodeSpecRaw::CrossesBelow { lhs, rhs, epsilon } => {
+                NodeSpec::CrossesBelow { lhs, rhs, epsilon }
+            }
             NodeSpecRaw::And { lhs, rhs } => NodeSpec::And { lhs, rhs },
             NodeSpecRaw::Or { lhs, rhs } => NodeSpec::Or { lhs, rhs },
             NodeSpecRaw::Xor { lhs, rhs } => NodeSpec::Xor { lhs, rhs },
@@ -5461,14 +5476,14 @@ impl NodeSpec {
             )?,
             Above { source, level } => any(real(source)?.above(*level)),
             Below { source, level } => any(real(source)?.below(*level)),
-            CrossesAbove { lhs, rhs } => {
+            CrossesAbove { lhs, rhs, epsilon } => {
                 let (l, r) = (real(lhs)?, real(rhs)?);
-                let cmp = l.gt(r);
+                let cmp = compare::Gt::with_tolerance(l, r, eps(epsilon));
                 any(cmp.clone().and(cmp.changed()))
             }
-            CrossesBelow { lhs, rhs } => {
+            CrossesBelow { lhs, rhs, epsilon } => {
                 let (l, r) = (real(lhs)?, real(rhs)?);
-                let cmp = l.lt(r);
+                let cmp = compare::Lt::with_tolerance(l, r, eps(epsilon));
                 any(cmp.clone().and(cmp.changed()))
             }
             And { lhs, rhs } => any(boolean(lhs)?.and(boolean(rhs)?)),

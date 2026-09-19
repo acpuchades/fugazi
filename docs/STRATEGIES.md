@@ -1955,10 +1955,13 @@ level *of*: the `70` in `!above { level: 70 }` is an RSI reading, not a price, a
 defaulting the omitted series to `close` built a document that runs and never
 fires. Write the series out — `!above { source: !rsi {}, level: 70 }`.
 
-### Crossovers — `{ lhs, rhs }`
+### Crossovers — `{ lhs, rhs, epsilon? }`
 
 `!crosses_above`, `!crosses_below` — fire on the bar `lhs` crosses over/under
 `rhs` (the comparison is true *and* it just changed). Operands are sources.
+`epsilon:` is the same optional absolute tolerance the comparisons carry: a
+noisy spread only registers a cross once it clears the deadband. Omitted, the
+scale-aware default applies.
 
 ### String comparisons — `{ lhs, rhs }`
 
